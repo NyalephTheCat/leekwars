@@ -1,0 +1,16 @@
+[package]
+name        = "leek-backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend selection and output paths for Leekscript toolchains."
+
+[dependencies]
+leek-manifest = { workspace = true }
+leek-project  = { workspace = true }
+leek-syntax   = { workspace = true }
+anyhow        = { workspace = true }
+
+[lints]
+workspace = true

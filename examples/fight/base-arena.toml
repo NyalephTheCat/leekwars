@@ -1,0 +1,10 @@
+# A base arena meant to be inherited with `extends = "base-arena.toml"`.
+seed = 1234567
+max_turns = 64
+version = 4
+strict = false
+
+[map]
+width = 17
+height = 17
+obstacles = [123, 54, 212, 231, 145, 200]

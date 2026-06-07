@@ -1,0 +1,36 @@
+[package]
+name        = "leek-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Language Server Protocol implementation for Leekscript."
+
+[dependencies]
+leek-span        = { workspace = true, features = ["salsa"] }
+leek-diagnostics = { workspace = true, features = ["salsa"] }
+leek-syntax      = { workspace = true, features = ["salsa"] }
+leek-lexer       = { workspace = true, features = ["salsa"] }
+leek-parser      = { workspace = true, features = ["salsa"] }
+leek-resolver    = { workspace = true, features = ["salsa"] }
+leek-types       = { workspace = true, features = ["salsa"] }
+leek-pipeline    = { workspace = true, features = ["salsa"] }
+leek-recipes     = { workspace = true }
+leek-fmt         = { workspace = true, features = ["salsa"] }
+leek-rewrite     = { workspace = true }
+leek-hir         = { workspace = true, features = ["salsa"] }
+leek-lint        = { workspace = true, features = ["salsa"] }
+leek-complexity  = { workspace = true }
+leek-ide         = { workspace = true }
+
+tower-lsp        = "0.20"
+tokio            = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+salsa            = "0.26"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "test-util"] }
+
+[lints]
+workspace = true

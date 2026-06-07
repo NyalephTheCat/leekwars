@@ -1,0 +1,18 @@
+[package]
+name        = "leek-dap-bin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stdio launcher for the Leekscript debug adapter."
+
+[[bin]]
+name = "leek-dap"
+path = "src/main.rs"
+
+[dependencies]
+leek-dap = { workspace = true }
+anyhow   = { workspace = true }
+
+[lints]
+workspace = true

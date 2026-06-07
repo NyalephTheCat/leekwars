@@ -1,0 +1,10 @@
+01_literals: +0 -0 lines vs golden
+02_arithmetic: +0 -0 lines vs golden
+03_function_call: +0 -0 lines vs golden
+04_control_flow: +0 -0 lines vs golden
+05_string_concat: +0 -0 lines vs golden
+06_while_loop: +0 -0 lines vs golden
+07_do_while: +0 -0 lines vs golden
+08_nested_if: +0 -0 lines vs golden
+09_multi_func: +3 -3 lines vs golden
+10_ternary: +0 -0 lines vs golden

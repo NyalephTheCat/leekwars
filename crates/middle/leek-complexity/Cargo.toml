@@ -1,0 +1,23 @@
+[package]
+name        = "leek-complexity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Static complexity / big-O analysis for Leekscript functions."
+
+[dependencies]
+leek-hir = { workspace = true }
+
+[dev-dependencies]
+leek-diagnostics = { workspace = true }
+leek-backend-interp = { workspace = true }
+leek-lexer       = { workspace = true }
+leek-parser      = { workspace = true }
+leek-resolver    = { workspace = true }
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-types       = { workspace = true }
+
+[lints]
+workspace = true

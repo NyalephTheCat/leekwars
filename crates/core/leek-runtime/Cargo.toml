@@ -1,0 +1,16 @@
+[package]
+name        = "leek-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Runtime value types and display for Leekscript."
+
+[dependencies]
+leek-hir = { workspace = true }
+# Op-cost / batch-multiplier catalog for the builtins (a pure data crate
+# with no leek dependencies of its own).
+leek-builtins = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,3 @@
+var i [%2 ..10]
+rethretn oArray(i)
+var s = <1, 2, 3>

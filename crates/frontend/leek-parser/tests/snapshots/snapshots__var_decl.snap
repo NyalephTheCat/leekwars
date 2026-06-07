@@ -1,0 +1,12 @@
+---
+source: crates/frontend/leek-parser/tests/snapshots.rs
+expression: dump(&node)
+---
+SourceFile
+  VarDeclStmt
+    KwVar "var"
+    Ident "x"
+    Eq "="
+    LiteralExpr
+      IntLiteral "1"
+    Semicolon ";"

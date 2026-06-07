@@ -1,0 +1,38 @@
+[package]
+name        = "leekc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Leekscript compiler driver (rustc-equivalent)."
+
+[dependencies]
+leek-lexer       = { workspace = true }
+leek-parser      = { workspace = true }
+leek-resolver    = { workspace = true }
+leek-types       = { workspace = true }
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-hir         = { workspace = true }
+leek-mir         = { workspace = true }
+leek-backend-interp = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-recipes     = { workspace = true }
+leek-environment = { workspace = true }
+leek-prelude     = { workspace = true }
+leek-backend-java = { workspace = true }
+leek-backend-native = { workspace = true }
+leek-fmt         = { workspace = true }
+leek-lint        = { workspace = true }
+leek-manifest    = { workspace = true }
+clap             = { workspace = true }
+anyhow           = { workspace = true }
+serde_json       = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "leekc"
+path = "src/main.rs"

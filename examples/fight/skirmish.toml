@@ -1,0 +1,18 @@
+# A second scenario reusing the arena and different builds/AIs, to show that
+# leek files and AIs mix and match freely.
+extends = "base-arena.toml"
+seed = 77
+
+[[entities]]
+id = 1
+team = 0
+cell = 17
+leek = "leeks/glass-cannon.toml"   # high damage, low life
+ai = "ais/hero.leek"
+
+[[entities]]
+id = 2
+team = 1
+cell = 270
+leek = "leeks/tank.toml"           # a tanky opponent that advances
+ai = "ais/villain.leek"

@@ -1,0 +1,32 @@
+[package]
+name        = "leek-lexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tokenizer for Leekscript."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-pipeline    = { workspace = true }
+salsa            = { version = "0.26", optional = true }
+
+[features]
+default = []
+# Adds a `lex_query` salsa-tracked entry point that `Lex::run`
+# dispatches to when the pipeline is driven via
+# `Pipeline::run_memoized`. Pulls `salsa` from every internal crate
+# whose types appear in the lex output (`leek-syntax/Token`,
+# `leek-diagnostics/Diagnostic`).
+salsa = [
+  "dep:salsa",
+  "leek-pipeline/salsa",
+  "leek-syntax/salsa",
+  "leek-diagnostics/salsa",
+  "leek-span/salsa",
+]
+
+[lints]
+workspace = true

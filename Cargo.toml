@@ -1,0 +1,155 @@
+[workspace]
+resolver = "2"
+# The `fuzz/` crate is a standalone cargo-fuzz workspace (nightly/libfuzzer
+# only) — kept out of the stable build.
+exclude = ["fuzz"]
+members = [
+    "crates/core/leek-span",
+    "crates/core/leek-diagnostics",
+    "crates/core/leek-builtins",
+    "crates/core/leek-environment",
+    "crates/core/leek-manifest",
+    "crates/core/leek-prelude",
+    "crates/core/leek-project",
+    "crates/core/leek-runtime",
+    "crates/core/leek-visit",
+    "crates/core/leek-text",
+    "crates/frontend/leek-syntax",
+    "crates/frontend/leek-lexer",
+    "crates/frontend/leek-parser",
+    "crates/middle/leek-resolver",
+    "crates/middle/leek-types",
+    "crates/middle/leek-hir",
+    "crates/middle/leek-mir",
+    "crates/backends/leek-backend-interp",
+    "crates/middle/leek-charge",
+    "crates/middle/leek-complexity",
+    "crates/db/leek-pipeline",
+    "crates/db/leek-recipes",
+    "crates/db/leek-driver",
+    "crates/backends/leek-backend-java",
+    "crates/backends/leek-backend-native",
+    "crates/backends/leek-backends",
+    "crates/game/leek-game-runtime",
+    "crates/game/leek-generator",
+    "crates/game/leek-scenario",
+    "crates/tools/leek-ide",
+    "crates/tools/leek-lsp",
+    "crates/tools/leek-dap",
+    "crates/tools/leek-fmt",
+    "crates/tools/leek-lint",
+    "crates/tools/leek-migrate",
+    "crates/tools/leek-rewrite",
+    "crates/testing/leek-builtin-suite",
+    "crates/testing/leek-test-driver",
+    "crates/testing/leek-test-corpus",
+    "crates/testing/leek-bench",
+    "bins/leekc",
+    "bins/leekbench",
+    "bins/leek-lsp",
+    "bins/leek-dap",
+    "bins/miku",
+]
+
+[workspace.package]
+version       = "0.0.1"
+edition       = "2024"
+rust-version  = "1.90"
+license       = "MIT OR Apache-2.0"
+repository    = "https://github.com/chloe/leekscript-rs"
+
+[workspace.dependencies]
+# Internal crates — referenced by other workspace members with `workspace = true`.
+leek-span         = { path = "crates/core/leek-span" }
+leek-diagnostics  = { path = "crates/core/leek-diagnostics" }
+leek-builtins     = { path = "crates/core/leek-builtins" }
+leek-environment  = { path = "crates/core/leek-environment" }
+leek-manifest     = { path = "crates/core/leek-manifest" }
+leek-prelude      = { path = "crates/core/leek-prelude" }
+leek-project      = { path = "crates/core/leek-project" }
+leek-runtime      = { path = "crates/core/leek-runtime" }
+leek-visit        = { path = "crates/core/leek-visit" }
+leek-text         = { path = "crates/core/leek-text" }
+leek-syntax       = { path = "crates/frontend/leek-syntax" }
+leek-lexer        = { path = "crates/frontend/leek-lexer" }
+leek-parser       = { path = "crates/frontend/leek-parser" }
+leek-resolver     = { path = "crates/middle/leek-resolver" }
+leek-types        = { path = "crates/middle/leek-types" }
+leek-hir          = { path = "crates/middle/leek-hir" }
+leek-mir          = { path = "crates/middle/leek-mir" }
+leek-backend-interp = { path = "crates/backends/leek-backend-interp" }
+leek-charge       = { path = "crates/middle/leek-charge" }
+leek-complexity   = { path = "crates/middle/leek-complexity" }
+leek-pipeline     = { path = "crates/db/leek-pipeline" }
+leek-recipes      = { path = "crates/db/leek-recipes" }
+leek-driver       = { path = "crates/db/leek-driver" }
+leek-backend-java = { path = "crates/backends/leek-backend-java" }
+leek-backend-native = { path = "crates/backends/leek-backend-native" }
+leek-backends     = { path = "crates/backends/leek-backends" }
+leek-game-runtime = { path = "crates/game/leek-game-runtime" }
+leek-generator    = { path = "crates/game/leek-generator" }
+leek-scenario     = { path = "crates/game/leek-scenario" }
+leek-ide          = { path = "crates/tools/leek-ide" }
+leek-lsp          = { path = "crates/tools/leek-lsp" }
+leek-dap          = { path = "crates/tools/leek-dap" }
+leek-fmt          = { path = "crates/tools/leek-fmt" }
+leek-lint         = { path = "crates/tools/leek-lint" }
+leek-migrate      = { path = "crates/tools/leek-migrate" }
+leek-rewrite      = { path = "crates/tools/leek-rewrite" }
+leek-builtin-suite = { path = "crates/testing/leek-builtin-suite" }
+leek-test-driver  = { path = "crates/testing/leek-test-driver" }
+leek-test-corpus  = { path = "crates/testing/leek-test-corpus" }
+leek-bench        = { path = "crates/testing/leek-bench" }
+
+# External — kept small for the first slice. We'll add winnow, rowan, salsa,
+# etc. as the slices that need them land.
+clap        = { version = "4", features = ["derive"] }
+clap_complete = "4"
+anyhow      = "1"
+rowan       = "0.16"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = { version = "0.8", default-features = false, features = ["parse", "display"] }
+comfy-table = "7"
+
+# Debug Adapter Protocol types + server scaffolding for `leek-dap`.
+dap         = "0.4.1-alpha1"
+
+# Native backend (Cranelift). The cranelift-* crates are released in
+# lockstep, so keep these versions identical.
+cranelift        = "0.123"
+cranelift-frontend = "0.123"
+cranelift-jit    = "0.123"
+cranelift-module = "0.123"
+cranelift-native = "0.123"
+cranelift-object = "0.123"
+target-lexicon   = "0.13"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Regression guards. These have zero hits in the codebase today; they exist
+# purely to flag leftover-debugging / unfinished-code footguns the moment one
+# lands, without adding noise now. Bump to "deny" to make them block CI.
+dbg_macro     = "warn" # stray `dbg!()` left in after debugging
+todo          = "warn" # `todo!()` placeholder shipped as real code
+unimplemented = "warn" # `unimplemented!()` panic path reachable at runtime
+# Allowed: judgment-heavy / low-internal-value pedantic lints.
+# Everything else (incl. the `cast_*` family) stays at `warn` and is fixed in code.
+missing_errors_doc       = "allow" # doc sections — nice-to-have, deferred
+missing_panics_doc       = "allow"
+doc_markdown             = "allow"
+must_use_candidate       = "allow" # #[must_use] proliferation — low internal value
+return_self_not_must_use = "allow"
+too_many_lines           = "allow" # structural/subjective refactor signals
+too_many_arguments       = "allow"
+type_complexity          = "allow"
+struct_excessive_bools   = "allow"
+similar_names            = "allow"
+items_after_statements   = "allow"
+module_name_repetitions  = "allow"
+implicit_hasher          = "allow" # internal APIs don't need generic-hasher params
+match_same_arms          = "allow" # fires on exhaustive AST/IR matches where one
+                                    # arm per variant is intentional and readable

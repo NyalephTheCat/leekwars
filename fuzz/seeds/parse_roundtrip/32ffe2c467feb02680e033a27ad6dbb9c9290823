@@ -1,0 +1,6 @@
+var x = 1 + 2 * 3
+function f(a, b) { return a + b }
+class A { private p = 0 public m() g = (x, y) => x * y
+var m = [1 : 2, 3 : 4]
+for (var k "b"
+return f(1, 2)

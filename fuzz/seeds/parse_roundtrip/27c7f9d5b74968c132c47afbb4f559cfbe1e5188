@@ -1,0 +1,4 @@
+var i [%1 ..10]
+retn rui1 ..10]
+retn oArray(i)
+var s = <,2, 1 3>

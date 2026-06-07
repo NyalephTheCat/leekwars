@@ -1,0 +1,12 @@
+[package]
+name = "leek-text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared text utilities for Leekscript — version-aware string escape/unescape codec."
+
+[dependencies]
+
+[lints]
+workspace = true

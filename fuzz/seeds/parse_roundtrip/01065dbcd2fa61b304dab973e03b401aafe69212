@@ -1,0 +1,9 @@
+var x = 1 + 2 * 3
+function f(a, b) { return a + b }
+class A { privatvar i [=1 ..10]
+retn ruintfloatervalToArray(i)
+var s = m)  2, 3>
+r m = [1 : 2, 3 : 4]
+for (var k : var v in m) { debug(v) }
+var r = true ? "a" : "b"
+return f(1, 2)

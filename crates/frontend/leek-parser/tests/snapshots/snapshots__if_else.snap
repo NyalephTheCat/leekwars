@@ -1,0 +1,32 @@
+---
+source: crates/frontend/leek-parser/tests/snapshots.rs
+expression: dump(&node)
+---
+SourceFile
+  IfStmt
+    KwIf "if"
+    LParen "("
+    BinaryExpr
+      NameRef
+        Ident "x"
+      Gt ">"
+      LiteralExpr
+        IntLiteral "0"
+    RParen ")"
+    Block
+      LBrace "{"
+      ReturnStmt
+        KwReturn "return"
+        LiteralExpr
+          IntLiteral "1"
+        Semicolon ";"
+      RBrace "}"
+    KwElse "else"
+    Block
+      LBrace "{"
+      ReturnStmt
+        KwReturn "return"
+        LiteralExpr
+          IntLiteral "0"
+        Semicolon ";"
+      RBrace "}"

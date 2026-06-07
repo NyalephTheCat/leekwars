@@ -1,0 +1,8 @@
+// @version:4
+var i = 0
+var n = 1
+do {
+    n = n * 2
+    i = i + 1
+} while (i < 5)
+return n

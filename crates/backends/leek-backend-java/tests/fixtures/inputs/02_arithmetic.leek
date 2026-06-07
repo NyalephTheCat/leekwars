@@ -1,0 +1,5 @@
+// @version:4
+var a = 1 + 2
+var b = a * 3 - 4
+var c = b % 5
+return c

@@ -1,0 +1,13 @@
+[package]
+name        = "leek-game-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Leek-wars fight builtins (getCell, getLife, …), operating through a GameHost — the game-side equivalent of leek-runtime."
+
+[dependencies]
+leek-runtime = { workspace = true }
+
+[lints]
+workspace = true

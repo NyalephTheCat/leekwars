@@ -1,0 +1,10 @@
+var a=1+2*3;
+var b= foo(x,y,z);
+var c =arr[0]+map["key"];
+var d=  cond? a:b;
+var f =[1,2,3];
+var g = ["a":1, "b":2];
+var h ={x: 1, y :2};
+var i = new Foo(1,2);
+var j= obj as String;
+return  a;

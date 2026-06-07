@@ -1,0 +1,32 @@
+[package]
+name        = "leek-lint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Leekscript linter — rule engine over HIR."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-hir         = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-parser      = { workspace = true }
+
+[dev-dependencies]
+leek-recipes     = { workspace = true }
+leek-pipeline    = { workspace = true }
+
+[features]
+default = []
+salsa = [
+  "leek-pipeline/salsa",
+  "leek-hir/salsa",
+  "leek-diagnostics/salsa",
+  "leek-span/salsa",
+  "leek-syntax/salsa",
+]
+
+[lints]
+workspace = true

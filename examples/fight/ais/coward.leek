@@ -1,0 +1,11 @@
+// @version: 4
+// Kiting: equip, keep distance from the nearest enemy, and take potshots.
+var target = getNearestEnemy();
+if (target != null) {
+    var arsenal = getWeapons();
+    if (count(arsenal) > 0 && getWeapon() != arsenal[0]) {
+        setWeapon(arsenal[0]);
+    }
+    moveAwayFrom(target, getMP());
+    useWeapon(target);
+}

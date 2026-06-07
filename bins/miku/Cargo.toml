@@ -1,0 +1,45 @@
+[package]
+name        = "miku"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Leekscript workspace tool (cargo-equivalent)."
+
+[[bin]]
+name = "miku"
+path = "src/main.rs"
+
+[dependencies]
+leek-manifest       = { workspace = true }
+leek-span           = { workspace = true }
+leek-diagnostics    = { workspace = true }
+leek-syntax         = { workspace = true }
+leek-hir            = { workspace = true }
+leek-mir            = { workspace = true }
+leek-pipeline       = { workspace = true }
+leek-recipes        = { workspace = true }
+leek-environment    = { workspace = true }
+leek-project        = { workspace = true }
+leek-driver         = { workspace = true }
+leek-backends       = { workspace = true }
+leek-backend-interp = { workspace = true }
+leek-backend-java   = { workspace = true }
+leek-fmt            = { workspace = true }
+leek-lint           = { workspace = true }
+leek-lsp            = { workspace = true }
+leek-ide            = { workspace = true }
+leek-rewrite        = { workspace = true }
+leek-migrate        = { workspace = true }
+leek-complexity     = { workspace = true }
+leek-parser         = { workspace = true }
+leek-scenario       = { workspace = true }
+leek-generator      = { workspace = true }
+ignore              = "0.4"
+clap                = { workspace = true }
+clap_complete       = "4"
+anyhow              = { workspace = true }
+serde_json          = { workspace = true }
+
+[lints]
+workspace = true

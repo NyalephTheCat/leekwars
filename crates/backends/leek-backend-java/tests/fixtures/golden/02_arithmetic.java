@@ -1,0 +1,23 @@
+import leekscript.runner.*;
+import leekscript.runner.values.*;
+import leekscript.runner.classes.*;
+import leekscript.common.*;
+
+public class AI_1 extends AI {
+public AI_1() throws LeekRunException {
+super(4, 4);
+}
+public void staticInit() throws LeekRunException {
+}
+public Object runIA(Session session) throws LeekRunException {
+Object u_a = ops(1l + 2l, 2);
+Object u_b = ops((Object) sub((Object) mul(u_a, 3l), 4l), 4);
+Object u_c = ops((Object) mod(u_b, 5l), 6);
+return u_c;
+}
+protected String getAIString() { return "02_arithmetic.leek";}
+protected String[] getErrorFiles() { return new String[] {"02_arithmetic.leek", };}
+
+protected int[] getErrorFilesID() { return new int[] {1, };}
+
+}

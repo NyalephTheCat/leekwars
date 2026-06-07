@@ -1,0 +1,36 @@
+[package]
+name        = "leek-mir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Mid-level IR (CFG) for Leekscript."
+
+[dependencies]
+leek-hir         = { workspace = true }
+leek-visit       = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-span        = { workspace = true }
+leek-types       = { workspace = true }
+leek-pipeline    = { workspace = true }
+salsa            = { version = "0.26", optional = true }
+
+[features]
+default = []
+salsa = [
+  "dep:salsa",
+  "leek-pipeline/salsa",
+  "leek-span/salsa",
+  "leek-types/salsa",
+  "leek-hir/salsa",
+]
+
+[dev-dependencies]
+# Cascade memoization test pulls salsa-enabled frontend stages and
+# uses the input setter.
+leek-syntax = { workspace = true, features = ["salsa"] }
+leek-lexer  = { workspace = true, features = ["salsa"] }
+leek-parser = { workspace = true, features = ["salsa"] }
+
+[lints]
+workspace = true

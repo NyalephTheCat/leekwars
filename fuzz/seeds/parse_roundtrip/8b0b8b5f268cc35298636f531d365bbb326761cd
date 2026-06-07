@@ -1,0 +1,3 @@
+var i [%1 .?10]
+oArray(i)
+var s = <?

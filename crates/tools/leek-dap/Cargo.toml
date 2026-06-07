@@ -1,0 +1,28 @@
+[package]
+name        = "leek-dap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Debug Adapter Protocol implementation for Leekscript (native backend)."
+
+[dependencies]
+# Compile + run the debuggee. The native (Cranelift) backend is the debug
+# target: `NativeOptions::debug()` keeps frame pointers and emits DWARF.
+leek-backend-native = { workspace = true }
+leek-hir         = { workspace = true }
+leek-span        = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-recipes     = { workspace = true }
+leek-diagnostics = { workspace = true }
+# Debugging an AI inside a fight: build the fight from a scenario and drive it.
+leek-scenario    = { workspace = true }
+leek-generator   = { workspace = true }
+
+dap         = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+
+[lints]
+workspace = true

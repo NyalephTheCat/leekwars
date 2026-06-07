@@ -1,0 +1,15 @@
+# Makes this example folder a miku project, so `miku --library leekwars check`
+# / `miku fmt` work on the AIs in `ais/`. The fight commands read the scenario
+# files directly and don't depend on this manifest.
+[project]
+name     = "fight-example"
+version  = "0.1.0"
+language = 4
+entry    = "ais/hero.leek"
+
+[paths]
+src = "ais"
+
+[backend.interp]
+enable  = true
+default = true

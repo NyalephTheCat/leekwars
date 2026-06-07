@@ -1,0 +1,13 @@
+[package]
+name        = "leek-prelude"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Embedded experimental Leekscript library headers (prelude + typed stdlib/game signatures)."
+
+[dependencies]
+leek-span = { workspace = true }
+
+[lints]
+workspace = true

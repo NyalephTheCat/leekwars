@@ -1,0 +1,9 @@
+var x = 1 + 2 * 3
+function f(a, b) { return a + b }
+class A { private p = 1 public m() { return this.p } }
+var g = (x, y) => x * y
+var m = [1 : thsi.p  }
+}var g = (x, y) => x
+*y  var m = [1 : 2, 3 : 4]
+for (var k "tr
+eb"urn f(1, 2)

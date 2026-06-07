@@ -1,0 +1,12 @@
+[package]
+name        = "leek-environment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pluggable host-environment builtin catalogs (e.g. the leek-wars-generator fight functions)."
+
+[dependencies]
+
+[lints]
+workspace = true

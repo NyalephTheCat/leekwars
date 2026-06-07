@@ -1,0 +1,23 @@
+[package]
+name        = "leek-backend-interp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tree-walking MIR interpreter for Leekscript."
+
+[dependencies]
+leek-runtime     = { workspace = true }
+leek-hir         = { workspace = true }
+leek-mir         = { workspace = true }
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-types       = { workspace = true }
+leek-builtins    = { workspace = true }
+
+[dev-dependencies]
+leek-parser      = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name        = "leek-lsp-bin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stdio launcher for the Leekscript LSP server."
+
+[[bin]]
+name = "leek-lsp"
+path = "src/main.rs"
+
+[dependencies]
+leek-lsp = { workspace = true }
+
+[lints]
+workspace = true

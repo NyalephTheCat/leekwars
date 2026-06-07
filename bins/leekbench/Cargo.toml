@@ -1,0 +1,21 @@
+[package]
+name        = "leekbench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Compare backend execution speed on a Leekscript program."
+
+[dependencies]
+leek-bench       = { workspace = true }
+leek-test-corpus = { workspace = true }
+clap             = { workspace = true }
+anyhow           = { workspace = true }
+comfy-table      = { workspace = true }
+
+[[bin]]
+name = "leekbench"
+path = "src/main.rs"
+
+[lints]
+workspace = true

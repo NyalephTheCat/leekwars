@@ -1,0 +1,6 @@
+[submodule "official/leek-wars"]
+	path = official/leek-wars
+	url = https://github.com/leek-wars/leek-wars
+[submodule "official-generator/leek-wars-generator"]
+	path = official-generator/leek-wars-generator
+	url = https://github.com/leek-wars/leek-wars-generator.git

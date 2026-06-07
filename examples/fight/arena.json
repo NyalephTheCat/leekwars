@@ -1,0 +1,26 @@
+{
+  "random_seed": 9001,
+  "max_turns": 48,
+  "version": 4,
+  "map": { "width": 17, "height": 17, "obstacles": [40, 41, 248, 247] },
+  "farmers": [{ "id": 1, "name": "Pilow", "country": "fr" }],
+  "teams": [{ "id": 0, "name": "Blue" }, { "id": 1, "name": "Red" }],
+  "entities": [
+    [
+      {
+        "id": 1, "name": "Hero", "team": 0, "farmer": 1, "cell": 0,
+        "ai": "ais/hero.leek",
+        "life": 3000, "strength": 400, "tp": 20, "mp": 6,
+        "weapons": [37, 47]
+      }
+    ],
+    [
+      {
+        "id": 2, "name": "Rival", "team": 1, "cell": 288,
+        "ai": "ais/villain.leek",
+        "life": 3000, "strength": 300, "tp": 14, "mp": 7,
+        "weapons": [37]
+      }
+    ]
+  ]
+}

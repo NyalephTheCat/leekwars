@@ -1,0 +1,15 @@
+[package]
+name        = "leek-builtins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Builtin catalog and generated metadata for Leekscript."
+
+[dependencies]
+
+[build-dependencies]
+serde_yaml = "0.9"
+
+[lints]
+workspace = true

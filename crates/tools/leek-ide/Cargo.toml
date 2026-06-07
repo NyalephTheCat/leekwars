@@ -1,0 +1,16 @@
+[package]
+name        = "leek-ide"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "IDE-facing helpers: doc comments, declaration signatures."
+
+[dependencies]
+leek-syntax  = { workspace = true }
+leek-span    = { workspace = true }
+leek-parser  = { workspace = true }
+leek-prelude = { workspace = true }
+
+[lints]
+workspace = true

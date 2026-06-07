@@ -1,0 +1,32 @@
+--- golden (Java reference)
++++ rust (leek-backend-java)
+ import leekscript.runner.*;
+ import leekscript.runner.values.*;
+ import leekscript.runner.classes.*;
+ import leekscript.common.*;
+ 
+ public class AI_1 extends AI {
+ public AI_1() throws LeekRunException {
+ super(3, 4);
+ }
+ public void staticInit() throws LeekRunException {
+ }
+ public Object runIA(Session session) throws LeekRunException {
+ Object u_s = ops(0l, 1);
+ for (Object u_i = ops(0l, 1);
+ ops(less(u_i, 10l), 1); ops(u_i = (Object) add(u_i, 1l), 2)) {
+ ops(1);if (ops(equals_equals((Object) mod(u_i, 2l), 0l), 7)) {
+ ops(u_s = (Object) add(u_s, u_i), 2);
+ }
+ else {
+ ops(u_s = (Object) sub(u_s, u_i), 2);
+ }
+ }
+ return u_s;
+ }
+ protected String getAIString() { return "04_control_flow.leek";}
+ protected String[] getErrorFiles() { return new String[] {"04_control_flow.leek", };}
+ 
+ protected int[] getErrorFilesID() { return new int[] {1, };}
+ 
+ }

@@ -1,0 +1,6 @@
+var i [%1 ..10]
+revthisar i = [1.r1
+]0.et..10 2, defaultthisart +i = [
+retn oArray(i)
+v3ar s = <>1, 2, 3>
+

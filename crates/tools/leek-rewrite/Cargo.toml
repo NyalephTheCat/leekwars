@@ -1,0 +1,15 @@
+[package]
+name        = "leek-rewrite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe text-edit composition for Leekscript tooling (formatter, LSP code actions, refactors)."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-diagnostics = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,55 @@
+# A duel that inherits the arena, pulls reusable leek builds from files, and
+# carries a profile + a file-driven testing config.
+#
+#   miku --library leekwars fight examples/fight/duel.toml
+#   miku --library leekwars fight examples/fight/duel.toml --mode matrix
+#   miku --library leekwars fight examples/fight/duel.toml --mode tournament \
+#       --entrant ais/hero.leek --entrant ais/tank.leek --entrant ais/villain.leek
+#   miku --library leekwars fight examples/fight/duel.toml --mode random \
+#       --runs 20 --capital 800 --random-stats strength,agility,wisdom
+
+extends = "base-arena.toml"
+
+# Farmer metadata (owners that group leeks; labels only).
+[[farmers]]
+id = 1
+name = "Pilow"
+country = "fr"
+
+# Each entity pulls its build from a reusable file and overrides only what is
+# scenario-specific (id, cell, team, ai).
+[[entities]]
+id = 1
+team = 0
+cell = 0
+farmer = 1
+leek = "leeks/hero.toml"
+ai = "ais/hero.leek"
+
+[[entities]]
+id = 2
+team = 1
+cell = 288
+leek = "leeks/tank.toml"
+ai = "ais/villain.leek"
+
+# An override block: `--profile aggressive` makes the hero hit harder.
+[profiles.aggressive]
+max_turns = 32
+
+[[profiles.aggressive.entities]]
+id = 1
+strength = 900
+weapons = [47]
+
+# File-driven testing defaults (CLI flags override these).
+[testing]
+mode = "matrix"
+hero_team = 0
+seeds = [1, 2, 3]
+opponents = ["ais/tank.leek", "ais/villain.leek"]
+
+[testing.random]
+runs = 10
+capital = 800
+stats = ["strength", "agility", "wisdom"]

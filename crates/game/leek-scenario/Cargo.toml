@@ -1,0 +1,23 @@
+[package]
+name        = "leek-scenario"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Fight-scenario format for Leekscript: a mergable, file-composable description of a leek-wars fight (leeks, farmers, map, seed) plus the loader that turns it into a runnable fight and the testing-mode drivers (matrix, tournament, randomized builds)."
+
+[dependencies]
+leek-generator    = { workspace = true }
+leek-game-runtime = { workspace = true }
+leek-hir          = { workspace = true }
+leek-recipes      = { workspace = true }
+leek-pipeline     = { workspace = true }
+leek-span         = { workspace = true }
+leek-diagnostics  = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+toml        = { workspace = true }
+anyhow      = { workspace = true }
+
+[lints]
+workspace = true

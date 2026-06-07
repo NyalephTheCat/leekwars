@@ -1,0 +1,18 @@
+// @version: 4
+// Aggressive: equip the primary weapon, close in, and fire until out of TP.
+// A leek starts a fight unequipped, so `setWeapon` must come before `useWeapon`.
+var target = getNearestEnemy();
+if (target != null) {
+    var arsenal = getWeapons();
+    if (count(arsenal) > 0 && getWeapon() != arsenal[0]) {
+        setWeapon(arsenal[0]);
+    }
+    moveToward(target, getMP());
+    // useWeapon returns > 0 on a hit (USE_SUCCESS / USE_CRITICAL); <= 0 means it
+    // couldn't fire (out of range, not enough TP, …), so stop for this turn.
+    while (getTP() >= 3) {
+        if (useWeapon(target) <= 0) {
+            break;
+        }
+    }
+}

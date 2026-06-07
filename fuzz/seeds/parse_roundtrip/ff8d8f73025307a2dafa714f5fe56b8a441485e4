@@ -1,0 +1,7 @@
+var i [=1 ..10]
+retn ruintfloatervalToArray(i)
+varvar i [%1 .?10]
+oArray(i)
+var s = <>
+ s = <1, 2,Z3>
+NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN

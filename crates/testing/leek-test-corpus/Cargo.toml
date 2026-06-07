@@ -1,0 +1,32 @@
+[package]
+name        = "leek-test-corpus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared fixtures and parity-test infrastructure."
+build       = "build.rs"
+
+[build-dependencies]
+leek-test-driver = { workspace = true }
+anyhow           = { workspace = true }
+
+[dependencies]
+leek-test-driver    = { workspace = true }
+leek-backends       = { workspace = true }
+leek-manifest       = { workspace = true }
+leek-diagnostics    = { workspace = true }
+leek-lexer          = { workspace = true }
+leek-parser         = { workspace = true }
+leek-pipeline       = { workspace = true }
+leek-recipes        = { workspace = true }
+leek-span           = { workspace = true }
+leek-syntax         = { workspace = true }
+toml                = { workspace = true }
+anyhow              = { workspace = true }
+
+# Single binary (`src/main.rs`, auto-detected by Cargo); subcommands
+# replace the former one-binary-per-task layout. See `src/main.rs`.
+
+[lints]
+workspace = true

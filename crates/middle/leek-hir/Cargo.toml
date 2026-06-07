@@ -1,0 +1,39 @@
+[package]
+name        = "leek-hir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "High-level intermediate representation for Leekscript."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-visit       = { workspace = true }
+leek-text        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-parser      = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-types       = { workspace = true }
+leek-resolver    = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-prelude     = { workspace = true }
+rowan            = { workspace = true }
+salsa            = { version = "0.26", optional = true }
+
+[features]
+default = []
+# Adds `salsa::Update` derives on every HIR type and exposes a
+# `lower_hir_query` tracked entry point. The artifact is
+# `Arc<HirFile>` on this path so cache hits are pointer-cheap.
+salsa = [
+  "dep:salsa",
+  "leek-pipeline/salsa",
+  "leek-parser/salsa",
+  "leek-syntax/salsa",
+  "leek-types/salsa",
+  "leek-diagnostics/salsa",
+  "leek-span/salsa",
+]
+
+[lints]
+workspace = true

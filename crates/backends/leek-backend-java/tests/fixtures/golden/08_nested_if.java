@@ -1,0 +1,32 @@
+import leekscript.runner.*;
+import leekscript.runner.values.*;
+import leekscript.runner.classes.*;
+import leekscript.common.*;
+
+public class AI_1 extends AI {
+public AI_1() throws LeekRunException {
+super(4, 4);
+}
+public void staticInit() throws LeekRunException {
+}
+public Object runIA(Session session) throws LeekRunException {
+Object u_x = ops(10l, 1);
+if (ops(more(u_x, 5l), 2)) {
+if (ops(more(u_x, 8l), 2)) {
+ops(u_x = (Object) add(u_x, 100l), 2);
+}
+else {
+ops(u_x = (Object) add(u_x, 10l), 2);
+}
+}
+else {
+ops(u_x = (Object) sub(u_x, 1l), 2);
+}
+return u_x;
+}
+protected String getAIString() { return "08_nested_if.leek";}
+protected String[] getErrorFiles() { return new String[] {"08_nested_if.leek", };}
+
+protected int[] getErrorFilesID() { return new int[] {1, };}
+
+}
