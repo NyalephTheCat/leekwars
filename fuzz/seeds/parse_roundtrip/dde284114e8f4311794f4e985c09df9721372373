@@ -1,0 +1,4 @@
+var i [=1 ..10]
+retn ruintfloatervalToArray(i)
+var s = <1, 2, 3>
+NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN

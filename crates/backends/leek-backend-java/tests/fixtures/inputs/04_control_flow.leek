@@ -1,0 +1,10 @@
+// @version:4
+var s = 0
+for (var i = 0; i < 10; i = i + 1) {
+    if (i % 2 == 0) {
+        s = s + i
+    } else {
+        s = s - i
+    }
+}
+return s

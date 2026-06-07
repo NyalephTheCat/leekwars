@@ -1,0 +1,7 @@
+// @version:4
+var i = 42
+var r = 3.14
+var s = "hello"
+var b = true
+var n = null
+return i

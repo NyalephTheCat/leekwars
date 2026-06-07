@@ -1,0 +1,27 @@
+[package]
+name        = "leek-backend-java"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-hir         = { workspace = true }
+leek-types       = { workspace = true }
+leek-charge      = { workspace = true }
+leek-builtins    = { workspace = true }
+leek-environment = { workspace = true }
+leek-text        = { workspace = true }
+
+[dev-dependencies]
+leek-parser      = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-backend-interp = { workspace = true }
+similar          = "2"
+base64           = "0.22"

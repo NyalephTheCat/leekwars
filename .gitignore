@@ -1,0 +1,22 @@
+/target
+crates/testing/leek-test-corpus/data/upstream_cases.json
+crates/testing/leek-test-corpus/data/baseline.json
+Cargo.lock
+**/*.rs.bk
+.DS_Store
+
+# Logs and Python tooling caches
+*.log
+__pycache__/
+*.pyc
+
+# Leek build output
+/build/
+
+# Node / VS Code extension build artifacts
+node_modules/
+editors/vscode/dist/
+*.vsix
+
+# Local Claude / agent session data
+/.claude/

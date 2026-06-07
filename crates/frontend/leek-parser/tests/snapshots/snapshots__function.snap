@@ -1,0 +1,28 @@
+---
+source: crates/frontend/leek-parser/tests/snapshots.rs
+expression: dump(&node)
+---
+SourceFile
+  FnDecl
+    KwFunction "function"
+    Ident "add"
+    LParen "("
+    ParamList
+      Param
+        Ident "a"
+      Comma ","
+      Param
+        Ident "b"
+    RParen ")"
+    Block
+      LBrace "{"
+      ReturnStmt
+        KwReturn "return"
+        BinaryExpr
+          NameRef
+            Ident "a"
+          Plus "+"
+          NameRef
+            Ident "b"
+        Semicolon ";"
+      RBrace "}"

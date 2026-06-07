@@ -1,0 +1,6 @@
+var i [%0 ..1retn rui1 ..10]
+0]
+retn var i [%1 ..10]
+retn rui1 ..10]
+retay(i)
+ s = <1, 2, 3>

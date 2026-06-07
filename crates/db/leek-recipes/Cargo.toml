@@ -1,0 +1,25 @@
+[package]
+name        = "leek-recipes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pre-built compiler pipeline recipes for Leekscript tools."
+
+[dependencies]
+leek-pipeline = { workspace = true, features = ["salsa"] }
+leek-diagnostics = { workspace = true }
+leek-syntax   = { workspace = true }
+leek-lexer    = { workspace = true }
+leek-parser   = { workspace = true }
+leek-resolver = { workspace = true }
+leek-environment = { workspace = true }
+leek-prelude  = { workspace = true }
+leek-types    = { workspace = true }
+leek-hir      = { workspace = true }
+leek-mir      = { workspace = true }
+leek-lint     = { workspace = true }
+leek-fmt      = { workspace = true, features = ["salsa"] }
+
+[lints]
+workspace = true

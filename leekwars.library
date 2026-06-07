@@ -1,0 +1,582 @@
+# leek-wars-generator environment library (file-path form of the built-in "leekwars" catalog)
+# Generated from crates/core/leek-environment/game_builtins.tsv + game_constants.tsv
+# Pass with:  leekc --library /home/deck/Documents/coding/Leekscript/leekwars.library   (or miku --library / LSP leek.libraries)
+
+namespace = com.leekwars.generator.classes.*
+
+# --- functions ---  name<TAB>dispatchClass<TAB>static|receiver<TAB>minArity<TAB>maxArity<TAB>ops
+canUseChip	ChipClass	static	2	2	45
+canUseChipOnCell	ChipClass	static	2	2	45
+canUseWeapon	WeaponClass	static	1	2	45
+canUseWeaponOnCell	WeaponClass	static	1	2	45
+chipNeedLos	ChipClass	static	1	1	10
+clearMarks	UtilClass	static	0	0	15
+deleteRegister	UtilClass	static	1	1	16
+getAIID	EntityClass	static	0	1	15
+getAIName	EntityClass	static	0	1	15
+getAbsoluteShield	EntityClass	static	0	1	15
+getAgility	EntityClass	static	0	1	15
+getAliveAllies	FightClass	static	0	0	100
+getAliveAlliesCount	FightClass	static	0	0	100
+getAliveEnemies	FightClass	static	0	0	100
+getAliveEnemiesCount	FightClass	static	0	0	25
+getAllChips	ChipClass	static	0	0	200
+getAllEffects	FightClass	static	0	0	200
+getAllWeapons	WeaponClass	static	0	0	200
+getAlliedTurret	FightClass	static	0	0	15
+getAllies	FightClass	static	0	0	100
+getAlliesCount	FightClass	static	0	0	25
+getAlliesLife	FightClass	static	0	0	50
+getBirthTurn	EntityClass	static	0	1	15
+getBulbCharacteristics	FightClass	static	1	1	40
+getBulbChips	FightClass	static	1	1	40
+getBulbStats	FightClass	static	1	1	40
+getBulbType	EntityClass	static	0	1	15
+getCell	EntityClass	static	0	1	5
+getCellContent	FieldClass	static	1	1	6
+getCellDistance	FieldClass	static	2	2	15
+getCellFromXY	FieldClass	static	2	2	5
+getCellToUseChip	FightClass	static	2	3	38080
+getCellToUseChipOnCell	FightClass	static	2	3	38080
+getCellToUseWeapon	FightClass	static	1	3	38080
+getCellToUseWeaponOnCell	FightClass	static	1	3	38080
+getCellX	FieldClass	static	1	1	5
+getCellY	FieldClass	static	1	1	5
+getCellsToUseChip	FightClass	static	2	3	25834
+getCellsToUseChipOnCell	FightClass	static	2	3	25834
+getCellsToUseWeapon	FightClass	static	1	3	25834
+getCellsToUseWeaponOnCell	FightClass	static	1	3	25834
+getChestType	EntityClass	static	0	1	15
+getChipArea	ChipClass	static	1	1	15
+getChipCooldown	ChipClass	static	1	1	15
+getChipCost	ChipClass	static	1	1	15
+getChipEffectiveArea	ChipClass	static	2	3	78
+getChipEffects	ChipClass	static	1	1	125
+getChipFailure	ChipClass	static	1	1	15
+getChipLaunchType	ChipClass	static	1	1	15
+getChipMaxRange	ChipClass	static	1	1	15
+getChipMaxScope	ChipClass	static	1	1	15
+getChipMaxUses	ChipClass	static	1	1	15
+getChipMinRange	ChipClass	static	1	1	15
+getChipMinScope	ChipClass	static	1	1	15
+getChipName	ChipClass	static	1	1	15
+getChipTargets	ChipClass	static	2	2	40
+getChips	EntityClass	static	0	1	40
+getCompositionName	EntityClass	static	0	1	15
+getCooldown	ChipClass	static	1	2	30
+getCores	EntityClass	static	0	1	15
+getCurrentCooldown	ChipClass	static	1	2	30
+getDamageReturn	EntityClass	static	0	1	15
+getDeadAllies	FightClass	static	0	0	100
+getDeadEnemies	FightClass	static	0	0	100
+getDeadEnemiesCount	FightClass	static	0	0	25
+getDistance	FieldClass	static	2	2	15
+getEffects	EntityClass	static	0	1	25
+getEnemies	FightClass	static	0	0	100
+getEnemiesCount	FightClass	static	0	0	25
+getEnemiesLife	FightClass	static	0	0	50
+getEnemyTurret	FightClass	static	0	0	15
+getEntity	EntityClass	static	0	0	5
+getEntityOnCell	FieldClass	static	1	1	15
+getEntityTurnOrder	EntityClass	static	0	1	30
+getFarestAlly	FightClass	static	0	0	31
+getFarestEnemy	FightClass	static	0	0	31
+getFarmerCountry	EntityClass	static	0	1	15
+getFarmerID	EntityClass	static	0	1	15
+getFarmerName	EntityClass	static	0	1	15
+getFarthestAlly	FightClass	static	0	0	31
+getFarthestEnemy	FightClass	static	0	0	31
+getFightBoss	FightClass	static	0	0	10
+getFightContext	FightClass	static	0	0	10
+getFightID	FightClass	static	0	0	5
+getFightType	FightClass	static	0	0	10
+getForce	EntityClass	static	0	1	15
+getFrequency	EntityClass	static	0	1	15
+getItemUses	EntityClass	static	1	1	15
+getLaunchedEffects	EntityClass	static	0	1	25
+getLeek	EntityClass	static	0	0	5
+getLeekID	EntityClass	static	0	1	15
+getLeekOnCell	FieldClass	static	1	1	15
+getLevel	EntityClass	static	0	1	15
+getLife	EntityClass	static	0	1	15
+getMP	EntityClass	static	0	1	15
+getMagic	EntityClass	static	0	1	15
+getMapType	FieldClass	static	0	0	5
+getMessageAuthor	NetworkClass	static	1	1	5
+getMessageParams	NetworkClass	static	1	1	5
+getMessageType	NetworkClass	static	1	1	5
+getMessages	NetworkClass	static	0	1	0
+getMobType	EntityClass	static	0	1	15
+getName	EntityClass	static	0	1	15
+getNearestAlly	FightClass	static	0	0	25
+getNearestAllyTo	FightClass	static	1	1	35
+getNearestAllyToCell	FightClass	static	1	1	35
+getNearestEnemy	FightClass	static	0	0	25
+getNearestEnemyTo	FightClass	static	1	1	35
+getNearestEnemyToCell	FightClass	static	1	1	35
+getNextPlayer	FightClass	static	0	1	20
+getObstacles	FieldClass	static	0	0	85
+getPassiveEffects	EntityClass	static	0	1	125
+getPath	FieldClass	static	2	3	0
+getPathLength	FieldClass	static	2	3	0
+getPower	EntityClass	static	0	1	15
+getPreviousPlayer	FightClass	static	0	1	20
+getRAM	EntityClass	static	0	1	15
+getRegister	UtilClass	static	1	1	15
+getRegisters	UtilClass	static	0	0	25
+getRelativeShield	EntityClass	static	0	1	15
+getResistance	EntityClass	static	0	1	15
+getScience	EntityClass	static	0	1	15
+getSide	EntityClass	static	0	1	5
+getStat	EntityClass	static	1	2	15
+getStates	EntityClass	static	0	1	25
+getStrength	EntityClass	static	0	1	15
+getSummoner	EntityClass	static	0	1	15
+getSummons	EntityClass	static	0	1	15
+getTP	EntityClass	static	0	1	15
+getTeamID	EntityClass	static	0	1	15
+getTeamName	EntityClass	static	0	1	15
+getTotalLife	EntityClass	static	0	1	15
+getTotalMP	EntityClass	static	0	1	15
+getTotalTP	EntityClass	static	0	1	15
+getTurn	FightClass	static	0	0	15
+getType	EntityClass	static	0	1	15
+getWeapon	EntityClass	static	0	1	15
+getWeaponArea	WeaponClass	static	1	1	15
+getWeaponCost	WeaponClass	static	0	1	15
+getWeaponEffectiveArea	WeaponClass	static	1	3	78
+getWeaponEffects	WeaponClass	static	0	1	125
+getWeaponFailure	WeaponClass	static	0	1	15
+getWeaponLaunchType	WeaponClass	static	0	1	15
+getWeaponMaxRange	WeaponClass	static	0	1	15
+getWeaponMaxScope	WeaponClass	static	0	1	15
+getWeaponMaxUses	WeaponClass	static	0	1	15
+getWeaponMinRange	WeaponClass	static	0	1	15
+getWeaponMinScope	WeaponClass	static	0	1	15
+getWeaponName	WeaponClass	static	0	1	15
+getWeaponPassiveEffects	WeaponClass	static	0	1	125
+getWeaponTargets	WeaponClass	static	1	2	40
+getWeapons	EntityClass	static	0	1	50
+getWinner	FightClass	static	0	0	5
+getWisdom	EntityClass	static	0	1	15
+isAlive	EntityClass	static	1	1	15
+isAlly	EntityClass	static	1	1	15
+isChip	ChipClass	static	1	1	10
+isDead	EntityClass	static	1	1	15
+isEmptyCell	FieldClass	static	1	1	10
+isEnemy	EntityClass	static	1	1	15
+isEntity	FieldClass	static	1	1	10
+isInlineChip	ChipClass	static	1	1	10
+isInlineWeapon	WeaponClass	static	0	1	10
+isLeek	FieldClass	static	1	1	10
+isObstacle	FieldClass	static	1	1	10
+isOnSameLine	FieldClass	static	2	2	15
+isStatic	EntityClass	static	0	1	15
+isSummon	EntityClass	static	0	1	10
+isWeapon	WeaponClass	static	1	1	15
+lama	EntityClass	static	0	0	30
+lineOfSight	FieldClass	static	2	5	31
+listen	EntityClass	static	0	0	78
+mark	UtilClass	static	2	4	164
+markText	UtilClass	static	1	5	164
+moveAwayFrom	FightClass	static	1	2	500
+moveAwayFromCell	FightClass	static	1	2	500
+moveAwayFromCells	FightClass	static	1	2	500
+moveAwayFromEntities	FightClass	static	1	2	500
+moveAwayFromLeeks	FightClass	static	1	2	500
+moveAwayFromLine	FightClass	static	2	3	500
+moveToward	FightClass	static	1	2	500
+moveTowardCell	FightClass	static	1	2	500
+moveTowardCells	FightClass	static	1	2	500
+moveTowardEntities	FightClass	static	1	2	500
+moveTowardLeeks	FightClass	static	1	2	500
+moveTowardLine	FightClass	static	2	3	500
+pause	UtilClass	static	0	0	30
+resurrect	ChipClass	static	2	2	500
+say	EntityClass	static	1	1	30
+sendAll	NetworkClass	static	2	2	40
+sendTo	NetworkClass	static	3	3	15
+setLoadout	FightClass	static	1	2	100
+setRegister	UtilClass	static	2	2	50
+setWeapon	EntityClass	static	1	1	15
+show	UtilClass	static	1	2	0
+summon	ChipClass	static	3	4	1750
+useChip	ChipClass	static	1	2	3000
+useChipOnCell	ChipClass	static	2	2	3000
+useWeapon	WeaponClass	static	1	1	3000
+useWeaponOnCell	WeaponClass	static	1	1	3000
+weaponNeedLos	WeaponClass	static	0	1	10
+
+# --- constants ---  const NAME type
+const AREA_ALLIES integer
+const AREA_CIRCLE_1 integer
+const AREA_CIRCLE_2 integer
+const AREA_CIRCLE_3 integer
+const AREA_ENEMIES integer
+const AREA_FIRST_INLINE integer
+const AREA_LASER_LINE integer
+const AREA_PLUS_1 integer
+const AREA_PLUS_2 integer
+const AREA_PLUS_3 integer
+const AREA_POINT integer
+const AREA_SQUARE_1 integer
+const AREA_SQUARE_2 integer
+const AREA_X_1 integer
+const AREA_X_2 integer
+const AREA_X_3 integer
+const BOSS_EVIL_PUMPKIN integer
+const BOSS_FENNEL_KING integer
+const BOSS_NASU_SAMOURAI integer
+const BOSS_NASU_SAMURAI integer
+const BULB_FIRE integer
+const BULB_HEALER integer
+const BULB_ICED integer
+const BULB_LIGHTNING integer
+const BULB_METALLIC integer
+const BULB_PUNY integer
+const BULB_ROCKY integer
+const BULB_SAVANT integer
+const BULB_TACTICIAN integer
+const BULB_WIZARD integer
+const CELL_EMPTY integer
+const CELL_ENTITY integer
+const CELL_OBSTACLE integer
+const CELL_PLAYER integer
+const CHEST_DIAMOND integer
+const CHEST_IRON integer
+const CHEST_WOOD integer
+const CHIP_ACCELERATION integer
+const CHIP_ADRENALINE integer
+const CHIP_ALTERATION integer
+const CHIP_ANTIDOTE integer
+const CHIP_APOCALYPSE integer
+const CHIP_ARMOR integer
+const CHIP_ARMORING integer
+const CHIP_ARSENIC integer
+const CHIP_AWEKENING integer
+const CHIP_BALL_AND_CHAIN integer
+const CHIP_BANDAGE integer
+const CHIP_BARK integer
+const CHIP_BOXING_GLOVE integer
+const CHIP_BRAINWASHING integer
+const CHIP_BRAMBLE integer
+const CHIP_BURNING integer
+const CHIP_CARAPACE integer
+const CHIP_CHILLI_PEPPER integer
+const CHIP_COLLAR integer
+const CHIP_CORN integer
+const CHIP_COVETOUSNESS integer
+const CHIP_COVID integer
+const CHIP_CRUSHING integer
+const CHIP_CURE integer
+const CHIP_DESINTEGRATION integer
+const CHIP_DEVIL_STRIKE integer
+const CHIP_DIVINE_PROTECTION integer
+const CHIP_DOME integer
+const CHIP_DOPING integer
+const CHIP_DRIP integer
+const CHIP_ELEVATION integer
+const CHIP_FEROCITY integer
+const CHIP_FERTILIZER integer
+const CHIP_FIRE_BALL integer
+const CHIP_FIRE_BULB integer
+const CHIP_FLAME integer
+const CHIP_FLASH integer
+const CHIP_FORTRESS integer
+const CHIP_FRACTURE integer
+const CHIP_GRAPPLE integer
+const CHIP_HEALER_BULB integer
+const CHIP_HELMET integer
+const CHIP_ICE integer
+const CHIP_ICEBERG integer
+const CHIP_ICED_BULB integer
+const CHIP_INVERSION integer
+const CHIP_JUMP integer
+const CHIP_KEMURIDAMA integer
+const CHIP_KILL integer
+const CHIP_KNOWLEDGE integer
+const CHIP_LEATHER_BOOTS integer
+const CHIP_LIBERATION integer
+const CHIP_LIGHTNING integer
+const CHIP_LIGHTNING_BULB integer
+const CHIP_LOAM integer
+const CHIP_MANUMISSION integer
+const CHIP_METALLIC_BULB integer
+const CHIP_METEORITE integer
+const CHIP_MIRROR integer
+const CHIP_MOTIVATION integer
+const CHIP_MUTATION integer
+const CHIP_PEBBLE integer
+const CHIP_PLAGUE integer
+const CHIP_PLASMA integer
+const CHIP_PRECIPITATION integer
+const CHIP_PRISM integer
+const CHIP_PROTEIN integer
+const CHIP_PUNISHMENT integer
+const CHIP_PUNY_BULB integer
+const CHIP_RAGE integer
+const CHIP_RAMPART integer
+const CHIP_REFLEXES integer
+const CHIP_REGENERATION integer
+const CHIP_REMISSION integer
+const CHIP_REPOTTING integer
+const CHIP_RESURRECTION integer
+const CHIP_ROCK integer
+const CHIP_ROCKFALL integer
+const CHIP_ROCKY_BULB integer
+const CHIP_SAVANT_BULB integer
+const CHIP_SERUM integer
+const CHIP_SEVEN_LEAGUE_BOOTS integer
+const CHIP_SHIELD integer
+const CHIP_SHOCK integer
+const CHIP_SHURIKEN integer
+const CHIP_SLOW_DOWN integer
+const CHIP_SOLIDIFICATION integer
+const CHIP_SOPORIFIC integer
+const CHIP_SPARK integer
+const CHIP_STALACTITE integer
+const CHIP_STEROID integer
+const CHIP_STRETCHING integer
+const CHIP_TACTICIAN_BULB integer
+const CHIP_TELEPORTATION integer
+const CHIP_THERAPY integer
+const CHIP_THORN integer
+const CHIP_THUNDER integer
+const CHIP_TOXIN integer
+const CHIP_TRANQUILIZER integer
+const CHIP_TRANSMUTATION integer
+const CHIP_TREBUCHET integer
+const CHIP_VACCINE integer
+const CHIP_VAMPIRIZATION integer
+const CHIP_VENOM integer
+const CHIP_WALL integer
+const CHIP_WARM_UP integer
+const CHIP_WHIP integer
+const CHIP_WINGED_BOOTS integer
+const CHIP_WIZARDRY integer
+const CHIP_WIZARD_BULB integer
+const CRITICAL_FACTOR real
+const EFFECT_ABSOLUTE_SHIELD integer
+const EFFECT_ABSOLUTE_VULNERABILITY integer
+const EFFECT_ADD_STATE integer
+const EFFECT_AFTEREFFECT integer
+const EFFECT_AGILITY integer
+const EFFECT_ALLY_KILLED_TO_AGILITY integer
+const EFFECT_ANTIDOTE integer
+const EFFECT_ATTRACT integer
+const EFFECT_BOOST_MAX_LIFE integer
+const EFFECT_BUFF_ABSOLUTE_SHIELD integer
+const EFFECT_BUFF_AGILITY integer
+const EFFECT_BUFF_DAMAGE integer
+const EFFECT_BUFF_DEBUFF integer
+const EFFECT_BUFF_FORCE integer
+const EFFECT_BUFF_HEAL integer
+const EFFECT_BUFF_MP integer
+const EFFECT_BUFF_RELATIVE_SHIELD integer
+const EFFECT_BUFF_RESISTANCE integer
+const EFFECT_BUFF_STRENGTH integer
+const EFFECT_BUFF_TELEPORTATION integer
+const EFFECT_BUFF_TP integer
+const EFFECT_BUFF_WISDOM integer
+const EFFECT_CRITICAL_TO_HEAL integer
+const EFFECT_DAMAGE integer
+const EFFECT_DAMAGE_RETURN integer
+const EFFECT_DAMAGE_TO_ABSOLUTE_SHIELD integer
+const EFFECT_DAMAGE_TO_STRENGTH integer
+const EFFECT_DEBUFF integer
+const EFFECT_FORCE integer
+const EFFECT_HEAL integer
+const EFFECT_INVERT integer
+const EFFECT_KILL integer
+const EFFECT_KILL_TO_TP integer
+const EFFECT_LIFE_DAMAGE integer
+const EFFECT_MODIFIER_IRREDUCTIBLE integer
+const EFFECT_MODIFIER_MULTIPLIED_BY_TARGETS integer
+const EFFECT_MODIFIER_NOT_REPLACEABLE integer
+const EFFECT_MODIFIER_ON_CASTER integer
+const EFFECT_MODIFIER_STACKABLE integer
+const EFFECT_MOVED_TO_MP integer
+const EFFECT_MP integer
+const EFFECT_NOVA_DAMAGE integer
+const EFFECT_NOVA_DAMAGE_TO_MAGIC integer
+const EFFECT_NOVA_VITALITY integer
+const EFFECT_POISON integer
+const EFFECT_POISON_TO_SCIENCE integer
+const EFFECT_PROPAGATION integer
+const EFFECT_PUSH integer
+const EFFECT_RAW_ABSOLUTE_SHIELD integer
+const EFFECT_RAW_BUFF_AGILITY integer
+const EFFECT_RAW_BUFF_MAGIC integer
+const EFFECT_RAW_BUFF_MP integer
+const EFFECT_RAW_BUFF_POWER integer
+const EFFECT_RAW_BUFF_RESISTANCE integer
+const EFFECT_RAW_BUFF_SCIENCE integer
+const EFFECT_RAW_BUFF_STRENGTH integer
+const EFFECT_RAW_BUFF_TP integer
+const EFFECT_RAW_BUFF_WISDOM integer
+const EFFECT_RAW_HEAL integer
+const EFFECT_RAW_RELATIVE_SHIELD integer
+const EFFECT_RELATIVE_SHIELD integer
+const EFFECT_REMOVE_SHACKLES integer
+const EFFECT_REPEL integer
+const EFFECT_RESURRECT integer
+const EFFECT_SHACKLE_AGILITY integer
+const EFFECT_SHACKLE_MAGIC integer
+const EFFECT_SHACKLE_MP integer
+const EFFECT_SHACKLE_STRENGTH integer
+const EFFECT_SHACKLE_TP integer
+const EFFECT_SHACKLE_WISDOM integer
+const EFFECT_SLIDE_TO integer
+const EFFECT_STEAL_ABSOLUTE_SHIELD integer
+const EFFECT_STEAL_LIFE integer
+const EFFECT_SUMMON integer
+const EFFECT_TARGET_ALLIES integer
+const EFFECT_TARGET_ALWAYS_CASTER integer
+const EFFECT_TARGET_CASTER integer
+const EFFECT_TARGET_ENEMIES integer
+const EFFECT_TARGET_NON_SUMMONS integer
+const EFFECT_TARGET_NOT_CASTER integer
+const EFFECT_TARGET_SUMMONS integer
+const EFFECT_TELEPORT integer
+const EFFECT_TOTAL_DEBUFF integer
+const EFFECT_TP integer
+const EFFECT_VULNERABILITY integer
+const ENTITY_BULB integer
+const ENTITY_CHEST integer
+const ENTITY_LEEK integer
+const ENTITY_MOB integer
+const ENTITY_TURRET integer
+const EROSION_CRITICAL_BONUS real
+const EROSION_DAMAGE real
+const EROSION_POISON real
+const FIGHT_CONTEXT_BATTLE_ROYALE integer
+const FIGHT_CONTEXT_CHALLENGE integer
+const FIGHT_CONTEXT_GARDEN integer
+const FIGHT_CONTEXT_TEST integer
+const FIGHT_CONTEXT_TOURNAMENT integer
+const FIGHT_TYPE_BATTLE_ROYALE integer
+const FIGHT_TYPE_BOSS integer
+const FIGHT_TYPE_CHEST_HUNT integer
+const FIGHT_TYPE_COLOSSUS integer
+const FIGHT_TYPE_FARMER integer
+const FIGHT_TYPE_SOLO integer
+const FIGHT_TYPE_TEAM integer
+const FIGHT_TYPE_WAR integer
+const LAUNCH_TYPE_CIRCLE integer
+const LAUNCH_TYPE_DIAGONAL integer
+const LAUNCH_TYPE_DIAGONAL_INVERTED integer
+const LAUNCH_TYPE_LINE integer
+const LAUNCH_TYPE_LINE_INVERTED integer
+const LAUNCH_TYPE_STAR integer
+const LAUNCH_TYPE_STAR_INVERTED integer
+const MAP_BEACH integer
+const MAP_CASTLE integer
+const MAP_CEMETERY integer
+const MAP_DESERT integer
+const MAP_FACTORY integer
+const MAP_FOREST integer
+const MAP_GLACIER integer
+const MAP_NEXUS integer
+const MAP_TEIEN integer
+const MAP_TEMPLE integer
+const MAX_TURNS integer
+const MESSAGE_ATTACK integer
+const MESSAGE_BUFF_AGILITY integer
+const MESSAGE_BUFF_FORCE integer
+const MESSAGE_BUFF_MP integer
+const MESSAGE_BUFF_STRENGTH integer
+const MESSAGE_BUFF_TP integer
+const MESSAGE_CUSTOM integer
+const MESSAGE_DEBUFF integer
+const MESSAGE_HEAL integer
+const MESSAGE_MOVE_AWAY integer
+const MESSAGE_MOVE_AWAY_CELL integer
+const MESSAGE_MOVE_TOWARD integer
+const MESSAGE_MOVE_TOWARD_CELL integer
+const MESSAGE_SHIELD integer
+const MOB_BLUE_CRYSTAL integer
+const MOB_EVIL_PUMPKIN integer
+const MOB_FENNEL_KING integer
+const MOB_FENNEL_KNIGHT integer
+const MOB_FENNEL_SCRIBE integer
+const MOB_FENNEL_SQUIRE integer
+const MOB_GRAAL integer
+const MOB_GREEN_CRYSTAL integer
+const MOB_HUBBARD integer
+const MOB_NASU_RONIN integer
+const MOB_NASU_SAMURAI integer
+const MOB_NASU_SEITO integer
+const MOB_NASU_WARRIOR integer
+const MOB_OFFSPRING integer
+const MOB_RED_CRYSTAL integer
+const MOB_TURBAN integer
+const MOB_WARTY integer
+const MOB_YELLOW_CRYSTAL integer
+const STATE_INVINCIBLE integer
+const STATE_UNHEALABLE integer
+const STAT_ABSOLUTE_SHIELD integer
+const STAT_AGILITY integer
+const STAT_CORES integer
+const STAT_DAMAGE_RETURN integer
+const STAT_FREQUENCY integer
+const STAT_LIFE integer
+const STAT_MAGIC integer
+const STAT_MP integer
+const STAT_POWER integer
+const STAT_RAM integer
+const STAT_RELATIVE_SHIELD integer
+const STAT_RESISTANCE integer
+const STAT_SCIENCE integer
+const STAT_STRENGTH integer
+const STAT_TP integer
+const STAT_WISDOM integer
+const SUMMON_LIMIT integer
+const USE_CRITICAL integer
+const USE_FAILED integer
+const USE_INVALID_COOLDOWN integer
+const USE_INVALID_POSITION integer
+const USE_INVALID_TARGET integer
+const USE_MAX_USES integer
+const USE_NOT_ENOUGH_TP integer
+const USE_RESURRECT_INVALID_ENTITY integer
+const USE_SUCCESS integer
+const USE_TOO_MANY_SUMMONS integer
+const USE_TOO_MUCH_SUMMONS integer
+const WEAPON_AXE integer
+const WEAPON_BAZOOKA integer
+const WEAPON_BROADSWORD integer
+const WEAPON_B_LASER integer
+const WEAPON_DARK_KATANA integer
+const WEAPON_DESTROYER integer
+const WEAPON_DOUBLE_GUN integer
+const WEAPON_ELECTRISOR integer
+const WEAPON_ENHANCED_LIGHTNINGER integer
+const WEAPON_EXCALIBUR integer
+const WEAPON_EXPLORER_RIFLE integer
+const WEAPON_FLAME_THROWER integer
+const WEAPON_GAZOR integer
+const WEAPON_GRENADE_LAUNCHER integer
+const WEAPON_HEAVY_SWORD integer
+const WEAPON_ILLICIT_GRENADE_LAUNCHER integer
+const WEAPON_J_LASER integer
+const WEAPON_KATANA integer
+const WEAPON_LASER integer
+const WEAPON_LIGHTNINGER integer
+const WEAPON_MACHINE_GUN integer
+const WEAPON_MAGNUM integer
+const WEAPON_MYSTERIOUS_ELECTRISOR integer
+const WEAPON_M_LASER integer
+const WEAPON_NEUTRINO integer
+const WEAPON_ODACHI integer
+const WEAPON_PISTOL integer
+const WEAPON_PROTON_CANON integer
+const WEAPON_QUANTUM_RIFLE integer
+const WEAPON_REVOKED_M_LASER integer
+const WEAPON_RHINO integer
+const WEAPON_RIFLE integer
+const WEAPON_SCYTHE integer
+const WEAPON_SHOTGUN integer
+const WEAPON_SWORD integer
+const WEAPON_TASER integer
+const WEAPON_UNBRIDLED_GAZOR integer
+const WEAPON_UNSTABLE_DESTROYER integer

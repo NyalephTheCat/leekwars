@@ -1,0 +1,267 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Leekscript",
+  "scopeName": "source.leek",
+  "fileTypes": ["leek"],
+  "patterns": [
+    { "include": "#pragma" },
+    { "include": "#comments" },
+    { "include": "#class-declaration" },
+    { "include": "#function-declaration" },
+    { "include": "#constructor-declaration" },
+    { "include": "#var-declaration" },
+    { "include": "#new-expression" },
+    { "include": "#method-call" },
+    { "include": "#function-call" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#builtin-functions" },
+    { "include": "#builtin-constants" },
+    { "include": "#types" },
+    { "include": "#identifiers" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "pragma": {
+      "match": "(//)\\s*(@(?:version|strict|experimental))(?::(\\S+))?",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.leek" },
+        "2": { "name": "meta.preprocessor.leek" },
+        "3": { "name": "string.unquoted.pragma-value.leek" }
+      }
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.leek",
+          "begin": "//",
+          "end": "$",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.leek" }
+          }
+        },
+        {
+          "name": "comment.block.leek",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.leek" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.leek" }
+          }
+        }
+      ]
+    },
+    "function-declaration": {
+      "match": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.function.leek" },
+        "2": { "name": "entity.name.function.leek" }
+      }
+    },
+    "class-declaration": {
+      "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+(extends)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
+      "captures": {
+        "1": { "name": "storage.type.class.leek" },
+        "2": { "name": "entity.name.class.leek" },
+        "3": { "name": "storage.modifier.extends.leek" },
+        "4": { "name": "entity.other.inherited-class.leek" }
+      }
+    },
+    "constructor-declaration": {
+      "match": "\\b(constructor)\\b",
+      "captures": {
+        "1": { "name": "storage.type.constructor.leek" }
+      }
+    },
+    "var-declaration": {
+      "match": "\\b(var|global)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.var.leek" },
+        "2": { "name": "variable.other.declaration.leek" }
+      }
+    },
+    "new-expression": {
+      "match": "\\b(new)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.operator.new.leek" },
+        "2": { "name": "entity.name.type.class.leek" }
+      }
+    },
+    "method-call": {
+      "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+      "captures": {
+        "1": { "name": "punctuation.accessor.leek" },
+        "2": { "name": "entity.name.function.method.leek" }
+      }
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.leek" }
+      }
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.leek",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.leek" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.leek" } },
+          "patterns": [{ "include": "#string-escape" }]
+        },
+        {
+          "name": "string.quoted.single.leek",
+          "begin": "'",
+          "end": "'",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.leek" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.leek" } },
+          "patterns": [{ "include": "#string-escape" }]
+        }
+      ]
+    },
+    "string-escape": {
+      "patterns": [
+        { "name": "constant.character.escape.leek", "match": "\\\\[nrt\\\\\"'0]" },
+        { "name": "constant.character.escape.unicode.leek", "match": "\\\\u\\{[0-9A-Fa-f]+\\}" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.leek", "match": "\\b0[xX][0-9A-Fa-f][0-9A-Fa-f_]*\\b" },
+        { "name": "constant.numeric.binary.leek", "match": "\\b0[bB][01][01_]*\\b" },
+        {
+          "name": "constant.numeric.real.leek",
+          "match": "\\b[0-9][0-9_]*\\.[0-9_]+([eE][-+]?[0-9_]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.real.exp.leek",
+          "match": "\\b[0-9][0-9_]*[eE][-+]?[0-9_]+\\b"
+        },
+        { "name": "constant.numeric.integer.leek", "match": "\\b[0-9][0-9_]*\\b" },
+        { "name": "constant.numeric.infinity.leek", "match": "∞" },
+        { "name": "constant.numeric.pi.leek", "match": "π" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flow.leek",
+          "match": "\\b(if|else|while|do|for|foreach|in|break|continue|return|switch|case|default)\\b"
+        },
+        {
+          "name": "storage.type.declaration.leek",
+          "match": "\\b(function|class|extends|constructor|include)\\b"
+        },
+        {
+          "name": "storage.modifier.leek",
+          "match": "\\b(static|private|public|protected|final)\\b"
+        },
+        {
+          "name": "keyword.operator.word.leek",
+          "match": "\\b(and|or|not|xor|is|instanceof)\\b"
+        },
+        {
+          "name": "keyword.operator.new.leek",
+          "match": "\\b(new)\\b"
+        },
+        {
+          "name": "constant.language.boolean.leek",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.leek",
+          "match": "\\b(null)\\b"
+        },
+        {
+          "name": "variable.language.this.leek",
+          "match": "\\b(this|super)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.leek",
+          "match": "\\b(integer|int|real|number|float|double|boolean|bool|string|void|any)\\b"
+        },
+        {
+          "name": "support.class.builtin.leek",
+          "match": "\\b(Array|Map|Set|Object|Function|Class|Interval|Number|String|Boolean|Integer|Real|System|JSON|Color|Value|Standard)\\b"
+        }
+      ]
+    },
+    "builtin-functions": {
+      "name": "support.function.builtin.leek",
+      "match": "\\b(getType|typeOf|instanceOf|string|number|real|integer|boolean|char|clone|isNull|length|count|isEmpty|debug|debugC|debugE|debugW|log|max|min|abs|ceil|floor|round|sqrt|pow|cos|sin|tan|acos|asin|atan|atan2|exp|log10|log2|sign|hypot|cbrt|rand|randInt|randFloat|getSeed|setSeed|push|pushAll|pop|shift|unshift|insert|remove|removeElement|removeKey|fill|sort|reverse|shuffle|join|indexOf|lastIndexOf|search|contains|inArray|slice|splice|chunk|concat|flatten|reduce|reduceRight|forEach|arrayForeach|arrayMap|arrayFilter|arrayReduce|arrayReduceRight|arrayConcat|arrayFlatten|arrayCount|arrayMax|arrayMin|arrayPartition|arraySort|arrayIter|arrayKeyExists|arrayKeys|arrayValues|arrayLast|arrayFirst|arrayChunk|arrayFoldLeft|arrayFoldRight|arrayCopy|arrayConcatAll|subArray|arrayReplace|arrayIntersect|arrayDifference|arrayUnion|arrayDistinct|arrayUnique|arrayRandom|arraySome|arrayEvery|arrayProduct|arrayAvg|arrayAdd|arrayGroupBy|arraySplit|arraySplice|entries|mapKeys|mapValues|mapContainsKey|mapContainsValue|mapForEach|mapSize|mapIsEmpty|mapPut|mapGet|mapRemove|mapClear|mapMerge|mapFilter|mapMap|setRemove|setContains|setSize|setClear|setUnion|setIntersection|setDifference|setForeach|setForEach|setToArray|setIsEmpty|charAt|substring|substr|replace|replaceAll|split|trim|toString|startsWith|endsWith|matches|format|stringContains|stringFormat|stringIndexOf|stringJoin|stringLength|stringReverse|stringSplit|stringSubstring|stringToLowerCase|stringToUpperCase|stringMatches|numberAbs|numberCeil|numberFloor|numberRound|numberSqrt|numberPow|numberCos|numberSin|numberMax|numberMin|numberExp|numberLog|intervalSize|intervalContains|intervalIsEmpty|intervalIter|intervalMin|intervalMax|intervalAvg|intervalForeach|intervalForEach|intervalReduce|intervalReduceRight|intervalFilter|intervalMap|jsonEncode|jsonDecode|json_encode|json_decode|color|getColor|getRed|getGreen|getBlue|colorFromRGB|colorToRGB|getOperations|getMaxOperations|getUsedRAM|getMaxRAM|getRemainingOperations|getRamUsage|getAITimestamp|getCurrentTime|getLife|getTotalLife|getMaxLife|getStrength|getAgility|getWisdom|getMP|getTP|getName|getLevel|getColors|getTeamName|getTeam|getEnemiesCount|getAlliesCount|getLeek|getLeeks|getAlliedLeeks|getEnemyLeeks|getEntities|getEnemy|getEnemies|getAllies|getAbsoluteShield|getRelativeShield|getMagic|getResistance|getCellDistance|getCellFromXY|getCellX|getCellY|getCell|getDistance|getMapType|getMap|getNearestEnemy|getNearestAlly|getNearestAllyTo|getNearestEnemyTo|getPath|getPathLength|getOperationsCount|getInstructionsCount|getWeapons|getWeapon|getChips|getCooldown|moveToward|moveTowardCell|moveTowardLeek|moveAwayFrom|moveAwayFromCell|moveAwayFromLeek|useWeapon|useWeaponOnCell|useChip|useChipOnCell|setWeapon|say|show|mark|lineOfSight|isAlive|isDead|isAlly|isEnemy|isOnSameLine|isOnSameDiagonal|isInlineAttack|isDiagonal|isStanding|endTurn|skipTurn|summon|getEntity|getOperationsHistory|getDamageReturn|getPower|getStartTP|getStartMP)\\b(?=\\s*\\()"
+    },
+    "builtin-constants": {
+      "name": "support.constant.builtin.leek",
+      "match": "\\b(PI|INFINITY|NAN|TYPE_NULL|TYPE_BOOLEAN|TYPE_NUMBER|TYPE_INTEGER|TYPE_REAL|TYPE_STRING|TYPE_ARRAY|TYPE_OBJECT|TYPE_FUNCTION|USE_SUCCESS|USE_FAILED|USE_CRITICAL|USE_INVALID_TARGET|USE_NOT_ENOUGH_TP|USE_INVALID_POSITION|USE_RESURRECT|SORT_ASC|SORT_DESC|SORT_RANDOM)\\b"
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "comment": "Uppercase-first identifiers — likely class names",
+          "name": "entity.name.type.leek",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "variable.other.leek",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.compound.leek",
+          "match": "(\\+=|-=|\\*=|/=|%=|\\*\\*=|\\\\=|&&=|\\|\\|=|\\?\\?=|&=|\\|=|\\^=|<<=|>>=|>>>=)"
+        },
+        {
+          "name": "keyword.operator.comparison.leek",
+          "match": "(===|!==|==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.leek",
+          "match": "(&&|\\|\\||!|\\?\\?)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.leek",
+          "match": "(\\+\\+|--|\\*\\*|\\+|-|\\*|/|%|\\\\)"
+        },
+        {
+          "name": "keyword.operator.bitwise.leek",
+          "match": "(<<|>>>|>>|&|\\||\\^|~)"
+        },
+        {
+          "name": "keyword.operator.arrow.leek",
+          "match": "(->|=>)"
+        },
+        {
+          "name": "keyword.operator.assignment.leek",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.ref.leek",
+          "match": "@"
+        },
+        {
+          "name": "keyword.operator.ternary.leek",
+          "match": "[?:]"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.comma.leek", "match": "," },
+        { "name": "punctuation.terminator.statement.leek", "match": ";" },
+        { "name": "punctuation.accessor.leek", "match": "\\." }
+      ]
+    }
+  }
+}

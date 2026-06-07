@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "leek",
+      "request": "launch",
+      "name": "Debug hero.leek (standalone)",
+      "program": "${workspaceFolder}/ais/hero.leek",
+      "stopOnEntry": true
+    },
+    {
+      "type": "leek",
+      "request": "launch",
+      "name": "Debug hero inside the duel",
+      "program": "${workspaceFolder}/ais/hero.leek",
+      "scenario": "${workspaceFolder}/duel.toml",
+      "fightEntity": 1,
+      "stopOnEntry": true
+    }
+  ]
+}

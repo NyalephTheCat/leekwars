@@ -1,0 +1,11 @@
+// @version:4
+function add2(a, b) {
+    return a + b
+}
+function mul2(a, b) {
+    return a * b
+}
+function compute(x) {
+    return add2(mul2(x, 2), 1)
+}
+return compute(5)

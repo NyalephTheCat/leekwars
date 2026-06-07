@@ -1,0 +1,4 @@
+// @version:4
+var n = 7
+var result = n > 0 ? n : -n
+return result

@@ -1,0 +1,27 @@
+# Cross-side ops-parity corpus.
+#
+# Each line: `<value>\t<jvm_runtime_ops>\t<static_emit_ops>\t<snippet>`
+# Comments (`#`) and blank lines are ignored.
+#
+# - `jvm_runtime_ops` is what `ai.operations()` reports after a single
+#   run. Used by `TestOpsCostCorpus.java` via `.equalsOps(...)`. This
+#   includes runtime helper bumps (e.g. the string-add helper bumps
+#   the counter for the allocation it performs).
+#
+# - `static_emit_ops` is the sum of the `N`s inside every `ops(...)`
+#   call emitted into the generated Java source. Used by
+#   `tests/parity.rs::ops_cost_matches_corpus` to verify the Rust
+#   backend produces the same `ops(VAL, N)` wrappers the Java
+#   reference does. Both backends agree on this even when runtime
+#   diverges via helpers.
+#
+# When you add a case here, both columns must reflect the upstream
+# reference's actual numbers — `tools/java-emitter/build.sh` plus a
+# JVM run can capture them in one shot.
+42	1	1	var x = 42 return x
+3	2	2	var x = 1 + 2 return x
+21	4	4	var a = 7 var x = a * 3 return x
+12	2	2	var x = 5 + 7 return x
+"ab"	4	2	var s = "a" + "b" return s
+9	4	4	function f(n) { return n * n } var x = f(3) return x
+2	6	6	var x = 100 % 7 return x

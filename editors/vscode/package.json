@@ -1,0 +1,174 @@
+{
+  "name": "leek",
+  "displayName": "Leekscript",
+  "description": "Language support for Leekscript via leek-lsp.",
+  "version": "0.0.1",
+  "publisher": "leekscript",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages", "Debuggers"],
+  "activationEvents": ["onLanguage:leek", "onDebugResolve:leek"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "breakpoints": [{ "language": "leek" }],
+    "debuggers": [
+      {
+        "type": "leek",
+        "label": "Leekscript",
+        "languages": ["leek"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the .leek program to debug.",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Break at the program's first statement.",
+                "default": false
+              },
+              "version": {
+                "type": "number",
+                "description": "Leekscript language version (1-4). Defaults to the file's pragma / latest.",
+                "enum": [1, 2, 3, 4]
+              },
+              "strict": {
+                "type": "boolean",
+                "description": "Compile in strict mode.",
+                "default": false
+              },
+              "noDebug": {
+                "type": "boolean",
+                "description": "Run without debugging (native, no breakpoints).",
+                "default": false
+              },
+              "scenario": {
+                "type": "string",
+                "description": "Path to a fight scenario (.toml/.json). When set, the program is debugged inside the fight; breakpoints fire during the turn loop."
+              },
+              "fightEntity": {
+                "type": "number",
+                "description": "Entity id the program controls in the scenario. Defaults to the entity whose ai is this program, else the first entity."
+              },
+              "profile": {
+                "type": "string",
+                "description": "A [profiles.<name>] block to apply to the scenario before the fight."
+              },
+              "seed": {
+                "type": "number",
+                "description": "Override the fight seed."
+              },
+              "maxTurns": {
+                "type": "number",
+                "description": "Override the fight turn limit."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "leek",
+            "request": "launch",
+            "name": "Debug Leekscript file",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Leekscript: Launch file",
+            "description": "Debug the active Leekscript program",
+            "body": {
+              "type": "leek",
+              "request": "launch",
+              "name": "Debug Leekscript file",
+              "program": "^\"\\${file}\"",
+              "stopOnEntry": false
+            }
+          },
+          {
+            "label": "Leekscript: Debug AI in fight",
+            "description": "Debug the active AI inside a fight scenario",
+            "body": {
+              "type": "leek",
+              "request": "launch",
+              "name": "Debug AI in fight",
+              "program": "^\"\\${file}\"",
+              "scenario": "^\"\\${workspaceFolder}/scenario.toml\"",
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "leek.restartServer",
+        "title": "Restart Language Server",
+        "category": "Leekscript"
+      }
+    ],
+    "languages": [
+      {
+        "id": "leek",
+        "aliases": ["Leekscript", "leek"],
+        "extensions": [".leek"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "leek",
+        "scopeName": "source.leek",
+        "path": "./syntaxes/leek.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Leekscript",
+      "properties": {
+        "leek.server.path": {
+          "type": "string",
+          "default": "leek-lsp",
+          "description": "Path to the leek-lsp executable."
+        },
+        "leek.debugAdapter.path": {
+          "type": "string",
+          "default": "leek-dap",
+          "description": "Path to the leek-dap debug adapter executable."
+        },
+        "leek.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "LSP trace level."
+        },
+        "leek.libraries": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Host-environment function libraries to load: a built-in name (\"leekwars\" for the leek-wars-generator fight functions) or a path to a library-definition file. Their functions are recognized by diagnostics and completion. Restart the server after changing."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
+    "package": "npm run compile && vsce package --no-yarn --skip-license"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.0.0"
+  }
+}

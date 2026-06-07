@@ -1,0 +1,21 @@
+[package]
+name        = "leek-generator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Leek-wars fight orchestrator: holds the world model, launches AIs, and bridges game builtins into native execution (the leek-wars-generator equivalent)."
+
+[dependencies]
+leek-game-runtime   = { workspace = true }
+leek-backend-native = { workspace = true }
+leek-runtime        = { workspace = true }
+leek-hir            = { workspace = true }
+
+[dev-dependencies]
+leek-parser = { workspace = true }
+leek-syntax = { workspace = true }
+leek-span   = { workspace = true }
+
+[lints]
+workspace = true

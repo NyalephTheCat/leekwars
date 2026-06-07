@@ -1,0 +1,32 @@
+[package]
+name        = "leek-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Compiler pipeline orchestration for Leekscript."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-manifest    = { workspace = true }
+leek-project     = { workspace = true }
+salsa            = { version = "0.26", optional = true }
+
+[dev-dependencies]
+leek-hir      = { workspace = true }
+leek-mir      = { workspace = true }
+leek-recipes  = { workspace = true }
+
+[features]
+default = []
+# Provide a salsa-backed memoization layer. When enabled the pipeline
+# exposes a `salsa` module with a `Db` trait and `LeekDb` concrete
+# database, plus a `SourceFile` input. Steps can dispatch to tracked
+# queries when [`Context::salsa`] returns `Some(db, file)` — useful for
+# cross-run caching (LSP, `miku watch`). Off by default so single-shot
+# users (`leekc`) don't pull the salsa dep.
+salsa = ["dep:salsa"]
+
+[lints]
+workspace = true

@@ -1,0 +1,44 @@
+--- exact mode (byte-faithful)
++++ clean mode (readable / charge-folded)
+ import leekscript.runner.*;
+ import leekscript.runner.values.*;
+ import leekscript.runner.classes.*;
+ import leekscript.common.*;
+ 
+ public class AI_1 extends AI {
+-public AI_1() throws LeekRunException {
+-super(4, 4);
+-}
+-public void staticInit() throws LeekRunException {
+-}
+-public Object runIA(Session session) throws LeekRunException {
+-Object u_i = ops(0l, 1);
+-Object u_n = ops(1l, 1);
+-do {
+-ops(1);ops(u_n = (Object) mul(u_n, 2l), 3);
+-ops(u_i = (Object) add(u_i, 1l), 2);
+-} while (ops(less(u_i, 5l), 1));
+-return u_n;
+-}
+-protected String getAIString() { return "07_do_while.leek";}
+-protected String[] getErrorFiles() { return new String[] {"07_do_while.leek", };}
+-
+-protected int[] getErrorFilesID() { return new int[] {1, };}
+-
++	public AI_1() throws LeekRunException {
++		super(5, 4);
++	}
++	public void staticInit() throws LeekRunException {
++	}
++	public Object runIA(Session session) throws LeekRunException {
++		ops(10);
++		Object i = 0l;
++		Object n = 1l;
++		do {
++			ops(12);
++			n = (Object) mul(n, 2l);
++			i = (Object) add(i, 1l);
++		} while (less(i, 5l));
++		return n;
++	}
+ }

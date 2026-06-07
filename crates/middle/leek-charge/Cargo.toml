@@ -1,0 +1,27 @@
+[package]
+name        = "leek-charge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Optional HIR pass that inserts static op-budget Charge instructions."
+
+[dependencies]
+leek-hir      = { workspace = true }
+leek-span     = { workspace = true }
+leek-pipeline = { workspace = true }
+salsa         = { version = "0.26", optional = true }
+
+[features]
+default = []
+# Adds a `charge_query` salsa-tracked entry point. Calls
+# `lower_hir_query` and re-runs only when the lowered HIR changes.
+salsa = [
+  "dep:salsa",
+  "leek-pipeline/salsa",
+  "leek-hir/salsa",
+  "leek-span/salsa",
+]
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+[package]
+name        = "leek-backend-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MIR → Cranelift IR → native code backend (JIT + object emission)."
+
+[dependencies]
+leek-mir      = { workspace = true }
+leek-hir      = { workspace = true }
+leek-types    = { workspace = true }
+leek-span     = { workspace = true }
+# The shared value semantics (binary ops, indexing, iteration, deep-clone)
+# live in `leek-runtime`; the native backend links them as C-ABI shims.
+# No dependency on any backend — `leek-runtime` is the shared library.
+leek-runtime  = { workspace = true }
+anyhow        = { workspace = true }
+
+cranelift            = { workspace = true }
+cranelift-frontend   = { workspace = true }
+cranelift-jit        = { workspace = true }
+cranelift-module     = { workspace = true }
+cranelift-native     = { workspace = true }
+cranelift-object     = { workspace = true }
+target-lexicon       = { workspace = true }
+
+[dev-dependencies]
+leek-parser = { workspace = true }
+leek-syntax = { workspace = true }
+leek-span   = { workspace = true }
+
+# Inherit the full workspace lint policy (pedantic clippy etc.). The JIT
+# path transmutes the finalized function pointer and calls it — inherently
+# unsafe — so `unsafe_code` is re-allowed at the crate root in lib.rs
+# rather than dropping every other workspace lint by overriding here.
+[lints]
+workspace = true

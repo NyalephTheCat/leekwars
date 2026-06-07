@@ -1,0 +1,31 @@
+[package]
+name        = "leek-diagnostics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Error model, catalog, and rendering for Leekscript."
+build = "build.rs"
+
+[dependencies]
+leek-span     = { workspace = true }
+serde         = { workspace = true, optional = true }
+serde_json    = { workspace = true, optional = true }
+salsa     = { version = "0.26", optional = true }
+
+[build-dependencies]
+serde_yaml = "0.9"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde", "dep:serde_json"]
+# Adds `salsa::Update` derives to the diagnostic model so it can cross
+# a tracked-query return boundary. Pulls in `leek-span/salsa` for the
+# `Span` derive.
+salsa = ["dep:salsa", "leek-span/salsa"]
+
+[lints]
+workspace = true

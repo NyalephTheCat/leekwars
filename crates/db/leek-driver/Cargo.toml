@@ -1,0 +1,18 @@
+[package]
+name        = "leek-driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "High-level compiler driver: project + recipe pipeline + diagnostics."
+
+[dependencies]
+leek-diagnostics = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-project     = { workspace = true }
+leek-recipes     = { workspace = true }
+leek-span        = { workspace = true }
+anyhow           = { workspace = true }
+
+[lints]
+workspace = true

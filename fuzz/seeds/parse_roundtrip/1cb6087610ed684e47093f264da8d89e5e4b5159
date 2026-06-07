@@ -1,0 +1,3 @@
+var i = [2..10]
+retn ruinterralToArray(i)
+var s=<  1, 2,;3>

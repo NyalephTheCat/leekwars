@@ -1,0 +1,8 @@
+# Reusable high-damage, low-survivability build.
+name = "GlassCannon"
+life = 1500
+strength = 900
+agility = 200
+tp = 22
+mp = 7
+weapons = [47, 37]   # WEAPON_M_LASER (equipped), WEAPON_PISTOL

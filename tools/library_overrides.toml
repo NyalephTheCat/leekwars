@@ -1,0 +1,40 @@
+# Manual overrides applied on top of the auto-extracted library signatures.
+#
+# The generator (tools/gen_leekwars_header.py) extracts typed, documented
+# signatures from the official sources. Use this file to refine specific
+# functions without hand-editing the generated `.leek` headers.
+#
+# Per function, under `[functions.<name>]`:
+#   skip = true
+#       Drop the function from the generated header entirely.
+#   signatures = ["<sig>", ...]
+#       Replace the generated signature(s) verbatim (the auto docstring is
+#       kept). Use this for the manual generics pass — the parser accepts
+#       generic type parameters (experimental), so e.g.
+#           [functions.push]
+#           signatures = ["push<T>(Array<T> array, T value) -> void"]
+#       resolves the element type at the call site instead of widening to
+#       `any`. Headers are validated with both `function_signatures` and
+#       `generics` enabled.
+
+# Generic array element ops — the manual pass that strengthens inference.
+# Now that the parser accepts generic type parameters, these resolve the
+# element type at the call site instead of widening to `any`.
+[functions.push]
+signatures = ["push<T>(Array<T> array, T value) -> void"]
+
+[functions.pop]
+signatures = ["pop<T>(Array<T> array) -> T"]
+
+[functions.first]
+signatures = ["first<T>(Array<T> array) -> T"]
+
+[functions.last]
+signatures = ["last<T>(Array<T> array) -> T"]
+
+[functions.unshift]
+signatures = ["unshift<T>(Array<T> array, T value) -> void"]
+
+# Example (non-generic): tighten arrayMap's return once we model HOFs.
+# [functions.arrayMap]
+# signatures = ["arrayMap(Array array, Function callback) -> Array"]

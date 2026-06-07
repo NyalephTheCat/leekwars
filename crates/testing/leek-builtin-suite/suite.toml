@@ -1,0 +1,99 @@
+# Focused tests — add a [[tests]] row to cover a builtin or a language
+# feature quickly. The upstream corpus (leek-test-corpus) remains the bulk
+# regression gate; this file is your own editable mini-corpus.
+#
+# Each [[tests]] row:
+#   id      = "unique name"        (required)
+#   builtin = "name"               (optional — only for builtin-coverage cases;
+#                                    omit it for a plain language/parser test)
+#   version = 4                    (optional, default 4; LeekScript 1..=4)
+#   source  = """ … """            (the program to run)
+#   expect  = one of:
+#       "pass"                     → runs without a runtime error
+#       "error"                    → fails to compile / errors at runtime
+#       { ops_at_most = N }        → runs within N operations
+#       { equals = "…" }           → result displays exactly as "…"
+#                                    (version-aware, like the upstream corpus)
+#
+# Run:  cargo run -p leek-builtin-suite --bin run-builtin-suite
+schema_version = 1
+
+# --- Language: lambda with an explicit return type (`arg => Type body`). ---
+[[tests]]
+id = "lambda_return_type_expr_body"
+version = 4
+source = "var f = x => integer x + 1 return f(5)"
+expect = { equals = "6" }
+
+[[tests]]
+id = "lambda_return_type_block_body"
+version = 4
+source = "var f = x => integer { return x + 1 } return f(5)"
+expect = { equals = "6" }
+
+[[tests]]
+id = "lambda_return_type_paren_param"
+version = 4
+source = "var f = (x) => real x * 2 return f(5)"
+expect = { equals = "10" }
+
+[[tests]]
+id = "lambda_no_return_type_still_parses"
+version = 4
+source = "var f = x => x + 1 return f(5)"
+expect = { equals = "6" }
+
+[[tests]]
+id = "lambda_ident_body_not_a_return_type"
+version = 4
+source = "var y = 7 var f = x => y return f(0)"
+expect = { equals = "7" }
+
+[[tests]]
+id = "sqrt_value"
+builtin = "sqrt"
+version = 4
+source = """
+function main() {
+  debug(sqrt(9));
+  return 0;
+}
+"""
+expect = "pass"
+
+[[tests]]
+id = "abs_negative"
+builtin = "abs"
+version = 4
+source = """
+function main() {
+  debug(abs(-3));
+  return 0;
+}
+"""
+expect = "pass"
+
+[[tests]]
+id = "sqrt_op_budget"
+builtin = "sqrt"
+version = 4
+source = """
+function main() {
+  var x = sqrt(2);
+  return 0;
+}
+"""
+expect = { ops_at_most = 20 }
+
+[[tests]]
+id = "array_map_batch"
+builtin = "arrayMap"
+version = 4
+source = """
+function main() {
+  var a = [1, 2, 3];
+  var b = arrayMap(a, function(x) { return x + 1; });
+  return 0;
+}
+"""
+expect = "pass"

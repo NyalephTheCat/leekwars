@@ -1,0 +1,41 @@
+[package]
+name        = "leek-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Type inference and checking for Leekscript."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-parser      = { workspace = true }
+leek-resolver    = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-prelude     = { workspace = true }
+rowan            = { workspace = true }
+salsa            = { version = "0.26", optional = true }
+
+[features]
+default = []
+# Adds a `typecheck_query` salsa-tracked entry point that
+# `TypeCheck::run` dispatches to when the pipeline is driven via
+# `Pipeline::run_memoized`. The query depends on `parse_query` so the
+# same green tree backs both resolution and typing.
+salsa = [
+  "dep:salsa",
+  "leek-pipeline/salsa",
+  "leek-parser/salsa",
+  "leek-syntax/salsa",
+  "leek-diagnostics/salsa",
+  "leek-span/salsa",
+]
+
+[dev-dependencies]
+# The cascade memoization test threads the full Pragma → Lex → Parse →
+# TypeCheck pipeline through `Pipeline::run_memoized`.
+leek-lexer = { workspace = true, features = ["salsa"] }
+
+[lints]
+workspace = true

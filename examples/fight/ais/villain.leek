@@ -1,0 +1,11 @@
+// @version: 4
+// Cautious: equip, advance, and take a single shot per turn.
+var target = getNearestEnemy();
+if (target != null) {
+    var arsenal = getWeapons();
+    if (count(arsenal) > 0 && getWeapon() != arsenal[0]) {
+        setWeapon(arsenal[0]);
+    }
+    moveToward(target, getMP());
+    useWeapon(target);
+}

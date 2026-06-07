@@ -1,0 +1,6 @@
+// combat AI using named constants (folded to literals)
+var e = getNearestEnemy();
+setWeapon(WEAPON_PISTOL);
+moveToward(e, 10);
+useWeapon(e);
+useWeapon(e);

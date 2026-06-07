@@ -1,0 +1,37 @@
+[package]
+name        = "leek-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Recursive-descent parser for Leekscript."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-lexer       = { workspace = true }
+leek-pipeline    = { workspace = true }
+rowan            = { workspace = true }
+salsa            = { version = "0.26", optional = true }
+
+[features]
+default = []
+# Adds a `parse_query` salsa-tracked entry point that `Parse::run`
+# dispatches to when the pipeline is driven via
+# `Pipeline::run_memoized`. `parse_query` calls `lex_query` so the
+# two stages share a single cached lex on the salsa path.
+salsa = [
+  "dep:salsa",
+  "leek-pipeline/salsa",
+  "leek-syntax/salsa",
+  "leek-lexer/salsa",
+  "leek-diagnostics/salsa",
+  "leek-span/salsa",
+]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+insta = "1"

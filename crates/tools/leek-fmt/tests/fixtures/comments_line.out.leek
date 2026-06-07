@@ -1,0 +1,13 @@
+// A standalone block comment.
+/// Doc above foo.
+function foo() {
+    return 1;
+}
+
+// Standalone above bar.
+
+/// Doc above bar.
+function bar() {
+    // inside bar
+    return 2;
+}

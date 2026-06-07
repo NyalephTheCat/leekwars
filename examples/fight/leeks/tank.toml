@@ -1,0 +1,8 @@
+# Reusable tanky leek build.
+name = "Tank"
+life = 6000
+strength = 150
+resistance = 200
+tp = 14
+mp = 5
+weapons = [37]        # WEAPON_PISTOL

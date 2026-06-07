@@ -1,0 +1,13 @@
+/**
+ * Compute area of circle.
+ * @param r radius
+ */
+function area(r) -> real { return 3.14 * r * r; }
+
+class Foo {
+    /**
+     * A documented method.
+     * @return integer the answer
+     */
+    public answer() -> integer { return 42; }
+}

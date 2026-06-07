@@ -1,0 +1,5 @@
+# cargo-fuzz working state — regenerated locally, not committed.
+/target
+/corpus
+/artifacts
+/coverage

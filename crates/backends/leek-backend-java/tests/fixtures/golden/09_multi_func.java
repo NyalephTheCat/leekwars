@@ -1,0 +1,29 @@
+import leekscript.runner.*;
+import leekscript.runner.values.*;
+import leekscript.runner.classes.*;
+import leekscript.common.*;
+
+public class AI_1 extends AI {
+public AI_1() throws LeekRunException {
+super(1, 4);
+}
+public void staticInit() throws LeekRunException {
+}
+private Object f_compute(Object p_x) throws LeekRunException {var u_x = p_x;
+ops(1);return f_add2(f_mul2(u_x, 2l), 1l);
+}
+private Object f_add2(Object p_a, Object p_b) throws LeekRunException {var u_a = p_a;var u_b = p_b;
+ops(1);ops(1); return (Object) add(u_a, u_b);
+}
+private Object f_mul2(Object p_a, Object p_b) throws LeekRunException {var u_a = p_a;var u_b = p_b;
+ops(1);ops(2); return (Object) mul(u_a, u_b);
+}
+public Object runIA(Session session) throws LeekRunException {
+return f_compute(5l);
+}
+protected String getAIString() { return "09_multi_func.leek";}
+protected String[] getErrorFiles() { return new String[] {"09_multi_func.leek", };}
+
+protected int[] getErrorFilesID() { return new int[] {1, };}
+
+}

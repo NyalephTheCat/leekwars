@@ -1,0 +1,31 @@
+# Standalone cargo-fuzz crate. The empty `[workspace]` table detaches it from
+# the parent workspace so a stable `cargo build` at the repo root never tries to
+# compile the libfuzzer (nightly-only) targets.
+[workspace]
+
+[package]
+name = "leek-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+leek-parser = { path = "../crates/frontend/leek-parser" }
+leek-span = { path = "../crates/core/leek-span" }
+leek-syntax = { path = "../crates/frontend/leek-syntax" }
+
+[[bin]]
+name = "parse_roundtrip"
+path = "fuzz_targets/parse_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz builds want optimization + debug assertions on (catch overflow/UB-ish
+# bugs while still running fast).
+[profile.release]
+debug = 1

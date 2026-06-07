@@ -1,0 +1,8 @@
+var i [%0 ..1retn rui1 ..10]
+0[%0 ..1retn ari1 ..10]
+0]
+retn var i [%1 ..10]
+retn rui1 .. 2, 3>]
+retn var i [%1 ..10]
+retn rui1 ..ay(i)
+ s = <1, 2, 3>

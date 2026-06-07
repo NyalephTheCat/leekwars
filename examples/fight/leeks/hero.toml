@@ -1,0 +1,10 @@
+# Reusable leek build — stats and loadout only. The scenario that uses it
+# supplies the id, cell, team, and AI. Referenced via `leek = "leeks/hero.toml"`.
+name = "Hero"
+life = 3000
+strength = 400
+agility = 80
+tp = 20
+mp = 6
+weapons = [37, 47]   # WEAPON_PISTOL (equipped), WEAPON_M_LASER
+chips = [18]          # CHIP_SPARK

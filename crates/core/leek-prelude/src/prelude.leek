@@ -1,0 +1,88 @@
+// @experimental: function_signatures
+//
+// Starter standard-library header (EXPERIMENTAL).
+//
+// Declares a handful of builtins as bodiless *signatures* — type
+// information for the front-end plus a per-backend implementation
+// directive. Loaded only when LEEK_EXPERIMENTAL_PRELUDE is set; it
+// coexists with the Rust-side builtin tables rather than replacing
+// them. The `@java-backend:` directives below are illustrative starter
+// mappings (`%0`, `%1` = the call's arguments), not yet the exact
+// Leek Wars runtime forms.
+
+/**
+ * Absolute value.
+ * @java-backend: Math.abs(%0)
+ * @native-backend: abs
+ */
+function abs(real x) -> real;
+
+/**
+ * Square root.
+ * @java-backend: Math.sqrt(%0)
+ * @native-backend: sqrt
+ */
+function sqrt(real x) -> real;
+
+/**
+ * Cube root.
+ * @java-backend: Math.cbrt(%0)
+ * @native-backend: cbrt
+ */
+function cbrt(real x) -> real;
+
+/**
+ * Largest integer not greater than `x`.
+ * @java-backend: Math.floor(%0)
+ * @native-backend: floor
+ */
+function floor(real x) -> integer;
+
+/**
+ * Smallest integer not less than `x`.
+ * @java-backend: Math.ceil(%0)
+ * @native-backend: ceil
+ */
+function ceil(real x) -> integer;
+
+/**
+ * Round to the nearest integer.
+ * @java-backend: Math.round(%0)
+ * @native-backend: round
+ */
+function round(real x) -> integer;
+
+/**
+ * `base` raised to `exponent`.
+ * @java-backend: Math.pow(%0, %1)
+ * @native-backend: pow
+ */
+function pow(real base, real exponent) -> real;
+
+/**
+ * The larger of two numbers.
+ * @java-backend: Math.max(%0, %1)
+ * @native-backend: max
+ */
+function max(real a, real b) -> real;
+
+/**
+ * The smaller of two numbers.
+ * @java-backend: Math.min(%0, %1)
+ * @native-backend: min
+ */
+function min(real a, real b) -> real;
+
+/**
+ * Cosine (radians).
+ * @java-backend: Math.cos(%0)
+ * @native-backend: cos
+ */
+function cos(real x) -> real;
+
+/**
+ * Sine (radians).
+ * @java-backend: Math.sin(%0)
+ * @native-backend: sin
+ */
+function sin(real x) -> real;

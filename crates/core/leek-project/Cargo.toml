@@ -1,0 +1,16 @@
+[package]
+name        = "leek-project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Leekscript project discovery, file index, and pipeline input helpers."
+
+[dependencies]
+leek-manifest = { workspace = true }
+leek-span       = { workspace = true }
+ignore          = "0.4"
+anyhow          = { workspace = true }
+
+[lints]
+workspace = true

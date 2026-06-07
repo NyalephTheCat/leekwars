@@ -1,0 +1,3 @@
+var i [=1 ..10]
+retn ruintfloatervalToArr ruintfloatervalToArray(#)
+var s = <1, 2, 3>

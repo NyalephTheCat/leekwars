@@ -1,0 +1,7 @@
+var x = 1 + 2 * 3
+function f(a, b) { return a + b }var x = 1 + 2 * 3
+function f(a, b) { return a + b 
+class A { private p = 1 public m() { return thi}
+class s.p } }
+var g = (x, y) => x * y
+varA {  pr

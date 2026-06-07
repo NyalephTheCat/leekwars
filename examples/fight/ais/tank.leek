@@ -1,0 +1,17 @@
+// @version: 4
+// Tanky: equip, hold ground until the enemy is in range, then fire.
+var target = getNearestEnemy();
+if (target != null) {
+    var arsenal = getWeapons();
+    if (count(arsenal) > 0 && getWeapon() != arsenal[0]) {
+        setWeapon(arsenal[0]);
+    }
+    if (getCellDistance(getCell(), getCell(target)) > 7) {
+        moveToward(target, getMP());
+    }
+    while (getTP() >= 3) {
+        if (useWeapon(target) <= 0) {
+            break;
+        }
+    }
+}

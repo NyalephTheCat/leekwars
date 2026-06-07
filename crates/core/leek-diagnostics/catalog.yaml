@@ -1,0 +1,94 @@
+# Diagnostic code catalog — single source of truth.
+# Regenerated into the crate at build time via build.rs.
+
+lexer:
+  - { id: E0001, name: StringNotClosed, severity: error }
+  - { id: E0002, name: InvalidNumber, severity: error }
+  - { id: E0003, name: UnexpectedChar, severity: error }
+  - { id: E0004, name: MultipleNumericSeparators, severity: error }
+
+pragma:
+  - { id: E0010, name: PragmaDuplicate, severity: error }
+  - { id: E0011, name: PragmaBadVersion, severity: error }
+  - { id: E0012, name: PragmaInvalidValue, severity: error }
+  - { id: W0010, name: PragmaUnknown, severity: warning }
+
+parser:
+  - { id: E0100, name: UnexpectedToken, severity: error }
+
+resolver:
+  - { id: E0200, name: UnknownVariable, severity: error }
+  - { id: E0202, name: RedeclaredSymbol, severity: error }
+  - { id: E0210, name: CantAssignValue, severity: error }
+  - { id: E0211, name: CannotRedefineFunction, severity: error }
+  - { id: E0212, name: VariableNameUnavailable, severity: error }
+  - { id: E0220, name: InvalidParameterCount, severity: error }
+  - { id: E0221, name: FunctionNotAvailable, severity: error }
+  - { id: E0222, name: CannotAssignFinalField, severity: error }
+  - { id: E0230, name: BreakOrContinueOutOfLoop, severity: error }
+  - { id: E0231, name: DuplicatedArgument, severity: error }
+  - { id: E0240, name: PrivateField, severity: error }
+  - { id: E0241, name: PrivateMethod, severity: error }
+  - { id: E0242, name: ClassMemberDoesNotExist, severity: error }
+  - { id: E0243, name: ProtectedField, severity: error }
+  - { id: E0244, name: ClassStaticMemberDoesNotExist, severity: error }
+  - { id: E0245, name: DuplicatedMethod, severity: error }
+  - { id: E0246, name: PrivateConstructor, severity: error }
+  - { id: E0247, name: ProtectedMethod, severity: error }
+  - { id: E0248, name: PrivateStaticMethod, severity: error }
+  - { id: E0249, name: ProtectedStaticMethod, severity: error }
+  - { id: E0263, name: PrivateStaticField, severity: error }
+  - { id: E0264, name: ProtectedStaticField, severity: error }
+  - { id: E0260, name: DefaultArgumentNotEnd, severity: error }
+  - { id: E0261, name: RemovedFunction, severity: error }
+  - { id: E0262, name: ProtectedConstructor, severity: error }
+  - { id: E0265, name: DuplicatedConstructor, severity: error }
+  - { id: E0266, name: CantAddInstructionAfterBreak, severity: error }
+  - { id: E0270, name: AiNotExisting, severity: error }
+  - { id: E0271, name: CircularInclude, severity: error }
+  - { id: E0272, name: IncludeNotFound, severity: error }
+  - { id: E0273, name: IncludeUnreadable, severity: error }
+  - { id: E0274, name: IncludeParseFailed, severity: error }
+
+types:
+  - { id: E0250, name: AssignmentIncompatibleType, severity: error }
+  - { id: E0251, name: IncompatibleType, severity: error }
+  - { id: E0252, name: WrongArgumentType, severity: error }
+  - { id: E0253, name: MapDuplicatedKey, severity: error }
+  - { id: E0254, name: ImpossibleCast, severity: error }
+
+lowering:
+  - { id: E0300, name: LoweringUnsupported, severity: error }
+  - { id: E0301, name: BackendDirectiveNotAllowed, severity: warning }
+
+manifest:
+  - { id: E0400, name: ManifestParseError, severity: error }
+
+rewrite:
+  - { id: E0500, name: EditOverlap, severity: error }
+  - { id: E0501, name: EditOutOfBounds, severity: error }
+  - { id: E0502, name: EditInvalidRange, severity: error }
+
+lint:
+  - { id: L0001, name: UnusedVariable, severity: warning }
+  - { id: L0003, name: ShadowedBinding, severity: hint }
+  - { id: L0004, name: EmptyBlock, severity: hint }
+  - { id: L0005, name: UnreachableCode, severity: warning }
+  - { id: L0006, name: ConstantCondition, severity: warning }
+  - { id: L0008, name: DeprecatedFeature, severity: warning }
+  - { id: L0009, name: DuplicateBranches, severity: warning }
+  - { id: L0010, name: SelfComparison, severity: warning }
+  - { id: L0011, name: SelfAssignment, severity: warning }
+  - { id: L0012, name: RedundantBoolean, severity: hint }
+  - { id: L0013, name: DoubleNegation, severity: hint }
+  - { id: L0014, name: IdenticalOperands, severity: warning }
+  - { id: L0015, name: AssignmentInCondition, severity: warning }
+  - { id: L0016, name: DivisionByZero, severity: warning }
+  - { id: L0017, name: DuplicateCondition, severity: warning }
+  - { id: L0018, name: UnusedParameter, severity: hint }
+  - { id: L0019, name: RedundantTernary, severity: hint }
+  - { id: L0020, name: DuplicateInclude, severity: warning }
+  - { id: L0021, name: NegatedComparison, severity: hint }
+  - { id: L0022, name: UnusedExpression, severity: warning }
+  - { id: L0023, name: DuplicateCase, severity: warning }
+  - { id: L0024, name: UnnecessaryElse, severity: hint }

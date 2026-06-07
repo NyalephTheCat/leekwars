@@ -1,0 +1,4 @@
+// @version:4
+var name = "world"
+var greeting = "hello, " + name + "!"
+return greeting

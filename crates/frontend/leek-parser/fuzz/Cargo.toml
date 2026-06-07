@@ -1,0 +1,21 @@
+[package]
+name = "leek-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+leek-parser = { path = ".." }
+leek-span = { path = "../../../core/leek-span" }
+leek-syntax = { path = "../../leek-syntax" }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false

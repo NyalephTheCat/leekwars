@@ -1,0 +1,37 @@
+[package]
+name        = "leek-fmt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Leekscript code formatter (CST-driven, Wadler-style pretty printer)."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-lexer       = { workspace = true }
+leek-parser      = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-manifest    = { workspace = true }
+rowan            = { workspace = true }
+salsa            = { version = "0.26", optional = true }
+
+[features]
+default = []
+salsa = [
+  "dep:salsa",
+  "leek-pipeline/salsa",
+  "leek-parser/salsa",
+  "leek-lexer/salsa",
+  "leek-syntax/salsa",
+  "leek-diagnostics/salsa",
+  "leek-span/salsa",
+]
+
+[dev-dependencies]
+insta       = "1"
+leek-parser = { workspace = true }
+
+[lints]
+workspace = true

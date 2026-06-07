@@ -1,0 +1,26 @@
+[package]
+name        = "leek-builtin-suite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Focused builtin behavior tests (complement upstream corpus)."
+
+[dependencies]
+leek-builtins       = { workspace = true }
+leek-backend-interp = { workspace = true }
+leek-diagnostics    = { workspace = true }
+leek-hir            = { workspace = true }
+leek-pipeline       = { workspace = true }
+leek-recipes        = { workspace = true }
+leek-span           = { workspace = true }
+serde               = { workspace = true }
+toml                = { version = "0.8", default-features = false, features = ["parse"] }
+anyhow              = { workspace = true }
+
+[[bin]]
+name = "run-builtin-suite"
+path = "src/bin/run.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,34 @@
+---
+source: crates/frontend/leek-parser/tests/snapshots.rs
+expression: dump(&node)
+---
+SourceFile
+  ClassDecl
+    KwClass "class"
+    Ident "Point"
+    LBrace "{"
+    ClassBody
+      ErrorNode
+        KwVar "var"
+      ClassField
+        Ident "x"
+        Eq "="
+        LiteralExpr
+          IntLiteral "0"
+        Semicolon ";"
+      ErrorNode
+        KwFunction "function"
+      ClassMethod
+        Ident "getX"
+        LParen "("
+        ParamList
+        RParen ")"
+        Block
+          LBrace "{"
+          ReturnStmt
+            KwReturn "return"
+            NameRef
+              Ident "x"
+            Semicolon ";"
+          RBrace "}"
+      RBrace "}"
