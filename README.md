@@ -135,6 +135,7 @@ leekbench program.leek --runs 8        # interp · native · java · upstream
 | rust-interp                   |                590 ms |         417 ms |                139 ms |
 | rust-native (Cranelift JIT)   |                324 ms |          13 ms |                 38 ms |
 | rust-java (transpiled)        |                  — ¹  |          13 ms |                 13 ms |
+| _+ JVM start-up² (per run)_   |             _≈ 0.26 s_ |       _≈ 0.26 s_ |             _≈ 0.26 s_ |
 
 <sub>AMD Custom APU (Steam Deck), 8 cores · JDK 25 · rustc 1.93 · release
 builds. Indicative micro-benchmarks — results vary by workload.</sub>
@@ -148,6 +149,13 @@ builds. Indicative micro-benchmarks — results vary by workload.</sub>
 - **rust-java** transpiles to Java and matches or beats upstream where it runs,
   but ¹ user functions with parameters don't yet compile (the `fib` case fails
   `javac`) — codegen is a work in progress.
+- ² The per-program rows are **inner** execution time. The two **Java** backends
+  also pay a fixed **≈ 0.26 s** JVM process + class-load tax on *every* fresh
+  invocation (program-independent; the Rust backends pay ~0). For the upstream
+  path, first-use LeekScript compiler warm-up adds **≈ 1.5 s** more, so a *cold
+  one-shot* run is **≈ 1.8 s** before the program executes — which is why the
+  instantly-starting Rust backends win end-to-end on single runs (e.g. one
+  fight AI), even where the JVM's steady-state inner loop is faster.
 - Every backend agrees on the computed result wherever it runs.
 
 ## Repository layout
