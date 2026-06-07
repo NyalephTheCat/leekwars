@@ -66,6 +66,9 @@ pub struct Cli {
     pub no_rust_java: bool,
 
     #[arg(long)]
+    pub no_native: bool,
+
+    #[arg(long)]
     pub verbose: bool,
 
     #[arg(long, short = 'd')]

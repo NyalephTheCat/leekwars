@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Per-backend benchmark harness for Leekscript: interpreter, emitted Java, upstream Java reference."
+description = "Per-backend benchmark harness for Leekscript: interpreter, native (Cranelift JIT), emitted Java, upstream Java reference."
 
 [dependencies]
 leek-span         = { workspace = true }
@@ -12,6 +12,7 @@ leek-syntax       = { workspace = true }
 leek-hir          = { workspace = true }
 leek-backend-interp = { workspace = true }
 leek-backend-java = { workspace = true }
+leek-backend-native = { workspace = true }
 leek-pipeline     = { workspace = true }
 leek-recipes      = { workspace = true }
 anyhow            = { workspace = true }

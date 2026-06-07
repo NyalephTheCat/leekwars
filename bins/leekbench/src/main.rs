@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::Parser;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Row, Table, presets};
-use leek_bench::{BenchOptions, BenchSummary, RustInterp, RustJavaEmit, UpstreamJava, bench};
+use leek_bench::{BenchOptions, BenchSummary, RustInterp, RustNative, RustJavaEmit, UpstreamJava, bench};
 use leek_test_corpus::cases::{Expectation, Manifest, TestCase};
 use leek_test_corpus::embedded_manifest;
 mod cli;
@@ -39,6 +39,10 @@ fn run_single(cli: &Cli, input: &PathBuf) -> Result<()> {
     let mut interp = RustInterp::new();
     summaries.push((interp.name_str(), bench(&mut interp, input, &opts)));
 
+    if !cli.no_native {
+        let mut nat = RustNative::new();
+        summaries.push((nat.name_str(), bench(&mut nat, input, &opts)));
+    }
     if !cli.no_rust_java {
         let mut rj = RustJavaEmit::auto();
         summaries.push((rj.name_str(), bench(&mut rj, input, &opts)));
@@ -160,6 +164,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
     std::fs::create_dir_all(&work_root)?;
 
     let mut interp = Aggregate::new("rust-interp");
+    let mut nat = Aggregate::new("rust-native");
     let mut rj = Aggregate::new("rust-java");
     let mut up = Aggregate::new("upstream-java");
 
@@ -185,6 +190,11 @@ fn run_corpus(cli: &Cli) -> Result<()> {
         };
 
         let r1 = bench(&mut RustInterp::new(), &path, &opts);
+        let r_nat = if cli.no_native {
+            None
+        } else {
+            Some(bench(&mut RustNative::new(), &path, &opts))
+        };
         let r2 = if cli.no_rust_java {
             None
         } else {
@@ -197,6 +207,9 @@ fn run_corpus(cli: &Cli) -> Result<()> {
         };
 
         interp.record(&r1, expected);
+        if let Some(r) = &r_nat {
+            nat.record(r, expected);
+        }
         if let Some(r) = &r2 {
             rj.record(r, expected);
         }
@@ -220,7 +233,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
         println!("{t}");
     }
 
-    let baseline = [&interp, &rj, &up]
+    let baseline = [&interp, &nat, &rj, &up]
         .iter()
         .filter_map(|a| median(&a.warm))
         .min()
@@ -238,7 +251,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
         "vs_best/share",
         "total",
     ]);
-    for a in [&interp, &rj, &up] {
+    for a in [&interp, &nat, &rj, &up] {
         if a.attempts == 0 {
             continue;
         }
@@ -283,7 +296,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
     println!("{table}");
     println!("bench wall-clock: {}", fmt(bench_total));
     if !cli.detail
-        && [&interp, &rj, &up]
+        && [&interp, &nat, &rj, &up]
             .iter()
             .any(|a| !a.step_samples.is_empty())
     {
@@ -539,6 +552,11 @@ trait NameStr {
     fn name_str(&self) -> String;
 }
 impl NameStr for RustInterp {
+    fn name_str(&self) -> String {
+        leek_bench::Backend::name(self).to_string()
+    }
+}
+impl NameStr for RustNative {
     fn name_str(&self) -> String {
         leek_bench::Backend::name(self).to_string()
     }

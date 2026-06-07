@@ -39,6 +39,7 @@
 
 mod compile;
 mod runner_interp;
+mod runner_native;
 mod runner_rust_java;
 mod runner_upstream;
 
@@ -48,6 +49,7 @@ use std::time::Duration;
 pub use compile::{CompiledHir, compile_hir, compile_hir_file};
 
 pub use runner_interp::RustInterp;
+pub use runner_native::RustNative;
 pub use runner_rust_java::RustJavaEmit;
 pub use runner_upstream::UpstreamJava;
 

@@ -118,6 +118,38 @@ The compiler lowers source → HIR → MIR and targets several backends:
 LeekScript versions 1–4 are supported, with a per-file `// @version:` pragma and
 an optional strict mode.
 
+## Benchmarks
+
+Each backend versus the upstream reference (the official Java LeekScript,
+`leekscript.jar`) on three compute-heavy programs. Figures are the
+**warm-median inner execution time** (JVM start-up and `javac` excluded) from
+the bundled `leekbench` harness, 8 runs each:
+
+```sh
+leekbench program.leek --runs 8        # interp · native · java · upstream
+```
+
+| Backend                       | `fib(28)` (recursion) | loop, 1M iters | array build+sum, 100k |
+|-------------------------------|----------------------:|---------------:|----------------------:|
+| **upstream-java** (reference) |                5.6 ms |          12 ms |                 18 ms |
+| rust-interp                   |                590 ms |         417 ms |                139 ms |
+| rust-native (Cranelift JIT)   |                324 ms |          13 ms |                 38 ms |
+| rust-java (transpiled)        |                  — ¹  |          13 ms |                 13 ms |
+
+<sub>AMD Custom APU (Steam Deck), 8 cores · JDK 25 · rustc 1.93 · release
+builds. Indicative micro-benchmarks — results vary by workload.</sub>
+
+- **rust-interp** is correct everywhere but is a straightforward MIR walker —
+  roughly 10–100× the reference.
+- **rust-native** keeps LeekScript's dynamic (boxed) values, so it's level with
+  the JVM on tight numeric loops (~1×) yet pays for call- and allocation-heavy
+  code (`fib`, arrays). This harness JIT-compiles on every run, so its times
+  *include* compilation.
+- **rust-java** transpiles to Java and matches or beats upstream where it runs,
+  but ¹ user functions with parameters don't yet compile (the `fib` case fails
+  `javac`) — codegen is a work in progress.
+- Every backend agrees on the computed result wherever it runs.
+
 ## Repository layout
 
 ```
