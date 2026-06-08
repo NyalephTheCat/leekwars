@@ -16,6 +16,13 @@ leek-span     = { workspace = true }
 # No dependency on any backend — `leek-runtime` is the shared library.
 leek-runtime  = { workspace = true }
 anyhow        = { workspace = true }
+# Per-run bump arena for value boxes — replaces a malloc-per-value with
+# chunked bump allocation that is reset (capacity-retaining) between runs.
+bumpalo       = "3"
+# AOT metadata blob: the dispatch tables computed at compile time, serialized
+# into the executable and reinstalled at startup.
+serde         = { workspace = true }
+serde_json    = { workspace = true }
 
 cranelift            = { workspace = true }
 cranelift-frontend   = { workspace = true }

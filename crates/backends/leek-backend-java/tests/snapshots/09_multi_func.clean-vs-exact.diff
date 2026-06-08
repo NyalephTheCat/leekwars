@@ -33,15 +33,15 @@
 +	}
 +	public void staticInit() throws LeekRunException {
 +	}
-+	private Object add2(Object u_a, Object u_b) throws LeekRunException {
++	private Object add2(Object a, Object b) throws LeekRunException {
 +		ops(4);
 +		return (Object) add(a, b);
 +	}
-+	private Object mul2(Object u_a, Object u_b) throws LeekRunException {
++	private Object mul2(Object a, Object b) throws LeekRunException {
 +		ops(4);
 +		return (Object) mul(a, b);
 +	}
-+	private Object compute(Object u_x) throws LeekRunException {
++	private Object compute(Object x) throws LeekRunException {
 +		ops(6);
 +		return add2(mul2(x, 2l), 1l);
 +	}

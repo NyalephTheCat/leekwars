@@ -120,6 +120,303 @@ pub fn compute_fn_rets(program: &MirProgram, lang: Lang) -> FnRets {
     rets
 }
 
+/// Parameter type specialization. An untyped (`Any`) parameter of an eligible
+/// free function that is provably ONLY ever passed one scalar kind — at every
+/// call site, program-wide — has its declared type pinned to that kind
+/// (`integer` or `real`), so the rest of the backend compiles it **unboxed**
+/// (no per-operation boxing). This closes the gap on call-heavy numeric code:
+/// with `fib`'s `n` unboxed, `n - 1` / `n < 2` become register `isub`/`icmp`
+/// instead of allocating shims.
+///
+/// Mutates `program` in place — the native backend owns its freshly-lowered MIR,
+/// so the interpreter/Java backends (which lower separately) are unaffected.
+///
+/// Soundness: pinning an `Any` param to `integer`/`real` makes it coerce its
+/// argument to that kind. The coercion is a no-op precisely when the argument
+/// is already that kind — so we pin a param ONLY when every call site provably
+/// passes one. We find that set per kind by an *optimistic* fixpoint: assume
+/// every candidate is the kind, then demote any contradicted by a call site,
+/// until stable (recursion like `fib`, where `n`'s type feeds `fib(n-1)`'s
+/// argument, needs the optimism). `integer` and `real` are incomparable, so we
+/// run two passes — `integer` first, then `real` over whatever stayed `Any`.
+/// Codegen runs after convergence on the final (sound) types; the corpus
+/// regression is the backstop.
+pub fn specialize_param_types(program: &mut MirProgram, lang: Lang) {
+    use leek_mir::ir::{Const, FunctionKind};
+
+    // Functions whose value is taken (`var f = myFn`) can be invoked indirectly
+    // with arguments we can't see — never specialize their params.
+    let mut escaped: HashSet<DefId> = HashSet::new();
+    for f in &program.functions {
+        for s in f.blocks.iter().flat_map(|b| &b.statements) {
+            if let Statement::Assign(_, Rvalue::FunctionRef(d)) = s {
+                escaped.insert(*d);
+            }
+        }
+    }
+
+    // A function whose callee fills a NON-const default uses the intricate
+    // `has_defaults` ABI — see `function_sig`; we don't specialize its params.
+    // (A const default is materialized at the call site, so it's fine.)
+    let fills_nonconst_default = |f: &MirFunction| {
+        f.params.iter().any(|&p| {
+            fillable_default(f, p).is_some()
+                && const_default(f, p).is_none()
+                && const_eval_default(f, p, lang.version).is_none()
+        })
+    };
+    // An untyped, read-only, value-use-only required param (no default of its
+    // own, not shared/by-ref) — the shape we can pin to an unboxed scalar.
+    let eligible_param = |f: &MirFunction, pid: LocalId| {
+        let d = &f.locals[pid.0 as usize];
+        matches!(d.ty, Type::Any)
+            && d.default_init.is_none()
+            && !d.is_shared
+            && !d.is_by_ref
+            && param_value_only(f, pid)
+    };
+
+    // Candidate (fn index, param local, ARG index, def id). For a free function
+    // the arg index is the param position; for a method it's `position - 1`
+    // (the receiver `this` is `params[0]`, not part of the call's `args`).
+    let mut candidates: Vec<(usize, LocalId, usize, DefId)> = Vec::new();
+    for (fi, f) in program.functions.iter().enumerate() {
+        let Some(def) = f.def_id else { continue };
+        if f.owning_class.is_some() || f.kind == FunctionKind::Main || escaped.contains(&def) {
+            continue;
+        }
+        if fills_nonconst_default(f) {
+            continue;
+        }
+        for (pi, &pid) in f.params.iter().enumerate() {
+            if eligible_param(f, pid) {
+                candidates.push((fi, pid, pi, def));
+            }
+        }
+    }
+
+    // --- Methods (Phase 3) -------------------------------------------------
+    // A `recv.m(args)` call dispatches by method name with virtual overrides, so
+    // attributing a call site's args to one method is only sound when the method
+    // is unambiguous. We require it to be a method of a *standalone* class (no
+    // parent, never extended → no overrides, no `super.m()`), with a name that is
+    // GLOBALLY UNIQUE among user methods, never shadowed by a field, and never
+    // read as a value (`obj.m` / `obj['m']` → a bound method callable later with
+    // unseen args). Under those gates EVERY `Callee::Method{ method: m }` site
+    // provably calls this one method, so its user params infer just like a free
+    // function's. `method_def` maps such names to the method's `DefId` so the
+    // pass can fold those call sites in.
+    let mut method_name_count: HashMap<&str, usize> = HashMap::new();
+    let mut field_names: HashSet<&str> = HashSet::new();
+    for c in &program.classes {
+        for m in c.methods.iter().filter(|m| !m.is_static) {
+            *method_name_count.entry(m.name.as_str()).or_default() += 1;
+        }
+        for fld in c.instance_fields.iter().chain(&c.static_fields) {
+            field_names.insert(fld.name.as_str());
+        }
+    }
+    let mut value_read: HashSet<&str> = HashSet::new();
+    for f in &program.functions {
+        for s in f.blocks.iter().flat_map(|b| &b.statements) {
+            match s {
+                Statement::Assign(_, Rvalue::Field(_, name)) => {
+                    value_read.insert(name.as_str());
+                }
+                Statement::Assign(_, Rvalue::Index(_, Operand::Const(Const::String(name)))) => {
+                    value_read.insert(name.as_str());
+                }
+                _ => {}
+            }
+        }
+    }
+    let extended: HashSet<DefId> = program.classes.iter().filter_map(|c| c.parent_def).collect();
+    let mut method_def: HashMap<String, DefId> = HashMap::new();
+    for c in &program.classes {
+        if c.parent_def.is_some() || extended.contains(&c.def_id) {
+            continue; // not standalone — overrides / super possible
+        }
+        for m in &c.methods {
+            if m.is_static
+                || m.user_arity == 0
+                || method_name_count.get(m.name.as_str()) != Some(&1)
+                || field_names.contains(m.name.as_str())
+                || value_read.contains(m.name.as_str())
+            {
+                continue;
+            }
+            let fi = m.function_idx;
+            let f = &program.functions[fi];
+            let Some(def) = f.def_id else { continue };
+            if fills_nonconst_default(f) {
+                continue;
+            }
+            method_def.insert(m.name.clone(), def);
+            // `params[0]` is `this`; user param at position `pp` ↔ `args[pp - 1]`.
+            for (pp, &pid) in f.params.iter().enumerate().skip(1) {
+                if eligible_param(f, pid) {
+                    candidates.push((fi, pid, pp - 1, def));
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return;
+    }
+    // `integer` first; then `real` over the params that stayed `Any`.
+    specialize_pass(program, lang, &candidates, &method_def, Type::Integer, ValTy::Int);
+    let remaining: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|&(fi, pid, _, _)| matches!(program.functions[fi].locals[pid.0 as usize].ty, Type::Any))
+        .collect();
+    specialize_pass(program, lang, &remaining, &method_def, Type::Real, ValTy::Real);
+}
+
+/// One optimistic-then-demote pass for a single scalar kind (`pin` / `want`):
+/// pin every `candidate` to `pin`, then repeatedly demote back to `Any` any
+/// whose call sites don't all (and provably) pass a `want`-typed argument, to a
+/// fixpoint. Only candidates currently typed `pin` are considered (so a prior
+/// pass's pins/demotions are respected).
+fn specialize_pass(
+    program: &mut MirProgram,
+    lang: Lang,
+    candidates: &[(usize, LocalId, usize, DefId)],
+    method_def: &HashMap<String, DefId>,
+    pin: Type,
+    want: ValTy,
+) {
+    use leek_mir::ir::Const;
+    if candidates.is_empty() {
+        return;
+    }
+    for &(fi, pid, _, _) in candidates {
+        program.functions[fi].locals[pid.0 as usize].ty = pin.clone();
+    }
+    loop {
+        let demote: HashSet<(usize, LocalId)> = {
+            let rets = compute_fn_rets(program, lang);
+            let tys: Vec<Option<HashMap<LocalId, ValTy>>> = program
+                .functions
+                .iter()
+                .map(|f| infer_local_tys(f, lang, &rets, false, program).ok())
+                .collect();
+            // Call sites of each candidate callee: (caller index, arg list).
+            // A direct `Callee::Function`; or a `Callee::Method` whose name is in
+            // `method_def` (a specialization-eligible unique method — every such
+            // call provably dispatches to it).
+            let mut sites: HashMap<DefId, Vec<(usize, &Vec<Operand>)>> = HashMap::new();
+            for (ci, caller) in program.functions.iter().enumerate() {
+                for s in caller.blocks.iter().flat_map(|b| &b.statements) {
+                    if let Statement::Call { call, .. } = s {
+                        match &call.callee {
+                            Callee::Function(d) => {
+                                sites.entry(*d).or_default().push((ci, &call.args));
+                            }
+                            Callee::Method { method, .. } => {
+                                if let Some(d) = method_def.get(method) {
+                                    sites.entry(*d).or_default().push((ci, &call.args));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let arg_ty = |caller: usize, arg: &Operand| -> ValTy {
+                match arg {
+                    Operand::Const(Const::Int(_)) => ValTy::Int,
+                    Operand::Const(Const::Bool(_)) => ValTy::Bool,
+                    Operand::Const(Const::Real(_)) => ValTy::Real,
+                    Operand::Const(_) => ValTy::Ref,
+                    Operand::Local(id) => {
+                        tys[caller].as_ref().and_then(|t| t.get(id).copied()).unwrap_or(ValTy::Ref)
+                    }
+                }
+            };
+            let mut demote = HashSet::new();
+            for &(fi, pid, pi, def) in candidates {
+                // Only this pass's still-pinned candidates.
+                if program.functions[fi].locals[pid.0 as usize].ty != pin {
+                    continue;
+                }
+                // Keep `pin` only with ≥1 call site, all passing a `want`. (No
+                // direct call site — e.g. a dead or only-indirect fn — fails this
+                // and is demoted, the safe choice.)
+                let ok = sites.get(&def).is_some_and(|v| {
+                    !v.is_empty()
+                        && v.iter()
+                            .all(|&(ci, args)| pi < args.len() && arg_ty(ci, &args[pi]) == want)
+                });
+                if !ok {
+                    demote.insert((fi, pid));
+                }
+            }
+            demote
+        };
+        if demote.is_empty() {
+            break;
+        }
+        for (fi, pid) in demote {
+            program.functions[fi].locals[pid.0 as usize].ty = Type::Any;
+        }
+    }
+}
+
+/// True when parameter `id` is used ONLY in value positions safe to read as an
+/// unboxed scalar: a `Binary`/`Unary`/`Cast` operand, a `Use` source, a call
+/// argument, or a returned operand. It must never be reassigned (a typed slot
+/// would coerce the new value), used as a composite/object base
+/// (`id[..]`/`id.x`/`push(id,..)`), a method/indirect/super receiver, a lambda
+/// capture, or promoted — any of which need the boxed dynamic representation.
+fn param_value_only(f: &MirFunction, id: LocalId) -> bool {
+    let op_is = |o: &Operand| matches!(o, Operand::Local(l) if *l == id);
+    let base_is = |p: &Place| {
+        matches!(p,
+            Place::Local(l) | Place::Field(l, _) | Place::Index(l, _) | Place::Slice(l, _)
+                if *l == id)
+            || matches!(p, Place::LambdaCapture { lambda, .. } if *lambda == id)
+    };
+    for s in f.blocks.iter().flat_map(|b| &b.statements) {
+        match s {
+            Statement::Assign(place, rv) => {
+                if base_is(place) {
+                    return false;
+                }
+                match rv {
+                    Rvalue::Field(l, _) | Rvalue::Index(l, _) | Rvalue::Slice(l, _) if *l == id => {
+                        return false;
+                    }
+                    Rvalue::MakeForeachIter(o) if op_is(o) => return false,
+                    Rvalue::MakeLambda { captures, .. } if captures.iter().any(op_is) => {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            Statement::Call { dest, call } => {
+                if dest.as_ref().is_some_and(base_is) {
+                    return false;
+                }
+                match &call.callee {
+                    Callee::Method { receiver, .. } | Callee::Indirect(receiver)
+                        if *receiver == id =>
+                    {
+                        return false;
+                    }
+                    Callee::SuperConstructor { this, .. } if *this == id => return false,
+                    _ => {}
+                }
+                // Passing `id` as a call ARGUMENT is fine — it propagates the int.
+            }
+            Statement::ApplyPromotion(l) if *l == id => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 /// The declared scalar kind of each typed global (`global real x` → Real),
 /// so global writes coerce the stored value. Untyped / composite globals
 /// are absent (no coercion).
@@ -2751,8 +3048,9 @@ pub fn translate_function(
                 // start as a valid boxed-null handle, not a 0 pointer that
                 // a dynamic op would dereference.
                 ValTy::Ref => {
-                    let p = crate::runtime::box_null_const() as i64;
-                    builder.ins().iconst(types::I64, p)
+                    let f = imports.rt("leek_box_null")?;
+                    let inst = builder.ins().call(f, &[]);
+                    builder.inst_results(inst)[0]
                 }
                 _ => builder.ins().iconst(types::I64, 0),
             },
@@ -2899,6 +3197,7 @@ pub fn translate_function(
             default_fill: &default_fill,
             object_locals: &object_locals,
             object_field_srcs: &object_field_srcs,
+            pending_charge: 0,
         };
         // On function entry, push a shadow call frame.
         if debug_hooks
@@ -3038,21 +3337,61 @@ struct Tx<'a, 'b> {
     /// Per object-literal local, the field → value-operand map (for skipping a
     /// field that holds a user class reference, which can't be runtime-built).
     object_field_srcs: &'a HashMap<LocalId, HashMap<String, Operand>>,
+    /// Coalesced op-budget charge for the current basic block. Per-op
+    /// `charge(n)` calls accumulate here instead of emitting a runtime call
+    /// each; [`flush_charge`](Self::flush_charge) emits a single
+    /// `leek_charge_ops(pending)` at the block boundary (and before a
+    /// back-edge budget check). Because a MIR block translates to straight-line
+    /// code (no conditional sub-paths — short-circuits/ternaries are their own
+    /// blocks), every accumulated op executes iff the block runs, so the total
+    /// op count for a completing program is identical to per-op charging.
+    pending_charge: u64,
+}
+
+/// A/B benchmark escape hatch (read once): when `LEEK_NATIVE_NO_COALESCE=1`,
+/// op charges are emitted per-op rather than coalesced per block, reproducing
+/// the pre-coalescing codegen for back-to-back comparison. Off by default.
+fn no_coalesce() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var_os("LEEK_NATIVE_NO_COALESCE").is_some_and(|v| v == "1")
+    })
 }
 
 impl Tx<'_, '_> {
-    /// Charge `n` operations into the run's op counter via `leek_charge_ops`,
-    /// at the same MIR sites the interpreter's `charge_ops` fires — so the two
-    /// backends report identical op counts (`.ops(N)` corpus cases). A zero
-    /// charge emits nothing.
+    /// Accumulate `n` operations into the current block's pending charge, at
+    /// the same MIR sites the interpreter's `charge_ops` fires. The charge is
+    /// *coalesced*: nothing is emitted here — [`flush_charge`](Self::flush_charge)
+    /// emits a single `leek_charge_ops(pending)` at the block boundary. Since a
+    /// MIR block is straight-line, the summed-then-charged total equals the
+    /// per-op total for any completing program, so the two backends still report
+    /// identical op counts (`.ops(N)` corpus cases); a budget-hitting program
+    /// errors under both, just possibly one block-charge later.
     // Returns `Result` for consistency with the fallible emit helpers it sits
-    // beside (and is called with `?`); the text-dump no-op path makes it always
-    // `Ok` today.
+    // beside (and is called with `?`); accumulation is infallible today.
     #[allow(clippy::unnecessary_wraps)]
     fn charge(&mut self, n: u64) -> Result<(), NativeError> {
+        self.pending_charge = self.pending_charge.saturating_add(n);
+        // A/B escape hatch: with `LEEK_NATIVE_NO_COALESCE=1` set, flush every
+        // charge immediately, reproducing the old per-op charging so the two
+        // modes can be benchmarked back-to-back on the same machine.
+        if no_coalesce() {
+            self.flush_charge()?;
+        }
+        Ok(())
+    }
+
+    /// Emit the coalesced `leek_charge_ops(pending)` call for the current block
+    /// and reset the accumulator. Called at every terminator (block boundary)
+    /// and, on a back-edge `Branch`, *before* the budget check so the check
+    /// observes the block's ops. A zero pending charge emits nothing.
+    #[allow(clippy::unnecessary_wraps)]
+    fn flush_charge(&mut self) -> Result<(), NativeError> {
+        let n = self.pending_charge;
         if n == 0 {
             return Ok(());
         }
+        self.pending_charge = 0;
         // Text-dump (CLIF inspection) mode declares no imports — there's no op
         // counter to charge, so skip silently rather than fail the dump.
         let Ok(f) = self.imports.rt("leek_charge_ops") else {
@@ -3153,10 +3492,24 @@ impl Tx<'_, '_> {
                     self.b.ins().call(f, &[cell, v]);
                     return Ok(());
                 }
-                let (v, ty) = self.rvalue(rv)?;
+                let target = self.var_tys[id.0 as usize];
+                // A direct array read into a scalar-typed slot reads straight
+                // into an unboxed `i64`/`f64` (`integer x = arr[i]`), skipping
+                // the box-then-`to_long`/`to_real`-unbox round-trip. Gated on a
+                // statically-integer index and a non-class-ref base (the only
+                // base kind `index` intercepts before the general read path).
+                let (v, ty) = match rv {
+                    Rvalue::Index(base, idx)
+                        if matches!(target, ValTy::Int | ValTy::Real)
+                            && self.operand_int_kind(idx)
+                            && !self.classref_locals.contains_key(base) =>
+                    {
+                        (self.index_unboxed(*base, idx, target)?, target)
+                    }
+                    _ => self.rvalue(rv)?,
+                };
                 // Coerce to the local's declared cranelift kind (e.g.
                 // `real x = 42` stores 42 as 42.0).
-                let target = self.var_tys[id.0 as usize];
                 let mut v = self.coerce(v, ty, target)?;
                 // v1 value semantics: assigning a composite to a *user*
                 // local copies it (deep-clone), unless the value is freshly
@@ -3323,8 +3676,7 @@ impl Tx<'_, '_> {
         }
         let set = self.imports.rt("leek_value_set_index")?;
         let (base_h, _) = self.local_value(base)?;
-        let key = crate::runtime::box_string(name) as i64;
-        let key = self.b.ins().iconst(types::I64, key);
+        let key = self.const_string(name)?;
         let (mut v, mut vt) = self.rvalue(rv)?;
         // Coerce a scalar write to the declared field type (`real? x = 5`
         // stores `5.0`), matching the interpreter's `coerce_to_type`.
@@ -3344,8 +3696,7 @@ impl Tx<'_, '_> {
     /// written value to its declared kind.
     fn set_global(&mut self, name: &str, rv: &Rvalue) -> Result<(), NativeError> {
         let set = self.imports.rt("leek_global_set")?;
-        let key = crate::runtime::box_string(name) as i64;
-        let key = self.b.ins().iconst(types::I64, key);
+        let key = self.const_string(name)?;
         let (mut v, mut vt) = self.rvalue(rv)?;
         if let Some(&gt) = self.global_tys.get(name)
             && vt != ValTy::Ref
@@ -3405,8 +3756,7 @@ impl Tx<'_, '_> {
                 // via `Global`/`GlobalRef` places, not always in
                 // `program.globals`.)
                 if program_writes_global(self.program, name) {
-                    let name_ptr = crate::runtime::box_string(name) as i64;
-                    let name_h = self.b.ins().iconst(types::I64, name_ptr);
+                    let name_h = self.const_string(name)?;
                     let (ptr, n) = self.build_ref_array(&call.args)?;
                     let nc = self.b.ins().iconst(types::I64, n as i64);
                     let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
@@ -3578,8 +3928,7 @@ impl Tx<'_, '_> {
             // sugar (`Array(1, 2)` == `[1, 2]`, `Map()` == `[:]`), exactly
             // mirroring the interpreter's `Callee::Builtin` →
             // `construct_builtin_class` path.
-            let name_ptr = crate::runtime::box_string(name) as i64;
-            let name_h = self.b.ins().iconst(types::I64, name_ptr);
+            let name_h = self.const_string(name)?;
             let (ptr, n) = self.build_ref_array(args)?;
             let f = self.imports.rt("leek_construct_builtin")?;
             let nc = self.b.ins().iconst(types::I64, n as i64);
@@ -3588,8 +3937,7 @@ impl Tx<'_, '_> {
         } else if self.link_game {
             // Host game function (`getCell`, …): box name + args and forward
             // to the linked game runtime via `leek_game_builtin`.
-            let name_ptr = crate::runtime::box_string(name) as i64;
-            let name_h = self.b.ins().iconst(types::I64, name_ptr);
+            let name_h = self.const_string(name)?;
             let (ptr, n) = self.build_ref_array(args)?;
             let f = self.imports.rt("leek_game_builtin")?;
             let nc = self.b.ins().iconst(types::I64, n as i64);
@@ -3613,8 +3961,8 @@ impl Tx<'_, '_> {
             n => return Err(unsupported(format!("{name}: arity {n} unsupported"))),
         };
         let f = self.imports.rt(shim)?;
-        let name_ptr = crate::runtime::box_string(name) as i64;
-        let mut cl_args = vec![self.b.ins().iconst(types::I64, name_ptr)];
+        let name_h = self.const_string(name)?;
+        let mut cl_args = vec![name_h];
         for op in args {
             let (v, t) = self.operand(op)?;
             cl_args.push(self.coerce(v, t, ValTy::Ref)?);
@@ -4000,11 +4348,13 @@ impl Tx<'_, '_> {
             } else {
                 self.b.def_var(self.vars[param.0 as usize], v);
             }
+            self.flush_charge()?;
             self.b.ins().jump(cont, &[]);
             return Ok(());
         }
         match t {
             Terminator::Goto(b) => {
+                self.flush_charge()?;
                 self.b.ins().jump(self.blocks[b], &[]);
             }
             Terminator::Branch {
@@ -4016,6 +4366,9 @@ impl Tx<'_, '_> {
                 // the if/while/and/or flow-control cost), charged before the
                 // condition is evaluated.
                 self.charge(1)?;
+                // Flush the block's coalesced charge (including this branch op)
+                // before the budget check so the check observes the full count.
+                self.flush_charge()?;
                 // Back-edge budget check: a branch is the only way to re-enter a
                 // block, so checking here bounds every loop. Stops an unbounded
                 // loop once the op budget is spent (when a finite one is set).
@@ -4055,12 +4408,14 @@ impl Tx<'_, '_> {
                     _ => self.operand(op)?,
                 };
                 let v = self.coerce(v, ty, self.ret_ty)?;
+                self.flush_charge()?;
                 self.b.ins().return_(&[v]);
             }
             // A void function returns null. With a `Ref` result that's a
             // boxed null; for the (rejected-for-main) scalar case it's a
             // dead dummy zero.
             Terminator::Return(None) => {
+                self.flush_charge()?;
                 let z = match self.ret_ty {
                     ValTy::Ref => {
                         let null = self.imports.rt("leek_box_null")?;
@@ -4077,6 +4432,7 @@ impl Tx<'_, '_> {
                 arms,
                 default,
             } => {
+                self.flush_charge()?;
                 let (disc, dty) = self.operand(discriminant)?;
                 if dty == ValTy::Real {
                     return Err(unsupported("switch on real"));
@@ -4096,6 +4452,7 @@ impl Tx<'_, '_> {
                 self.b.ins().jump(self.blocks[default], &[]);
             }
             Terminator::Unreachable => {
+                self.flush_charge()?;
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }
         }
@@ -4156,8 +4513,7 @@ impl Tx<'_, '_> {
                     // one has been assigned, else the builtin handle. Defer to
                     // the `leek_ref_or_builtin` shim.
                     if program_writes_global(self.program, name) {
-                        let name_ptr = crate::runtime::box_string(name) as i64;
-                        let name_h = self.b.ins().iconst(types::I64, name_ptr);
+                        let name_h = self.const_string(name)?;
                         let f = self.imports.rt("leek_ref_or_builtin")?;
                         let inst = self.b.ins().call(f, &[name_h]);
                         return Ok((self.b.inst_results(inst)[0], ValTy::Ref));
@@ -4173,8 +4529,7 @@ impl Tx<'_, '_> {
                     // reference. The interpreter reads the name-keyed global
                     // store, falling back to null; `leek_global_get` does
                     // exactly that.
-                    let name_ptr = crate::runtime::box_string(name) as i64;
-                    let name_h = self.b.ins().iconst(types::I64, name_ptr);
+                    let name_h = self.const_string(name)?;
                     let f = self.imports.rt("leek_global_get")?;
                     let inst = self.b.ins().call(f, &[name_h]);
                     Ok((self.b.inst_results(inst)[0], ValTy::Ref))
@@ -4243,8 +4598,7 @@ impl Tx<'_, '_> {
         // — a builtin class, constructed via the shared
         // `construct_builtin_class`.
         if leek_runtime::builtin_class_name(class).is_some() {
-            let name_ptr = crate::runtime::box_string(class) as i64;
-            let name = self.b.ins().iconst(types::I64, name_ptr);
+            let name = self.const_string(class)?;
             let (ptr, n) = self.build_ref_array(args)?;
             let f = self.imports.rt("leek_construct_builtin")?;
             let nc = self.b.ins().iconst(types::I64, n as i64);
@@ -4265,8 +4619,7 @@ impl Tx<'_, '_> {
         // skips (native doesn't model those).
         if let Some(builtin) = builtin_ancestor(prog, c) {
             if matches!(builtin.as_str(), "Array" | "Map" | "Set" | "Object") {
-                let name_ptr = crate::runtime::box_string(&builtin) as i64;
-                let name = self.b.ins().iconst(types::I64, name_ptr);
+                let name = self.const_string(&builtin)?;
                 let (ptr, n) = self.build_ref_array(args)?;
                 let f = self.imports.rt("leek_construct_builtin")?;
                 let nc = self.b.ins().iconst(types::I64, n as i64);
@@ -4285,8 +4638,7 @@ impl Tx<'_, '_> {
         let new = self.imports.rt("leek_instance_new")?;
         let set = self.imports.rt("leek_value_set_index")?;
         let class_def = self.b.ins().iconst(types::I64, i64::from(c.def_id.0));
-        let name_ptr = crate::runtime::box_string(&c.name) as i64;
-        let name_box = self.b.ins().iconst(types::I64, name_ptr);
+        let name_box = self.const_string(&c.name)?;
         let inst = self.b.ins().call(new, &[class_def, name_box]);
         let this = self.b.inst_results(inst)[0];
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
@@ -4295,8 +4647,7 @@ impl Tx<'_, '_> {
         // the interpreter's parent-first order), so even initializer-less
         // fields exist (as null) — `Display` and `keys()` see them all.
         for fs in &c.field_layout {
-            let key = crate::runtime::box_string(&fs.name) as i64;
-            let key = self.b.ins().iconst(types::I64, key);
+            let key = self.const_string(&fs.name)?;
             let boxed = match fs.init_fn {
                 None => {
                     let null = self.imports.rt("leek_box_null")?;
@@ -4599,8 +4950,7 @@ impl Tx<'_, '_> {
             {
                 let (recv, recv_ty) = self.local_value(receiver)?;
                 let recv = self.coerce(recv, recv_ty, ValTy::Ref)?;
-                let key_ptr = crate::runtime::box_string(method) as i64;
-                let key = self.b.ins().iconst(types::I64, key_ptr);
+                let key = self.const_string(method)?;
                 let (ptr, n) = self.build_ref_array(args)?;
                 let nc = self.b.ins().iconst(types::I64, n as i64);
                 let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
@@ -4655,8 +5005,7 @@ impl Tx<'_, '_> {
             }
             let (recv, recv_ty) = self.local_value(receiver)?;
             let recv = self.coerce(recv, recv_ty, ValTy::Ref)?;
-            let key = crate::runtime::box_string(method) as i64;
-            let key = self.b.ins().iconst(types::I64, key);
+            let key = self.const_string(method)?;
             let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
             let idx = self.imports.rt("leek_value_index")?;
             let inst = self.b.ins().call(idx, &[recv, key, ver]);
@@ -4799,8 +5148,7 @@ impl Tx<'_, '_> {
         let obj = self.b.inst_results(inst)[0];
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
         for (name, op) in fields {
-            let key = crate::runtime::box_string(name) as i64;
-            let key = self.b.ins().iconst(types::I64, key);
+            let key = self.const_string(name)?;
             let (v, t) = self.operand(op)?;
             let val = self.coerce(v, t, ValTy::Ref)?;
             self.b.ins().call(set, &[obj, key, val, ver]);
@@ -4829,8 +5177,7 @@ impl Tx<'_, '_> {
     ) -> Result<Value, NativeError> {
         let get = self.imports.rt("leek_static_get")?;
         let cd = self.b.ins().iconst(types::I64, owner.0 as i64);
-        let key = crate::runtime::box_string(name) as i64;
-        let key = self.b.ins().iconst(types::I64, key);
+        let key = self.const_string(name)?;
         let inst = self.b.ins().call(get, &[cd, key]);
         let mut v = self.b.inst_results(inst)[0];
         if let Some(kind) = coerce {
@@ -4853,8 +5200,7 @@ impl Tx<'_, '_> {
     fn static_field_set(&mut self, owner: DefId, name: &str, val: Value) -> Result<(), NativeError> {
         let set = self.imports.rt("leek_static_set")?;
         let cd = self.b.ins().iconst(types::I64, owner.0 as i64);
-        let key = crate::runtime::box_string(name) as i64;
-        let key = self.b.ins().iconst(types::I64, key);
+        let key = self.const_string(name)?;
         self.b.ins().call(set, &[cd, key, val]);
         Ok(())
     }
@@ -4951,8 +5297,7 @@ impl Tx<'_, '_> {
         // compiled). The receiver is captured, so calling it prepends `obj`.
         let get = self.imports.rt("leek_value_index")?;
         let (base_h, _) = self.local_value(base)?;
-        let key = crate::runtime::box_string(name) as i64;
-        let key = self.b.ins().iconst(types::I64, key);
+        let key = self.const_string(name)?;
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
         let inst = self.b.ins().call(get, &[base_h, key, ver]);
         Ok((self.b.inst_results(inst)[0], ValTy::Ref))
@@ -4961,8 +5306,7 @@ impl Tx<'_, '_> {
     /// Read a file-level global by name.
     fn global_get(&mut self, name: &str) -> Result<(Value, ValTy), NativeError> {
         let get = self.imports.rt("leek_global_get")?;
-        let key = crate::runtime::box_string(name) as i64;
-        let key = self.b.ins().iconst(types::I64, key);
+        let key = self.const_string(name)?;
         let inst = self.b.ins().call(get, &[key]);
         Ok((self.b.inst_results(inst)[0], ValTy::Ref))
     }
@@ -5122,7 +5466,6 @@ impl Tx<'_, '_> {
             }
             return Err(unsupported("class reference index (non-static-field)"));
         }
-        let get = self.imports.rt("leek_value_index")?;
         // Indexing a non-composite (`(5)[0]`) yields null — box the scalar
         // and let the shared `read_index` return null, matching the interp.
         let arr = {
@@ -5130,9 +5473,20 @@ impl Tx<'_, '_> {
             self.coerce(v, base_ty, ValTy::Ref)?
         };
         let (i, it) = self.operand(idx)?;
+        let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
+        // A statically-integer index needs no heap box: `leek_index_int` takes
+        // it as a raw `i64`. The result is still a handle, identical to the
+        // boxed-index `leek_value_index` (whose class-ref / instance-method
+        // special cases only apply to a string key, so an integer index falls
+        // through to the same `read_index_versioned`).
+        if it == ValTy::Int {
+            let get = self.imports.rt("leek_index_int")?;
+            let inst = self.b.ins().call(get, &[arr, i, ver]);
+            return Ok((self.b.inst_results(inst)[0], ValTy::Ref));
+        }
+        let get = self.imports.rt("leek_value_index")?;
         // The index is itself a boxed value (so map string keys work too).
         let idx_h = self.coerce(i, it, ValTy::Ref)?;
-        let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
         let inst = self.b.ins().call(get, &[arr, idx_h, ver]);
         Ok((self.b.inst_results(inst)[0], ValTy::Ref))
     }
@@ -5194,6 +5548,33 @@ impl Tx<'_, '_> {
         Ok((v, self.var_tys[id.0 as usize]))
     }
 
+    /// Materialize a string literal's bytes *in-binary* (immediate byte stores
+    /// to a stack slot) and box them at runtime via `leek_const_string`. Unlike
+    /// baking a `box_string` handle as an absolute immediate, this is fully
+    /// relocatable — the AOT binary builds the string in its own process.
+    fn const_string(&mut self, s: &str) -> Result<Value, NativeError> {
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        let ptr = if len == 0 {
+            self.b.ins().iconst(types::I64, 0)
+        } else {
+            let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(len).unwrap_or(u32::MAX),
+                0,
+            ));
+            for (i, &byte) in bytes.iter().enumerate() {
+                let bv = self.b.ins().iconst(types::I8, i64::from(byte));
+                self.b.ins().stack_store(bv, slot, i32::try_from(i).unwrap_or(0));
+            }
+            self.b.ins().stack_addr(types::I64, slot, 0)
+        };
+        let lenv = self.b.ins().iconst(types::I64, i64::try_from(len).unwrap_or(i64::MAX));
+        let f = self.imports.rt("leek_const_string")?;
+        let inst = self.b.ins().call(f, &[ptr, lenv]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
     fn operand(&mut self, op: &Operand) -> Result<(Value, ValTy), NativeError> {
         match op {
             Operand::Local(id) => {
@@ -5215,18 +5596,15 @@ impl Tx<'_, '_> {
             Operand::Const(Const::Real(bits)) => {
                 Ok((self.b.ins().f64const(f64::from_bits(*bits)), ValTy::Real))
             }
-            // A string literal is boxed once at compile time; its (leaked)
-            // handle is embedded as a constant pointer. v4-only, like the
-            // other composite paths.
-            Operand::Const(Const::String(s)) => {
-                let ptr = crate::runtime::box_string(s) as i64;
-                Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref))
-            }
-            // A null literal is a boxed `Null` handle (a `Ref`), so it
-            // flows through the dynamic-value paths like any other handle.
+            // A string literal: materialize its bytes in-binary and box them at
+            // runtime (relocatable — see `const_string`).
+            Operand::Const(Const::String(s)) => Ok((self.const_string(s)?, ValTy::Ref)),
+            // A null literal: build a fresh `Null` handle at runtime rather than
+            // baking a pointer to the compiler process's null singleton.
             Operand::Const(Const::Null) => {
-                let ptr = crate::runtime::box_null_const() as i64;
-                Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref))
+                let f = self.imports.rt("leek_box_null")?;
+                let inst = self.b.ins().call(f, &[]);
+                Ok((self.b.inst_results(inst)[0], ValTy::Ref))
             }
         }
     }
@@ -5272,6 +5650,47 @@ impl Tx<'_, '_> {
         }
     }
 
+    /// True if an operand's static kind is an unboxed `integer` — an `Int`
+    /// local or an integer literal. Used to gate the unboxed-index array reads
+    /// (`leek_index_int` / `leek_array_get_*`), which take the index as a raw
+    /// `i64`.
+    fn operand_int_kind(&self, op: &Operand) -> bool {
+        match op {
+            Operand::Local(id) => self.var_tys[id.0 as usize] == ValTy::Int,
+            Operand::Const(Const::Int(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Read `base[idx]` directly into an unboxed scalar (`target` is `Int` or
+    /// `Real`), for an indexing whose result flows into a scalar-typed slot.
+    /// `read_index_versioned(..).to_long()/.to_real()` is exactly what the
+    /// destination's `coerce(Ref → Int/Real)` (i.e. `leek_unbox_int/real`)
+    /// would compute on the boxed read, so the value is byte-identical — but
+    /// neither the index nor the result is ever boxed. The caller guarantees
+    /// `idx` is a statically-integer operand and `base` is not a class-ref.
+    fn index_unboxed(
+        &mut self,
+        base: LocalId,
+        idx: &Operand,
+        target: ValTy,
+    ) -> Result<Value, NativeError> {
+        let arr = {
+            let (v, base_ty) = self.local_value(base)?;
+            self.coerce(v, base_ty, ValTy::Ref)?
+        };
+        let (i, _it) = self.operand(idx)?;
+        let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
+        let sym = if target == ValTy::Real {
+            "leek_array_get_real"
+        } else {
+            "leek_array_get_int"
+        };
+        let f = self.imports.rt(sym)?;
+        let inst = self.b.ins().call(f, &[arr, i, ver]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
     /// True if an operand's static kind is a boxed `Ref` (a dynamic value) —
     /// a `Ref`/cell local, or a null/string constant.
     fn operand_is_ref(&self, op: &Operand) -> bool {
@@ -5290,8 +5709,13 @@ impl Tx<'_, '_> {
         match ty {
             ValTy::Real => self.b.ins().f64const(0.0),
             ValTy::Ref => {
-                let p = crate::runtime::box_null_const() as i64;
-                self.b.ins().iconst(types::I64, p)
+                // `leek_box_null` is always declared (a composite shim).
+                let f = self
+                    .imports
+                    .rt("leek_box_null")
+                    .expect("leek_box_null shim declared");
+                let inst = self.b.ins().call(f, &[]);
+                self.b.inst_results(inst)[0]
             }
             _ => self.b.ins().iconst(types::I64, 0),
         }
@@ -5334,8 +5758,9 @@ impl Tx<'_, '_> {
             // Use the compile-time leaked null handle (an `iconst`), not the
             // `leek_box_null` shim — so this works even in an otherwise
             // composite-free function.
-            let p = crate::runtime::box_null_const() as i64;
-            return Ok((self.b.ins().iconst(types::I64, p), ValTy::Ref));
+            let f = self.imports.rt("leek_box_null")?;
+            let inst = self.b.ins().call(f, &[]);
+            return Ok((self.b.inst_results(inst)[0], ValTy::Ref));
         }
         let (a, lt) = self.operand(l)?;
         let (b, rt) = self.operand(r)?;
@@ -5344,13 +5769,31 @@ impl Tx<'_, '_> {
         // operand — e.g. an array element — dispatches at runtime through
         // the shared `apply_binary`, matching the interpreter exactly.
         if lt == ValTy::Ref || rt == ValTy::Ref {
-            let binop = self.imports.rt("leek_value_binop")?;
-            let a = self.coerce(a, lt, ValTy::Ref)?;
-            let b = self.coerce(b, rt, ValTy::Ref)?;
             let code = self.b.ins().iconst(types::I64, crate::runtime::binop_code(op));
             let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
-            let inst = self.b.ins().call(binop, &[code, a, b, ver]);
-            let res = self.b.inst_results(inst)[0];
+            // Fast path: when the *other* operand is an integer literal, pass it
+            // as an immediate to a `_ci{r,l}` shim instead of heap-boxing it on
+            // every evaluation (`n - 1`, `n < 2`, … — a box per op otherwise).
+            // The result is identical; only the constant's allocation is removed.
+            let res = if let (ValTy::Ref, Operand::Const(Const::Int(c))) = (lt, r) {
+                let a = self.coerce(a, lt, ValTy::Ref)?;
+                let cv = self.b.ins().iconst(types::I64, *c);
+                let cir = self.imports.rt("leek_value_binop_cir")?;
+                let inst = self.b.ins().call(cir, &[code, a, cv, ver]);
+                self.b.inst_results(inst)[0]
+            } else if let (ValTy::Ref, Operand::Const(Const::Int(c))) = (rt, l) {
+                let b = self.coerce(b, rt, ValTy::Ref)?;
+                let cv = self.b.ins().iconst(types::I64, *c);
+                let cil = self.imports.rt("leek_value_binop_cil")?;
+                let inst = self.b.ins().call(cil, &[code, cv, b, ver]);
+                self.b.inst_results(inst)[0]
+            } else {
+                let binop = self.imports.rt("leek_value_binop")?;
+                let a = self.coerce(a, lt, ValTy::Ref)?;
+                let b = self.coerce(b, rt, ValTy::Ref)?;
+                let inst = self.b.ins().call(binop, &[code, a, b, ver]);
+                self.b.inst_results(inst)[0]
+            };
             // String concat charges 1 op per result char on top of the `Add`
             // node cost (interp `exec.rs`). The shim no-ops for non-string
             // results (e.g. `array + array`).
@@ -5595,15 +6038,32 @@ fn call_result_ty(
     // scalar result. (A non-colliding user method already hits the
     // `None if is_method => Ref` fallback, so this only realigns collisions.)
     if let Callee::Method { receiver, method } = &call.callee {
-        let user = receiver_class(f_locals, new_classes, aliased, *receiver)
+        if let Some(c) = receiver_class(f_locals, new_classes, aliased, *receiver)
             .and_then(|cls| program.class_by_name(cls))
-            .and_then(|c| program.resolve_method(c, method, Some(call.args.len())))
+            && let Some(vt) = program.resolve_method(c, method, Some(call.args.len()))
+        {
+            // For a method on a *standalone* class (no parent, never extended →
+            // dispatch is statically this method, no override can return a
+            // different kind) that is *public* (so the call is always accessible
+            // → never the null-on-inaccessible path), use the resolved method's
+            // own return kind. That lets a recursive numeric method
+            // (`this.fib(n-1) + this.fib(n-2)`) stay unboxed end-to-end. Every
+            // other user method call stays a boxed `Ref`, re-coerced at the dest.
+            let standalone = c.parent_def.is_none()
+                && !program.classes.iter().any(|o| o.parent_def == Some(c.def_id));
+            if standalone
+                && matches!(vt.visibility, Visibility::Public)
+                && let Some(def) = program.functions[vt.function_idx].def_id
+            {
+                return Some(rets.get(&def).copied().unwrap_or(ValTy::Ref));
+            }
+            return Some(ValTy::Ref);
+        }
+        if classrefs
+            .get(receiver)
+            .and_then(|cls| resolve_static_method(program, cls, method, call.args.len()))
             .is_some()
-            || classrefs
-                .get(receiver)
-                .and_then(|cls| resolve_static_method(program, cls, method, call.args.len()))
-                .is_some();
-        if user {
+        {
             return Some(ValTy::Ref);
         }
     }

@@ -532,6 +532,16 @@ fn numeric_op(
     int_op: impl FnOnce(i64, i64) -> i64,
     real_op: impl FnOnce(f64, f64) -> f64,
 ) -> Value {
+    // Fast paths for the overwhelmingly common same-typed scalar operands —
+    // avoids routing already-unwrapped numbers through the general `to_long` /
+    // `to_real` conversion (a sizeable match that doesn't inline, ~4% of a
+    // tight arithmetic loop per profiling). Behaviour is identical to the
+    // general arms below.
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => return Value::Int(int_op(*a, *b)),
+        (Value::Real(a), Value::Real(b)) => return Value::Real(real_op(*a, *b)),
+        _ => {}
+    }
     if matches!(l, Value::Real(_)) || matches!(r, Value::Real(_)) {
         Value::Real(real_op(l.to_real(), r.to_real()))
     } else {

@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use leek_diagnostics::LintLevels;
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter};
-use leek_pipeline::{Input, Pipeline, Run};
+use leek_pipeline::{Input, Pipeline, Run, TimingSink};
 use leek_project::{Project, SourceInput};
 use leek_recipes::{RecipeParams, Target};
 
@@ -87,6 +87,49 @@ pub fn run_entry(project: &Project, config: &DriverConfig) -> Result<DriverRun<'
         &entry,
         leek_span::SourceId::new(1).unwrap(),
         config,
+    )
+}
+
+/// Like [`run_file`], but records per-step durations into `sink`.
+pub fn run_file_timed(
+    project: &Project,
+    path: &Path,
+    source_id: leek_span::SourceId,
+    config: &DriverConfig,
+    sink: &TimingSink,
+) -> Result<DriverRun<'static>> {
+    let (src, text) = project.pipeline_input(source_id, path)?;
+    let lint = LintLevels {
+        deny: &project.manifest.lint.deny,
+        warn: &project.manifest.lint.warn,
+        allow: &project.manifest.lint.allow,
+    };
+    let reporter =
+        Reporter::new(config.color, config.format, lint).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pipeline = leek_recipes::pipeline_timed(config.target, &config.params, sink)?;
+    let label = path.display().to_string();
+    Ok(run_with_reporter(
+        &pipeline,
+        Input::from(src),
+        &text,
+        &label,
+        &reporter,
+    ))
+}
+
+/// Like [`run_entry`], but records per-step durations into `sink`.
+pub fn run_entry_timed(
+    project: &Project,
+    config: &DriverConfig,
+    sink: &TimingSink,
+) -> Result<DriverRun<'static>> {
+    let entry = project.entry_path();
+    run_file_timed(
+        project,
+        &entry,
+        leek_span::SourceId::new(1).unwrap(),
+        config,
+        sink,
     )
 }
 

@@ -288,6 +288,11 @@ pub(super) fn declare_imports(
             ("leek_unbox_int", &[i], Some(i)),
             ("leek_unbox_real", &[i], Some(f)),
             ("leek_unbox_bool", &[i], Some(i)),
+            // A string or null literal can appear in *any* function regardless
+            // of the `uses_composite` heuristic, and both now build their handle
+            // at runtime (relocatable), so declare their shims unconditionally.
+            ("leek_box_null", &[], Some(i)),
+            ("leek_const_string", &[i, i], Some(i)),
         ];
         for (sym, params, ret) in op_shims {
             let mut sig = m.make_signature();
@@ -383,10 +388,16 @@ pub(super) fn declare_imports(
         let shims: &[(&'static str, &[ClType], Option<ClType>)] = &[
             // Scalar box/unbox (`leek_box_int` etc.) are declared
             // unconditionally above; `leek_box_null` stays here (composite).
-            ("leek_box_null", &[], Some(i)),
             ("leek_array_new", &[], Some(i)),
             ("leek_array_push", &[i, i], None),
             ("leek_value_index", &[i, i, i], Some(i)),
+            // Typed array reads with an unboxed integer index: `leek_index_int`
+            // returns a handle (saves boxing the index); the `_get_int/_real`
+            // pair return an unboxed scalar (also skip boxing the result) for a
+            // read flowing into a scalar-typed slot.
+            ("leek_index_int", &[i, i, i], Some(i)),
+            ("leek_array_get_int", &[i, i, i], Some(i)),
+            ("leek_array_get_real", &[i, i, i], Some(types::F64)),
             ("leek_value_set_index", &[i, i, i, i], None),
             ("leek_map_new", &[], Some(i)),
             ("leek_map_put", &[i, i, i], None),
@@ -416,6 +427,8 @@ pub(super) fn declare_imports(
             ("leek_call_value", &[i, i, i, i], Some(i)),
             ("leek_call_method", &[i, i, i, i, i], Some(i)),
             ("leek_value_binop", &[i, i, i, i], Some(i)),
+            ("leek_value_binop_cir", &[i, i, i, i], Some(i)),
+            ("leek_value_binop_cil", &[i, i, i, i], Some(i)),
             ("leek_foreach_iter", &[i], Some(i)),
             ("leek_class_of", &[i], Some(i)),
             ("leek_class_super", &[i], Some(i)),

@@ -33,6 +33,7 @@ fn run_single(cli: &Cli, input: &PathBuf) -> Result<()> {
     let opts = BenchOptions {
         runs: cli.runs.max(1),
         version: cli.lang_version,
+        strict: false,
     };
     let mut summaries: Vec<(String, Result<BenchSummary>)> = Vec::new();
 
@@ -187,6 +188,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
         let opts = BenchOptions {
             runs: cli.runs.max(1),
             version: cli.corpus_lang_version.unwrap_or(case.version),
+            strict: case.strict,
         };
 
         let r1 = bench(&mut RustInterp::new(), &path, &opts);

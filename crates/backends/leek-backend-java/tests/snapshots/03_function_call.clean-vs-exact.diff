@@ -28,7 +28,7 @@
 +	}
 +	public void staticInit() throws LeekRunException {
 +	}
-+	private Object square(Object u_n) throws LeekRunException {
++	private Object square(Object n) throws LeekRunException {
 +		ops(4);
 +		return (Object) mul(n, n);
 +	}

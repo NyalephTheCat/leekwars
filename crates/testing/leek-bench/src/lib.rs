@@ -67,6 +67,10 @@ pub struct BenchOptions {
     pub runs: usize,
     /// Leekscript version to compile/run with (1..=4).
     pub version: u8,
+    /// Strict mode — typed-assignment coercion (`var a = 5.5; a = 2` stores
+    /// `2.0`). Must match the upstream case's mode or value-agreement checks
+    /// on conversion-sensitive programs spuriously fail.
+    pub strict: bool,
 }
 
 impl Default for BenchOptions {
@@ -74,6 +78,7 @@ impl Default for BenchOptions {
         Self {
             runs: 5,
             version: 4,
+            strict: false,
         }
     }
 }
@@ -131,8 +136,12 @@ pub fn bench<B: Backend + ?Sized>(
     } else {
         warm[warm.len() / 2]
     };
-    let mut sample = all[0].stdout.clone();
-    sample.truncate(80);
+    // Keep the FULL program output — callers compare it against the expected
+    // value for the agreement check, and display sites truncate it themselves.
+    // Clipping here silently failed the corpus agreement check on every long
+    // result (arrays, …): a truncated sample never equals the full expected
+    // string.
+    let sample = all[0].stdout.clone();
     Ok(BenchSummary {
         backend: backend.name(),
         cold,

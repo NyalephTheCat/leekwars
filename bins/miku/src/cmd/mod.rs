@@ -30,6 +30,7 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
     let manifest_path = cli.manifest_path.clone();
     let color = cli.color;
     let quiet = cli.quiet;
+    let verbose = cli.verbose;
     let format = cli.message_format;
 
     // Load + register any host-environment libraries (`--library leekwars`,
@@ -48,9 +49,15 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::New(args) => new::new(args, quiet).map(to_exit),
         Command::Init(args) => new::init(args, quiet).map(to_exit),
-        Command::Build(args) => {
-            build::run(args, manifest_path.as_deref(), color, format, quiet, environment)
-        }
+        Command::Build(args) => build::run(
+            args,
+            manifest_path.as_deref(),
+            color,
+            format,
+            quiet,
+            verbose,
+            environment,
+        ),
         Command::Run(args) => run::run(args, manifest_path.as_deref(), color, format, quiet),
         Command::Fight(args) => fight::run(args, quiet),
         Command::Check => check::run(manifest_path.as_deref(), color, format, quiet),

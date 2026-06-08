@@ -29,6 +29,7 @@ members = [
     "crates/db/leek-driver",
     "crates/backends/leek-backend-java",
     "crates/backends/leek-backend-native",
+    "crates/backends/leek-aot-runtime",
     "crates/backends/leek-backends",
     "crates/game/leek-game-runtime",
     "crates/game/leek-generator",
@@ -85,6 +86,7 @@ leek-recipes      = { path = "crates/db/leek-recipes" }
 leek-driver       = { path = "crates/db/leek-driver" }
 leek-backend-java = { path = "crates/backends/leek-backend-java" }
 leek-backend-native = { path = "crates/backends/leek-backend-native" }
+leek-aot-runtime  = { path = "crates/backends/leek-aot-runtime" }
 leek-backends     = { path = "crates/backends/leek-backends" }
 leek-game-runtime = { path = "crates/game/leek-game-runtime" }
 leek-generator    = { path = "crates/game/leek-generator" }

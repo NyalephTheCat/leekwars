@@ -5,25 +5,31 @@ use leek_hir::{Field, Function, MethodDef};
 use super::{ends_with_return, java_type_for, sanitize_ident};
 use crate::mangle;
 impl super::Emitter<'_> {
+    /// The parameter name to declare in a Java method signature. It must match
+    /// how the *body* refers to that parameter:
+    /// - exact mode declares `p_x` and rebinds `var u_x = p_x;`, and the body
+    ///   names locals `u_x`;
+    /// - clean mode has no rebind, so the signature must use the same
+    ///   [`mangle::local`] name the body uses (which drops the `u_` prefix for
+    ///   ordinary identifiers).
+    fn sig_param_name(&self, name: &str) -> String {
+        if self.opts.is_clean() {
+            mangle::local(self.opts, name)
+        } else {
+            format!("p_{}", sanitize_ident(name))
+        }
+    }
+
     pub(crate) fn emit_function(&mut self, f: &Function) {
         let name = mangle::function(self.opts, &f.name);
-        // The reference declares parameters with a `p_` prefix and
-        // then emits `var u_x = p_x;` so the body can refer to `u_x`
-        // uniformly with locals. In clean mode the prefix layer is
-        // unnecessary — locals are unprefixed and we declare the
-        // params under their final name directly.
-        let (param_prefix, rebind) = if self.opts.is_clean() {
-            ("u_", false)
-        } else {
-            ("p_", true)
-        };
+        // Exact mode declares params `p_x` then rebinds `var u_x = p_x;` so the
+        // body can refer to them as `u_x` (like other locals). Clean mode has no
+        // rebind layer — the signature declares the body's own name directly.
+        let rebind = !self.opts.is_clean();
         let params = f
             .params
             .iter()
-            .map(|p| {
-                let safe = sanitize_ident(&p.name);
-                format!("Object {param_prefix}{safe}")
-            })
+            .map(|p| format!("Object {}", self.sig_param_name(&p.name)))
             .collect::<Vec<_>>()
             .join(", ");
         if rebind {
@@ -74,24 +80,15 @@ impl super::Emitter<'_> {
         if let Some(min_arity) = first_default {
             let full_arity = f.params.len();
             for arity in min_arity..full_arity {
-                self.emit_default_overload(f, &name, param_prefix, arity);
+                self.emit_default_overload(f, &name, arity);
             }
         }
     }
 
-    pub(crate) fn emit_default_overload(
-        &mut self,
-        f: &Function,
-        name: &str,
-        param_prefix: &str,
-        arity: usize,
-    ) {
+    pub(crate) fn emit_default_overload(&mut self, f: &Function, name: &str, arity: usize) {
         let params = f.params[..arity]
             .iter()
-            .map(|p| {
-                let safe = sanitize_ident(&p.name);
-                format!("Object {param_prefix}{safe}")
-            })
+            .map(|p| format!("Object {}", self.sig_param_name(&p.name)))
             .collect::<Vec<_>>()
             .join(", ");
         let call_args = f
@@ -100,8 +97,7 @@ impl super::Emitter<'_> {
             .enumerate()
             .map(|(i, p)| {
                 if i < arity {
-                    let safe = sanitize_ident(&p.name);
-                    format!("{param_prefix}{safe}")
+                    self.sig_param_name(&p.name)
                 } else {
                     match &p.default {
                         Some(d) => self.expr_to_string(d),

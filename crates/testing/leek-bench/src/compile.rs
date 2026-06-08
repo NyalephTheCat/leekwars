@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::{Input, Run, TimingSink};
-use leek_recipes::{RecipeParams, Target};
+use leek_recipes::{OptLevel, RecipeParams, Target};
 
 /// HIR plus per-step prepare timings from a standard compile pipeline.
 pub struct CompiledHir {
@@ -18,9 +18,12 @@ pub struct CompiledHir {
 /// Run pragma → lex → parse → resolve → typecheck → lower-hir with timing.
 pub fn compile_hir(input: Input) -> Result<(CompiledHir, Run<'static>)> {
     let sink = TimingSink::new();
-    let pipeline =
-        leek_recipes::pipeline_timed(Target::Hir, &RecipeParams::permissive(), &sink)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Optimize like the real codegen drivers (`miku run`, native) so the
+    // benchmark measures the pipeline users actually execute, not an
+    // unoptimized one.
+    let params = RecipeParams::permissive().with_opt(OptLevel::O1);
+    let pipeline = leek_recipes::pipeline_timed(Target::Hir, &params, &sink)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let run = pipeline.run(input);
     let hir = run
         .get::<HirArtifact>()

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use leek_backends::{java_clean_mode, pick_java_out_dir, resolve_backend, version_from_byte};
-use leek_driver::{DriverConfig, run_entry};
+use leek_driver::{DriverConfig, run_entry, run_entry_timed};
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
 use leek_project::Project;
@@ -19,6 +19,7 @@ pub fn run(
     color: ColorWhen,
     format: MessageFormat,
     quiet: bool,
+    verbose: bool,
     environment: Option<std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
@@ -28,13 +29,43 @@ pub fn run(
 
     let backend = resolve_backend(&project.manifest, args.backend.as_deref())?;
 
+    // Java *exact* mode must mirror the upstream reference compiler's emission
+    // shape, so it keeps the IR source-faithful (O0). Every other build path —
+    // Java clean, native — folds constants to shrink the program's op budget.
+    let clean_java = matches!(backend, BackendKind::Java)
+        && java_clean_mode(
+            args.clean,
+            &project.manifest.backend.java.clone().unwrap_or_default(),
+        );
+    let opt = if matches!(backend, BackendKind::Java) && !clean_java {
+        leek_recipes::OptLevel::O0
+    } else {
+        leek_recipes::OptLevel::O1
+    };
+
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default(),
+        params: RecipeParams::default().with_opt(opt),
         color: color.into(),
         format: format.into(),
     };
-    let driver_run = run_entry(&project, &config)?;
+    let driver_run = if verbose {
+        let sink = leek_pipeline::TimingSink::new();
+        let run = run_entry_timed(&project, &config, &sink)?;
+        eprintln!(
+            "miku build: pipeline timings for {}:",
+            project.entry_path().display()
+        );
+        let mut total = std::time::Duration::ZERO;
+        for entry in sink.entries() {
+            total += entry.duration;
+            eprintln!("  {:>14}: {:?}", entry.step, entry.duration);
+        }
+        eprintln!("  {:>14}: {:?}", "total", total);
+        run
+    } else {
+        run_entry(&project, &config)?
+    };
     if driver_run.had_error {
         return Ok(ExitCode::from(1));
     }
@@ -53,9 +84,7 @@ pub fn run(
             }
             Ok(ExitCode::SUCCESS)
         }
-        BackendKind::Native => {
-            bail!("native backend not yet supported in this toolchain");
-        }
+        BackendKind::Native => emit_native(&project, &driver_run.run, &args, quiet),
         BackendKind::Jar => {
             bail!("jar backend not yet supported in this toolchain");
         }
@@ -63,6 +92,32 @@ pub fn run(
             bail!("wasm backend not yet supported in this toolchain");
         }
     }
+}
+
+/// AOT-compile the project to a standalone native executable. The output path
+/// is `--out-dir` if given, else `<project root>/<project name>`.
+fn emit_native(
+    project: &Project,
+    result: &leek_pipeline::Run<'_>,
+    args: &Build,
+    quiet: bool,
+) -> Result<ExitCode> {
+    let hir = result
+        .get::<HirArtifact>()
+        .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
+    let input = result.input();
+    let out = args
+        .out_dir
+        .clone()
+        .unwrap_or_else(|| project.root.join(&project.manifest.project.name));
+
+    let opts = leek_backend_native::NativeOptions::release()
+        .with_lang(input.version_byte, input.strict)
+        // A standalone binary runs unbounded — no per-turn op budget.
+        .with_op_limit(u64::MAX);
+    leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, quiet)
+        .with_context(|| format!("compiling native executable to {}", out.display()))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn emit_java(

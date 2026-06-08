@@ -79,7 +79,8 @@ miku fight           run / test / debug leek-wars fights  (see below)
 ```
 
 Global flags include `--manifest-path`, `--library leekwars` (load host
-function libraries), `--message-format {human|json|junit}`, and `--color`.
+function libraries), `--message-format {human|json|junit}`, `--color`, and
+`--verbose` (e.g. `miku build --verbose` prints per-stage pipeline timings).
 
 ## Fights — the leek-wars simulator
 
@@ -112,50 +113,126 @@ The compiler lowers source → HIR → MIR and targets several backends:
 - **Interpreter** — powers `miku run` / `miku test`.
 - **Java** — the default `miku build` output (transpiles to `.java`).
 - **Native (Cranelift JIT)** — used by `leek-dap` (debugging) and the fight
-  simulator (`leek-generator`); also emits relocatable object files.
+  simulator (`leek-generator`); also emits relocatable object files. Handles the
+  full middle-end it's given, including lambdas/closures, first-class functions,
+  and classes (instances, fields, dynamic method dispatch).
+- **Native (AOT)** — compiles ahead-of-time to a **standalone executable**
+  (`miku build --backend native`, or `leekc --emit native --native-emit exe`).
+  Unlike the JIT path it compiles once and the binary runs with no per-run
+  codegen. It links the emitted object against a prebuilt static runtime
+  archive with `cc` — no per-build `cargo`, so a compile is a sub-second C link.
+  It covers the scalar / string / numeric-array / direct-call subset; programs
+  using lambdas, classes, or builtin values (`PI`, `var f = abs`) are still
+  rejected with a pointer to the JIT. (Those bake compiler-process heap pointers
+  as absolute immediates — string and null literals were made relocatable, as
+  in-binary bytes built at runtime; extending that to boxed-constant and class
+  handles is the remaining AOT work.)
 - **JAR / WASM** — scaffolded; not yet wired into `miku build`.
 
 LeekScript versions 1–4 are supported, with a per-file `// @version:` pragma and
 an optional strict mode.
 
+### Optimization
+
+Codegen drivers run backend-agnostic passes that shrink a program's **operation
+budget** (the per-turn `TOO_MUCH_OPERATIONS` limit in leek-wars):
+
+- **Function inlining** — a call to a small `return <expr>` free function with
+  trivial (literal / variable) arguments is replaced by its body, then the call
+  disappears (and the result often folds: `dbl(2 + 3)` → `dbl(5)` → `10`).
+- **Constant propagation** — an immutable `var x = <literal>` or file-level
+  `global G = <literal>` (never reassigned, captured, or passed by reference) is
+  substituted at its uses, then its declaration is dropped.
+- **Constant folding** — constant expressions collapse to literals (`1 + 2 * 3`
+  → `7`, `true ? a : b` → `a`, `"a" + "b"` → `"ab"`), including calls to pure
+  math builtins (`abs`, `min`, `max`, `floor`, `ceil`, `sqrt`). Conservative and
+  version-independent: division, `%`, `**`, `??`, `round`, casts, and mixed-type
+  `==` are left alone so results never diverge across backends.
+- **Dead-code elimination** — a constant-condition `if`/`while` collapses to the
+  taken branch (or is dropped), and pure discarded expression-statements are
+  removed. (Analysis paths like `check`/`lint` stay at `O0`, so they still see
+  and report the original code.)
+- **Control-flow simplification** — a branch/switch on a constant, or a branch
+  whose arms coincide, becomes an unconditional jump, and blocks that become
+  unreachable are removed.
+
+These are gated by an optimization level: `miku run` (interpreter) and
+`miku build --clean` (readable Java) compile at **O1**; Java *exact* mode (which
+mirrors the upstream reference compiler's emission) and the analysis paths
+(`check`, `lint`, the LSP) stay at **O0**. `miku build --verbose` prints
+per-stage pipeline timings.
+
 ## Benchmarks
 
-Each backend versus the upstream reference (the official Java LeekScript,
-`leekscript.jar`) on three compute-heavy programs. Figures are the
-**warm-median inner execution time** (JVM start-up and `javac` excluded) from
-the bundled `leekbench` harness, 8 runs each:
+Every backend versus the upstream reference (the official Java LeekScript,
+`leekscript.jar`) on four compute-heavy programs, from the bundled `leekbench`
+harness (`leekbench program.leek --runs 10 --detail`). **Bold** rows are the
+steady-state **warm-median per-run** time (inner program time — JVM start-up and
+`javac` excluded); indented `↳` rows break each backend into its sub-steps. An
+asterisk\* marks a **one-time** compile/build cost that is *not* part of the
+per-run figure above it. The native backend is shown both ways — the in-process
+**JIT** (re-compiles every run: `jit-compile` + `execute`) and the **AOT exe**
+(compiled once to a standalone binary, then pure execution):
 
-```sh
-leekbench program.leek --runs 8        # interp · native · java · upstream
-```
+Each warm-median cell is shaded against the **upstream reference** for that same
+program — 🟢 matches or beats it (≤ 1.25×), 🟡 within 1.25–3×, 🔴 more than 3×
+slower:
 
-| Backend                       | `fib(28)` (recursion) | loop, 1M iters | array build+sum, 100k |
-|-------------------------------|----------------------:|---------------:|----------------------:|
-| **upstream-java** (reference) |                5.6 ms |          12 ms |                 18 ms |
-| rust-interp                   |                590 ms |         417 ms |                139 ms |
-| rust-native (Cranelift JIT)   |                324 ms |          13 ms |                 38 ms |
-| rust-java (transpiled)        |                  — ¹  |          13 ms |                 13 ms |
-| _+ JVM start-up² (per run)_   |             _≈ 0.26 s_ |       _≈ 0.26 s_ |             _≈ 0.26 s_ |
+| backend / step | `fib(28)` | loop, 1M | array, 100k | map, 50k |
+|---|--:|--:|--:|--:|
+| **rust-interp** | 🔴 **442 ms** | 🔴 **309 ms** | 🔴 **77 ms** | 🔴 **89 ms** |
+| &nbsp;↳ compile (lex → lower-hir)\* | 0.22 ms | 0.16 ms | 0.30 ms | 0.20 ms |
+| **rust-native · JIT** | 🟢 **4.9 ms** | 🟢 **8.5 ms** | 🟡 **14 ms** | 🔴 **48 ms** |
+| &nbsp;↳ jit-compile (per run) | 0.46 ms | 0.45 ms | 0.73 ms | 0.69 ms |
+| &nbsp;↳ execute | 4.3 ms | 7.9 ms | 11 ms | 40 ms |
+| **rust-native · AOT exe** | 🟡 **7.0 ms** | 🟢 **10 ms** | 🔴 **27 ms** | 🔴 **57 ms** |
+| &nbsp;↳ build: codegen + cc link\* | ≈ 15 ms + ≈ 0.8 s (once) | | | |
+| **rust-java** | 🟢 **4.5 ms** | 🟢 **12 ms** | 🟢 **2.9 ms** | 🟢 **4.8 ms** |
+| &nbsp;↳ javac\* | 1.3 s | 1.4 s | 1.5 s | 1.3 s |
+| **upstream-java** (reference) | ⭐ **4.3 ms** | ⭐ **11 ms** | ⭐ **7.3 ms** | ⭐ **6.7 ms** |
+| &nbsp;↳ jvm compile + warm-up\* | ≈ 2.6 s (once) | | | |
 
-<sub>AMD Custom APU (Steam Deck), 8 cores · JDK 25 · rustc 1.93 · release
-builds. Indicative micro-benchmarks — results vary by workload.</sub>
+<sub>AMD Custom APU (Steam Deck), 8 cores · JDK 25 · rustc 1.93.1 · release
+builds. Indicative micro-benchmarks on a thermally-throttling handheld —
+absolute values drift ±20% with thermal state; the relative picture is stable.
+The two Java backends additionally pay a fixed **≈ 0.26 s** JVM process +
+class-load tax on every fresh invocation (excluded above; the Rust backends pay
+~0), so a *cold one-shot* JVM run is ≈ 0.3–1.8 s before the program executes.</sub>
 
-- **rust-interp** is correct everywhere but is a straightforward MIR walker —
-  roughly 10–100× the reference.
-- **rust-native** keeps LeekScript's dynamic (boxed) values, so it's level with
-  the JVM on tight numeric loops (~1×) yet pays for call- and allocation-heavy
-  code (`fib`, arrays). This harness JIT-compiles on every run, so its times
-  *include* compilation.
-- **rust-java** transpiles to Java and matches or beats upstream where it runs,
-  but ¹ user functions with parameters don't yet compile (the `fib` case fails
-  `javac`) — codegen is a work in progress.
-- ² The per-program rows are **inner** execution time. The two **Java** backends
-  also pay a fixed **≈ 0.26 s** JVM process + class-load tax on *every* fresh
-  invocation (program-independent; the Rust backends pay ~0). For the upstream
-  path, first-use LeekScript compiler warm-up adds **≈ 1.5 s** more, so a *cold
-  one-shot* run is **≈ 1.8 s** before the program executes — which is why the
-  instantly-starting Rust backends win end-to-end on single runs (e.g. one
-  fight AI), even where the JVM's steady-state inner loop is faster.
+- **rust-interp** is a straightforward MIR walker, correct everywhere — ~20–100×
+  the reference (slowest on call-heavy `fib`, closest on array/map), after a
+  round of hot-path work: borrow-not-clone operand reads, faster global access,
+  an `Int`/`Real` arithmetic fast path.
+- **rust-native** keeps LeekScript's dynamic (boxed) values but unboxes scalars
+  whose type is known. It **beats the JVM on the scalar loop** and now **matches
+  it on recursion** (`fib` ≈ upstream) thanks to ¹ param specialization; it still
+  trails on allocation/hashing (arrays, maps), where values stay boxed. Two wins
+  got it there: a per-run **bump arena** for value boxes (replacing a `malloc`
+  per value — allocation-heavy code 2–3× faster) and the specialization below.
+  The `↳ jit-compile` rows show Cranelift codegen is **sub-millisecond**, so each
+  warm JIT run is essentially pure execution.
+- ¹ **Param type specialization.** `fib(n)`'s `n` is untyped, so every `n-1` /
+  `n < 2` would box a dynamic value. The native backend proves — by a
+  whole-program fixpoint over call sites — that such a parameter only ever
+  receives one scalar kind (every site an `integer`, or every site a `real`),
+  then compiles it as an unboxed register value (`isub`/`icmp` / float ops, no
+  allocation). That alone took `fib` from 117 ms to ≈ 4.5 ms. It applies to any
+  provably-monomorphic untyped parameter of a free function or a standalone
+  class's public method (including const-default args), not just `fib`.
+- **rust-native AOT exe** is the same Cranelift code compiled *ahead of time* to
+  a standalone binary (`leekc --emit native --native-emit exe` / `miku build
+  --backend native`): no per-run compilation, ~3 ms process start, first run =
+  steady-state. It's **thread-local-storage-bound** (a standalone binary's slower
+  TLS model makes the per-run op counter / value arena / globals costlier to
+  reach), so it trails the JIT most on still-boxing code (arrays, maps) and stays
+  close where values are unboxed (scalar loop, specialized `fib` ≈ 6 ms). It pays
+  the bigger one-time build (the `↳ build` row) for instant, recompile-free runs
+  — ideal for a single deployed binary (e.g. a fight AI), less so for throughput.
+- **rust-java** transpiles to Java and runs in the same ballpark as the upstream
+  reference — matching it on `fib`, ~20% behind on the loop, and ahead on
+  array/map build here. The instantly-starting Rust backends still win *end-to-end*
+  on single runs, since the JVM pair pays the ≈ 0.26 s (and, cold, up to ≈ 1.8 s)
+  start-up tax before the program even executes.
 - Every backend agrees on the computed result wherever it runs.
 
 ## Repository layout

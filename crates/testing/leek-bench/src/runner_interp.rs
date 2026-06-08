@@ -13,6 +13,7 @@ use crate::{Backend, BenchOptions, RunResult, compile_hir_file};
 pub struct RustInterp {
     hir: Option<std::sync::Arc<leek_hir::HirFile>>,
     version: u8,
+    strict: bool,
     steps: Vec<(String, Duration)>,
 }
 
@@ -21,6 +22,7 @@ impl RustInterp {
         Self {
             hir: None,
             version: 4,
+            strict: false,
             steps: Vec::new(),
         }
     }
@@ -41,6 +43,7 @@ impl Backend for RustInterp {
             .with_context(|| format!("compiling {}", source.display()))?;
         self.hir = Some(compiled.hir);
         self.version = opts.version;
+        self.strict = opts.strict;
         self.steps = compiled.steps;
         Ok(())
     }
@@ -52,10 +55,11 @@ impl Backend for RustInterp {
         let mut out = Vec::with_capacity(runs);
         for _ in 0..runs {
             let t0 = Instant::now();
-            let r = leek_backend_interp::run_with_limit_version(
+            let r = leek_backend_interp::run_with_limit_version_strict(
                 hir.as_ref(),
                 200_000_000,
                 self.version,
+                self.strict,
             );
             let elapsed = t0.elapsed();
             if let Some(err) = r.error {

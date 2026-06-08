@@ -8,7 +8,7 @@ use leek_backends::resolve_run_backend;
 use leek_driver::{DriverConfig, run_entry};
 use leek_hir::pipeline::HirArtifact;
 use leek_project::Project;
-use leek_recipes::{RecipeParams, Target};
+use leek_recipes::{OptLevel, RecipeParams, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Run};
 
@@ -30,7 +30,8 @@ pub fn run(
 
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default(),
+        // The interpreter enforces an op budget, so fold constants to shrink it.
+        params: RecipeParams::default().with_opt(OptLevel::O1),
         color: color.into(),
         format: format.into(),
     };

@@ -83,7 +83,7 @@ impl Interpreter<'_> {
                 if let Some(o) = self.charge_ops(1) {
                     return Err(o);
                 }
-                let cv = self.read_operand(locals, cond);
+                let cv = self.read_operand_cow(locals, cond);
                 let take_then = cv.is_truthy();
                 Ok(StepResult::Goto(if take_then {
                     *then_block
@@ -120,7 +120,7 @@ impl Interpreter<'_> {
                 arms,
                 default,
             } => {
-                let disc = self.read_operand(locals, discriminant);
+                let disc = self.read_operand_cow(locals, discriminant);
                 for (k, target) in arms {
                     let kv = const_to_value(k);
                     if disc.loose_eq(&kv) {
@@ -151,6 +151,33 @@ impl Interpreter<'_> {
                 raw.unbox()
             }
             Operand::Const(c) => const_to_value(c),
+        }
+    }
+
+    /// Like [`Self::read_operand`] but borrows the value in place when possible,
+    /// returning a [`Cow`] that is `Borrowed` for the common case (a plain
+    /// local that isn't a captured `Value::Cell`) and `Owned` only when a value
+    /// must be materialised — a `Const`, an out-of-range slot, or a `Cell` that
+    /// has to be peeled. The hot arithmetic paths read operands only to pass
+    /// them by reference into the shared `eval` helpers, so borrowing avoids a
+    /// clone *and* its matching drop per operand — the interpreter's single
+    /// largest per-op cost (`Value` clone/drop churn, per profiling).
+    #[allow(clippy::unused_self)]
+    pub(crate) fn read_operand_cow<'l>(
+        &self,
+        locals: &'l [Value],
+        op: &Operand,
+    ) -> std::borrow::Cow<'l, Value> {
+        use std::borrow::Cow;
+        match op {
+            Operand::Local(id) => match locals.get(id.0 as usize) {
+                // A captured local is stored behind a shared `Cell`; peel it
+                // (this clones, as before) so callers see the "real" value.
+                Some(v @ Value::Cell(_)) => Cow::Owned(v.unbox()),
+                Some(v) => Cow::Borrowed(v),
+                None => Cow::Owned(Value::Null),
+            },
+            Operand::Const(c) => Cow::Owned(const_to_value(c)),
         }
     }
 
@@ -247,14 +274,27 @@ impl Interpreter<'_> {
             Place::Global(_, name) => {
                 // Coerce the RHS to the global's declared type
                 // (e.g. `global real x = 56` stores `56.0` not `56`).
-                let ty = self
-                    .program
-                    .globals
-                    .iter()
-                    .find(|g| g.name == *name)
-                    .map_or(Type::Any, |g| g.ty.clone());
-                let coerced = coerce_to_type(&value, &ty);
-                self.globals.insert(name.clone(), coerced);
+                // The type comes from the precomputed `global_types` map (O(1),
+                // only non-`Any` entries present), so an untyped global skips
+                // coercion entirely (`coerce_to_type` on `Any` is identity).
+                // Skip the lookup hash altogether when no global is typed (the
+                // common case) — `global_types` is then empty.
+                let coerced = if self.global_types.is_empty() {
+                    value
+                } else {
+                    match self.global_types.get(name) {
+                        Some(ty) => coerce_to_type(&value, ty),
+                        None => value,
+                    }
+                };
+                // Update an existing global in place — avoids cloning the name
+                // `String` (a heap allocation) on every write in a loop; only
+                // the first-ever write of a global allocates the key.
+                if let Some(slot) = self.globals.get_mut(name) {
+                    *slot = coerced;
+                } else {
+                    self.globals.insert(name.clone(), coerced);
+                }
             }
             Place::Field(base, name) => {
                 let base_v = locals
@@ -475,8 +515,8 @@ impl Interpreter<'_> {
                 }
             }
             Rvalue::Binary(op, l, r) => {
-                let lv = self.read_operand(locals, l);
-                let rv = self.read_operand(locals, r);
+                let lv = self.read_operand_cow(locals, l);
+                let rv = self.read_operand_cow(locals, r);
                 if let Some(o) = self.charge_ops(binary_op_cost(*op)) {
                     return Err(o);
                 }
@@ -486,7 +526,7 @@ impl Interpreter<'_> {
                 // `add` runtime cost). Only when a string operand made
                 // this a concat — array `+` is unaffected.
                 if *op == BinOp::Add
-                    && (matches!(lv, Value::String(_)) || matches!(rv, Value::String(_)))
+                    && (matches!(&*lv, Value::String(_)) || matches!(&*rv, Value::String(_)))
                     && let Value::String(s) = &result
                     && let Some(o) = self.charge_ops(s.chars().count() as u64)
                 {
@@ -495,11 +535,11 @@ impl Interpreter<'_> {
                 result
             }
             Rvalue::Unary(op, x) => {
-                let v = self.read_operand(locals, x);
+                let v = self.read_operand_cow(locals, x);
                 apply_unary(*op, &v)
             }
             Rvalue::Cast(kind, x) => {
-                let v = self.read_operand(locals, x);
+                let v = self.read_operand_cow(locals, x);
                 apply_cast(*kind, &v)
             }
             Rvalue::Field(base, name) => {

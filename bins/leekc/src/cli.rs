@@ -54,6 +54,9 @@ pub enum NativeEmitArg {
     Asm,
     /// Write a relocatable object file (requires `--native-out`).
     Object,
+    /// Compile ahead-of-time to a standalone native executable at
+    /// `--native-out` (default `a.out`). Needs `cargo` on PATH.
+    Exe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

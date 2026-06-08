@@ -40,8 +40,41 @@ use leek_hir::DefId;
 use leek_mir::{
     FunctionKind, MirProgram,
 };
+use leek_types::Type;
 
 use crate::value::Value;
+
+/// A tiny FNV-1a [`Hasher`](std::hash::Hasher) for the file-global store. Global
+/// names are short ASCII identifiers hashed on every read/write in hot loops;
+/// the stdlib's default SipHash is DoS-resistant but ~3-4× slower than FNV for
+/// such keys, and globals are an internal, untrusted-input-free map, so the
+/// trade is pure win here. Used only for [`Interpreter::globals`].
+#[derive(Clone, Copy)]
+pub(crate) struct FnvHasher(u64);
+
+impl Default for FnvHasher {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl std::hash::Hasher for FnvHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = h;
+    }
+}
+
+/// File-global store keyed by name, using the fast [`FnvHasher`].
+pub(crate) type GlobalMap =
+    HashMap<String, Value, std::hash::BuildHasherDefault<FnvHasher>>;
 
 // ---- Outcomes and result ----
 
@@ -77,7 +110,7 @@ pub struct Interpreter<'a> {
     /// DefId) because HIR doesn't always allocate a `Def::Global`
     /// for top-level `var`/`global` declarations — both forms read
     /// and write through this map.
-    pub(crate) globals: HashMap<String, Value>,
+    pub(crate) globals: GlobalMap,
     pub(crate) version: u8,
     /// Strict mode — when on, inferred types coerce on plain
     /// `=` too (`var a = 5.5; a = 2` stores `2.0`). Off by
@@ -126,6 +159,11 @@ pub struct Interpreter<'a> {
     /// the named runtime builtin (the interpreter has no body to run).
     /// Populated by [`Self::set_bodiless_builtins`] from the HIR.
     pub(crate) bodiless_builtins: HashMap<DefId, String>,
+    /// Global name → declared type, precomputed once so a global write can
+    /// look up its coercion type in O(1) instead of linear-scanning
+    /// `program.globals` (and cloning the `Type`) on every assignment. Only
+    /// non-`Any` entries are kept — an absent name means "no coercion".
+    pub(crate) global_types: HashMap<String, Type>,
 }
 
 mod call;
@@ -139,7 +177,7 @@ impl<'a> Interpreter<'a> {
     pub fn new(program: &'a MirProgram) -> Self {
         let mut me = Self {
             program,
-            globals: HashMap::new(),
+            globals: GlobalMap::default(),
             version: 4,
             strict: false,
             op_limit: None,
@@ -154,10 +192,23 @@ impl<'a> Interpreter<'a> {
             profiler: None,
             rng: leek_runtime::Rng::new(),
             bodiless_builtins: HashMap::new(),
+            global_types: HashMap::new(),
         };
         me.index_functions();
         me.index_classes();
+        me.index_global_types();
         me
+    }
+
+    /// Precompute the global-name → declared-type map consulted on the hot
+    /// global-write path. Skips `Any`-typed globals (the common untyped case)
+    /// since they need no coercion. Run once; `program` is immutable after.
+    fn index_global_types(&mut self) {
+        for g in &self.program.globals {
+            if !matches!(g.ty, Type::Any) {
+                self.global_types.insert(g.name.clone(), g.ty.clone());
+            }
+        }
     }
 
     /// Register signature-file builtins (`DefId` → builtin name) so calls

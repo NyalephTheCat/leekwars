@@ -14,7 +14,7 @@ use leek_mir::pipeline::MirArtifact;
 use leek_parser::pipeline::{AstArtifact, GreenTreeArtifact};
 use leek_pipeline::{RecipeStep, plan_for};
 
-pub use leek_pipeline::{Pipeline, RecipeError, RecipeParams, RecipePlan, TimingSink};
+pub use leek_pipeline::{OptLevel, Pipeline, RecipeError, RecipeParams, RecipePlan, TimingSink};
 use leek_resolver::pipeline::{IncludeGraphArtifact, ResolveArtifact};
 use leek_types::pipeline::TypeCheckArtifact;
 

@@ -28,7 +28,10 @@ pub enum MathSig {
 macro_rules! real_to_real {
     ($($symbol:ident / $leek:literal => $body:expr;)*) => {
         $(
-            /// Shared `f64 -> f64` math builtin.
+            /// Shared `f64 -> f64` math builtin. `no_mangle` so the AOT
+            /// (compile-to-executable) backend can link against it by name.
+            #[allow(unsafe_code)]
+            #[unsafe(no_mangle)]
             pub extern "C" fn $symbol(x: f64) -> f64 {
                 let f: fn(f64) -> f64 = $body;
                 f(x)
@@ -40,7 +43,9 @@ macro_rules! real_to_real {
 macro_rules! real_to_int {
     ($($symbol:ident / $leek:literal => $body:expr;)*) => {
         $(
-            /// Shared `f64 -> i64` math builtin.
+            /// Shared `f64 -> i64` math builtin. `no_mangle` for AOT linking.
+            #[allow(unsafe_code)]
+            #[unsafe(no_mangle)]
             pub extern "C" fn $symbol(x: f64) -> i64 {
                 let f: fn(f64) -> i64 = $body;
                 f(x)
@@ -76,16 +81,22 @@ real_to_int! {
 }
 
 /// Shared `pow` (always real, like the `pow` builtin).
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_pow(a: f64, b: f64) -> f64 {
     a.powf(b)
 }
 
 /// Shared `atan2`.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_atan2(a: f64, b: f64) -> f64 {
     a.atan2(b)
 }
 
 /// Shared `hypot`.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_hypot(a: f64, b: f64) -> f64 {
     a.hypot(b)
 }
@@ -94,6 +105,8 @@ pub extern "C" fn leek_hypot(a: f64, b: f64) -> f64 {
 /// non-negative exponent `< 64`. Matches the interpreter:
 /// `a.checked_pow(b) ` saturating to `i64::MAX` on overflow. Callers must
 /// guarantee `0 <= b < 64`.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_ipow(a: i64, b: i64) -> i64 {
     a.checked_pow(u32::try_from(b).unwrap_or(u32::MAX)).unwrap_or(i64::MAX)
 }

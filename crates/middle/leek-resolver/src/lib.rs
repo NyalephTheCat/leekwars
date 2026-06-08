@@ -295,34 +295,58 @@ impl Resolver {
         // outer scopes without the noise of every builtin.
         self.push_scope();
         // Two-pass for forward references: first collect
-        // declarations, then walk bodies.
+        // declarations, then walk bodies. Matching on the node kind before
+        // casting consumes each child with a single `cast` rather than cloning
+        // it for every failed cast attempt.
         for child in file.syntax().children() {
-            if let Some(fn_decl) = FnDecl::cast(child.clone()) {
-                self.declare_fn(&fn_decl);
-            } else if let Some(cls) = ClassDecl::cast(child.clone()) {
-                self.declare_class(&cls);
-            } else if let Some(stmt) = Stmt::cast(child.clone()) {
-                self.declare_top_stmt(&stmt);
+            match child.kind() {
+                leek_syntax::SyntaxKind::FnDecl => {
+                    if let Some(fn_decl) = FnDecl::cast(child) {
+                        self.declare_fn(&fn_decl);
+                    }
+                }
+                leek_syntax::SyntaxKind::ClassDecl => {
+                    if let Some(cls) = ClassDecl::cast(child) {
+                        self.declare_class(&cls);
+                    }
+                }
+                _ => {
+                    if let Some(stmt) = Stmt::cast(child) {
+                        self.declare_top_stmt(&stmt);
+                    }
+                }
             }
         }
         let mut terminated_at: Option<leek_span::Span> = None;
         for child in file.syntax().children() {
-            if let Some(fn_decl) = FnDecl::cast(child.clone()) {
-                self.resolve_fn_body(&fn_decl);
-            } else if let Some(cls) = ClassDecl::cast(child.clone()) {
-                self.resolve_class(&cls);
-            } else if let Some(stmt) = Stmt::cast(child.clone()) {
-                self.resolve_stmt(&stmt);
-                if terminated_at.is_none() && crate::statements::is_block_terminator(&stmt) {
-                    terminated_at = Some(self.node_span(stmt.syntax()));
-                } else if terminated_at.is_some() {
-                    self.err(
-                        codes::CANT_ADD_INSTRUCTION_AFTER_BREAK,
-                        self.node_span(stmt.syntax()),
-                        "cannot add instruction after a terminator (return/break/continue)"
-                            .to_string(),
-                    );
-                    terminated_at = None;
+            match child.kind() {
+                leek_syntax::SyntaxKind::FnDecl => {
+                    if let Some(fn_decl) = FnDecl::cast(child) {
+                        self.resolve_fn_body(&fn_decl);
+                    }
+                }
+                leek_syntax::SyntaxKind::ClassDecl => {
+                    if let Some(cls) = ClassDecl::cast(child) {
+                        self.resolve_class(&cls);
+                    }
+                }
+                _ => {
+                    if let Some(stmt) = Stmt::cast(child) {
+                        self.resolve_stmt(&stmt);
+                        if terminated_at.is_none()
+                            && crate::statements::is_block_terminator(&stmt)
+                        {
+                            terminated_at = Some(self.node_span(stmt.syntax()));
+                        } else if terminated_at.is_some() {
+                            self.err(
+                                codes::CANT_ADD_INSTRUCTION_AFTER_BREAK,
+                                self.node_span(stmt.syntax()),
+                                "cannot add instruction after a terminator (return/break/continue)"
+                                    .to_string(),
+                            );
+                            terminated_at = None;
+                        }
+                    }
                 }
             }
         }

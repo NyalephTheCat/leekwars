@@ -24,7 +24,31 @@ use leek_runtime::{
 /// `*mut Value` handle, and the result is a boxed handle.
 type LambdaFn = extern "C" fn(*const *mut Value, i64) -> *mut Value;
 
+/// Per-run storage for every value handle: a bump arena that owns the `Value`s
+/// plus the list of pointers to drop. Held in ONE thread-local so the hot
+/// `handle` path does a single TLS access (it allocates *and* records together).
+///
+/// The arena is behind an `Option` so [`BOX_STATE`] can be `const`-initialized —
+/// that matters: a `const` thread-local skips the lazy-initialization guard the
+/// stdlib runs on *every* access of a non-const one, which profiling showed was
+/// ~45% of native `fib` self-time (`LocalKey::with`). The arena is created on
+/// first use (a predictable branch) and reused across runs via `reset`.
+struct BoxState {
+    arena: Option<bumpalo::Bump>,
+    /// Bumpalo does NOT run destructors on `reset`, so this is the drop list:
+    /// each pointer is `drop_in_place`d exactly once at run end (releasing the
+    /// `Rc`-backed storage the value holds) before the arena is reset. Handles
+    /// are read by *cloning* (never freed) elsewhere, so there is no double-free.
+    boxes: Vec<*mut Value>,
+}
+
 thread_local! {
+    /// See [`BoxState`]. Bump allocation replaces a `malloc` per value (the
+    /// dominant native cost on boxing-heavy code) and `reset` retains the
+    /// largest chunk, so steady-state runs (corpus, LSP, fights) allocate ~zero.
+    static BOX_STATE: RefCell<BoxState> =
+        const { RefCell::new(BoxState { arena: None, boxes: Vec::new() }) };
+
     /// File-level globals, keyed by name (matching the interpreter), each
     /// holding a value handle. Cleared by [`clear_globals`] before every
     /// JIT run so programs don't see a previous run's globals.
@@ -166,6 +190,7 @@ pub fn ops_used() -> u64 {
 /// (matching the interpreter's `charge_ops`). On exceeding the budget it
 /// records `TOO_MUCH_OPERATIONS`; the JIT'd code can't unwind, so loops poll
 /// [`op_budget_exceeded`] at their back-edges to stop promptly.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_charge_ops(n: i64) {
     let next = OP_COUNT.with(|c| {
         let v = c.get().saturating_add(n.max(0) as u64);
@@ -179,6 +204,7 @@ pub extern "C" fn leek_charge_ops(n: i64) {
 
 /// Whether the op budget has been exceeded — polled at loop back-edges so the
 /// JIT'd code can branch out instead of running an unbounded loop to the end.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_op_budget_exceeded() -> i64 {
     i64::from(OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get))
 }
@@ -188,6 +214,7 @@ pub extern "C" fn leek_op_budget_exceeded() -> i64 {
 /// when an `Add` produced a string (`exec.rs`); the native `Add` boxed path
 /// calls this with the result so a `.ops` count over string concat matches.
 /// A non-string result (e.g. `array + array`) charges nothing.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_charge_concat(result: *mut Value) {
     if let Value::String(s) = unsafe { val(result) } {
         leek_charge_ops(s.chars().count() as i64);
@@ -269,7 +296,7 @@ pub fn invoke_top_level_string(v: Value) -> Value {
     };
     let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
     let argv = [handle(v.clone())];
-    let result = unsafe { take(f(argv.as_ptr(), 1)) };
+    let result = unsafe { read_handle(f(argv.as_ptr(), 1)) };
     leek_runtime::DISPLAY_TOP_LEVEL_BARE.with(|c| c.set(true));
     result
 }
@@ -313,6 +340,7 @@ pub fn clear_globals() {
 /// field's initialiser on first access (a null sentinel is stored first to
 /// break self-referential init cycles). Mirrors the interpreter's lazy
 /// static-field initialisation.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_static_get(class_def: i64, name: *mut Value) -> *mut Value {
     let Some(field) = builtin_name(name) else {
         return handle(Value::Null);
@@ -340,6 +368,7 @@ pub extern "C" fn leek_static_get(class_def: i64, name: *mut Value) -> *mut Valu
 /// `2`=bool), preserving `null` (for nullable declared types). Used to make
 /// a typed static field's stored value match its declaration (`real? a = 12`
 /// reads back `12.0`), mirroring the interpreter's `coerce_to_type`.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_coerce_scalar(h: *mut Value, kind: i64) -> *mut Value {
     let v = unsafe { val(h) };
     if matches!(v, Value::Null) {
@@ -356,6 +385,7 @@ pub extern "C" fn leek_coerce_scalar(h: *mut Value, kind: i64) -> *mut Value {
 /// `base[start:end:step]` — slice an array / string / interval. Each bound
 /// is a boxed handle; a `null` handle (absent or null-valued bound) means
 /// "use the default for that side", matching the interpreter.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_slice(
     base: *mut Value,
     start: *mut Value,
@@ -379,6 +409,7 @@ pub extern "C" fn leek_slice(
 }
 
 /// `C.staticField = v` — store the handle.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_static_set(class_def: i64, name: *mut Value, val: *mut Value) {
     let Some(field) = builtin_name(name) else {
         return;
@@ -464,7 +495,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             // with null and drop any surplus, matching the interpreter's lax
             // arity (the missing `x` binds to null).
             argv.resize_with(nparams, || handle(Value::Null));
-            unsafe { take(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
         }
         Value::Function(Function::Builtin(name)) => {
             // A builtin takes its args by value — peel any shared cell first (a
@@ -505,7 +536,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             let argv: Vec<*mut Value> = full.into_iter().map(handle).collect();
-            unsafe { take(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
         }
         // A bound method (`obj['m']` / `obj.m` as a value). Mirrors the
         // interpreter: prepend the stored receiver, unless the caller passed
@@ -534,7 +565,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             let argv: Vec<*mut Value> = full.into_iter().map(handle).collect();
-            unsafe { take(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
         }
         // A builtin class invoked as a value (`var c = Array; c(1, 2)`, or a
         // field/object slot holding `Array`/`Map`/…) is constructor sugar —
@@ -556,7 +587,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             let argv: Vec<*mut Value> = full.into_iter().map(handle).collect();
-            unsafe { take(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
         }
         _ => Value::Null,
     }
@@ -564,6 +595,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
 
 /// Construct a lambda value capturing `ncap` already-boxed values (snapshot,
 /// matching Leekscript value-capture). `caps` points to `ncap` handles.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_make_lambda(function_idx: i64, caps: *const *mut Value, ncap: i64) -> *mut Value {
     let captured: Vec<Value> = (0..ncap as isize)
         .map(|i| unsafe { val(*caps.offset(i)) }.clone())
@@ -586,6 +618,7 @@ pub extern "C" fn leek_make_lambda(function_idx: i64, caps: *const *mut Value, n
 /// to a builtin method (`run_builtin(method, [receiver, …args])`). This lets a
 /// method call on a captured `this` / an `expr as C` cast value dispatch
 /// correctly at runtime.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_call_method(
     receiver: *mut Value,
     name: *mut Value,
@@ -627,6 +660,7 @@ pub extern "C" fn leek_call_method(
     handle(leek_runtime::call_builtin(&mut host, &method, &all).unwrap_or(Value::Null))
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_call_value(
     callee: *mut Value,
     argv: *const *mut Value,
@@ -645,7 +679,18 @@ pub extern "C" fn leek_call_value(
 
 #[inline]
 fn handle(v: Value) -> *mut Value {
-    Box::into_raw(Box::new(v))
+    // ONE thread-local access: allocate the value's storage from the per-run
+    // bump arena (cheap, chunked — `Bump::alloc` takes `&self` and returns a
+    // unique `&mut Value` with a stable address valid until the next `reset`)
+    // AND record the pointer for `free_run_boxes` to drop. `BOX_STATE` is
+    // `const`-initialized, so this skips the lazy-init guard a non-const
+    // thread-local pays on every access.
+    BOX_STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let p = std::ptr::from_mut(s.arena.get_or_insert_with(bumpalo::Bump::new).alloc(v));
+        s.boxes.push(p);
+        p
+    })
 }
 
 /// A [`BuiltinHost`] for the native backend's stdlib-builtin calls. Supplies
@@ -734,44 +779,73 @@ unsafe fn val<'a>(p: *mut Value) -> &'a Value {
 /// `debug_hooks` is on; forwards the statement's source byte offset and the
 /// current frame's local-variable pointers to the installed
 /// [`crate::debug::DebugHook`] (which may pause execution).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_dbg_safepoint(offset: i64, desc: i64, values: i64) {
     crate::debug::fire_safepoint(offset as u32, desc as usize, values as usize);
 }
 
 /// Function-entry debug hook: pushes a shadow call frame for `desc` (the
 /// function's `*const VarTable`).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_dbg_enter(desc: i64) {
     crate::debug::fire_enter(desc as usize);
 }
 
 /// Function-return debug hook: pops the top shadow call frame.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_dbg_leave() {
     crate::debug::fire_leave();
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_box_int(i: i64) -> *mut Value {
     handle(Value::Int(i))
 }
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_box_real(r: f64) -> *mut Value {
     handle(Value::Real(r))
 }
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_box_bool(b: i64) -> *mut Value {
     handle(Value::Bool(b != 0))
 }
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_box_null() -> *mut Value {
     handle(Value::Null)
 }
 
+/// Build a `Value::String` from `len` bytes at `ptr`. The generated code
+/// materializes the literal's bytes in-binary (immediate stores) and passes a
+/// pointer to them, so nothing references the *compiler* process's heap — the
+/// AOT-relocatable replacement for baking a `box_string` handle as an immediate.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_const_string(ptr: *const u8, len: i64) -> *mut Value {
+    let s = if len <= 0 || ptr.is_null() {
+        String::new()
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    handle(Value::String(Rc::new(s)))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_unbox_int(p: *mut Value) -> i64 {
     unsafe { val(p) }.to_long()
 }
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_unbox_real(p: *mut Value) -> f64 {
     unsafe { val(p) }.to_real()
 }
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_unbox_bool(p: *mut Value) -> i64 {
     i64::from(unsafe { val(p) }.is_truthy())
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_array_new() -> *mut Value {
     handle(Value::Array(Rc::new(RefCell::new(Vec::new()))))
 }
@@ -781,6 +855,7 @@ pub extern "C" fn leek_array_new() -> *mut Value {
 /// reach here boxed in its shared cell) — `unbox` clones the inner `Value`,
 /// which for an array is a shallow `Rc` clone sharing the same backing `Vec`,
 /// so the in-place push still mutates the aliased array.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_array_push(arr: *mut Value, elem: *mut Value) {
     if let Value::Array(a) = unsafe { val(arr) }.unbox() {
         a.borrow_mut().push(unsafe { val(elem) }.clone());
@@ -790,6 +865,7 @@ pub extern "C" fn leek_array_push(arr: *mut Value, elem: *mut Value) {
 /// Read `base[idx]` for any indexable value (array / string / map / set /
 /// object), delegating to the interpreter's `read_index`. `idx` is itself
 /// a handle (so map string keys work too).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_value_index(base: *mut Value, idx: *mut Value, version: i64) -> *mut Value {
     let base = unsafe { val(base) };
     let idx = unsafe { val(idx) };
@@ -824,19 +900,41 @@ pub extern "C" fn leek_value_index(base: *mut Value, idx: *mut Value, version: i
     handle(leek_runtime::read_index_versioned(base, idx, version as u8))
 }
 
-/// Box a string literal at compile time into a leaked handle. The native
-/// backend embeds the returned pointer as a constant in the generated
-/// (JIT) code; the leak keeps it valid for the process lifetime.
-pub fn box_string(s: &str) -> *mut Value {
-    handle(Value::String(Rc::new(s.to_string())))
+/// Read `base[idx]` with an **unboxed** integer index, returning a boxed
+/// handle. Identical to [`leek_value_index`] called with a boxed `Int` index:
+/// that shim's class-reference / instance-method special cases only fire for a
+/// `String` (or `ClassRef`) key, so for an integer index it falls straight
+/// through to `read_index_versioned` — exactly what this does. The backend uses
+/// it for `base[i]` when `i` is statically `integer`, saving one heap box (the
+/// index) per read. The result is still a handle, so every consumer is
+/// unaffected.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_index_int(base: *mut Value, idx: i64, version: i64) -> *mut Value {
+    let b = unsafe { val(base) };
+    handle(leek_runtime::read_index_versioned(b, &Value::Int(idx), version as u8))
 }
 
-/// A leaked handle to a fresh `Value::Null`, embedded as a constant for
-/// zero-initializing a `Ref` local (an uninitialized `var x` is null).
-/// Reads see `Null`; `set_index` on `Null` is a no-op (never writes back),
-/// so the handle is never mutated.
-pub fn box_null_const() -> *mut Value {
-    handle(Value::Null)
+/// Read `base[idx]` (unboxed integer index) and return the element coerced to
+/// an **unboxed `i64`** — equivalent to `leek_unbox_int(leek_index_int(..))`
+/// (`read_index_versioned(..).to_long()`), with neither the index nor the
+/// result ever boxed. Used when the read flows directly into a scalar
+/// `integer`-typed slot, whose assignment would `to_long`-coerce the boxed read
+/// anyway; the produced value is byte-identical regardless of the element's
+/// actual runtime kind (an out-of-bounds `null` reads as `0`, exactly as the
+/// boxed path's `to_long(null)` would).
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_array_get_int(base: *mut Value, idx: i64, version: i64) -> i64 {
+    let b = unsafe { val(base) };
+    leek_runtime::read_index_versioned(b, &Value::Int(idx), version as u8).to_long()
+}
+
+/// Mirror of [`leek_array_get_int`] returning an unboxed `f64` (the read
+/// coerced via `to_real`), for a read flowing directly into a `real`-typed
+/// slot. Equivalent to `leek_unbox_real(leek_index_int(..))`.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_array_get_real(base: *mut Value, idx: i64, version: i64) -> f64 {
+    let b = unsafe { val(base) };
+    leek_runtime::read_index_versioned(b, &Value::Int(idx), version as u8).to_real()
 }
 
 /// Box an arbitrary compile-time-known `Value` (e.g. a builtin constant
@@ -850,6 +948,7 @@ pub fn box_value(v: Value) -> *mut Value {
 /// object), delegating to the interpreter's `set_index`. Both `idx` and
 /// `value` are handles. If `base` had to morph to hold the write, the new
 /// value is written back into the handle in place.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_value_set_index(
     base: *mut Value,
     idx: *mut Value,
@@ -884,12 +983,14 @@ pub extern "C" fn leek_value_set_index(
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_map_new() -> *mut Value {
     handle(Value::Map(Rc::new(RefCell::new(MapData::new()))))
 }
 
 /// Insert `key → value` into a map, with the interpreter's key
 /// canonicalization (so collection keys reduce the same way).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_map_put(map: *mut Value, key: *mut Value, value: *mut Value) {
     if let Value::Map(m) = unsafe { val(map) } {
         let k = unsafe { val(key) }.clone();
@@ -899,10 +1000,12 @@ pub extern "C" fn leek_map_put(map: *mut Value, key: *mut Value, value: *mut Val
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_set_new() -> *mut Value {
     handle(Value::Set(Rc::new(RefCell::new(SetData::new()))))
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_object_new() -> *mut Value {
     handle(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
 }
@@ -913,6 +1016,7 @@ pub extern "C" fn leek_object_new() -> *mut Value {
 /// field initializers and constructor run as separate emitted calls.
 /// `class_def` is the class's `DefId.0`; `name_box` is a boxed-string
 /// handle carrying the class name (used by `Display`).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_instance_new(class_def: i64, name_box: *mut Value) -> *mut Value {
     let class_name = match unsafe { val(name_box) } {
         Value::String(s) => s.to_string(),
@@ -927,6 +1031,7 @@ pub extern "C" fn leek_instance_new(class_def: i64, name_box: *mut Value) -> *mu
 
 /// Read a global by name (a null handle → a fresh `null`, matching the
 /// interpreter's treatment of an unset global).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_global_get(name: *mut Value) -> *mut Value {
     let Some(name) = builtin_name(name) else {
         return handle(Value::Null);
@@ -941,6 +1046,7 @@ pub extern "C" fn leek_global_get(name: *mut Value) -> *mut Value {
 
 /// Store a global by name (the handle aliases, matching v4 reference
 /// semantics; the previous handle is left to leak).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_global_set(name: *mut Value, value: *mut Value) {
     if let Some(name) = builtin_name(name) {
         GLOBALS.with(|g| g.borrow_mut().insert(name, value));
@@ -951,6 +1057,7 @@ pub extern "C" fn leek_global_set(name: *mut Value, value: *mut Value) {
 /// (`abs = 2; return abs`, or `var _c = count; count = …`). Mirrors the
 /// interpreter's dynamic resolution: the global's value if one has been
 /// assigned, otherwise the builtin handle (constant or `Function::Builtin`).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_ref_or_builtin(name: *mut Value) -> *mut Value {
     let Some(n) = builtin_name(name) else {
         return handle(Value::Null);
@@ -967,6 +1074,7 @@ pub extern "C" fn leek_ref_or_builtin(name: *mut Value) -> *mut Value {
 /// Call a name that is a builtin shadowed by a same-named global
 /// (`cos = function(…){…}; cos(1, 2, 3)`). If a global has been assigned,
 /// invoke its value; otherwise dispatch the builtin directly.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_call_ref_or_builtin(
     name: *mut Value,
     argv: *const *mut Value,
@@ -992,6 +1100,7 @@ pub extern "C" fn leek_call_ref_or_builtin(
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_set_add(set: *mut Value, elem: *mut Value) {
     if let Value::Set(s) = unsafe { val(set) } {
         s.borrow_mut().insert(unsafe { val(elem) }.clone());
@@ -1003,6 +1112,7 @@ pub extern "C" fn leek_set_add(set: *mut Value, elem: *mut Value) {
 /// the `Infinity`-forces-real bits: bit0 start-inclusive, bit1
 /// end-inclusive, bit2 start-forces-real, bit3 end-forces-real. Mirrors
 /// the interpreter's `materialize_interval` (step is ignored, as there).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_interval(start: *mut Value, end: *mut Value, flags: i64) -> *mut Value {
     let bound = |p: *mut Value| -> (Option<f64>, bool) {
         if p.is_null() {
@@ -1030,6 +1140,7 @@ pub extern "C" fn leek_interval(start: *mut Value, end: *mut Value, flags: i64) 
 /// Element count of an array / map / set (0 otherwise). A string counts
 /// its characters only in v4 — v1–v3 `count("…")` is 0 (strings aren't
 /// collections there).
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_count(p: *mut Value, version: i64) -> i64 {
     match unsafe { val(p) } {
         Value::Array(a) => a.borrow().len() as i64,
@@ -1042,12 +1153,14 @@ pub extern "C" fn leek_count(p: *mut Value, version: i64) -> i64 {
 
 /// Truthiness of a boxed value (for branching / `!` on a dynamic value),
 /// using the shared `Value::is_truthy`. Returns 0 or 1.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_truthy(p: *mut Value) -> i64 {
     unsafe { val(p) }.is_truthy() as i64
 }
 
 /// Deep-clone a boxed value for v1 value semantics (assignment / pass-by-
 /// value of a composite copies it). Scalars clone trivially.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_clone_v1(p: *mut Value) -> *mut Value {
     handle(leek_runtime::deep_clone(unsafe { val(p) }))
 }
@@ -1057,6 +1170,7 @@ pub extern "C" fn leek_clone_v1(p: *mut Value) -> *mut Value {
 /// already a cell (e.g. a lambda capture-parameter that arrives holding the
 /// enclosing scope's cell handle), it is returned unchanged so the shared
 /// `Rc` is preserved; otherwise its value is wrapped in a fresh cell.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_make_cell(inner: *mut Value) -> *mut Value {
     match unsafe { val(inner) } {
         Value::Cell(_) => inner,
@@ -1066,6 +1180,7 @@ pub extern "C" fn leek_make_cell(inner: *mut Value) -> *mut Value {
 
 /// Read a cell local: clone the value currently behind the cell (peeled).
 /// A non-cell handle (defensive) is returned cloned unchanged.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_cell_get(cell: *mut Value) -> *mut Value {
     match unsafe { val(cell) } {
         Value::Cell(rc) => handle(rc.borrow().clone()),
@@ -1076,6 +1191,7 @@ pub extern "C" fn leek_cell_get(cell: *mut Value) -> *mut Value {
 /// Write a cell local: store `v` (peeled) into the shared slot, so any
 /// closure sharing the cell's `Rc` observes the new value. A no-op on a
 /// non-cell handle.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_cell_set(cell: *mut Value, v: *mut Value) {
     if let Value::Cell(rc) = unsafe { val(cell) } {
         *rc.borrow_mut() = unsafe { val(v) }.unbox();
@@ -1085,6 +1201,7 @@ pub extern "C" fn leek_cell_set(cell: *mut Value, v: *mut Value) {
 /// Consume a pending v1 LegacyArray promotion (stashed by a mutating
 /// builtin like `push`) and return the promoted value; if none is pending,
 /// return `current` unchanged. Used to lower `Statement::ApplyPromotion`.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_apply_promotion(current: *mut Value) -> *mut Value {
     match leek_runtime::take_pending_promotion() {
         Some(v) => handle(v),
@@ -1095,6 +1212,7 @@ pub extern "C" fn leek_apply_promotion(current: *mut Value) -> *mut Value {
 /// Apply a unary operator to a boxed value, returning a new handle.
 /// `code`: 0 = negate (`-x`), 1 = bitwise-not (`~x`). Delegates to the
 /// shared `leek_runtime` ops so the result matches the interpreter.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_value_unary(code: i64, p: *mut Value) -> *mut Value {
     let v = unsafe { val(p) };
     let r = match code {
@@ -1109,6 +1227,7 @@ pub extern "C" fn leek_value_unary(code: i64, p: *mut Value) -> *mut Value {
 /// handle. `code`: 0 = IntToReal, 1 = RealToInt, 2 = ToBool, 3 = ToString,
 /// else = User (identity clone). Mirrors the interpreter's `apply_cast`
 /// (same `Value` conversion methods), so the result matches exactly.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_apply_cast(code: i64, p: *mut Value) -> *mut Value {
     let v = unsafe { val(p) };
     let r = match code {
@@ -1126,6 +1245,7 @@ pub extern "C" fn leek_apply_cast(code: i64, p: *mut Value) -> *mut Value {
 /// matches the interpreter exactly (string concat, array `+`, version-
 /// specific division, etc.). `code` is a [`BinOp`] encoded via
 /// [`binop_code`].
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_value_binop(
     code: i64,
     a: *mut Value,
@@ -1137,6 +1257,30 @@ pub extern "C" fn leek_value_binop(
     };
     let (l, r) = (unsafe { val(a) }, unsafe { val(b) });
     handle(apply_binop(op, l, r, version as u8))
+}
+
+/// Like [`leek_value_binop`] but the RIGHT operand is an integer *constant*
+/// passed by value — so the backend never boxes it. Used for `dyn OP <int lit>`
+/// (`n - 1`, `n < 2`, …), removing one heap allocation per such operation; the
+/// constant `Value::Int` lives on the stack. Identical result to boxing it.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_value_binop_cir(code: i64, a: *mut Value, c: i64, version: i64) -> *mut Value {
+    let Some(op) = binop_from_code(code) else {
+        return handle(Value::Null);
+    };
+    let l = unsafe { val(a) };
+    handle(apply_binop(op, l, &Value::Int(c), version as u8))
+}
+
+/// Mirror of [`leek_value_binop_cir`] for a LEFT integer constant
+/// (`<int lit> OP dyn`) — order preserved for non-commutative ops.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_value_binop_cil(code: i64, c: i64, b: *mut Value, version: i64) -> *mut Value {
+    let Some(op) = binop_from_code(code) else {
+        return handle(Value::Null);
+    };
+    let r = unsafe { val(b) };
+    handle(apply_binop(op, &Value::Int(c), r, version as u8))
 }
 
 /// Pure dispatch of a [`BinOp`] onto the shared `leek_runtime` operators —
@@ -1178,6 +1322,7 @@ pub fn apply_binop(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
 }
 
 /// Build a `foreach` iterator (`[key, value]` pairs) for an iterable.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_foreach_iter(iterable: *mut Value) -> *mut Value {
     handle(leek_runtime::make_foreach_iter(unsafe { val(iterable) }))
 }
@@ -1235,6 +1380,7 @@ fn builtin_name(h: *mut Value) -> Option<String> {
 /// through the shared `leek_runtime::call_builtin` with a trivial native
 /// host. One shim per small arity (most builtins take ≤ 3 args).
 /// The `.class` meta-property: the runtime class of a value.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_class_of(v: *mut Value) -> *mut Value {
     handle(leek_runtime::class_of(unsafe { val(v) }))
 }
@@ -1242,6 +1388,7 @@ pub extern "C" fn leek_class_of(v: *mut Value) -> *mut Value {
 /// `.super` on a (runtime) class value: the parent class. A user class with an
 /// explicit parent yields that class's ref; one with no explicit parent yields
 /// the builtin `Value` base. A non-class value yields null.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_class_super(v: *mut Value) -> *mut Value {
     match unsafe { val(v) } {
         Value::ClassRef(def, _) => match CLASS_PARENT.with(|c| c.borrow().get(&def.0).cloned()) {
@@ -1262,6 +1409,7 @@ pub extern "C" fn leek_class_super(v: *mut Value) -> *mut Value {
 /// `new <BuiltinClass>(args)` — construct an `Array`/`Map`/`Set`/`Object`/
 /// boxed scalar from the boxed args. Delegates to the shared
 /// `construct_builtin_class`.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_construct_builtin(
     name: *mut Value,
     argv: *const *mut Value,
@@ -1279,6 +1427,7 @@ pub extern "C" fn leek_construct_builtin(
 /// Host game builtin (`getCell`, `getLife`, …): unbox the args and forward
 /// to the installed [`crate::game::GameRuntime`]. Emitted by the backend when
 /// `link_game` is on for a builtin it doesn't otherwise handle.
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_game_builtin(
     name: *mut Value,
     argv: *const *mut Value,
@@ -1293,6 +1442,7 @@ pub extern "C" fn leek_game_builtin(
     handle(crate::game::dispatch(&name, &args))
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_builtin0(name: *mut Value, version: i64) -> *mut Value {
     let Some(name) = builtin_name(name) else {
         return handle(Value::Null);
@@ -1306,6 +1456,7 @@ pub extern "C" fn leek_builtin0(name: *mut Value, version: i64) -> *mut Value {
     handle(leek_runtime::call_builtin(&mut host, &name, &[]).unwrap_or(Value::Null))
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_builtin1(name: *mut Value, a0: *mut Value, version: i64) -> *mut Value {
     let Some(name) = builtin_name(name) else {
         return handle(Value::Null);
@@ -1320,6 +1471,7 @@ pub extern "C" fn leek_builtin1(name: *mut Value, a0: *mut Value, version: i64) 
     handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_builtin2(
     name: *mut Value,
     a0: *mut Value,
@@ -1339,6 +1491,7 @@ pub extern "C" fn leek_builtin2(
     handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_builtin3(
     name: *mut Value,
     a0: *mut Value,
@@ -1363,6 +1516,7 @@ pub extern "C" fn leek_builtin3(
     handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn leek_builtin4(
     name: *mut Value,
     a0: *mut Value,
@@ -1389,13 +1543,43 @@ pub extern "C" fn leek_builtin4(
     handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
 }
 
-/// Recover the `Value` behind a handle, freeing the box. Used at the JIT
-/// boundary to read the program's result.
+/// Read the `Value` behind a handle by cloning it, WITHOUT freeing the box.
+/// The box stays owned by the per-run [`BOXES`] registry and is reclaimed in a
+/// single sweep by [`free_run_boxes`] at run end — so handles are never freed
+/// at the read site, which keeps box ownership in exactly one place and makes a
+/// double-free impossible. Used at the JIT boundary to read the program's
+/// result and at each lambda-callback return.
 ///
 /// # Safety
-/// `p` must be a handle and must not be used afterward.
-pub unsafe fn take(p: *mut Value) -> Value {
-    *unsafe { Box::from_raw(p) }
+/// `p` must be a live handle (created by [`handle`] and not yet swept).
+pub unsafe fn read_handle(p: *mut Value) -> Value {
+    unsafe { (*p).clone() }
+}
+
+/// Reclaim every value handle allocated during the current run. Call once the
+/// run's result has been read out (cloned) — see [`read_handle`] — so the
+/// result `Value` and anything reachable from it (held by its own `Rc` clones)
+/// survives.
+///
+/// Each handle's storage lives in the [`ARENA`]; bumpalo doesn't run
+/// destructors, so we `drop_in_place` each value exactly once here (releasing
+/// the `Rc`-backed array/map/string storage it holds — no other code frees a
+/// handle, so there is no double-free), then `reset` the arena to reclaim all
+/// its memory at once while retaining capacity for the next run.
+pub fn free_run_boxes() {
+    BOX_STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        for p in s.boxes.drain(..) {
+            // SAFETY: `p` is a unique, still-live value in the arena, produced
+            // by `handle` and dropped exactly once (reads clone, never free).
+            unsafe { std::ptr::drop_in_place(p) };
+        }
+        // All values are dropped; release their bump storage in one shot.
+        // `reset` keeps the largest chunk so subsequent runs reuse it.
+        if let Some(arena) = s.arena.as_mut() {
+            arena.reset();
+        }
+    });
 }
 
 /// All shim `(symbol, address)` pairs, for JIT symbol registration.
@@ -1409,12 +1593,16 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_box_real", leek_box_real as *const u8),
         ("leek_box_bool", leek_box_bool as *const u8),
         ("leek_box_null", leek_box_null as *const u8),
+        ("leek_const_string", leek_const_string as *const u8),
         ("leek_unbox_int", leek_unbox_int as *const u8),
         ("leek_unbox_real", leek_unbox_real as *const u8),
         ("leek_unbox_bool", leek_unbox_bool as *const u8),
         ("leek_array_new", leek_array_new as *const u8),
         ("leek_array_push", leek_array_push as *const u8),
         ("leek_value_index", leek_value_index as *const u8),
+        ("leek_index_int", leek_index_int as *const u8),
+        ("leek_array_get_int", leek_array_get_int as *const u8),
+        ("leek_array_get_real", leek_array_get_real as *const u8),
         ("leek_value_set_index", leek_value_set_index as *const u8),
         ("leek_map_new", leek_map_new as *const u8),
         ("leek_map_put", leek_map_put as *const u8),
@@ -1444,6 +1632,8 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_call_value", leek_call_value as *const u8),
         ("leek_call_method", leek_call_method as *const u8),
         ("leek_value_binop", leek_value_binop as *const u8),
+        ("leek_value_binop_cir", leek_value_binop_cir as *const u8),
+        ("leek_value_binop_cil", leek_value_binop_cil as *const u8),
         ("leek_foreach_iter", leek_foreach_iter as *const u8),
         ("leek_class_of", leek_class_of as *const u8),
         ("leek_class_super", leek_class_super as *const u8),

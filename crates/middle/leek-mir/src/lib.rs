@@ -20,9 +20,11 @@
 pub mod cfg;
 pub mod ir;
 pub mod lower;
+pub mod opt;
 pub mod pipeline;
 pub mod verify;
 
 pub use ir::*;
 pub use lower::lower_file;
+pub use opt::{optimize_function, optimize_program};
 pub use verify::{verify_function, verify_program, MirError};

@@ -15,6 +15,24 @@ use super::prelude::*;
 static PRELUDE_PARSE_CACHE: LazyLock<Mutex<HashMap<(u8, Version), GreenNode>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// The function-signature maps a `Checker` collects from the embedded library
+/// headers. The headers depend only on the language version, so the collected
+/// signatures are cached and cloned into each fresh `Checker` rather than
+/// re-walking ~200 declarations every time.
+#[derive(Clone, Default)]
+struct SeededSigs {
+    param_types: HashMap<String, Vec<Type>>,
+    return_type: HashMap<String, Type>,
+    generic: HashMap<String, crate::generic::GenericSig>,
+}
+
+/// Memoized result of [`Checker::seed_library_signatures`], keyed by version.
+/// The parse cache above only avoids re-parsing the headers; this avoids the
+/// far larger cost of re-walking every signature and rebuilding the maps on
+/// every compile (which dominates small-file / per-keystroke latency).
+static SEEDED_SIG_CACHE: LazyLock<Mutex<HashMap<Version, SeededSigs>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Parse a static prelude header once per `(tag, version)` and return a clone
 /// of the cached green tree.
 fn cached_prelude_parse(tag: u8, version: Version, src: &str) -> GreenNode {
@@ -59,12 +77,40 @@ impl Checker {
     /// prelude feature flag) or [`Options::seed_library`]; off by default so the
     /// corpus baseline and normal inference are unchanged.
     pub(crate) fn seed_library_signatures(&mut self) {
+        // Fast path: the library signatures for this version are already
+        // collected. Clone them in and skip the re-walk. `extend` is safe
+        // because this runs on a fresh `Checker` before any user collection,
+        // so the maps are empty.
+        if let Some(cached) = SEEDED_SIG_CACHE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&self.version)
+        {
+            self.user_fn_param_types.extend(cached.param_types.clone());
+            self.user_fn_return_type.extend(cached.return_type.clone());
+            self.user_fn_generic.extend(cached.generic.clone());
+            return;
+        }
+
         // Standard library first, then the leek-wars game functions
         // (`getCell`, `getLife`, …) so in-game scripts infer their
         // declared returns too. Same-named entries: last wins, but the
         // two sets are effectively disjoint.
         self.seed_header(0, leek_prelude::STDLIB_SRC);
         self.seed_header(1, leek_prelude::LEEKWARS_SRC);
+
+        // Snapshot the freshly collected library signatures (the maps hold
+        // nothing else yet) so the next `Checker` at this version reuses them.
+        let snapshot = SeededSigs {
+            param_types: self.user_fn_param_types.clone(),
+            return_type: self.user_fn_return_type.clone(),
+            generic: self.user_fn_generic.clone(),
+        };
+        SEEDED_SIG_CACHE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(self.version)
+            .or_insert(snapshot);
     }
 
     /// Parse one typed signature header and collect its top-level
@@ -89,26 +135,47 @@ impl Checker {
         // types so call-site checks for Function<X => Y>-typed
         // parameters (IMPOSSIBLE_CAST detection) can resolve them.
         // Also record class → parent links so `super` types correctly.
+        // Match on the node kind before casting so each child is consumed by a
+        // single `cast` (which takes ownership) instead of being cloned for each
+        // failed cast attempt.
         for child in file.syntax().children() {
-            if let Some(fn_decl) = FnDecl::cast(child.clone()) {
-                self.collect_fn_signature(&fn_decl);
-            } else if let Some(cls) = ClassDecl::cast(child) {
-                let (name, parent) = class_name_and_parent(&cls);
-                let Some(name) = name else { continue };
-                if let Some(parent) = parent {
-                    self.class_parents.insert(name.clone(), parent);
+            match child.kind() {
+                SyntaxKind::FnDecl => {
+                    if let Some(fn_decl) = FnDecl::cast(child) {
+                        self.collect_fn_signature(&fn_decl);
+                    }
                 }
-                self.collect_class_members(&cls, &name);
-                self.collect_generic_class(&cls, &name);
+                SyntaxKind::ClassDecl => {
+                    if let Some(cls) = ClassDecl::cast(child) {
+                        let (name, parent) = class_name_and_parent(&cls);
+                        let Some(name) = name else { continue };
+                        if let Some(parent) = parent {
+                            self.class_parents.insert(name.clone(), parent);
+                        }
+                        self.collect_class_members(&cls, &name);
+                        self.collect_generic_class(&cls, &name);
+                    }
+                }
+                _ => {}
             }
         }
         for child in file.syntax().children() {
-            if let Some(fn_decl) = FnDecl::cast(child.clone()) {
-                self.check_fn_body(&fn_decl);
-            } else if let Some(cls) = ClassDecl::cast(child.clone()) {
-                self.check_class(&cls);
-            } else if let Some(stmt) = Stmt::cast(child) {
-                self.check_stmt(&stmt);
+            match child.kind() {
+                SyntaxKind::FnDecl => {
+                    if let Some(fn_decl) = FnDecl::cast(child) {
+                        self.check_fn_body(&fn_decl);
+                    }
+                }
+                SyntaxKind::ClassDecl => {
+                    if let Some(cls) = ClassDecl::cast(child) {
+                        self.check_class(&cls);
+                    }
+                }
+                _ => {
+                    if let Some(stmt) = Stmt::cast(child) {
+                        self.check_stmt(&stmt);
+                    }
+                }
             }
         }
     }

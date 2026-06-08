@@ -247,11 +247,28 @@ pub fn run() -> Result<ExitCode> {
                     .native_out
                     .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from("out.o"));
+                if cli.native_emit == NativeEmitArg::Exe {
+                    // AOT: compile to a standalone executable. The program runs
+                    // unbounded (no per-run op budget), like a normal binary.
+                    opts.op_limit = u64::MAX;
+                    let out = cli
+                        .native_out
+                        .clone()
+                        .unwrap_or_else(|| std::path::PathBuf::from("a.out"));
+                    if let Err(e) =
+                        leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, false)
+                    {
+                        eprintln!("native: {e}");
+                        return Ok(ExitCode::from(1));
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
                 opts.emit = match cli.native_emit {
                     NativeEmitArg::Run => NativeEmit::Jit,
                     NativeEmitArg::Clif => NativeEmit::Clif,
                     NativeEmitArg::Asm => NativeEmit::Disasm,
                     NativeEmitArg::Object => NativeEmit::Object(obj_path.clone()),
+                    NativeEmitArg::Exe => unreachable!("handled above"),
                 };
                 match leek_backend_native::compile(hir.0.as_ref(), &opts) {
                     Ok(NativeArtifact::Value(v)) => println!("{v}"),

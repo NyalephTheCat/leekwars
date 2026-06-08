@@ -188,6 +188,38 @@ mod index_tests {
         check_collecting(&ast, src, Version::LATEST, Options::default())
     }
 
+    fn run_seeded(text: &str) -> TypeCheckResult {
+        let src = SourceId::new(1).unwrap();
+        let lex_out = lex(text, src, Version::LATEST);
+        let parse = parse_tokens(text, src, &lex_out.tokens, Version::LATEST);
+        let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
+        check_collecting(
+            &ast,
+            src,
+            Version::LATEST,
+            Options {
+                experimental_prelude: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn cached_library_seeding_is_stable_and_complete() {
+        // Seeding the stdlib signatures must yield the same maps whether it
+        // walks the headers fresh (cold cache) or clones the memoized snapshot
+        // (warm cache). Two sequential seeded checks must agree, and a known
+        // stdlib signature must survive caching.
+        let first = run_seeded("var x = 1\n").signatures.fn_returns;
+        let second = run_seeded("var x = 1\n").signatures.fn_returns;
+        assert_eq!(first, second, "seeded signatures stable across runs");
+        assert_eq!(
+            first.get("floor"),
+            Some(&Type::Integer),
+            "stdlib `floor` signature present after (cached) seeding"
+        );
+    }
+
     #[test]
     fn integer_literal_at_cursor() {
         let text = "var x = 5;";

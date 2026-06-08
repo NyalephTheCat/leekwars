@@ -40,6 +40,8 @@
     clippy::default_trait_access
 )]
 
+pub mod aot;
+pub mod aot_meta;
 pub mod debug;
 pub mod game;
 mod options;
@@ -72,6 +74,23 @@ pub enum NativeArtifact {
     Text(String),
     /// An object file was written to disk. [`NativeEmit::Object`].
     Object,
+}
+
+thread_local! {
+    /// (JIT-compile, execute) split of the most recent JIT `run`/`compile`
+    /// on this thread. Set at the end of the [`NativeEmit::Jit`] path.
+    static LAST_JIT_SPLIT: std::cell::Cell<Option<(std::time::Duration, std::time::Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The (JIT-compile, execute) durations of the most recent successful JIT run
+/// on this thread, or `None` if none has completed. The compile portion covers
+/// Cranelift codegen + module finalize + runtime wiring; the execute portion is
+/// the JIT'd `main` call. Lets the benchmark harness report the two separately
+/// instead of one combined figure.
+#[must_use]
+pub fn last_jit_split() -> Option<(std::time::Duration, std::time::Duration)> {
+    LAST_JIT_SPLIT.with(std::cell::Cell::get)
 }
 
 /// Convenience: JIT-compile `hir` with `opts` and run it, returning the
@@ -111,40 +130,14 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
     // reference can be invoked to construct), recording class → thunk index.
     // Done before signature/reachability analysis so the thunks participate.
     let class_thunks = translate::append_ctor_thunks(&mut program, opts.version);
+    // Pin provably-integer untyped params to `integer` so they compile unboxed.
+    translate::specialize_param_types(&mut program, lang);
     let main = &program.functions[main_idx];
     // Program-wide function result kinds (drives cross-call typing) and
     // declared scalar kinds of typed globals (drives write coercion).
     let fn_rets = translate::compute_fn_rets(&program, lang);
     let global_tys = translate::global_scalar_tys(&program);
-    // Map each *bodiless* function's HIR `DefId` to the runtime builtin
-    // to dispatch when it's called. A `@native-backend:` directive
-    // overrides the name (its leading identifier — `abs`, or `abs(%0)` →
-    // `abs`); otherwise the function's own name is the builtin name (the
-    // signature-file migration of existing builtins). Functions with a
-    // body aren't included — they compile normally.
-    let native_directives: std::collections::HashMap<leek_hir::DefId, String> = hir
-        .defs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, d)| match d {
-            leek_hir::Def::Function(f) if f.body.is_none() => {
-                let name = f
-                    .backend_directives
-                    .iter()
-                    .find(|(b, _)| b == "native")
-                    .map(|(_, body)| {
-                        body.split(['(', ' '])
-                            .next()
-                            .unwrap_or(body)
-                            .trim()
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| f.name.clone());
-                Some((leek_hir::DefId(i as u32), name))
-            }
-            _ => None,
-        })
-        .collect();
+    let native_directives = collect_native_directives(hir);
 
     match &opts.emit {
         NativeEmit::Clif => {
@@ -191,7 +184,7 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             let mut module = cranelift_object::ObjectModule::new(ob);
             // Object emit isn't executed, so lambda addresses / the method
             // table aren't needed.
-            let _ = define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game)?;
+            let _ = define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game, false)?;
             let bytes = module
                 .finish()
                 .emit()
@@ -200,6 +193,7 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             Ok(NativeArtifact::Object)
         }
         NativeEmit::Jit => {
+            let t_compile = std::time::Instant::now();
             let isa = build_isa(opts)?;
             let mut jb = cranelift_jit::JITBuilder::with_isa(isa, default_libcall_names());
             // Register the shared runtime math builtins (and the `**`
@@ -215,7 +209,7 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             }
             let mut module = cranelift_jit::JITModule::new(jb);
             let (id, ret_ty, lambda_funcs, method_resolve, static_init, user_fn_idx, exact_arity, class_string_method) =
-                define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game)?;
+                define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game, false)?;
             module
                 .finalize_definitions()
                 .map_err(|e| NativeError::Compile(e.to_string()))?;
@@ -307,6 +301,11 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             // ops at the same MIR sites the interpreter does (so counts match);
             // `ops_used()` reads the total after `main` returns.
             runtime::reset_ops(opts.op_limit);
+            // Everything above is codegen + runtime wiring; the program itself
+            // hasn't run yet. Split the timing here so the benchmark can report
+            // JIT compilation separately from execution.
+            let compile_dur = t_compile.elapsed();
+            let t_exec = std::time::Instant::now();
             // SAFETY: `leek_main` was declared with the matching ABI
             // (`() -> i64` or `() -> f64`) and the module finalized; the
             // pointer is a valid host function.
@@ -337,9 +336,35 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
                     let f = unsafe {
                         std::mem::transmute::<*const u8, extern "C" fn() -> *mut Value>(ptr)
                     };
-                    runtime::invoke_top_level_string(unsafe { runtime::take(f()) })
+                    // Clone the result out of its handle (don't free the box —
+                    // `free_run_boxes` below reclaims every handle at once). The
+                    // clone keeps the result's `Rc`-backed data alive past the
+                    // sweep.
+                    runtime::invoke_top_level_string(unsafe { runtime::read_handle(f()) })
                 }
             };
+            LAST_JIT_SPLIT.with(|c| c.set(Some((compile_dur, t_exec.elapsed()))));
+            // The program has finished running and its result is now an owned,
+            // JIT-independent `Value` (any class `string()` display override
+            // already ran during extraction above; scalars and composites live
+            // on the normal heap). Reclaim the module's executable + data
+            // memory now — a plain `JITModule` drop LEAKS these mmap'd regions,
+            // which accumulates across runs and OOMs a process that JIT-compiles
+            // many programs (e.g. the upstream-suite regression test compiles
+            // 10k+ cases in one process).
+            //
+            // SAFETY: `free_memory` requires that no function from this module
+            // is executing or called afterward. `main` has returned, no JIT
+            // function is invoked past this point (a returned function value
+            // stringifies without being called), and the per-run runtime tables
+            // of finalized addresses (`LAMBDA_FNS`, …) are overwritten at the
+            // start of the next run before they could be consulted again.
+            unsafe { module.free_memory() };
+            // Reclaim every boxed `Value` handle this run allocated. The result
+            // was cloned out above (`read_handle`), so it and its reachable data
+            // survive; all intermediate boxes — including the ones the global
+            // store held — are freed here instead of leaking until process exit.
+            runtime::free_run_boxes();
             // A runtime fault recorded by a shim during the run (e.g. a
             // v4-strict out-of-bounds array write) takes precedence over the
             // computed value: the program errored.
@@ -356,6 +381,96 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
 /// in `module`, returning `main`'s `FuncId` and result kind. Bails (so the
 /// whole program skips) if any reachable function falls outside the scalar
 /// subset.
+/// Map each *bodiless* function's HIR `DefId` to the runtime builtin to dispatch
+/// when it's called (honoring a `@native-backend:` directive's leading
+/// identifier, else the function's own name).
+fn collect_native_directives(hir: &HirFile) -> HashMap<leek_hir::DefId, String> {
+    hir.defs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| match d {
+            leek_hir::Def::Function(f) if f.body.is_none() => {
+                let name = f
+                    .backend_directives
+                    .iter()
+                    .find(|(b, _)| b == "native")
+                    .map(|(_, body)| body.split(['(', ' ']).next().unwrap_or(body).trim().to_string())
+                    .unwrap_or_else(|| f.name.clone());
+                Some((leek_hir::DefId(i as u32), name))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Emit an AOT object (with externally linkable `leek_uniform_{idx}` symbols)
+/// and return the dispatch-table [`AotMeta`](crate::aot_meta::AotMeta) the
+/// runtime must reinstall at startup. Used only by the AOT path.
+pub fn compile_object_with_meta(
+    hir: &HirFile,
+    opts: &NativeOptions,
+    obj_path: &std::path::Path,
+) -> Result<aot_meta::AotMeta, NativeError> {
+    runtime::set_enforce_budget(opts.op_limit != u64::MAX);
+    let (mut program, errs) = leek_mir::lower_file(hir);
+    if let Some(first) = errs.first() {
+        return Err(NativeError::Compile(format!(
+            "MIR lowering failed: {}",
+            first.message
+        )));
+    }
+    let main_idx = program
+        .functions
+        .iter()
+        .position(|f| f.kind == leek_mir::ir::FunctionKind::Main)
+        .ok_or_else(|| NativeError::Compile("no main function".into()))?;
+    let lang = Lang {
+        version: opts.version,
+        strict: opts.strict,
+    };
+    let class_thunks = translate::append_ctor_thunks(&mut program, opts.version);
+    translate::specialize_param_types(&mut program, lang);
+    let fn_rets = translate::compute_fn_rets(&program, lang);
+    let global_tys = translate::global_scalar_tys(&program);
+    let native_directives = collect_native_directives(hir);
+    let main = &program.functions[main_idx];
+
+    let isa = build_isa(opts)?;
+    let ob = cranelift_object::ObjectBuilder::new(isa, "leek", default_libcall_names())
+        .map_err(|e| NativeError::Compile(e.to_string()))?;
+    let mut module = cranelift_object::ObjectModule::new(ob);
+    let (_main_id, _ret, lambda_funcs, method_resolve, static_init, user_fn_idx, exact_arity, class_string_method) =
+        define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game, /* external_uniform */ true)?;
+    let bytes = module
+        .finish()
+        .emit()
+        .map_err(|e| NativeError::Compile(e.to_string()))?;
+    std::fs::write(obj_path, bytes).map_err(|e| NativeError::Compile(e.to_string()))?;
+
+    Ok(aot_meta::AotMeta::build(
+        &program,
+        &lambda_funcs,
+        method_resolve,
+        static_init,
+        user_fn_idx,
+        exact_arity,
+        class_string_method,
+        &class_thunks,
+    ))
+}
+
+/// Symbol name + linkage for a uniform-ABI function. AOT uses one externally
+/// visible `leek_uniform_{idx}` scheme so a generated C harness can take the
+/// address; the JIT keeps the descriptive local name (linkage is irrelevant
+/// there, since addresses come from the `FuncId`).
+fn uniform_symbol(external: bool, jit_prefix: &str, idx: usize) -> (String, Linkage) {
+    if external {
+        (format!("leek_uniform_{idx}"), Linkage::Export)
+    } else {
+        (format!("{jit_prefix}_{idx}"), Linkage::Local)
+    }
+}
+
 fn define_program<M: Module>(
     module: &mut M,
     program: &leek_mir::ir::MirProgram,
@@ -372,6 +487,12 @@ fn define_program<M: Module>(
     debug_hooks: bool,
     // Route unknown builtins to the host game runtime (see `crate::game`).
     link_game: bool,
+    // AOT: give every uniform-ABI function (lambda / thunk / value-method) a
+    // single externally-linkable `leek_uniform_{idx}` symbol, so a generated C
+    // harness can take its address to repopulate the runtime dispatch tables at
+    // startup. The JIT passes `false` (addresses come from `FuncId`, names /
+    // linkage are irrelevant).
+    external_uniform: bool,
 ) -> Result<
     (
         cranelift_module::FuncId,
@@ -488,8 +609,9 @@ fn define_program<M: Module>(
         clsig.params.push(AbiParam::new(i64t));
         clsig.params.push(AbiParam::new(i64t));
         clsig.returns.push(AbiParam::new(i64t));
+        let (sym, link) = uniform_symbol(external_uniform, "leek_lambda", idx);
         let id = module
-            .declare_function(&format!("leek_lambda_{idx}"), Linkage::Local, &clsig)
+            .declare_function(&sym, link, &clsig)
             .map_err(|e| NativeError::Compile(e.to_string()))?;
         lambda_funcs.insert(idx, (id, f.params.len()));
     }
@@ -501,8 +623,9 @@ fn define_program<M: Module>(
         clsig.params.push(AbiParam::new(i64t));
         clsig.params.push(AbiParam::new(i64t));
         clsig.returns.push(AbiParam::new(i64t));
+        let (sym, link) = uniform_symbol(external_uniform, "leek_ctorthunk", idx);
         let id = module
-            .declare_function(&format!("leek_ctorthunk_{idx}"), Linkage::Local, &clsig)
+            .declare_function(&sym, link, &clsig)
             .map_err(|e| NativeError::Compile(e.to_string()))?;
         lambda_funcs.insert(idx, (id, f.params.len()));
     }
@@ -561,8 +684,9 @@ fn define_program<M: Module>(
         clsig.params.push(AbiParam::new(i64t));
         clsig.params.push(AbiParam::new(i64t));
         clsig.returns.push(AbiParam::new(i64t));
+        let (sym, link) = uniform_symbol(external_uniform, "leek_method", idx);
         let id = module
-            .declare_function(&format!("leek_method_{idx}"), Linkage::Local, &clsig)
+            .declare_function(&sym, link, &clsig)
             .map_err(|e| NativeError::Compile(e.to_string()))?;
         method_funcs.insert(idx, (id, f.params.len()));
     }

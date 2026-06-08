@@ -54,7 +54,7 @@ pub use project::{
     LoadedProjectFile, Project, ProjectError, ProjectIndex, SourceInput, walk_leek_files,
 };
 pub use recipe::{
-    ArtifactList, RecipeArtifact, RecipeError, RecipeParams, RecipePlan, RecipeStep,
+    ArtifactList, OptLevel, RecipeArtifact, RecipeError, RecipeParams, RecipePlan, RecipeStep,
     pipeline_for as pipeline_for_recipe, plan_for,
 };
 pub use timed::{StepTiming, Timed, TimedBox, TimingSink};

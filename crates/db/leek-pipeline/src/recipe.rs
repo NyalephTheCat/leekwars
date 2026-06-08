@@ -15,11 +15,40 @@ use leek_diagnostics::Severity;
 
 use crate::{Artifact, Pipeline, Step, TimedBox, TimingSink};
 
+/// How aggressively backend-agnostic optimization passes rewrite the IR.
+///
+/// Optimization is opt-in per recipe because some consumers need the IR to
+/// mirror the source 1:1 — notably the Java backend's *exact* mode, which
+/// reproduces the upstream reference compiler's emission shape, and analysis
+/// passes (lint, complexity) that report on the code as written. Codegen
+/// recipes (`miku run`, `miku build --clean`, native) request [`OptLevel::O1`]
+/// to shrink the program's static op budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptLevel {
+    /// No optimization. The IR mirrors the source structure.
+    #[default]
+    O0,
+    /// Backend-agnostic constant folding / dead-code elimination.
+    O1,
+}
+
+impl OptLevel {
+    /// Whether optimization passes should run at this level.
+    #[must_use]
+    pub fn optimizes(self) -> bool {
+        matches!(self, OptLevel::O1)
+    }
+}
+
 #[derive(Clone)]
 pub struct RecipeParams {
     /// If set, producer steps that opt into [`crate::combinators::RecipeStepStopOnError`]
     /// stop the pipeline when new diagnostics at or above this severity are emitted.
     pub stop_on_diagnostics: Option<Severity>,
+    /// How aggressively to optimize the IR. Defaults to [`OptLevel::O0`] so
+    /// analysis/diagnostic recipes see the code as written; codegen recipes
+    /// raise it via [`RecipeParams::with_opt`].
+    pub opt: OptLevel,
     /// Per-artifact inclusion gate used by [`crate::combinators::Optional`].
     /// Defaults to "include everything".
     want: Option<std::sync::Arc<dyn Fn(TypeId) -> bool + Send + Sync>>,
@@ -29,6 +58,7 @@ impl Default for RecipeParams {
     fn default() -> Self {
         Self {
             stop_on_diagnostics: Some(Severity::Error),
+            opt: OptLevel::default(),
             want: None,
         }
     }
@@ -53,6 +83,7 @@ impl RecipeParams {
     pub fn lsp() -> Self {
         Self {
             stop_on_diagnostics: None,
+            opt: OptLevel::O0,
             want: None,
         }
     }
@@ -61,12 +92,21 @@ impl RecipeParams {
     pub fn permissive() -> Self {
         Self {
             stop_on_diagnostics: None,
+            opt: OptLevel::O0,
             want: None,
         }
     }
 
     pub fn without_stop_on_error(mut self) -> Self {
         self.stop_on_diagnostics = None;
+        self
+    }
+
+    /// Request an [`OptLevel`] for this recipe (codegen drivers use
+    /// [`OptLevel::O1`]).
+    #[must_use]
+    pub fn with_opt(mut self, opt: OptLevel) -> Self {
+        self.opt = opt;
         self
     }
 

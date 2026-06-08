@@ -1,0 +1,20 @@
+[package]
+name = "leek-aot-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A C-linkable static archive bundling the Leekscript runtime (the `leek_*`
+# shims + math builtins, with Rust std) plus the AOT harness glue. The AOT
+# backend links a compiled program object against this with `cc`, so producing
+# an executable needs no per-program `cargo`/`rustc` run.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+leek-runtime        = { workspace = true }
+leek-backend-native = { workspace = true }
+leek-backend-interp = { workspace = true }
+
+[lints]
+workspace = true

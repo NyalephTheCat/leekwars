@@ -949,6 +949,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "leek-aot-runtime"
+version = "0.0.1"
+dependencies = [
+ "leek-backend-interp",
+ "leek-backend-native",
+ "leek-runtime",
+]
+
+[[package]]
 name = "leek-backend-interp"
 version = "0.0.1"
 dependencies = [
@@ -987,6 +996,7 @@ name = "leek-backend-native"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "bumpalo",
  "cranelift",
  "cranelift-frontend",
  "cranelift-jit",
@@ -1000,6 +1010,8 @@ dependencies = [
  "leek-span",
  "leek-syntax",
  "leek-types",
+ "serde",
+ "serde_json",
  "target-lexicon",
 ]
 
@@ -1617,6 +1629,7 @@ dependencies = [
  "ignore",
  "leek-backend-interp",
  "leek-backend-java",
+ "leek-backend-native",
  "leek-backends",
  "leek-complexity",
  "leek-diagnostics",
