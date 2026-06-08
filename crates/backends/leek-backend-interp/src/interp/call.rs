@@ -403,18 +403,16 @@ impl<'a> Interpreter<'a> {
                 }
                 self.run_method(receiver, method, &args)
             }
-            Value::Super {
-                parent_class,
-                receiver: inner,
-            } => {
-                if let Some(fn_idx) = self.find_method(parent_class, method) {
+            Value::Super(s) => {
+                if let Some(fn_idx) = self.find_method(&s.parent_class, method) {
                     let mut full = Vec::with_capacity(args.len() + 1);
-                    full.push((**inner).clone());
+                    full.push((*s.receiver).clone());
                     full.extend(args);
                     return self.run_function(fn_idx, full);
                 }
                 Err(Outcome::Error(format!(
-                    "super.{method}: parent class `{parent_class}` has no such method"
+                    "super.{method}: parent class `{}` has no such method",
+                    s.parent_class
                 )))
             }
             Value::ClassRef(class_def, _) => {

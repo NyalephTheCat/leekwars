@@ -391,6 +391,13 @@ pub(super) fn declare_imports(
             ("leek_array_new", &[], Some(i)),
             ("leek_array_push", &[i, i], None),
             ("leek_value_index", &[i, i, i], Some(i)),
+            // Field reads with the name passed unboxed (`ptr`,`len`,`ver`):
+            // `_get` returns a handle (saves the key box); `_int`/`_real` return
+            // an unboxed scalar for a read into a scalar-typed slot.
+            ("leek_field_get", &[i, i, i, i], Some(i)),
+            ("leek_field_get_int", &[i, i, i, i], Some(i)),
+            ("leek_field_get_real", &[i, i, i, i], Some(types::F64)),
+            ("leek_field_set", &[i, i, i, i, i], None),
             // Typed array reads with an unboxed integer index: `leek_index_int`
             // returns a handle (saves boxing the index); the `_get_int/_real`
             // pair return an unboxed scalar (also skip boxing the result) for a
@@ -429,6 +436,8 @@ pub(super) fn declare_imports(
             ("leek_value_binop", &[i, i, i, i], Some(i)),
             ("leek_value_binop_cir", &[i, i, i, i], Some(i)),
             ("leek_value_binop_cil", &[i, i, i, i], Some(i)),
+            ("leek_value_binop_crr", &[i, i, types::F64, i], Some(i)),
+            ("leek_value_binop_crl", &[i, types::F64, i, i], Some(i)),
             ("leek_foreach_iter", &[i], Some(i)),
             ("leek_class_of", &[i], Some(i)),
             ("leek_class_super", &[i], Some(i)),

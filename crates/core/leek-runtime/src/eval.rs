@@ -224,7 +224,7 @@ pub fn class_of(v: &Value) -> Value {
             let b = i.borrow();
             Value::ClassRef(b.class, Rc::new(b.class_name.clone()))
         }
-        Value::Super { receiver, .. } => class_of(receiver),
+        Value::Super(s) => class_of(&s.receiver),
         Value::Cell(c) => class_of(&c.borrow()),
     }
 }

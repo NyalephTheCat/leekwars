@@ -127,7 +127,7 @@ impl Value {
                 // can't overflow `i64` before the `.max(0)` clamp.
                 hi.saturating_sub(lo).saturating_add(1).max(0)
             }
-            Value::Super { receiver, .. } => receiver.to_long(),
+            Value::Super(s) => s.receiver.to_long(),
             Value::Cell(c) => c.borrow().to_long(),
         }
     }

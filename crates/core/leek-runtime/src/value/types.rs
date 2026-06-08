@@ -60,11 +60,10 @@ pub enum Value {
     /// `super` expression inside a method body. Behaves like the
     /// stored receiver for everything except method dispatch,
     /// which statically resolves against `parent_class`. Built by
-    /// [`leek_mir::Rvalue::MakeSuper`] in the lowering pass.
-    Super {
-        parent_class: String,
-        receiver: Rc<Value>,
-    },
+    /// [`leek_mir::Rvalue::MakeSuper`] in the lowering pass. Boxed —
+    /// it's a rare, large variant (an inline `String` + `Rc`), so
+    /// keeping it out of line shrinks every `Value` (32 → 24 bytes).
+    Super(Box<SuperValue>),
     /// Shared mutable storage — wraps a local that's captured by
     /// one or more lambdas so writes propagate between the outer
     /// scope and every closure that holds a reference. Reads peek
@@ -72,6 +71,14 @@ pub enum Value {
     /// interpreter at frame init for locals the lowerer marked
     /// `is_shared`. Never produced by user code directly.
     Cell(Rc<RefCell<Value>>),
+}
+
+/// Payload of [`Value::Super`] — kept behind a `Box` so it doesn't bloat the
+/// `Value` enum (see the `Super` variant).
+#[derive(Debug, Clone)]
+pub struct SuperValue {
+    pub parent_class: String,
+    pub receiver: Rc<Value>,
 }
 
 #[derive(Debug, Clone)]

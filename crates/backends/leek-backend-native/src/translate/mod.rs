@@ -3506,6 +3506,21 @@ impl Tx<'_, '_> {
                     {
                         (self.index_unboxed(*base, idx, target)?, target)
                     }
+                    // A direct field read into a scalar-typed slot
+                    // (`integer x = obj.f`) reads straight into an unboxed
+                    // scalar. Gated to the generic member path `field` would take
+                    // (a `Ref` base that isn't a class-ref; not the `super`/
+                    // `class` meta-properties), so the special cases still route
+                    // through `field`.
+                    Rvalue::Field(base, name)
+                        if matches!(target, ValTy::Int | ValTy::Real)
+                            && name != "super"
+                            && name != "class"
+                            && self.var_tys[base.0 as usize] == ValTy::Ref
+                            && !self.classref_locals.contains_key(base) =>
+                    {
+                        (self.field_unboxed(*base, name, target)?, target)
+                    }
                     _ => self.rvalue(rv)?,
                 };
                 // Coerce to the local's declared cranelift kind (e.g.
@@ -3674,9 +3689,9 @@ impl Tx<'_, '_> {
         if self.is_final_field(base, name) {
             return Ok(());
         }
-        let set = self.imports.rt("leek_value_set_index")?;
+        let set = self.imports.rt("leek_field_set")?;
         let (base_h, _) = self.local_value(base)?;
-        let key = self.const_string(name)?;
+        let (ptr, lenv) = self.const_str_bytes(name);
         let (mut v, mut vt) = self.rvalue(rv)?;
         // Coerce a scalar write to the declared field type (`real? x = 5`
         // stores `5.0`), matching the interpreter's `coerce_to_type`.
@@ -3688,7 +3703,10 @@ impl Tx<'_, '_> {
         }
         let val = self.coerce(v, vt, ValTy::Ref)?;
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
-        self.b.ins().call(set, &[base_h, key, val, ver]);
+        // The field name is passed unboxed (`ptr`,`len`) — `leek_field_set`
+        // writes an instance/object field via `set_field(&str, …)` with no
+        // `Value::String` key allocation.
+        self.b.ins().call(set, &[base_h, ptr, lenv, val, ver]);
         Ok(())
     }
 
@@ -5295,12 +5313,9 @@ impl Tx<'_, '_> {
         // `BoundMethod` from `METHOD_RESOLVE` — seeded for `obj.m` field reads
         // by `index_method_targets` (so the method is reachable + uniform-
         // compiled). The receiver is captured, so calling it prepends `obj`.
-        let get = self.imports.rt("leek_value_index")?;
         let (base_h, _) = self.local_value(base)?;
-        let key = self.const_string(name)?;
-        let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
-        let inst = self.b.ins().call(get, &[base_h, key, ver]);
-        Ok((self.b.inst_results(inst)[0], ValTy::Ref))
+        let v = self.field_get_boxed(base_h, name)?;
+        Ok((v, ValTy::Ref))
     }
 
     /// Read a file-level global by name.
@@ -5552,7 +5567,10 @@ impl Tx<'_, '_> {
     /// to a stack slot) and box them at runtime via `leek_const_string`. Unlike
     /// baking a `box_string` handle as an absolute immediate, this is fully
     /// relocatable — the AOT binary builds the string in its own process.
-    fn const_string(&mut self, s: &str) -> Result<Value, NativeError> {
+    /// Materialise a compile-time string's bytes onto a stack slot, returning
+    /// `(ptr, len)` as i64 values. Used both to box a string literal
+    /// (`const_string`) and to pass a field name unboxed to `leek_field_get*`.
+    fn const_str_bytes(&mut self, s: &str) -> (Value, Value) {
         let bytes = s.as_bytes();
         let len = bytes.len();
         let ptr = if len == 0 {
@@ -5570,8 +5588,45 @@ impl Tx<'_, '_> {
             self.b.ins().stack_addr(types::I64, slot, 0)
         };
         let lenv = self.b.ins().iconst(types::I64, i64::try_from(len).unwrap_or(i64::MAX));
+        (ptr, lenv)
+    }
+
+    fn const_string(&mut self, s: &str) -> Result<Value, NativeError> {
+        let (ptr, lenv) = self.const_str_bytes(s);
         let f = self.imports.rt("leek_const_string")?;
         let inst = self.b.ins().call(f, &[ptr, lenv]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
+    /// Read instance field / member `name` of `base`, returning a boxed handle,
+    /// via `leek_field_get` — the field name is passed unboxed (`ptr`,`len`), so
+    /// no `Value::String` key is allocated per read. Semantically identical to
+    /// `leek_value_index(base, const_string(name))`.
+    fn field_get_boxed(&mut self, base_h: Value, name: &str) -> Result<Value, NativeError> {
+        let (ptr, lenv) = self.const_str_bytes(name);
+        let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
+        let f = self.imports.rt("leek_field_get")?;
+        let inst = self.b.ins().call(f, &[base_h, ptr, lenv, ver]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
+    /// Read instance field `name` of `base` directly into an unboxed scalar
+    /// (`target` is `Int`/`Real`), via `leek_field_get_int`/`_real`. The value is
+    /// `read_member(..).to_long()/.to_real()` — byte-identical to what the boxed
+    /// read coerced to the scalar slot would produce, with neither key nor result
+    /// boxed. The caller guarantees `base` is a known class instance.
+    fn field_unboxed(&mut self, base: LocalId, name: &str, target: ValTy) -> Result<Value, NativeError> {
+        let (bv, bt) = self.local_value(base)?;
+        let base_h = self.coerce(bv, bt, ValTy::Ref)?;
+        let (ptr, lenv) = self.const_str_bytes(name);
+        let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
+        let sym = if target == ValTy::Real {
+            "leek_field_get_real"
+        } else {
+            "leek_field_get_int"
+        };
+        let f = self.imports.rt(sym)?;
+        let inst = self.b.ins().call(f, &[base_h, ptr, lenv, ver]);
         Ok(self.b.inst_results(inst)[0])
     }
 
@@ -5771,21 +5826,33 @@ impl Tx<'_, '_> {
         if lt == ValTy::Ref || rt == ValTy::Ref {
             let code = self.b.ins().iconst(types::I64, crate::runtime::binop_code(op));
             let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
-            // Fast path: when the *other* operand is an integer literal, pass it
-            // as an immediate to a `_ci{r,l}` shim instead of heap-boxing it on
-            // every evaluation (`n - 1`, `n < 2`, … — a box per op otherwise).
-            // The result is identical; only the constant's allocation is removed.
-            let res = if let (ValTy::Ref, Operand::Const(Const::Int(c))) = (lt, r) {
+            // Fast path: when exactly one operand is dynamic (`Ref`) and the
+            // other is a statically-`integer`/`real` value (literal OR a typed
+            // local), pass that scalar by value to a `_ci{r,l}` / `_cr{r,l}`
+            // shim instead of heap-boxing it on every evaluation (`arr[i] - 1`,
+            // `boxed + x`, …). The shim rebuilds the identical `Value::Int` /
+            // `Value::Real` on the stack, so the result is unchanged — only the
+            // scalar's per-op allocation is removed. `Bool` keeps the boxed
+            // path (its `Value::Bool` dispatch differs from an int rebuild).
+            let res = if lt == ValTy::Ref && rt == ValTy::Int {
                 let a = self.coerce(a, lt, ValTy::Ref)?;
-                let cv = self.b.ins().iconst(types::I64, *c);
                 let cir = self.imports.rt("leek_value_binop_cir")?;
-                let inst = self.b.ins().call(cir, &[code, a, cv, ver]);
+                let inst = self.b.ins().call(cir, &[code, a, b, ver]);
                 self.b.inst_results(inst)[0]
-            } else if let (ValTy::Ref, Operand::Const(Const::Int(c))) = (rt, l) {
+            } else if lt == ValTy::Ref && rt == ValTy::Real {
+                let a = self.coerce(a, lt, ValTy::Ref)?;
+                let crr = self.imports.rt("leek_value_binop_crr")?;
+                let inst = self.b.ins().call(crr, &[code, a, b, ver]);
+                self.b.inst_results(inst)[0]
+            } else if rt == ValTy::Ref && lt == ValTy::Int {
                 let b = self.coerce(b, rt, ValTy::Ref)?;
-                let cv = self.b.ins().iconst(types::I64, *c);
                 let cil = self.imports.rt("leek_value_binop_cil")?;
-                let inst = self.b.ins().call(cil, &[code, cv, b, ver]);
+                let inst = self.b.ins().call(cil, &[code, a, b, ver]);
+                self.b.inst_results(inst)[0]
+            } else if rt == ValTy::Ref && lt == ValTy::Real {
+                let b = self.coerce(b, rt, ValTy::Ref)?;
+                let crl = self.imports.rt("leek_value_binop_crl")?;
+                let inst = self.b.ins().call(crl, &[code, a, b, ver]);
                 self.b.inst_results(inst)[0]
             } else {
                 let binop = self.imports.rt("leek_value_binop")?;

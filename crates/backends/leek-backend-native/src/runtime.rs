@@ -471,9 +471,6 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             else {
                 return Value::Null;
             };
-            let mask = LAMBDA_BYREF
-                .with(|c| c.borrow().get(&cap.function_idx).cloned())
-                .unwrap_or_default();
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             // Captures are shared cells — pass them raw so the closure observes
             // (and propagates) enclosing-scope mutations. User args are threaded
@@ -485,7 +482,14 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
                 .iter()
                 .map(|c| handle(c.clone()))
                 .collect();
-            for a in thread_args(args, &mask, host.version()) {
+            // Borrow the by-ref mask in place — the map holds an entry for every
+            // lambda, so cloning it here allocated a `Vec<bool>` on every call.
+            let ver = host.version();
+            let threaded = LAMBDA_BYREF.with(|c| {
+                let b = c.borrow();
+                thread_args(args, b.get(&cap.function_idx).map_or(&[][..], |m| m.as_slice()), ver)
+            });
+            for a in threaded {
                 argv.push(handle(a));
             }
             // The uniform body loads exactly `nparams` handles (`[captures…,
@@ -531,8 +535,12 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             if USER_FN_EXACT_ARITY.with(|c| c.borrow().contains(&def.0)) && args.len() != nparams {
                 return Value::Null;
             }
-            let mask = LAMBDA_BYREF.with(|c| c.borrow().get(&idx).cloned()).unwrap_or_default();
-            let mut full = thread_args(args, &mask, host.version());
+            // Borrow the by-ref mask in place (no per-call `Vec<bool>` clone).
+            let ver = host.version();
+            let mut full = LAMBDA_BYREF.with(|c| {
+                let b = c.borrow();
+                thread_args(args, b.get(&idx).map_or(&[][..], |m| m.as_slice()), ver)
+            });
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             let argv: Vec<*mut Value> = full.into_iter().map(handle).collect();
@@ -867,8 +875,15 @@ pub extern "C" fn leek_array_push(arr: *mut Value, elem: *mut Value) {
 /// a handle (so map string keys work too).
 #[unsafe(no_mangle)]
 pub extern "C" fn leek_value_index(base: *mut Value, idx: *mut Value, version: i64) -> *mut Value {
-    let base = unsafe { val(base) };
-    let idx = unsafe { val(idx) };
+    handle(member_by_value(unsafe { val(base) }, unsafe { val(idx) }, version as u8))
+}
+
+/// The native string-/index-keyed member read shared by [`leek_value_index`]
+/// (boxed key) and [`read_member`] (`&str` key). Returns the value; the caller
+/// boxes or coerces it. Mirrors the interpreter: a runtime class-ref's
+/// reflection arrays, an instance's stored field then bound-method fallback,
+/// otherwise the shared `read_index_versioned`.
+fn member_by_value(base: &Value, idx: &Value, version: u8) -> Value {
     // `x.class.fields` (and `.methods` / `.static_fields` / …) on a runtime
     // class-reference value: return the registered reflection name array (a
     // fresh `Array<String>` each read). The compile-time `C.fields` form is
@@ -876,11 +891,11 @@ pub extern "C" fn leek_value_index(base: *mut Value, idx: *mut Value, version: i
     if let (Value::ClassRef(def, _), Value::String(member)) = (base, idx)
         && let Some(names) = CLASS_REFLECT
             .with(|c| c.borrow().get(&def.0).and_then(|m| m.get(member.as_str()).cloned()))
-        {
-            return handle(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
-                names.into_iter().map(|n| Value::String(std::rc::Rc::new(n))).collect(),
-            ))));
-        }
+    {
+        return Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+            names.into_iter().map(|n| Value::String(std::rc::Rc::new(n))).collect(),
+        )));
+    }
     // `instance['name']` resolves to a stored field first, then (like the
     // interpreter's `read_index_with_methods`) to a bound method.
     if let (Value::Instance(inst), Value::String(name)) = (base, idx) {
@@ -890,14 +905,82 @@ pub extern "C" fn leek_value_index(base: *mut Value, idx: *mut Value, version: i
             drop(b);
             let key = (cls, name.as_ref().clone());
             if let Some(fidx) = METHOD_RESOLVE.with(|m| m.borrow().get(&key).copied()) {
-                return handle(Value::Function(Function::BoundMethod {
+                return Value::Function(Function::BoundMethod {
                     function_idx: fidx,
                     receiver: Box::new(base.clone()),
-                }));
+                });
             }
         }
     }
-    handle(leek_runtime::read_index_versioned(base, idx, version as u8))
+    leek_runtime::read_index_versioned(base, idx, version)
+}
+
+/// Read member `name` of `base` (the static-name `obj.field` / `obj['name']`
+/// path). FAST PATH: an existing instance field needs NO string allocation —
+/// borrow the `&str`, clone the value out. Everything else (method fallback,
+/// object, class-ref reflection, non-composite) builds the boxed `Value::String`
+/// key and uses the exact same [`member_by_value`] logic as [`leek_value_index`],
+/// so the result is byte-identical to the boxed-key path.
+fn read_member(base: &Value, name: &str, version: u8) -> Value {
+    if let Value::Instance(inst) = base
+        && let Some(v) = inst.borrow().fields.get(name)
+    {
+        return v.clone();
+    }
+    member_by_value(base, &Value::String(std::rc::Rc::new(name.to_owned())), version)
+}
+
+/// Build a `&str` from a backend-materialised name (`ptr`/`len` of bytes on the
+/// caller's stack — valid for the call). The bytes come from a compile-time
+/// `&str` literal, so they're valid UTF-8.
+unsafe fn member_name<'a>(ptr: *const u8, len: i64) -> &'a str {
+    if len <= 0 {
+        return "";
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    unsafe { std::str::from_utf8_unchecked(slice) }
+}
+
+/// `obj.field` read with the field name passed UNBOXED (`ptr`/`len`), returning
+/// a boxed handle — identical to [`leek_value_index`] with a boxed string key,
+/// minus the per-read `Value::String` allocation for the key (and skipping it
+/// entirely on the hot instance-field path; see [`read_member`]).
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_get(
+    base: *mut Value,
+    name_ptr: *const u8,
+    name_len: i64,
+    version: i64,
+) -> *mut Value {
+    let name = unsafe { member_name(name_ptr, name_len) };
+    handle(read_member(unsafe { val(base) }, name, version as u8))
+}
+
+/// [`leek_field_get`] coerced to an unboxed `i64` (`read_member(..).to_long()`),
+/// for `integer x = obj.field` — byte-identical to `leek_unbox_int` of the boxed
+/// read, with neither key nor result boxed.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_get_int(
+    base: *mut Value,
+    name_ptr: *const u8,
+    name_len: i64,
+    version: i64,
+) -> i64 {
+    let name = unsafe { member_name(name_ptr, name_len) };
+    read_member(unsafe { val(base) }, name, version as u8).to_long()
+}
+
+/// Mirror of [`leek_field_get_int`] returning an unboxed `f64` (`to_real`), for
+/// `real x = obj.field`.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_get_real(
+    base: *mut Value,
+    name_ptr: *const u8,
+    name_len: i64,
+    version: i64,
+) -> f64 {
+    let name = unsafe { member_name(name_ptr, name_len) };
+    read_member(unsafe { val(base) }, name, version as u8).to_real()
 }
 
 /// Read `base[idx]` with an **unboxed** integer index, returning a boxed
@@ -955,6 +1038,16 @@ pub extern "C" fn leek_value_set_index(
     value: *mut Value,
     version: i64,
 ) {
+    let v = unsafe { val(value) }.clone();
+    unsafe { set_member(base, val(idx), v, version as u8) };
+}
+
+/// Shared `base[idx] = value` writeback used by [`leek_value_set_index`] (boxed
+/// key) and [`leek_field_set`]'s fallback (`&str` key built into a `Value`).
+///
+/// # Safety
+/// `base` must be a live handle.
+unsafe fn set_member(base: *mut Value, idx: &Value, value: Value, version: u8) {
     // v4-strict: an out-of-bounds array write is a runtime error
     // (`ARRAY_OUT_OF_BOUND`). Non-strict v4 silently drops the write and
     // v1–v3 promote the array to a sparse map, so the check is gated exactly
@@ -965,21 +1058,44 @@ pub extern "C" fn leek_value_set_index(
         && let Value::Array(a) = unsafe { val(base) }
     {
         let len = leek_runtime::len_as_int(a.borrow().len());
-        let raw = unsafe { val(idx) }.as_int().unwrap_or(0);
+        let raw = idx.as_int().unwrap_or(0);
         let i = if raw < 0 { raw + len } else { raw };
         if i < 0 || i >= len {
             raise_runtime_error("ARRAY_OUT_OF_BOUND");
             return;
         }
     }
-    let v = unsafe { val(value) }.clone();
-    let morphed =
-        leek_runtime::set_index(unsafe { val(base) }, unsafe { val(idx) }, v, version as u8);
+    let morphed = leek_runtime::set_index(unsafe { val(base) }, idx, value, version);
     if let Some(new_base) = morphed {
         // SAFETY: `base` is a live, owned handle (leaked box).
         unsafe {
             *base = new_base;
         }
+    }
+}
+
+/// `obj.field = value` / `obj['field'] = value` with the field name passed
+/// UNBOXED (`ptr`,`len`). For an instance/object base — the target of `.field`
+/// syntax — writes via `set_field` with the `&str` directly (no `Value::String`
+/// key allocation). Any other base type falls back to the shared [`set_member`]
+/// (building the boxed key then), identical to [`leek_value_set_index`].
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_set(
+    base: *mut Value,
+    name_ptr: *const u8,
+    name_len: i64,
+    value: *mut Value,
+    version: i64,
+) {
+    let name = unsafe { member_name(name_ptr, name_len) };
+    let v = unsafe { val(value) }.clone();
+    match unsafe { val(base) } {
+        Value::Instance(_) | Value::Object(_) => {
+            leek_runtime::set_field(unsafe { val(base) }, name, v);
+        }
+        _ => unsafe {
+            set_member(base, &Value::String(std::rc::Rc::new(name.to_owned())), v, version as u8);
+        },
     }
 }
 
@@ -1033,12 +1149,12 @@ pub extern "C" fn leek_instance_new(class_def: i64, name_box: *mut Value) -> *mu
 /// interpreter's treatment of an unset global).
 #[unsafe(no_mangle)]
 pub extern "C" fn leek_global_get(name: *mut Value) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     GLOBALS.with(|g| {
         g.borrow()
-            .get(&name)
+            .get(name)
             .copied()
             .unwrap_or_else(|| handle(Value::Null))
     })
@@ -1081,7 +1197,7 @@ pub extern "C" fn leek_call_ref_or_builtin(
     argc: i64,
     version: i64,
 ) -> *mut Value {
-    let Some(n) = builtin_name(name) else {
+    let Some(n) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let args: Vec<Value> = (0..argc as isize)
@@ -1090,11 +1206,11 @@ pub extern "C" fn leek_call_ref_or_builtin(
     let mut host = NativeHost {
         version: version as u8,
     };
-    if let Some(g) = GLOBALS.with(|g| g.borrow().get(&n).copied()) {
+    if let Some(g) = GLOBALS.with(|g| g.borrow().get(n).copied()) {
         let gv = unsafe { val(g) }.clone();
         return handle(dispatch_call_value(&mut host, &gv, args));
     }
-    match leek_runtime::call_builtin(&mut host, &n, &args) {
+    match leek_runtime::call_builtin(&mut host, n, &args) {
         Ok(v) => handle(v),
         Err(_) => handle(Value::Null),
     }
@@ -1283,6 +1399,29 @@ pub extern "C" fn leek_value_binop_cil(code: i64, c: i64, b: *mut Value, version
     handle(apply_binop(op, &Value::Int(c), r, version as u8))
 }
 
+/// `real`-typed counterparts of [`leek_value_binop_cir`] / `_cil`: the
+/// statically-`real` operand is passed by value as an `f64`, so a `dyn OP
+/// <real>` (or `<real> OP dyn`) never heap-boxes it. Building `Value::Real(c)`
+/// on the stack is identical to boxing the operand and dispatching.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_value_binop_crr(code: i64, a: *mut Value, c: f64, version: i64) -> *mut Value {
+    let Some(op) = binop_from_code(code) else {
+        return handle(Value::Null);
+    };
+    let l = unsafe { val(a) };
+    handle(apply_binop(op, l, &Value::Real(c), version as u8))
+}
+
+/// Left-`real`-operand mirror of [`leek_value_binop_crr`].
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_value_binop_crl(code: i64, c: f64, b: *mut Value, version: i64) -> *mut Value {
+    let Some(op) = binop_from_code(code) else {
+        return handle(Value::Null);
+    };
+    let r = unsafe { val(b) };
+    handle(apply_binop(op, &Value::Real(c), r, version as u8))
+}
+
 /// Pure dispatch of a [`BinOp`] onto the shared `leek_runtime` operators —
 /// the single source of truth shared by the JIT `leek_value_binop` shim and
 /// the compile-time const-evaluator (`const_eval_default`). Matches the
@@ -1368,10 +1507,26 @@ fn binop_from_code(c: i64) -> Option<BinOp> {
     Some(op)
 }
 
-/// Read a builtin's name out of a (boxed string) handle.
+/// Read a builtin's name out of a (boxed string) handle, cloned. For sites
+/// that need an owned `String` (a `HashMap` key, a `Function::Builtin`); the
+/// hot dispatch shims use [`builtin_name_ref`] instead.
 fn builtin_name(h: *mut Value) -> Option<String> {
     match unsafe { val(h) } {
         Value::String(s) => Some(s.as_ref().clone()),
+        _ => None,
+    }
+}
+
+/// Borrow a builtin's name out of a (boxed string) handle WITHOUT cloning — for
+/// the hot dispatch shims, whose name only flows into `&str` consumers
+/// (`charge_builtin_ops` / `call_builtin` / `game::dispatch` / a `HashMap<String,
+/// _>` lookup, which borrows `str`). The handle is a live arena box that
+/// outlives the call and the bump arena never moves an existing allocation, so
+/// the borrow stays valid for the whole dispatch (mirrors [`val`]'s unbounded
+/// lifetime). Removes a `String` allocation on every `push`/`abs`/`getCell`/… .
+fn builtin_name_ref<'a>(h: *mut Value) -> Option<&'a str> {
+    match unsafe { val(h) } {
+        Value::String(s) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -1415,13 +1570,13 @@ pub extern "C" fn leek_construct_builtin(
     argv: *const *mut Value,
     argc: i64,
 ) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let args: Vec<Value> = (0..argc as isize)
         .map(|i| unsafe { val(*argv.offset(i)) }.clone())
         .collect();
-    handle(leek_runtime::construct_builtin_class(&name, args))
+    handle(leek_runtime::construct_builtin_class(name, args))
 }
 
 /// Host game builtin (`getCell`, `getLife`, …): unbox the args and forward
@@ -1433,42 +1588,42 @@ pub extern "C" fn leek_game_builtin(
     argv: *const *mut Value,
     argc: i64,
 ) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let args: Vec<Value> = (0..argc as isize)
         .map(|i| unsafe { val(*argv.offset(i)) }.clone())
         .collect();
-    handle(crate::game::dispatch(&name, &args))
+    handle(crate::game::dispatch(name, &args))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn leek_builtin0(name: *mut Value, version: i64) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let mut host = NativeHost {
         version: version as u8,
     };
-    if charge_builtin_ops(&name, &[], version) {
+    if charge_builtin_ops(name, &[], version) {
         return handle(Value::Null);
     }
-    handle(leek_runtime::call_builtin(&mut host, &name, &[]).unwrap_or(Value::Null))
+    handle(leek_runtime::call_builtin(&mut host, name, &[]).unwrap_or(Value::Null))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn leek_builtin1(name: *mut Value, a0: *mut Value, version: i64) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let mut host = NativeHost {
         version: version as u8,
     };
     let args = [unsafe { val(a0) }.clone()];
-    if charge_builtin_ops(&name, &args, version) {
+    if charge_builtin_ops(name, &args, version) {
         return handle(Value::Null);
     }
-    handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
+    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
 }
 
 #[unsafe(no_mangle)]
@@ -1478,17 +1633,17 @@ pub extern "C" fn leek_builtin2(
     a1: *mut Value,
     version: i64,
 ) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let mut host = NativeHost {
         version: version as u8,
     };
     let args = [unsafe { val(a0) }.clone(), unsafe { val(a1) }.clone()];
-    if charge_builtin_ops(&name, &args, version) {
+    if charge_builtin_ops(name, &args, version) {
         return handle(Value::Null);
     }
-    handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
+    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
 }
 
 #[unsafe(no_mangle)]
@@ -1499,7 +1654,7 @@ pub extern "C" fn leek_builtin3(
     a2: *mut Value,
     version: i64,
 ) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let mut host = NativeHost {
@@ -1510,10 +1665,10 @@ pub extern "C" fn leek_builtin3(
         unsafe { val(a1) }.clone(),
         unsafe { val(a2) }.clone(),
     ];
-    if charge_builtin_ops(&name, &args, version) {
+    if charge_builtin_ops(name, &args, version) {
         return handle(Value::Null);
     }
-    handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
+    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
 }
 
 #[unsafe(no_mangle)]
@@ -1525,7 +1680,7 @@ pub extern "C" fn leek_builtin4(
     a3: *mut Value,
     version: i64,
 ) -> *mut Value {
-    let Some(name) = builtin_name(name) else {
+    let Some(name) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
     let mut host = NativeHost {
@@ -1537,10 +1692,10 @@ pub extern "C" fn leek_builtin4(
         unsafe { val(a2) }.clone(),
         unsafe { val(a3) }.clone(),
     ];
-    if charge_builtin_ops(&name, &args, version) {
+    if charge_builtin_ops(name, &args, version) {
         return handle(Value::Null);
     }
-    handle(leek_runtime::call_builtin(&mut host, &name, &args).unwrap_or(Value::Null))
+    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
 }
 
 /// Read the `Value` behind a handle by cloning it, WITHOUT freeing the box.
@@ -1600,6 +1755,10 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_array_new", leek_array_new as *const u8),
         ("leek_array_push", leek_array_push as *const u8),
         ("leek_value_index", leek_value_index as *const u8),
+        ("leek_field_get", leek_field_get as *const u8),
+        ("leek_field_get_int", leek_field_get_int as *const u8),
+        ("leek_field_get_real", leek_field_get_real as *const u8),
+        ("leek_field_set", leek_field_set as *const u8),
         ("leek_index_int", leek_index_int as *const u8),
         ("leek_array_get_int", leek_array_get_int as *const u8),
         ("leek_array_get_real", leek_array_get_real as *const u8),
@@ -1634,6 +1793,8 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_value_binop", leek_value_binop as *const u8),
         ("leek_value_binop_cir", leek_value_binop_cir as *const u8),
         ("leek_value_binop_cil", leek_value_binop_cil as *const u8),
+        ("leek_value_binop_crr", leek_value_binop_crr as *const u8),
+        ("leek_value_binop_crl", leek_value_binop_crl as *const u8),
         ("leek_foreach_iter", leek_foreach_iter as *const u8),
         ("leek_class_of", leek_class_of as *const u8),
         ("leek_class_super", leek_class_super as *const u8),

@@ -10,7 +10,7 @@ use leek_mir::{
 };
 use leek_types::Type;
 
-use crate::value::{Function as FnValue, IntervalValue, MapData, ObjectData, SetData, Value};
+use crate::value::{Function as FnValue, IntervalValue, MapData, ObjectData, SetData, SuperValue, Value};
 
 use super::value::{const_to_value, coerce_to_type, set_field, set_index, binary_op_cost, apply_binary, apply_unary, apply_cast, slice_value, builtin_class_name, construct_builtin_class, make_foreach_iter};
 use super::{Interpreter, Outcome, StepResult};
@@ -679,10 +679,10 @@ impl Interpreter<'_> {
             }
             Rvalue::MakeSuper { this, parent_class } => {
                 let recv = locals.get(this.0 as usize).cloned().unwrap_or(Value::Null);
-                Value::Super {
+                Value::Super(Box::new(SuperValue {
                     parent_class: parent_class.clone(),
                     receiver: Rc::new(recv),
-                }
+                }))
             }
             Rvalue::ClassRef(def, name) => {
                 if let Some(v) = self.globals.get(name).cloned() {

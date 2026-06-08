@@ -361,7 +361,7 @@ fn write_value_inner(
             }
             f.write_str(if iv.end_inclusive { "]" } else { "[" })
         }
-        Value::Super { receiver, .. } => write_value_inner(f, receiver, visited),
+        Value::Super(s) => write_value_inner(f, &s.receiver, visited),
         // Cells are pure storage — render their inner value
         // transparently. (Reads at the boundary normally unbox
         // first, but Display occasionally lands here when a
