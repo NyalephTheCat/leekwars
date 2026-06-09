@@ -553,7 +553,15 @@ impl super::Emitter<'_> {
                 // does for arbitrary expressions.
                 buf.push_str("execute(");
                 self.write_name(buf, name_ref);
-                self.write_execute_args(buf, &c.args);
+                // v1: when the callee is a known `var f = function(@a){…}`
+                // binding, pass the bare box (not `.get()`) for a ref-box arg at
+                // each written-`@` position so the lambda's `@a` aliases — and
+                // mutates — the caller's variable.
+                let positions = match name_ref {
+                    NameRef::Local(id) => self.var_ref_positions.get(&id.0).cloned(),
+                    _ => None,
+                };
+                self.write_execute_args_maybe_ref(buf, &c.args, positions.as_deref());
                 buf.push(')');
             }
             Callee::Function(NameRef::Super) => {
@@ -754,15 +762,32 @@ impl super::Emitter<'_> {
     /// explicit `new Object[]{null}` — same fix the upstream does
     /// in `LeekFunctionCall.compileL`.
     pub(crate) fn write_execute_args(&self, buf: &mut String, args: &[Expr]) {
+        self.write_execute_args_maybe_ref(buf, args, None);
+    }
+
+    /// Like [`Self::write_execute_args`], but when `positions[i]` is set and the
+    /// argument is a ref-box local, pass the bare `Box` (so a `@`-ref param of
+    /// the callee aliases it) instead of its loaded value. `positions = None`
+    /// behaves exactly like the plain version.
+    fn write_execute_args_maybe_ref(
+        &self,
+        buf: &mut String,
+        args: &[Expr],
+        positions: Option<&[bool]>,
+    ) {
         let single_null =
             args.len() == 1 && matches!(&args[0].kind, ExprKind::Literal(Literal::Null));
         if single_null {
             buf.push_str(", new Object[] { null }");
             return;
         }
-        for a in args {
+        for (i, a) in args.iter().enumerate() {
             buf.push_str(", ");
-            self.write_expr(buf, a, false);
+            if positions.is_some_and(|p| p.get(i).copied().unwrap_or(false)) && self.is_ref_box(a) {
+                buf.push_str(&self.ref_box_name(a));
+            } else {
+                self.write_expr(buf, a, false);
+            }
         }
     }
 }

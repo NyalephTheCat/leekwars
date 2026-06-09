@@ -79,7 +79,7 @@ impl<'a> super::Emitter<'a> {
                 self.writer.add_code("ops(1);");
             }
             self.emit_stmts(&body.stmts);
-            if !ends_with_return(&body.stmts) {
+            if !ends_with_return(&body.stmts, self.opts.emit_ops) {
                 self.writer.add_line("return null;");
             }
         } else {
@@ -252,7 +252,7 @@ impl<'a> super::Emitter<'a> {
         self.writer.push_indent();
         if let Some(body) = &m.body {
             self.emit_stmts(&body.stmts);
-            if !ends_with_return(&body.stmts) {
+            if !ends_with_return(&body.stmts, self.opts.emit_ops) {
                 self.writer.add_line("return null;");
             }
         } else {
@@ -445,7 +445,7 @@ impl<'a> super::Emitter<'a> {
             self.writer.push_indent();
             if let Some(body) = &m.body {
                 self.emit_stmts(&body.stmts);
-                if !ends_with_return(&body.stmts) {
+                if !ends_with_return(&body.stmts, self.opts.emit_ops) {
                     self.writer.add_line("return null;");
                 }
             } else {

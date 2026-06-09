@@ -138,6 +138,11 @@ pub(crate) struct Emitter<'a> {
     /// methods) instead of the reflective `getField` / `callObjectAccess`
     /// fallback used for `Object`-typed bases. `None` outside a class method.
     current_class: std::cell::Cell<Option<&'a leek_hir::Class>>,
+    /// v1 only. `var f = function(@a){…}` bindings → which call positions are
+    /// written-`@` (so an `execute(f, …)` arm passes the box for a ref-box arg
+    /// there, aliasing the caller's variable). Keyed by the var's `DefId.0`.
+    /// Empty at v2+ (no by-ref propagation). Built by [`caller_box_locals`].
+    var_ref_positions: std::collections::HashMap<u32, Vec<bool>>,
 }
 
 mod call;
@@ -153,6 +158,16 @@ pub(crate) use traits::EmitExpr;
 
 impl<'a> Emitter<'a> {
     pub(crate) fn new(opts: &'a Options, hir: &'a HirFile) -> Self {
+        // v1: a local passed as a *mutated* `@`-ref argument must be a runtime
+        // `Box` at its declaration so the callee (or a closure it returns)
+        // aliases and mutates it (`function f(@a){ -> { a += 2 } } var x = 10;
+        // f(x)(); return x` → 12). Seeds `ref_boxes` (the read/write routing) and
+        // `var_ref_positions` (local-callee dispatch). No-op at v2+.
+        let (caller_boxes, var_ref_positions) = if matches!(opts.version, leek_syntax::Version::V1) {
+            caller_box_locals(hir)
+        } else {
+            (std::collections::HashSet::new(), std::collections::HashMap::new())
+        };
         Self {
             opts,
             hir,
@@ -163,13 +178,14 @@ impl<'a> Emitter<'a> {
             outlined: std::cell::RefCell::new(Vec::new()),
             fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             in_outlined: std::cell::Cell::new(false),
-            ref_boxes: std::cell::RefCell::new(std::collections::HashSet::new()),
+            ref_boxes: std::cell::RefCell::new(caller_boxes),
             outline_counter: std::cell::Cell::new(0),
             initializing_def: std::cell::Cell::new(None),
             self_rec_def: std::cell::Cell::new(None),
             shadowed_builtins: std::cell::RefCell::new(std::collections::HashSet::new()),
             boxed_locals: std::cell::RefCell::new(std::collections::HashSet::new()),
             current_class: std::cell::Cell::new(None),
+            var_ref_positions,
         }
     }
 
@@ -397,7 +413,7 @@ impl<'a> Emitter<'a> {
                 code
             };
             self.writer.add_line(&format!("return {rendered};"));
-        } else if !ends_with_return(head) {
+        } else if !ends_with_return(head, self.opts.emit_ops) {
             self.writer.add_line("return null;");
         }
         if self.opts.is_clean() {
@@ -1133,14 +1149,187 @@ pub(crate) fn collect_shadowed_builtins(
 pub(crate) fn is_div_expr(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Binary(BinaryOp::Div, _, _))
 }
-pub(crate) fn ends_with_return(stmts: &[Stmt]) -> bool {
-    stmts.last().is_some_and(stmt_definitely_returns)
+/// `(locals to box, var-binding → written-`@` positions)` — see
+/// [`caller_box_locals`].
+pub(crate) type CallerBoxInfo = (
+    std::collections::HashSet<leek_hir::DefId>,
+    std::collections::HashMap<u32, Vec<bool>>,
+);
+
+/// v1 by-ref propagation analysis. A local passed as an argument at a `@`-ref
+/// parameter position that the callee *writes* (`function f(@a){ a += 1 }`, or a
+/// closure it returns that writes `a`) must be a runtime `Box` so the mutation
+/// reaches the caller's variable. Returns the set of such locals (seeded into
+/// `ref_boxes`) plus, for `var f = function(@a){…}` bindings, the written-`@`
+/// positions keyed by the var's def (so an `execute(f, …)` call can box the
+/// right argument).
+pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
+    use leek_hir::{LambdaBody, LambdaExpr, Param};
+    use std::collections::{HashMap, HashSet};
+
+    // Does any write target one of `targets` (assignment l-value, ++/--)?
+    fn expr_writes(e: &Expr, targets: &HashSet<u32>, out: &mut HashSet<u32>) {
+        match &e.kind {
+            ExprKind::Binary(op, l, r) => {
+                if (matches!(op, BinaryOp::Assign) || op.compound_base().is_some())
+                    && let ExprKind::Name(NameRef::Local(id)) = &l.kind
+                    && targets.contains(&id.0)
+                {
+                    out.insert(id.0);
+                }
+                expr_writes(l, targets, out);
+                expr_writes(r, targets, out);
+            }
+            ExprKind::Postfix(_, x) | ExprKind::Unary(_, x) => {
+                if let ExprKind::Name(NameRef::Local(id)) = &x.kind
+                    && targets.contains(&id.0)
+                {
+                    out.insert(id.0);
+                }
+                expr_writes(x, targets, out);
+            }
+            // A nested closure can write a captured `@` param (`@a{ -> { a+=2 } }`)
+            // — `walk_expr_children` treats a lambda as a leaf, so descend here.
+            ExprKind::Lambda(l) => match &l.body {
+                LambdaBody::Expr(b) => expr_writes(b, targets, out),
+                LambdaBody::Block(b) => b.stmts.iter().for_each(|s| stmt_writes(s, targets, out)),
+            },
+            _ => leek_hir::visit::walk_expr_children(e, &mut |c| expr_writes(c, targets, out)),
+        }
+    }
+    fn stmt_writes(s: &Stmt, targets: &HashSet<u32>, out: &mut HashSet<u32>) {
+        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| expr_writes(e, targets, out));
+        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| stmt_writes(c, targets, out));
+    }
+    // The `@` param positions the callable writes (so an arg there must box).
+    fn mutated_ref_positions(params: &[Param], body: &[Stmt]) -> Vec<bool> {
+        let ref_defs: HashSet<u32> =
+            params.iter().filter(|p| p.is_by_ref).map(|p| p.def.0).collect();
+        if ref_defs.is_empty() {
+            return vec![false; params.len()];
+        }
+        let mut written = HashSet::new();
+        for s in body {
+            stmt_writes(s, &ref_defs, &mut written);
+        }
+        params
+            .iter()
+            .map(|p| p.is_by_ref && written.contains(&p.def.0))
+            .collect()
+    }
+
+    // `var f = function(@a){…}` bindings → the lambda's written-`@` positions,
+    // so a `f(b)` call resolves. Store the owned `Vec<bool>` (not a reference) so
+    // it outlives the walk.
+    let mut var_lambda_pos: HashMap<u32, Vec<bool>> = HashMap::new();
+    fn lambda_stmts(l: &LambdaExpr) -> &[Stmt] {
+        match &l.body {
+            LambdaBody::Block(b) => &b.stmts,
+            LambdaBody::Expr(_) => &[],
+        }
+    }
+    fn collect_var_lambdas(s: &Stmt, m: &mut HashMap<u32, Vec<bool>>) {
+        if let Stmt::VarDecl(v) = s
+            && let Some(init) = &v.init
+            && let ExprKind::Lambda(l) = &init.kind
+        {
+            m.insert(v.def.0, mutated_ref_positions(&l.params, lambda_stmts(l)));
+        }
+        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| collect_var_lambdas(c, m));
+    }
+
+    let mut roots: Vec<&[Stmt]> = vec![&hir.main];
+    for d in &hir.defs {
+        match d {
+            Def::Function(f) => {
+                if let Some(b) = &f.body {
+                    roots.push(&b.stmts);
+                }
+            }
+            Def::Class(c) => {
+                for m in c.methods.iter().chain(&c.constructors) {
+                    if let Some(b) = &m.body {
+                        roots.push(&b.stmts);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for stmts in &roots {
+        for s in *stmts {
+            collect_var_lambdas(s, &mut var_lambda_pos);
+        }
+    }
+
+    // Resolve a call's `@`-write positions, then mark local args there.
+    let mut out: HashSet<leek_hir::DefId> = HashSet::new();
+    let mark = |c: &leek_hir::Call, positions: &[bool], out: &mut HashSet<leek_hir::DefId>| {
+        for (i, arg) in c.args.iter().enumerate() {
+            if positions.get(i).copied().unwrap_or(false)
+                && let ExprKind::Name(NameRef::Local(id)) = &arg.kind
+            {
+                out.insert(*id);
+            }
+        }
+    };
+    fn walk_calls(
+        e: &Expr,
+        hir: &HirFile,
+        var_lambda_pos: &HashMap<u32, Vec<bool>>,
+        out: &mut HashSet<leek_hir::DefId>,
+        mark: &dyn Fn(&leek_hir::Call, &[bool], &mut HashSet<leek_hir::DefId>),
+    ) {
+        if let ExprKind::Call(c) = &e.kind {
+            let positions = match &c.callee {
+                Callee::Function(NameRef::Function(fid)) => match hir.defs.get(fid.0 as usize) {
+                    Some(Def::Function(f)) => Some(mutated_ref_positions(
+                        &f.params,
+                        f.body.as_ref().map_or(&[], |b| &b.stmts),
+                    )),
+                    _ => None,
+                },
+                Callee::Function(NameRef::Local(fid)) => var_lambda_pos.get(&fid.0).cloned(),
+                _ => None,
+            };
+            if let Some(pos) = positions {
+                mark(c, &pos, out);
+            }
+        }
+        leek_hir::visit::walk_expr_children(e, &mut |c| {
+            walk_calls(c, hir, var_lambda_pos, out, mark);
+        });
+    }
+    fn walk_call_stmts(
+        s: &Stmt,
+        hir: &HirFile,
+        var_lambda_pos: &HashMap<u32, Vec<bool>>,
+        out: &mut HashSet<leek_hir::DefId>,
+        mark: &dyn Fn(&leek_hir::Call, &[bool], &mut HashSet<leek_hir::DefId>),
+    ) {
+        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| {
+            walk_calls(e, hir, var_lambda_pos, out, mark);
+        });
+        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| {
+            walk_call_stmts(c, hir, var_lambda_pos, out, mark);
+        });
+    }
+    for stmts in &roots {
+        for s in *stmts {
+            walk_call_stmts(s, hir, &var_lambda_pos, &mut out, &mark);
+        }
+    }
+    (out, var_lambda_pos)
+}
+
+pub(crate) fn ends_with_return(stmts: &[Stmt], emit_ops: bool) -> bool {
+    stmts.last().is_some_and(|s| stmt_definitely_returns(s, emit_ops))
 }
 
 /// True when control flow can't fall off the end of this statement —
 /// i.e. it always exits the enclosing function. Java will reject a
 /// trailing `return null;` after such a statement as unreachable.
-pub(crate) fn stmt_definitely_returns(s: &Stmt) -> bool {
+pub(crate) fn stmt_definitely_returns(s: &Stmt, emit_ops: bool) -> bool {
     match s {
         // Only `return` actually leaves the *function*. `break`/`continue`
         // only escape the enclosing loop, so they don't suppress the
@@ -1149,30 +1338,32 @@ pub(crate) fn stmt_definitely_returns(s: &Stmt) -> bool {
         // shaped methods that javac flagged as `missing return`.
         Stmt::Return(_) => true,
         Stmt::If(i) => {
-            let then_returns = stmt_definitely_returns(&i.then_branch);
+            let then_returns = stmt_definitely_returns(&i.then_branch, emit_ops);
             let else_returns = i
                 .else_branch
                 .as_deref()
-                .is_some_and(stmt_definitely_returns);
+                .is_some_and(|e| stmt_definitely_returns(e, emit_ops));
             then_returns && else_returns
         }
-        Stmt::Block(b) => ends_with_return(&b.stmts),
+        Stmt::Block(b) => ends_with_return(&b.stmts, emit_ops),
         // A `do { ... } while (cond)` body runs at least once, so a
         // body that always returns means the whole loop always
         // returns. Without this arm `javac` rejects the trailing
         // `return null;` after the loop as unreachable. An infinite
         // `do … while (true)` likewise never falls through.
-        Stmt::DoWhile(d) => stmt_definitely_returns(&d.body) || is_infinite_loop(&d.cond, &d.body),
+        Stmt::DoWhile(d) => {
+            stmt_definitely_returns(&d.body, emit_ops) || is_infinite_loop(&d.cond, &d.body, emit_ops)
+        }
         // `while (true) { … }` with no `break` escaping the loop never
         // completes normally — code after it is unreachable, so suppress
         // the trailing `return null;`.
-        Stmt::While(w) => is_infinite_loop(&w.cond, &w.body),
+        Stmt::While(w) => is_infinite_loop(&w.cond, &w.body, emit_ops),
         // A `switch` always returns when it has a `default` arm and every arm
         // (default included) definitely returns and none `break`s out.
         Stmt::Switch(s) => {
             s.arms.iter().any(|a| a.case.is_none())
                 && s.arms.iter().all(|a| {
-                    ends_with_return(&a.body) && !a.body.iter().any(stmt_has_own_break)
+                    ends_with_return(&a.body, emit_ops) && !a.body.iter().any(stmt_has_own_break)
                 })
         }
         _ => false,
@@ -1181,8 +1372,17 @@ pub(crate) fn stmt_definitely_returns(s: &Stmt) -> bool {
 
 /// True for a `while`/`do-while` whose condition is the literal `true` and whose
 /// body has no `break` targeting it — an infinite loop that never falls through.
-fn is_infinite_loop(cond: &Expr, body: &Stmt) -> bool {
-    matches!(&cond.kind, ExprKind::Literal(Literal::Bool(true))) && !stmt_has_own_break(body)
+///
+/// Only in *clean* mode (`!emit_ops`), where the condition emits as the bare
+/// constant `true` that javac folds to a provably-infinite loop (so a trailing
+/// `return null;` would be unreachable). In exact mode the condition is wrapped
+/// in `ops(bool(true), …)` (see `loop_cond_string`) — opaque to javac — so the
+/// trailing return is reachable and *required*; reporting the loop as infinite
+/// there is what produced the `missing return statement` javac failures.
+fn is_infinite_loop(cond: &Expr, body: &Stmt, emit_ops: bool) -> bool {
+    !emit_ops
+        && matches!(&cond.kind, ExprKind::Literal(Literal::Bool(true)))
+        && !stmt_has_own_break(body)
 }
 
 /// Whether `s` contains a `break` that would exit the *current* loop — i.e. one

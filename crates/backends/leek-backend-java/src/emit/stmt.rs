@@ -1,5 +1,6 @@
 use leek_hir::{
-    DoWhileStmt, Expr, ExprKind, ForStmt, ForeachStmt, IfStmt, NameRef, Stmt, VarDecl, WhileStmt,
+    DoWhileStmt, Expr, ExprKind, ForStmt, ForeachStmt, IfStmt, Literal, NameRef, Stmt, VarDecl,
+    WhileStmt,
 };
 
 use super::traits::EmitStmt;
@@ -59,7 +60,12 @@ impl EmitStmt for Emitter<'_> {
                 // tick `ops(1);` is emitted separately by the
                 // surrounding block-entry path (`emit_body`) — not
                 // by the return itself.
-                let code = self.expr_to_string(e);
+                // At v1 the reference compiles the return value with `compileL`
+                // (value semantics): a returned variable / field / index load is
+                // deep-copied, so `function(){ return r }` hands back a copy the
+                // caller can't alias-mutate. `v1_clone` is that copy (a no-op at
+                // v2+ and for non-load expressions).
+                let code = self.v1_clone(e);
                 let line = self.line_of(e.span);
                 if self.opts.emit_ops {
                     let cost = expr_op_cost(e);
@@ -128,7 +134,7 @@ impl Emitter<'_> {
         let cutoff = if self.opts.dead_code_elim {
             stmts
                 .iter()
-                .position(|s| is_terminator(s) || super::stmt_definitely_returns(s))
+                .position(|s| is_terminator(s) || super::stmt_definitely_returns(s, self.opts.emit_ops))
                 .map_or(stmts.len(), |p| p + 1)
         } else {
             stmts.len()
@@ -363,6 +369,15 @@ impl Emitter<'_> {
         if !self.opts.emit_ops {
             return inner;
         }
+        // Match the reference `WhileBlock`: a boolean *literal* condition is
+        // wrapped in `bool(...)` ("Prevent unreachable code error") so javac
+        // can't fold `while (ops(true, 0))` to a provably-infinite loop and then
+        // reject the method's trailing `return null;` as `missing return`.
+        let inner = if matches!(&c.kind, ExprKind::Literal(Literal::Bool(_))) {
+            format!("bool({inner})")
+        } else {
+            inner
+        };
         let cost = expr_op_cost(c);
         format!("ops({inner}, {cost})")
     }
@@ -543,6 +558,7 @@ impl Emitter<'_> {
             shadowed_builtins: std::cell::RefCell::new(self.shadowed_builtins.borrow().clone()),
             boxed_locals: std::cell::RefCell::new(self.boxed_locals.borrow().clone()),
             current_class: std::cell::Cell::new(self.current_class.get()),
+            var_ref_positions: self.var_ref_positions.clone(),
         };
         scratch.emit_stmts(&b.stmts);
         // Hand off any outlined-lambda helpers the scratch run

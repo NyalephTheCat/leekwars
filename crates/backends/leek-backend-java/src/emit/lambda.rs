@@ -44,10 +44,16 @@ impl super::Emitter<'_> {
                 // keeps the null-returning stub.
                 let unboxed_captures: std::collections::HashSet<_> = {
                     let boxed = self.boxed_locals.borrow();
+                    let ref_boxes = self.ref_boxes.borrow();
                     captures
                         .iter()
                         .copied()
-                        .filter(|d| !boxed.contains(d))
+                        // A captured `@`-ref param is a runtime `Box` (passed to
+                        // the factory as `final Box`), so a write through it
+                        // *is* expressible — `a += 2` routes to the Box mutator
+                        // and propagates. Only genuinely unboxed captures force
+                        // the null stub.
+                        .filter(|d| !boxed.contains(d) && !ref_boxes.contains(d))
                         .collect()
                 };
                 if lambda_writes_to_outer(b, &unboxed_captures) {
@@ -132,6 +138,12 @@ impl super::Emitter<'_> {
                 )
                 .unwrap();
                 self.ref_boxes.borrow_mut().insert(p.def);
+            } else if matches!(self.opts.version, leek_syntax::Version::V1) {
+                // v1 by-value param: the runtime hands callbacks element/arg
+                // *boxes* (e.g. `arrayMap` passes a `Box` per element), so `load`
+                // to unwrap before the v1 value-semantics `copy`. Without the
+                // unwrap a boxed callee (`execute(box, …)`) silently yields null.
+                write!(buf, "var {pname} = copy(load({src}));").unwrap();
             } else {
                 write!(buf, "var {pname} = {src};").unwrap();
             }
@@ -162,7 +174,7 @@ impl super::Emitter<'_> {
                     buf.push_str("ops(1);");
                 }
                 buf.push_str(&self.render_block_to_string(b));
-                if !ends_with_return(&b.stmts) {
+                if !ends_with_return(&b.stmts, self.opts.emit_ops) {
                     buf.push_str("return null;");
                 }
             }
@@ -283,7 +295,7 @@ impl super::Emitter<'_> {
         let prev_outlined = self.in_outlined.replace(true);
         factory_buf.push_str(&self.render_block_to_string(body));
         self.in_outlined.set(prev_outlined);
-        if !ends_with_return(&body.stmts) {
+        if !ends_with_return(&body.stmts, self.opts.emit_ops) {
             factory_buf.push_str("return null;");
         }
         factory_buf.push_str("}}; }");
