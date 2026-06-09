@@ -4,9 +4,9 @@ A from-scratch **Rust implementation of the LeekScript language and toolchain** 
 the scripting language behind [LeekWars](https://leekwars.com), the online game
 where you program AIs for "leeks" that fight on a grid.
 
-This workspace is more than a compiler: it ships a `cargo`-style project tool, a
-language server, a debugger, multiple code-generation backends, and a native
-**fight simulator** so you can write, test, and debug leek AIs entirely offline.
+It ships a `cargo`-style project tool, a language server, a debugger, several
+code-generation backends, and a native **fight simulator** so you can write,
+test, and debug leek AIs entirely offline.
 
 ```leek
 // @version: 4
@@ -49,22 +49,12 @@ A project is described by a `Miku.toml` manifest (the `cargo`-equivalent of
 `Cargo.toml`): `[project]` metadata, source/test paths, backend settings, lint
 and format rules.
 
-## The toolchain
-
-| Binary      | Role                                                          |
-|-------------|--------------------------------------------------------------|
-| `miku`      | Workspace tool — build/run/test/lint/fmt/doc & more (`cargo`) |
-| `leekc`     | Single-file compiler driver (`rustc`)                        |
-| `leek-lsp`  | Language server (diagnostics, completion, inlay hints)       |
-| `leek-dap`  | Debug Adapter Protocol server (breakpoints, stepping)        |
-| `leekbench` | Benchmark runner                                             |
-
-### `miku` at a glance
+## `miku` commands
 
 ```text
 miku new|init        create / initialize a project
 miku build           compile via the manifest's backend (Java by default)
-miku run             build and execute via the native JIT
+miku run             JIT-compile and execute
 miku check           diagnostics only
 miku test            run tests under tests/
 miku fmt | lint      format / lint .leek sources
@@ -81,6 +71,10 @@ miku fight           run / test / debug leek-wars fights  (see below)
 Global flags include `--manifest-path`, `--library leekwars` (load host
 function libraries), `--message-format {human|json|junit}`, `--color`, and
 `--verbose` (e.g. `miku build --verbose` prints per-stage pipeline timings).
+
+Other binaries in the workspace: `leekc` (single-file compiler driver),
+`leek-lsp` (language server), `leek-dap` (debug adapter), `leekbench`
+(benchmark runner).
 
 ## Fights — the leek-wars simulator
 
@@ -100,67 +94,8 @@ miku fight duel.toml --emit ./duel-fight   # generate a standalone native execut
 Scenarios are **composable**: a file can `extends` a base arena, pull reusable
 leek builds from separate files (`leek = "leeks/hero.toml"`), and carry named
 override `[profiles]`. You can also **debug an AI inside a running fight** —
-breakpoints fire during the turn loop — via `leek-dap` (set `scenario` /
-`fightEntity` in your launch config).
-
-A complete, runnable example lives in [`examples/fight/`](examples/fight/) with
-its own README.
-
-## Backends
-
-The compiler lowers source → HIR → MIR and targets several backends:
-
-- **Java** — the default `miku build` output (transpiles to `.java`).
-- **Native (Cranelift JIT)** — powers `miku run` / `miku test`, `leek-dap`
-  (debugging), and the fight simulator (`leek-generator`); also emits
-  relocatable object files. Handles the full middle-end it's given, including
-  lambdas/closures, first-class functions, and classes (instances, fields,
-  dynamic method dispatch).
-- **Native (AOT)** — compiles ahead-of-time to a **standalone executable**
-  (`miku build --backend native`, or `leekc --emit native --native-emit exe`).
-  Unlike the JIT path it compiles once and the binary runs with no per-run
-  codegen. It links the emitted object against a prebuilt static runtime
-  archive with `cc` — no per-build `cargo`, so a compile is a sub-second C link.
-  It covers the scalar / string / numeric-array / direct-call subset; programs
-  using lambdas, classes, or builtin values (`PI`, `var f = abs`) are still
-  rejected with a pointer to the JIT. (Those bake compiler-process heap pointers
-  as absolute immediates — string and null literals were made relocatable, as
-  in-binary bytes built at runtime; extending that to boxed-constant and class
-  handles is the remaining AOT work.)
-- **JAR / WASM** — scaffolded; not yet wired into `miku build`.
-
-LeekScript versions 1–4 are supported, with a per-file `// @version:` pragma and
-an optional strict mode.
-
-### Optimization
-
-Codegen drivers run backend-agnostic passes that shrink a program's **operation
-budget** (the per-turn `TOO_MUCH_OPERATIONS` limit in leek-wars):
-
-- **Function inlining** — a call to a small `return <expr>` free function with
-  trivial (literal / variable) arguments is replaced by its body, then the call
-  disappears (and the result often folds: `dbl(2 + 3)` → `dbl(5)` → `10`).
-- **Constant propagation** — an immutable `var x = <literal>` or file-level
-  `global G = <literal>` (never reassigned, captured, or passed by reference) is
-  substituted at its uses, then its declaration is dropped.
-- **Constant folding** — constant expressions collapse to literals (`1 + 2 * 3`
-  → `7`, `true ? a : b` → `a`, `"a" + "b"` → `"ab"`), including calls to pure
-  math builtins (`abs`, `min`, `max`, `floor`, `ceil`, `sqrt`). Conservative and
-  version-independent: division, `%`, `**`, `??`, `round`, casts, and mixed-type
-  `==` are left alone so results never diverge across backends.
-- **Dead-code elimination** — a constant-condition `if`/`while` collapses to the
-  taken branch (or is dropped), and pure discarded expression-statements are
-  removed. (Analysis paths like `check`/`lint` stay at `O0`, so they still see
-  and report the original code.)
-- **Control-flow simplification** — a branch/switch on a constant, or a branch
-  whose arms coincide, becomes an unconditional jump, and blocks that become
-  unreachable are removed.
-
-These are gated by an optimization level: `miku run` (native JIT) and
-`miku build --clean` (readable Java) compile at **O1**; Java *exact* mode (which
-mirrors the upstream reference compiler's emission) and the analysis paths
-(`check`, `lint`, the LSP) stay at **O0**. `miku build --verbose` prints
-per-stage pipeline timings.
+breakpoints fire during the turn loop — via `leek-dap`. A complete, runnable
+example lives in [`examples/fight/`](examples/fight/).
 
 ## Benchmarks
 
@@ -191,45 +126,25 @@ cell).
 binary, then pure execution; same codegen as JIT, so identical corpus correctness.
 **⁴ rust-java**: a transpiler to Java; corpus figure is a representative
 **1 500-case** slice — **89% fully correct** (56 wrong values, 103 compile
-failures), the rest concentrated in **user-class codegen**. After recent codegen
-fixes (range/slice access, `++`/`--` on indexed l-values, builtin-class
-constructors, typed-array coercion) + harness corrections (JVM locale,
-`ai.export`, log capture); the array subset alone went **220/400 → 396/400**.
+failures), the rest concentrated in **user-class codegen**.
 **⁵** Both Java backends also pay a fixed ≈ 0.26 s JVM process tax per fresh
 invocation (≈ 0.3–1.8 s cold before the program runs); the Rust backends pay ~0.</sub>
 
 - **rust-native** keeps LeekScript's dynamic (boxed) values but unboxes scalars
-  whose type is known. It **beats the JVM on the scalar loop** and now **matches
-  it on recursion** (`fib` ≈ upstream) thanks to param specialization (next
-  bullet); it still trails on allocation/hashing (arrays, maps), where values
-  stay boxed. Two wins got it there: a per-run **bump arena** for value boxes
-  (replacing a `malloc` per value — allocation-heavy code 2–3× faster) and the
-  specialization below. Cranelift codegen is **sub-millisecond** (the JIT's
-  per-run compile step), so each warm JIT run is essentially pure execution.
-- **Param type specialization.** `fib(n)`'s `n` is untyped, so every `n-1` /
-  `n < 2` would box a dynamic value. The native backend proves — by a
-  whole-program fixpoint over call sites — that such a parameter only ever
-  receives one scalar kind (every site an `integer`, or every site a `real`),
-  then compiles it as an unboxed register value (`isub`/`icmp` / float ops, no
-  allocation). That alone took `fib` from 117 ms to ≈ 4.5 ms. It applies to any
-  provably-monomorphic untyped parameter of a free function or a standalone
-  class's public method (including const-default args), not just `fib`.
-- **rust-native AOT exe** is the same Cranelift code compiled *ahead of time* to
-  a standalone binary (`leekc --emit native --native-emit exe` / `miku build
-  --backend native`): no per-run compilation, ~3 ms process start, first run =
-  steady-state. It's **thread-local-storage-bound** (a standalone binary's slower
-  TLS model makes the per-run op counter / value arena / globals costlier to
-  reach), so it trails the JIT most on still-boxing code (arrays, maps) and stays
-  close where values are unboxed (scalar loop, specialized `fib` ≈ 6 ms). It pays
-  the bigger one-time build (≈ 0.8 s, once) for instant, recompile-free runs —
-  ideal for a single deployed binary (e.g. a fight AI), less so for throughput.
-- **rust-java** transpiles to Java and runs in the same ballpark as the upstream
-  reference — matching it on `fib`, ~20% behind on the loop, and ahead on
-  array/map build here. The instantly-starting Rust backends still win *end-to-end*
-  on single runs, since the JVM pair pays the ≈ 0.26 s (and, cold, up to ≈ 1.8 s)
-  start-up tax before the program even executes.
-- The **native** backend matches the reference on the entire corpus (9 238 / 9 238);
-  `rust-java`'s remaining mismatches are summarised in the corpus footnote above.
+  whose type is known. It **beats the JVM on the scalar loop** and **matches it
+  on recursion** (`fib` ≈ upstream, via param-type specialization — proving an
+  untyped parameter is monomorphic and compiling it as an unboxed register), while
+  trailing on allocation/hashing (arrays, maps) where values stay boxed. Cranelift
+  codegen is sub-millisecond, so each warm JIT run is essentially pure execution.
+- **rust-native AOT exe** is the same Cranelift code compiled *ahead of time* to a
+  standalone binary — no per-run compilation, first run = steady-state. Ideal for
+  a single deployed binary (e.g. a fight AI); it trails the JIT on still-boxing
+  code (slower TLS in a standalone binary), close where values are unboxed.
+- **rust-java** transpiles to Java, in the same ballpark as upstream; the
+  instantly-starting Rust backends still win *end-to-end* on single runs since the
+  JVM pair pays its start-up tax first.
+- The **native** backend matches the reference on the entire corpus
+  (9 238 / 9 238); `rust-java`'s remaining mismatches are in the footnote above.
 
 ## Repository layout
 
@@ -252,8 +167,8 @@ official/, official-generator/   upstream reference impls (git submodules)
 
 ## Building & developing
 
-Requires stable Rust (the toolchain is pinned in `rust-toolchain.toml`, with
-`rustfmt` and `clippy`).
+Requires stable Rust (pinned in `rust-toolchain.toml`, with `rustfmt` and
+`clippy`).
 
 ```sh
 cargo build                 # whole workspace
@@ -263,23 +178,16 @@ cargo clippy                # lints (clippy pedantic at warn level)
 cargo fmt
 ```
 
-## Editor support
-
-- **VS Code** — `editors/vscode/` provides syntax highlighting, the language
-  server, and debugging (including "Debug AI in fight").
-- **Neovim** — `editors/nvim/` provides syntax/filetype detection and
-  `leek-lsp` setup (see its README).
-
-## Reference implementations
-
-`official/leek-wars` (the game client) and
-`official-generator/leek-wars-generator` (the upstream Java fight generator) are
-included as **git submodules** for reference and parity testing. If you didn't
-clone with `--recursive`:
+If you didn't clone with `--recursive`, fetch the reference-implementation
+submodules (`official/`, `official-generator/`):
 
 ```sh
 git submodule update --init --recursive
 ```
+
+Editor support lives in `editors/`: **VS Code** (`editors/vscode/` — syntax,
+language server, "Debug AI in fight") and **Neovim** (`editors/nvim/` — filetype
+detection and `leek-lsp` setup).
 
 ## License
 
