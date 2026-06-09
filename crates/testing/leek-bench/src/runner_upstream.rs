@@ -93,6 +93,13 @@ impl Backend for UpstreamJava {
         // chdir to the source's directory and pass the basename so
         // includes (and the source itself) resolve.
         let out = Command::new("java")
+            // The upstream runtime formats v1 reals with a default-locale
+            // `DecimalFormat`; the corpus's expected values were authored in a
+            // French (comma-decimal) locale, so pin it here for both Java
+            // backends — otherwise `0.5` renders as `0.5` not `0,5` and every
+            // v1 real "disagrees" spuriously.
+            .arg("-Duser.language=fr")
+            .arg("-Duser.country=FR")
             .arg("-cp")
             .arg(&cp)
             .arg("UpstreamRunner")
@@ -160,6 +167,10 @@ public class UpstreamRunner {
         AI ai = LeekScript.compileFile(new File(path).getPath(), "AI", options);
         long c1 = System.nanoTime();
         System.err.println("COMPILE_NS=" + (c1 - c0));
+        // Discard system logs (the default `BasicAILog` prints each to stdout)
+        // so a soft warning during runIA doesn't pollute the captured result —
+        // matching the upstream test framework, which reads logs separately.
+        ai.getLogs().setStream(a -> {});
         Object first = null;
         for (int i = 0; i < runs; i++) {
             ai.resetCounter();
@@ -169,7 +180,10 @@ public class UpstreamRunner {
             if (first == null) first = v;
             System.err.println("INNER_NS=" + (t1 - t0));
         }
-        System.out.println(ai.string(first));
+        // Match the upstream test framework's result stringification
+        // (`TestCommon`: `ai.export(v, ...)`), which quotes strings — `string()`
+        // does not, so a top-level string result would mismatch the expected.
+        System.out.println(ai.export(first));
     }
 }
 "#;

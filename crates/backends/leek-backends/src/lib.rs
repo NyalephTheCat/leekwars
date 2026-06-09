@@ -27,19 +27,18 @@ pub fn resolve_backend(manifest: &Manifest, cli_backend: Option<&str>) -> Result
     })
 }
 
-/// `miku run` only supports the interpreter today.
+/// `miku run` executes via the native JIT. The optional `--backend` override is
+/// accepted only when it names the native backend; any other backend belongs to
+/// `miku build`.
 pub fn resolve_run_backend(cli_backend: Option<&str>) -> Result<()> {
-    if let Some(raw) = cli_backend {
-        match BackendKind::parse(raw) {
-            Some(BackendKind::Interp) | None if raw == "interp" => Ok(()),
-            Some(BackendKind::Native) => {
-                bail!("native backend not yet supported in this toolchain")
-            }
-            Some(_) => bail!("`miku run` only supports the interpreter backend in this toolchain"),
+    match cli_backend {
+        None | Some("native") => Ok(()),
+        Some(raw) => match BackendKind::parse(raw) {
+            Some(_) => bail!(
+                "`miku run` executes via the native backend; `--backend {raw}` is not supported (use `miku build --backend {raw}`)"
+            ),
             None => bail!("unknown backend `{raw}`"),
-        }
-    } else {
-        Ok(())
+        },
     }
 }
 

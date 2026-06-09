@@ -153,37 +153,44 @@ fn run_case(case: &Case, file_id: usize) -> Result<Outcome> {
 
     match case.expect {
         Expectation::OpsAtMost(limit) => {
-            let (_result, used) =
-                leek_backend_interp::run_with_ops_used(hir, limit.saturating_mul(4), case.version);
-            Ok(if used <= limit {
-                Outcome::Pass
-            } else {
-                Outcome::Fail
-            })
+            // Native charges ops at the same MIR sites as the (removed) interp.
+            Ok(
+                if native_run(hir, case.version, limit.saturating_mul(4)).is_some()
+                    && leek_backend_native::ops_used() <= limit
+                {
+                    Outcome::Pass
+                } else {
+                    Outcome::Fail
+                },
+            )
         }
-        Expectation::Pass => {
-            let r = leek_backend_interp::run_with_limit_version(hir, 5_000_000, case.version);
-            Ok(if r.error.is_none() {
-                Outcome::Pass
-            } else {
-                Outcome::Fail
-            })
-        }
+        Expectation::Pass => Ok(if native_run(hir, case.version, 5_000_000).is_some() {
+            Outcome::Pass
+        } else {
+            Outcome::Fail
+        }),
         Expectation::Equals(ref want) => {
-            let r = leek_backend_interp::run_with_limit_version(hir, 5_000_000, case.version);
-            if r.error.is_some() {
-                return Ok(Outcome::Fail);
-            }
-            // Format the result version-aware, matching the upstream corpus.
-            leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
-            let got = r.value.to_string();
-            Ok(if &got == want {
-                Outcome::Pass
-            } else {
-                Outcome::Fail
+            Ok(match native_run(hir, case.version, 5_000_000) {
+                Some(got) if &got == want => Outcome::Pass,
+                _ => Outcome::Fail,
             })
         }
         Expectation::Error => Ok(Outcome::Fail),
+    }
+}
+
+/// Execute `hir` on the native JIT, returning the displayed result string or
+/// `None` on a compile / runtime error. Replaces the removed interpreter as the
+/// in-process executor (the upstream `expected` values remain the oracle).
+fn native_run(hir: &leek_hir::HirFile, version: u8, op_limit: u64) -> Option<String> {
+    leek_runtime::DISPLAY_VERSION.with(|c| c.set(version));
+    let mut opts = leek_backend_native::NativeOptions::release();
+    opts.version = version;
+    opts.op_limit = op_limit;
+    opts.emit = leek_backend_native::NativeEmit::Jit;
+    match leek_backend_native::compile(hir, &opts) {
+        Ok(leek_backend_native::NativeArtifact::Value(v)) => Some(v.to_string()),
+        _ => None,
     }
 }
 

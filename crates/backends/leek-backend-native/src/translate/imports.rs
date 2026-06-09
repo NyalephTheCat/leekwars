@@ -398,6 +398,15 @@ pub(super) fn declare_imports(
             ("leek_field_get_int", &[i, i, i, i], Some(i)),
             ("leek_field_get_real", &[i, i, i, i], Some(types::F64)),
             ("leek_field_set", &[i, i, i, i, i], None),
+            // Slot-resolved field access for a statically-known class: the
+            // compile-time dense slot (`base, slot, name_ptr, name_len, ver`)
+            // skips the field-name hash; the name is carried for the cold
+            // non-instance fallback only.
+            ("leek_field_get_slot", &[i, i, i, i, i], Some(i)),
+            ("leek_field_get_slot_int", &[i, i, i, i, i], Some(i)),
+            ("leek_field_get_slot_real", &[i, i, i, i, i], Some(types::F64)),
+            ("leek_field_set_slot", &[i, i, i, i, i, i], None),
+            ("leek_set_index_int", &[i, i, i, i], None),
             // Typed array reads with an unboxed integer index: `leek_index_int`
             // returns a handle (saves boxing the index); the `_get_int/_real`
             // pair return an unboxed scalar (also skip boxing the result) for a

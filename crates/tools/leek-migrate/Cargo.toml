@@ -16,7 +16,8 @@ leek-rewrite     = { workspace = true }
 
 [dev-dependencies]
 leek-hir    = { workspace = true }
-leek-backend-interp = { workspace = true }
+leek-backend-native = { workspace = true }
+leek-runtime        = { workspace = true }
 
 [lints]
 workspace = true

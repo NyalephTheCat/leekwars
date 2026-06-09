@@ -65,14 +65,14 @@ pub enum Command {
     Init(Init),
     /// Compile per the manifest's default backend (Java by default).
     Build(Build),
-    /// Build with the interpreter backend and execute.
+    /// Build and execute via the native JIT.
     Run(Run),
     /// Run a leek-wars fight from a scenario file, or test an AI against many
     /// settings (matrix sweep, tournament, randomized builds).
     Fight(Fight),
     /// Run diagnostics across the project without producing output.
     Check,
-    /// Run every `.leek` file under `tests/` through the interpreter.
+    /// Run every `.leek` file under `tests/` via the native JIT.
     Test(Test),
     /// Format all `.leek` sources.
     Fmt(Fmt),
@@ -92,8 +92,8 @@ pub enum Command {
     Migrate(Migrate),
     /// Print per-function complexity / big-O analysis.
     Analyze(Analyze),
-    /// Run the program under the interpreter and emit a per-stack
-    /// ops profile (folded format or human table).
+    /// Unavailable: the per-stack ops profiler relied on the removed
+    /// interpreter backend.
     Profile(Profile),
     /// Generate HTML API documentation from `.leek` sources.
     Doc(Doc),
@@ -270,8 +270,9 @@ pub struct Build {
 
 #[derive(Debug, clap::Args)]
 pub struct Run {
-    /// Override the backend used for execution. Only `interp` is
-    /// supported in v0.1; `native` returns a clean error.
+    /// Override the backend used for execution. `miku run` executes via the
+    /// native JIT, so only `native` is accepted; other backends belong to
+    /// `miku build`.
     #[arg(long, value_name = "KIND")]
     pub backend: Option<String>,
 }

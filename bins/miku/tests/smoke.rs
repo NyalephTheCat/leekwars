@@ -117,7 +117,7 @@ fn run_outputs_value() {
 name    = "runme"
 version = "0.1.0"
 
-[backend.interp]
+[backend.native]
 enable  = true
 default = true
 "#,

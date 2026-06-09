@@ -1,6 +1,6 @@
 use leek_hir::{
-    BinaryOp, Expr, ExprKind, IntervalExpr, Literal, NameRef, NewExpr, PostfixOp, SliceExpr,
-    UnaryOp,
+    BinaryOp, Callee, Def, Expr, ExprKind, IntervalExpr, Literal, NameRef, NewExpr, PostfixOp,
+    SliceExpr, UnaryOp,
 };
 use leek_types::Type;
 use std::fmt::Write as _;
@@ -11,6 +11,19 @@ use super::{
     is_primitive_number_expr, is_string_expr, java_class_name, sanitize_ident, user_fn_wrapper,
 };
 use crate::mangle;
+
+/// The math builtins whose result is statically numeric (`real`/`integer`) —
+/// the same set as `leek_runtime::math_sig`. Used to decide whether a value
+/// assigned into a typed numeric array can be coerced (see
+/// [`Emitter::expr_is_numeric`]).
+fn is_numeric_math_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "sqrt" | "cbrt" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh"
+            | "tanh" | "exp" | "log" | "log10" | "log2" | "floor" | "ceil" | "round" | "pow"
+            | "atan2" | "hypot"
+    )
+}
 
 impl Emitter<'_> {
     pub(crate) fn expr_to_string(&self, e: &Expr) -> String {
@@ -686,8 +699,79 @@ impl Emitter<'_> {
         buf.push_str(", ");
         self.write_expr(buf, idx, false);
         buf.push_str(", ");
-        self.write_expr(buf, value, false);
+        self.write_index_value(buf, op, base, value);
         buf.push_str(", null)");
+    }
+
+    /// Emit the value of an indexed assignment, coercing it to the array's
+    /// declared element type for a plain `=` into a typed numeric array — the
+    /// runtime `ArrayLeekValue` is type-erased, so `Array<real> a; a[0] = 5`
+    /// must store `5.0` and `Array<integer> a; a[0] = 5.7` must store `5`.
+    /// Mirrors upstream `JavaWriter.compileConvert`'s numeric arms
+    /// (`((Number) v).doubleValue()` / `.longValue()`). The Java backend gets
+    /// untyped HIR (`value.ty` is `Any`), so the element type is recovered from
+    /// the base local's *declaration* and the value is coerced only when it is
+    /// statically, unambiguously numeric (a literal or a math builtin — never a
+    /// bare `+`, which could be string/array concat) — matching upstream's
+    /// "only an int-or-real static value is converted" rule and avoiding a cast
+    /// of a non-`Number` value.
+    fn write_index_value(&self, buf: &mut String, op: BinaryOp, base: &Expr, value: &Expr) {
+        if op == BinaryOp::Assign && self.expr_is_numeric(value) {
+            let suffix = match self.local_array_elem_ty(base) {
+                Some(Type::Real) => Some(").doubleValue()"),
+                Some(Type::Integer) => Some(").longValue()"),
+                _ => None,
+            };
+            if let Some(suffix) = suffix {
+                buf.push_str("((Number) ");
+                self.write_expr(buf, value, true);
+                buf.push_str(suffix);
+                return;
+            }
+        }
+        self.write_expr(buf, value, false);
+    }
+
+    /// The declared element type of `base` when it's a local declared as a
+    /// (statically) typed array — `Array<real> a` → `Real`. Recovered from the
+    /// def table since the HIR `Expr.ty` is `Any` here.
+    fn local_array_elem_ty(&self, base: &Expr) -> Option<Type> {
+        if let ExprKind::Name(NameRef::Local(id)) = &base.kind
+            && let Some(Def::Local(l)) = self.hir.defs.get(id.0 as usize)
+            && let Some(Type::Array(elem)) = &l.ty
+        {
+            return Some((**elem).clone());
+        }
+        None
+    }
+
+    /// Whether `e` is statically, unambiguously a number — an int/real literal,
+    /// a negation of one, or a numeric math builtin (`round`/`floor`/`sqrt`/…).
+    /// Deliberately conservative: a bare `+`/`*` etc. is excluded because
+    /// without types it could be string or array concatenation, not arithmetic.
+    fn expr_is_numeric(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Literal(Literal::Int(_) | Literal::Real(_)) => true,
+            ExprKind::Unary(UnaryOp::Neg, x) => self.expr_is_numeric(x),
+            ExprKind::Call(c) => matches!(
+                &c.callee,
+                Callee::Function(NameRef::Builtin(n)) if is_numeric_math_builtin(n)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Emit `++`/`--` on an index l-value via the compound-assign put-helper
+    /// (`put_add_eq(base, idx, 1l, null)` / `put_sub_eq(...)`), which returns
+    /// the new value. `a[i]` lowers to `get(...)`, not assignable in Java, so
+    /// the plain `<x> = add(<x>, 1l)` form can't be used for an indexed target.
+    fn write_index_incdec(&self, buf: &mut String, helper: &str, base: &Expr, idx: &Expr) {
+        buf.push_str(helper);
+        buf.push('(');
+        self.write_expr(buf, base, false);
+        buf.push_str(", ");
+        self.write_expr(buf, idx, false);
+        buf.push_str(", 1l, null)");
     }
 
     // ---- unary / postfix ---------------------------------------------------
@@ -729,19 +813,30 @@ impl Emitter<'_> {
                 buf.push(')');
             }
             UnaryOp::PreInc => {
-                // Reference shape: `u_x = add(u_x, 1l)`. The `add`/
-                // `sub` methods are instance methods on `AI` so bare
-                // names resolve correctly inside an AI subclass.
-                self.write_expr(buf, x, false);
-                buf.push_str(" = add(");
-                self.write_expr(buf, x, false);
-                buf.push_str(", 1l)");
+                // An index l-value (`a[i]`) emits as `get(...)`, which isn't a
+                // valid Java l-value — route through the `put_add_eq` helper
+                // (returns the new value, matching pre-increment), like a
+                // compound `a[i] += 1`. Reference shape for a plain l-value:
+                // `u_x = add(u_x, 1l)` (`add`/`sub` are bare AI instance
+                // methods).
+                if let ExprKind::Index(base, idx) = &x.kind {
+                    self.write_index_incdec(buf, "put_add_eq", base, idx);
+                } else {
+                    self.write_expr(buf, x, false);
+                    buf.push_str(" = add(");
+                    self.write_expr(buf, x, false);
+                    buf.push_str(", 1l)");
+                }
             }
             UnaryOp::PreDec => {
-                self.write_expr(buf, x, false);
-                buf.push_str(" = sub(");
-                self.write_expr(buf, x, false);
-                buf.push_str(", 1l)");
+                if let ExprKind::Index(base, idx) = &x.kind {
+                    self.write_index_incdec(buf, "put_sub_eq", base, idx);
+                } else {
+                    self.write_expr(buf, x, false);
+                    buf.push_str(" = sub(");
+                    self.write_expr(buf, x, false);
+                    buf.push_str(", 1l)");
+                }
             }
             UnaryOp::Ref => self.write_expr(buf, x, parens_if_negative),
         }
@@ -752,19 +847,31 @@ impl Emitter<'_> {
             PostfixOp::PostInc => {
                 // `a++` = pre-value of `a` after assignment. Trick from
                 // the Java reference: compute `add(a, 1)`, assign it to
-                // `a`, then `sub(...,1)` to recover the original.
+                // `a`, then `sub(...,1)` to recover the original. An index
+                // l-value goes through `put_add_eq` (returns the new value),
+                // so the old value is `sub(put_add_eq(...), 1)`.
                 buf.push_str("sub(");
-                self.write_expr(buf, x, false);
-                buf.push_str(" = add(");
-                self.write_expr(buf, x, false);
-                buf.push_str(", 1l), 1l)");
+                if let ExprKind::Index(base, idx) = &x.kind {
+                    self.write_index_incdec(buf, "put_add_eq", base, idx);
+                } else {
+                    self.write_expr(buf, x, false);
+                    buf.push_str(" = add(");
+                    self.write_expr(buf, x, false);
+                    buf.push_str(", 1l)");
+                }
+                buf.push_str(", 1l)");
             }
             PostfixOp::PostDec => {
                 buf.push_str("add(");
-                self.write_expr(buf, x, false);
-                buf.push_str(" = sub(");
-                self.write_expr(buf, x, false);
-                buf.push_str(", 1l), 1l)");
+                if let ExprKind::Index(base, idx) = &x.kind {
+                    self.write_index_incdec(buf, "put_sub_eq", base, idx);
+                } else {
+                    self.write_expr(buf, x, false);
+                    buf.push_str(" = sub(");
+                    self.write_expr(buf, x, false);
+                    buf.push_str(", 1l)");
+                }
+                buf.push_str(", 1l)");
             }
             PostfixOp::NonNull => {
                 // `x!` — assert non-null. The reference just emits the
@@ -942,49 +1049,45 @@ impl Emitter<'_> {
     }
 
     pub(crate) fn write_slice(&self, buf: &mut String, s: &SliceExpr) {
-        buf.push_str("LeekOperations.slice(");
-        buf.push_str(self.ai_this());
-        buf.push_str(", ");
+        // Mirror the upstream `LeekArrayAccess.writeJavaCode` range forms — AI
+        // instance methods called bare (like `get(...)`), NOT a non-existent
+        // `LeekOperations.slice`. The method name selects on which bounds are
+        // present; then the base, the present bound(s), and the stride:
+        //   a[i:j]   → range(base, i, j)        a[i:]  → range_start(base, i)
+        //   a[:j]    → range_end(base, j)       a[:]   → range_all(base)
+        // with the stride appended last when present (`a[i:j:k]` → +`, k`).
+        let name = match (s.start.is_some(), s.end.is_some()) {
+            (true, true) => "range",
+            (true, false) => "range_start",
+            (false, true) => "range_end",
+            (false, false) => "range_all",
+        };
+        buf.push_str(name);
+        buf.push('(');
         self.write_expr(buf, &s.base, false);
-        buf.push_str(", ");
-        match &s.start {
-            Some(e) => self.write_expr(buf, e, false),
-            None => buf.push_str("null"),
+        if let Some(e) = &s.start {
+            buf.push_str(", ");
+            self.write_expr(buf, e, false);
         }
-        buf.push_str(", ");
-        match &s.end {
-            Some(e) => self.write_expr(buf, e, false),
-            None => buf.push_str("null"),
+        if let Some(e) = &s.end {
+            buf.push_str(", ");
+            self.write_expr(buf, e, false);
         }
-        buf.push_str(", ");
-        match &s.step {
-            Some(e) => self.write_expr(buf, e, false),
-            None => buf.push_str("null"),
+        if let Some(e) = &s.step {
+            buf.push_str(", ");
+            self.write_expr(buf, e, false);
         }
         buf.push(')');
     }
 
     pub(crate) fn write_new(&self, buf: &mut String, n: &NewExpr) {
-        // Built-in primitive classes (`Integer`, `Real`, `Number`,
-        // `Boolean`) have no Java constructor — the upstream emitter
-        // collapses `new Integer()` to the type's default literal
-        // (`0l` / `0.0` / `false`). Mirror that to avoid emitting
-        // `new u_Integer()` for a class that doesn't exist.
-        // See `LeekFunctionCall.compileL`'s `ClassValueType` arm.
-        match n.class.as_str() {
-            "Integer" => {
-                buf.push_str("0l");
-                return;
-            }
-            "Real" | "Number" => {
-                buf.push_str("0.0");
-                return;
-            }
-            "Boolean" => {
-                buf.push_str("false");
-                return;
-            }
-            _ => {}
+        // A built-in class used as a constructor (`new Array()`, `new Map`,
+        // `new Integer()`, …) has no user-class Java constructor — route it to
+        // the same construction the upstream emitter uses (collection
+        // `*LeekValue`, or a primitive's default literal). See
+        // `LeekFunctionCall.compileL`'s `ClassValueType` arm.
+        if self.write_builtin_class_construct(buf, &n.class, &n.args) {
+            return;
         }
         buf.push_str("new ");
         buf.push_str(&mangle::class_name(self.opts, &n.class));
@@ -996,5 +1099,36 @@ impl Emitter<'_> {
             self.write_expr(buf, a, false);
         }
         buf.push(')');
+    }
+
+    /// Emit a built-in class used as a constructor (`Array()`, `new Map()`,
+    /// `Set(1, 2)`, `Integer()`, …) and return `true`; return `false` for a
+    /// name that isn't a built-in class (the caller then handles it as a user
+    /// class or an unknown builtin). Collection classes build the matching
+    /// `*LeekValue` exactly as an array/map/set/object literal would; the
+    /// primitive classes collapse to their default literal, mirroring the
+    /// upstream `LeekFunctionCall` `ClassValueType` arm. Used by both the
+    /// `new C(...)` form ([`Self::write_new`]) and the call form `C(...)`.
+    pub(crate) fn write_builtin_class_construct(
+        &self,
+        buf: &mut String,
+        class: &str,
+        args: &[Expr],
+    ) -> bool {
+        match class {
+            // Collections build from the call args, just like a literal.
+            "Array" => self.write_array(buf, args),
+            "Set" => self.write_set(buf, args),
+            // `Map()` / `Object()` take no positional elements — an empty one.
+            "Map" => self.write_map(buf, &[]),
+            "Object" => self.write_object(buf, &[]),
+            // Primitive classes collapse to their default literal.
+            "Integer" => buf.push_str("0l"),
+            "Real" | "Number" => buf.push_str("0.0"),
+            "Boolean" => buf.push_str("false"),
+            "String" => buf.push_str("\"\""),
+            _ => return false,
+        }
+        true
     }
 }

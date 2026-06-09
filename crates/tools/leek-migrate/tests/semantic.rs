@@ -12,7 +12,7 @@
 //! output version target with the same code." A textual rename
 //! that changes runtime behaviour fails here.
 
-use leek_backend_interp::{Value, run_with_limit_version};
+use leek_runtime::Value;
 use leek_diagnostics::Severity;
 use leek_hir::lower_file;
 use leek_migrate::migrate_text;
@@ -50,13 +50,14 @@ fn run(src: &str, version: Version) -> Value {
     let root = SyntaxNode::new_root(parsed.green.clone());
     let file = SourceFile::cast(root).expect("source file root");
     let (hir, _diags) = lower_file(&file, id());
-    let r = run_with_limit_version(&hir, 1_000_000, version_num(version));
-    assert!(
-        r.error.is_none(),
-        "runtime error under {version:?}: {:?}\nsource:\n{src}",
-        r.error,
-    );
-    r.value
+    let mut opts = leek_backend_native::NativeOptions::release();
+    opts.version = version_num(version);
+    opts.op_limit = 1_000_000;
+    opts.emit = leek_backend_native::NativeEmit::Jit;
+    match leek_backend_native::compile(&hir, &opts) {
+        Ok(leek_backend_native::NativeArtifact::Value(v)) => v,
+        other => panic!("native run failed under {version:?}: {other:?}\nsource:\n{src}"),
+    }
 }
 
 /// The core assertion: original under `from`, migrated under `to`,

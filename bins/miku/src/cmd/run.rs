@@ -1,4 +1,4 @@
-//! `miku run` — build via the interpreter and execute.
+//! `miku run` — build and execute via the native JIT.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -46,11 +46,22 @@ pub fn run(
     };
 
     let version_byte = driver_run.run.input().version_byte;
-    let r = leek_backend_interp::run_with_limit_version(hir.0.as_ref(), OP_BUDGET, version_byte);
-    if let Some(err) = r.error {
-        eprintln!("error: {err}");
-        return Ok(ExitCode::from(1));
+    // Execute via the native JIT (the interpreter backend was removed). The 20M
+    // op budget matches the prior interpreter run.
+    use leek_backend_native::{NativeArtifact, NativeEmit, NativeOptions};
+    let mut opts = NativeOptions::debug();
+    opts.version = version_byte;
+    opts.op_limit = OP_BUDGET;
+    opts.emit = NativeEmit::Jit;
+    match leek_backend_native::compile(hir.0.as_ref(), &opts) {
+        Ok(NativeArtifact::Value(v)) => {
+            println!("{v}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(_) => unreachable!("Jit emit yields a Value"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(ExitCode::from(1))
+        }
     }
-    println!("{}", r.value);
-    Ok(ExitCode::SUCCESS)
 }

@@ -1182,8 +1182,11 @@ fn dynamic_method_targets(program: &MirProgram, f: &MirFunction) -> Vec<(usize, 
 pub fn method_value_info(
     program: &MirProgram,
     reachable_indices: &[usize],
-) -> (HashMap<(String, String), usize>, HashSet<usize>) {
-    let mut table = HashMap::new();
+) -> (HashMap<u32, HashMap<String, usize>>, HashSet<usize>) {
+    // Keyed by the class's `DefId` (a `u32`, matching the runtime instance's
+    // `class`) → method name → function index, so the per-call resolve in
+    // `leek_call_method` is a `(u32, &str)` lookup with no string clones/hashes.
+    let mut table: HashMap<u32, HashMap<String, usize>> = HashMap::new();
     let mut set = HashSet::new();
     for &fi in reachable_indices {
         for (fidx, cls, name) in index_method_targets(program, &program.functions[fi])
@@ -1191,7 +1194,9 @@ pub fn method_value_info(
             .chain(virtual_method_targets(program, &program.functions[fi]))
             .chain(dynamic_method_targets(program, &program.functions[fi]))
         {
-            table.insert((cls, name), fidx);
+            if let Some(c) = program.class_by_name(&cls) {
+                table.entry(c.def_id.0).or_default().insert(name, fidx);
+            }
             set.insert(fidx);
         }
     }
@@ -3634,11 +3639,8 @@ impl Tx<'_, '_> {
                 _ => {}
             }
         }
-        let set = self.imports.rt("leek_value_set_index")?;
         let (arr, _) = self.local_value(base)?;
         let (i, it) = self.operand(idx)?;
-        // The index is a boxed value (so map keys of any kind work).
-        let idx_h = self.coerce(i, it, ValTy::Ref)?;
         let (mut v, mut vt) = self.rvalue(rv)?;
         // A typed numeric array coerces the written element to its element
         // kind (`Array<real>`'s `a[0] = 5` stores `5.0`); a constant-keyed
@@ -3661,7 +3663,16 @@ impl Tx<'_, '_> {
         }
         let elem = self.coerce(v, vt, ValTy::Ref)?;
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
-        self.b.ins().call(set, &[arr, idx_h, elem, ver]);
+        // A statically-integer index needs no heap box (`a[i] = v`); the boxed
+        // path stays for map keys of any kind.
+        if it == ValTy::Int {
+            let set = self.imports.rt("leek_set_index_int")?;
+            self.b.ins().call(set, &[arr, i, elem, ver]);
+        } else {
+            let set = self.imports.rt("leek_value_set_index")?;
+            let idx_h = self.coerce(i, it, ValTy::Ref)?;
+            self.b.ins().call(set, &[arr, idx_h, elem, ver]);
+        }
         Ok(())
     }
 
@@ -3689,7 +3700,7 @@ impl Tx<'_, '_> {
         if self.is_final_field(base, name) {
             return Ok(());
         }
-        let set = self.imports.rt("leek_field_set")?;
+        let slot = self.field_slot_of(base, name);
         let (base_h, _) = self.local_value(base)?;
         let (ptr, lenv) = self.const_str_bytes(name);
         let (mut v, mut vt) = self.rvalue(rv)?;
@@ -3703,10 +3714,19 @@ impl Tx<'_, '_> {
         }
         let val = self.coerce(v, vt, ValTy::Ref)?;
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
-        // The field name is passed unboxed (`ptr`,`len`) — `leek_field_set`
-        // writes an instance/object field via `set_field(&str, …)` with no
-        // `Value::String` key allocation.
-        self.b.ins().call(set, &[base_h, ptr, lenv, val, ver]);
+        // The field name is passed unboxed (`ptr`,`len`). A known-class field
+        // resolves to a dense slot → `leek_field_set_slot` writes it via a
+        // direct `Vec` index, skipping the field-name hash; otherwise
+        // `leek_field_set` writes via `set_field(&str, …)`. Neither allocates a
+        // `Value::String` key.
+        if let Some(slot) = slot {
+            let set = self.imports.rt("leek_field_set_slot")?;
+            let slotv = self.b.ins().iconst(types::I64, i64::try_from(slot).unwrap_or(i64::MAX));
+            self.b.ins().call(set, &[base_h, slotv, ptr, lenv, val, ver]);
+        } else {
+            let set = self.imports.rt("leek_field_set")?;
+            self.b.ins().call(set, &[base_h, ptr, lenv, val, ver]);
+        }
         Ok(())
     }
 
@@ -4793,6 +4813,25 @@ impl Tx<'_, '_> {
             .and_then(|fs| coerce_target_ty(&fs.ty))
     }
 
+    /// The dense field slot for `name` when `base`'s class is statically known
+    /// and declares (or inherits) `name` as a stored field. The slot
+    /// (`MirClass::field_layout`) is assigned root-first, so an inherited field
+    /// keeps the same slot in every subclass — making it valid for any runtime
+    /// instance whose static type is this class (or a descendant). Returns
+    /// `None` for an unknown class or a name that isn't a stored field (e.g. a
+    /// method, which must keep the name path's bound-method fallback).
+    fn field_slot_of(&self, base: LocalId, name: &str) -> Option<usize> {
+        // A/B hatch (read at codegen time, zero runtime cost): force the
+        // field-name path to measure the slot-indexing win.
+        if std::env::var_os("LEEK_NATIVE_NO_FIELDSLOT").is_some() {
+            return None;
+        }
+        receiver_class(self.mir_locals, self.new_classes, self.aliased_classes, base)
+            .and_then(|cls| self.program.class_by_name(cls))
+            .and_then(|c| c.field_slot(name))
+            .map(|fs| fs.slot)
+    }
+
     /// `true` if some strict descendant of `base` overrides the instance
     /// method `(name, arity)` — so a receiver of static type `base` whose
     /// runtime class might be that subclass needs virtual dispatch, which
@@ -5313,8 +5352,9 @@ impl Tx<'_, '_> {
         // `BoundMethod` from `METHOD_RESOLVE` — seeded for `obj.m` field reads
         // by `index_method_targets` (so the method is reachable + uniform-
         // compiled). The receiver is captured, so calling it prepends `obj`.
+        let slot = self.field_slot_of(base, name);
         let (base_h, _) = self.local_value(base)?;
-        let v = self.field_get_boxed(base_h, name)?;
+        let v = self.field_get_boxed(base_h, name, slot)?;
         Ok((v, ValTy::Ref))
     }
 
@@ -5602,11 +5642,27 @@ impl Tx<'_, '_> {
     /// via `leek_field_get` — the field name is passed unboxed (`ptr`,`len`), so
     /// no `Value::String` key is allocated per read. Semantically identical to
     /// `leek_value_index(base, const_string(name))`.
-    fn field_get_boxed(&mut self, base_h: Value, name: &str) -> Result<Value, NativeError> {
+    /// `slot` is the compile-time-resolved dense field slot when `base`'s class
+    /// is known (see [`Self::field_slot_of`]) — then the read goes through
+    /// `leek_field_get_slot`, skipping the runtime field-name hash. `None` keeps
+    /// the name path (`leek_field_get`), which also handles `obj.method`
+    /// bound-method reads (a method has no field slot).
+    fn field_get_boxed(
+        &mut self,
+        base_h: Value,
+        name: &str,
+        slot: Option<usize>,
+    ) -> Result<Value, NativeError> {
         let (ptr, lenv) = self.const_str_bytes(name);
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
-        let f = self.imports.rt("leek_field_get")?;
-        let inst = self.b.ins().call(f, &[base_h, ptr, lenv, ver]);
+        let inst = if let Some(slot) = slot {
+            let slotv = self.b.ins().iconst(types::I64, i64::try_from(slot).unwrap_or(i64::MAX));
+            let f = self.imports.rt("leek_field_get_slot")?;
+            self.b.ins().call(f, &[base_h, slotv, ptr, lenv, ver])
+        } else {
+            let f = self.imports.rt("leek_field_get")?;
+            self.b.ins().call(f, &[base_h, ptr, lenv, ver])
+        };
         Ok(self.b.inst_results(inst)[0])
     }
 
@@ -5620,6 +5676,19 @@ impl Tx<'_, '_> {
         let base_h = self.coerce(bv, bt, ValTy::Ref)?;
         let (ptr, lenv) = self.const_str_bytes(name);
         let ver = self.b.ins().iconst(types::I64, i64::from(self.lang.version));
+        // A known-class field resolves to a dense slot → the slot shim skips the
+        // field-name hash (see [`Self::field_slot_of`]).
+        if let Some(slot) = self.field_slot_of(base, name) {
+            let slotv = self.b.ins().iconst(types::I64, i64::try_from(slot).unwrap_or(i64::MAX));
+            let sym = if target == ValTy::Real {
+                "leek_field_get_slot_real"
+            } else {
+                "leek_field_get_slot_int"
+            };
+            let f = self.imports.rt(sym)?;
+            let inst = self.b.ins().call(f, &[base_h, slotv, ptr, lenv, ver]);
+            return Ok(self.b.inst_results(inst)[0]);
+        }
         let sym = if target == ValTy::Real {
             "leek_field_get_real"
         } else {

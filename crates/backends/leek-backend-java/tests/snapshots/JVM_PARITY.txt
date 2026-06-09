@@ -1,8 +1,8 @@
 rust-emit JVM parity: 3403 cases
 ✓ value: 3370/3403 (99.0%)
-✓ ops:   3039/3403 (89.3%)
+✓ ops:   3038/3403 (89.3%)
 ✗ value mismatches: 33
-✗ ops drift:        364
+✗ ops drift:        365
 ✗ jvm errors:       0
 
 L224: v1 code="var a = 5 a ^= 2 return a;"

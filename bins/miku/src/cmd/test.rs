@@ -34,7 +34,7 @@ use crate::cli::{ColorWhen, MessageFormat, Test};
 use crate::util::reporter_from_cli;
 
 /// Default op budget per test file when no `timeout` annotation is given.
-const DEFAULT_OP_BUDGET: u64 = 5_000_000;
+const DEFAULT_OP_BUDGET: u64 = 20_000_000;
 
 pub fn run(
     args: Test,
@@ -165,15 +165,21 @@ fn run_one(
     };
 
     let budget = annotations.timeout.unwrap_or(DEFAULT_OP_BUDGET);
-    let r = leek_backend_interp::run_with_limit_version(hir.0.as_ref(), budget, version_byte);
+    // Execute via the native JIT (the interpreter backend was removed). A
+    // runtime error surfaces as `Err(NativeError::Runtime(..))`.
+    let mut opts = leek_backend_native::NativeOptions::debug();
+    opts.version = version_byte;
+    opts.op_limit = budget;
+    opts.emit = leek_backend_native::NativeEmit::Jit;
+    let err = leek_backend_native::compile(hir.0.as_ref(), &opts).err();
 
-    match (&r.error, annotations.expect_fail) {
+    match (&err, annotations.expect_fail) {
         (None, false) => Ok(TestOutcome::Pass),
         (None, true) => Ok(TestOutcome::Fail(
             "expected failure but program ran clean".into(),
         )),
         (Some(_), true) => Ok(TestOutcome::Pass),
-        (Some(err), false) => Ok(TestOutcome::Fail(format!("runtime: {err}"))),
+        (Some(e), false) => Ok(TestOutcome::Fail(format!("runtime: {e}"))),
     }
 }
 

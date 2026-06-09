@@ -1,7 +1,7 @@
 //! Well-formedness verification of MIR.
 //!
-//! MIR is consumed by two independent backends — `leek-backend-interp` (walks
-//! the CFG) and `leek-backend-native` (Cranelift). Both *assume* a set of
+//! MIR is consumed by the code-generation backends — `leek-backend-native`
+//! (Cranelift) and `leek-backend-java`. Both *assume* a set of
 //! structural invariants and index straight into `blocks` / terminator targets
 //! without bounds checks. Historically those invariants were implicit: a
 //! malformed function was only discovered when a backend panicked or

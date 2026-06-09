@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::Parser;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Row, Table, presets};
-use leek_bench::{BenchOptions, BenchSummary, RustInterp, RustNative, RustJavaEmit, UpstreamJava, bench};
+use leek_bench::{BenchOptions, BenchSummary, RustNative, RustJavaEmit, UpstreamJava, bench};
 use leek_test_corpus::cases::{Expectation, Manifest, TestCase};
 use leek_test_corpus::embedded_manifest;
 mod cli;
@@ -37,13 +37,8 @@ fn run_single(cli: &Cli, input: &PathBuf) -> Result<()> {
     };
     let mut summaries: Vec<(String, Result<BenchSummary>)> = Vec::new();
 
-    let mut interp = RustInterp::new();
-    summaries.push((interp.name_str(), bench(&mut interp, input, &opts)));
-
-    if !cli.no_native {
-        let mut nat = RustNative::new();
-        summaries.push((nat.name_str(), bench(&mut nat, input, &opts)));
-    }
+    let mut nat = RustNative::new();
+    summaries.push((nat.name_str(), bench(&mut nat, input, &opts)));
     if !cli.no_rust_java {
         let mut rj = RustJavaEmit::auto();
         summaries.push((rj.name_str(), bench(&mut rj, input, &opts)));
@@ -164,13 +159,12 @@ fn run_corpus(cli: &Cli) -> Result<()> {
     });
     std::fs::create_dir_all(&work_root)?;
 
-    let mut interp = Aggregate::new("rust-interp");
     let mut nat = Aggregate::new("rust-native");
     let mut rj = Aggregate::new("rust-java");
     let mut up = Aggregate::new("upstream-java");
 
     let mut per_case_table = if cli.verbose {
-        let mut t = make_table(&["case", "interp", "rust-java", "upstream", "agree"]);
+        let mut t = make_table(&["case", "native", "rust-java", "upstream", "agree"]);
         t.set_content_arrangement(ContentArrangement::Disabled);
         Some(t)
     } else {
@@ -191,12 +185,8 @@ fn run_corpus(cli: &Cli) -> Result<()> {
             strict: case.strict,
         };
 
-        let r1 = bench(&mut RustInterp::new(), &path, &opts);
-        let r_nat = if cli.no_native {
-            None
-        } else {
-            Some(bench(&mut RustNative::new(), &path, &opts))
-        };
+        // Native is the in-process reference backend (the interpreter was removed).
+        let r1 = bench(&mut RustNative::new(), &path, &opts);
         let r2 = if cli.no_rust_java {
             None
         } else {
@@ -208,10 +198,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
             Some(bench(&mut UpstreamJava::auto(), &path, &opts))
         };
 
-        interp.record(&r1, expected);
-        if let Some(r) = &r_nat {
-            nat.record(r, expected);
-        }
+        nat.record(&r1, expected);
         if let Some(r) = &r2 {
             rj.record(r, expected);
         }
@@ -235,7 +222,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
         println!("{t}");
     }
 
-    let baseline = [&interp, &nat, &rj, &up]
+    let baseline = [&nat, &rj, &up]
         .iter()
         .filter_map(|a| median(&a.warm))
         .min()
@@ -253,7 +240,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
         "vs_best/share",
         "total",
     ]);
-    for a in [&interp, &nat, &rj, &up] {
+    for a in [&nat, &rj, &up] {
         if a.attempts == 0 {
             continue;
         }
@@ -298,7 +285,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
     println!("{table}");
     println!("bench wall-clock: {}", fmt(bench_total));
     if !cli.detail
-        && [&interp, &nat, &rj, &up]
+        && [&nat, &rj, &up]
             .iter()
             .any(|a| !a.step_samples.is_empty())
     {
@@ -552,11 +539,6 @@ fn truncate(s: &str, n: usize) -> String {
 
 trait NameStr {
     fn name_str(&self) -> String;
-}
-impl NameStr for RustInterp {
-    fn name_str(&self) -> String {
-        leek_bench::Backend::name(self).to_string()
-    }
 }
 impl NameStr for RustNative {
     fn name_str(&self) -> String {

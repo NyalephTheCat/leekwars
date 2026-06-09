@@ -263,7 +263,7 @@ fn parse_backend(
     tbl: &toml::value::Table,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<BackendTable, ManifestError> {
-    const KNOWN: &[&str] = &["java", "jar", "native", "interp", "wasm"];
+    const KNOWN: &[&str] = &["java", "jar", "native", "wasm"];
     warn_unknown(tbl, "backend", KNOWN, warnings);
     let mut out = BackendTable::default();
     for (key, val) in tbl {
@@ -279,7 +279,6 @@ fn parse_backend(
             "java" => out.java = Some(settings),
             "jar" => out.jar = Some(settings),
             "native" => out.native = Some(settings),
-            "interp" => out.interp = Some(settings),
             "wasm" => out.wasm = Some(settings),
             _ => unreachable!(),
         }
@@ -532,7 +531,7 @@ mod tests {
             emit_lines = true
             out_dir = "build/java"
 
-            [backend.interp]
+            [backend.native]
             enable = true
         "#;
         let (m, _) = parse_ok(src);
@@ -542,7 +541,7 @@ mod tests {
         assert_eq!(j.java_mode, Some(JavaMode::Clean));
         assert_eq!(j.java_version, Some(17));
         assert_eq!(j.out_dir, Some(PathBuf::from("build/java")));
-        assert!(m.backend.interp.as_ref().unwrap().enable);
+        assert!(m.backend.native.as_ref().unwrap().enable);
         assert_eq!(
             m.backend.default_kind(),
             Some(crate::types::BackendKind::Java)
@@ -555,13 +554,13 @@ mod tests {
             [project]
             name = "demo"
             version = "0.1.0"
-            [backend.interp]
+            [backend.native]
             enable = true
         "#;
         let (m, _) = parse_ok(src);
         assert_eq!(
             m.backend.default_kind(),
-            Some(crate::types::BackendKind::Interp)
+            Some(crate::types::BackendKind::Native)
         );
     }
 

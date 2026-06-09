@@ -18,12 +18,9 @@
 //!
 //! ## Optional by design
 //!
-//! Backends opt in. `leek-backend-interp` runs the uncharged form by default
-//! (per-statement tick); only when given a `charged_hir(file, opts)`
-//! result does it use the block-level charges and skip the tick.
-//! Java-exact mode keeps the per-instruction `ai.ops(1)` shape to
-//! mirror the reference; Java-clean / interp-bytecode / native opt
-//! in for tighter loops.
+//! Backends opt in. Java-exact mode keeps the per-instruction `ai.ops(1)`
+//! shape to mirror the reference; Java-clean and native opt in to the
+//! block-level charges for tighter loops.
 
 mod cost;
 mod opts;

@@ -76,14 +76,6 @@ pub fn run(
         BackendKind::Java => {
             emit_java(&project, &driver_run.run, version, &args, quiet, environment)
         }
-        BackendKind::Interp => {
-            if !quiet {
-                eprintln!(
-                    "miku: interpreter backend has no build output; use `miku run` to execute"
-                );
-            }
-            Ok(ExitCode::SUCCESS)
-        }
         BackendKind::Native => emit_native(&project, &driver_run.run, &args, quiet),
         BackendKind::Jar => {
             bail!("jar backend not yet supported in this toolchain");

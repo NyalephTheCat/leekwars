@@ -11,7 +11,8 @@ leek-hir = { workspace = true }
 
 [dev-dependencies]
 leek-diagnostics = { workspace = true }
-leek-backend-interp = { workspace = true }
+leek-backend-native = { workspace = true }
+leek-runtime        = { workspace = true }
 leek-lexer       = { workspace = true }
 leek-parser      = { workspace = true }
 leek-resolver    = { workspace = true }

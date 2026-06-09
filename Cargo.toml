@@ -21,7 +21,6 @@ members = [
     "crates/middle/leek-types",
     "crates/middle/leek-hir",
     "crates/middle/leek-mir",
-    "crates/backends/leek-backend-interp",
     "crates/middle/leek-charge",
     "crates/middle/leek-complexity",
     "crates/db/leek-pipeline",
@@ -78,7 +77,6 @@ leek-resolver     = { path = "crates/middle/leek-resolver" }
 leek-types        = { path = "crates/middle/leek-types" }
 leek-hir          = { path = "crates/middle/leek-hir" }
 leek-mir          = { path = "crates/middle/leek-mir" }
-leek-backend-interp = { path = "crates/backends/leek-backend-interp" }
 leek-charge       = { path = "crates/middle/leek-charge" }
 leek-complexity   = { path = "crates/middle/leek-complexity" }
 leek-pipeline     = { path = "crates/db/leek-pipeline" }

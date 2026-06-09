@@ -49,7 +49,7 @@ fn write_skeleton(dir: &Path, project_name: &str, _quiet: bool) -> Result<()> {
          name    = \"{project_name}\"\n\
          version = \"0.1.0\"\n\
          \n\
-         [backend.interp]\n\
+         [backend.native]\n\
          enable  = true\n\
          default = true\n",
     );

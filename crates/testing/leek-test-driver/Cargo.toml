@@ -7,13 +7,13 @@ license.workspace = true
 description = "Upstream corpus runner using recipe pipelines."
 
 [dependencies]
-leek-backend-interp = { workspace = true }
 leek-backend-java   = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-backends       = { workspace = true }
 leek-manifest       = { workspace = true }
 leek-diagnostics    = { workspace = true }
 leek-hir            = { workspace = true }
+leek-runtime        = { workspace = true }
 leek-parser         = { workspace = true }
 leek-pipeline       = { workspace = true }
 leek-recipes        = { workspace = true }

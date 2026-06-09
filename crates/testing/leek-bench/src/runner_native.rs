@@ -16,6 +16,7 @@ use crate::{compile_hir_file, Backend, BenchOptions, RunResult};
 pub struct RustNative {
     hir: Option<std::sync::Arc<leek_hir::HirFile>>,
     version: u8,
+    strict: bool,
     /// Per-run JIT-compile durations captured from the backend, sorted after
     /// the run loop so the median can be reported alongside execution.
     compile_samples: Vec<Duration>,
@@ -28,6 +29,7 @@ impl RustNative {
         Self {
             hir: None,
             version: 4,
+            strict: false,
             compile_samples: Vec::new(),
             exec_samples: Vec::new(),
         }
@@ -45,10 +47,11 @@ impl Backend for RustNative {
         "rust-native"
     }
     fn prepare(&mut self, source: &Path, opts: &BenchOptions) -> Result<()> {
-        let compiled = compile_hir_file(source, opts.version)
+        let compiled = compile_hir_file(source, opts.version, opts.strict)
             .with_context(|| format!("compiling {}", source.display()))?;
         self.hir = Some(compiled.hir);
         self.version = opts.version;
+        self.strict = opts.strict;
         Ok(())
     }
     fn bench_runs(&mut self, runs: usize) -> Result<Vec<RunResult>> {
@@ -56,7 +59,7 @@ impl Backend for RustNative {
             .hir
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("not prepared"))?;
-        let opts = NativeOptions::release().with_lang(self.version, false);
+        let opts = NativeOptions::release().with_lang(self.version, self.strict);
         let mut out = Vec::with_capacity(runs);
         self.compile_samples.clear();
         self.exec_samples.clear();

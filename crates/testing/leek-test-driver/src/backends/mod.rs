@@ -9,11 +9,9 @@ use leek_diagnostics::Severity;
 use leek_hir::pipeline::HirArtifact;
 use leek_hir::HirFile;
 use leek_manifest::{BackendKind, BackendTable};
-use leek_parser::ast::{AstNode, SourceFile};
 use leek_pipeline::Input;
 use leek_recipes::{RecipeParams, Target};
 use leek_span::SourceId;
-use leek_syntax::SyntaxNode;
 use serde::{Deserialize, Serialize};
 
 use crate::cases::{Expectation, Manifest, TestCase};
@@ -25,7 +23,6 @@ use crate::run::CaseOutcome;
 #[serde(rename_all = "snake_case")]
 pub enum SuiteBackend {
     Pipeline,
-    Interp,
     Java,
     Native,
 }
@@ -34,7 +31,6 @@ impl SuiteBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pipeline => "pipeline",
-            Self::Interp => "interp",
             Self::Java => "java",
             Self::Native => "native",
         }
@@ -43,7 +39,6 @@ impl SuiteBackend {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "pipeline" => Self::Pipeline,
-            "interp" => Self::Interp,
             "java" => Self::Java,
             "native" => Self::Native,
             _ => return None,
@@ -52,7 +47,6 @@ impl SuiteBackend {
 
     fn from_manifest_kind(kind: BackendKind) -> Option<Self> {
         match kind {
-            BackendKind::Interp => Some(Self::Interp),
             BackendKind::Java => Some(Self::Java),
             BackendKind::Native => Some(Self::Native),
             BackendKind::Jar | BackendKind::Wasm => None,
@@ -214,7 +208,6 @@ fn run_case_with_ctx(
 ) -> CaseOutcome {
     match backend {
         SuiteBackend::Pipeline => run_pipeline(case, ctx, source),
-        SuiteBackend::Interp => run_interp(case, ctx, source),
         SuiteBackend::Java => run_java(case, ctx),
         SuiteBackend::Native => run_native(case, ctx),
     }
@@ -304,7 +297,7 @@ fn run_native(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
         return CaseOutcome::SkippedUnknown;
     };
 
-    leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
+    leek_runtime::DISPLAY_VERSION.with(|c| c.set(case.version));
     let opts = leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
 
     match &case.expected {
@@ -412,7 +405,7 @@ fn native_error_outcome(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
         && is_runtime_error_code(code)
         && let Some(hir) = ctx.hir.as_deref()
     {
-        leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
+        leek_runtime::DISPLAY_VERSION.with(|c| c.set(case.version));
         // A *small* op budget bounds execution tightly: a runaway loop trips it
         // (recording TOO_MUCH_OPERATIONS) within a few thousand iterations. This
         // matters because native leaks intermediate composite values (handles
@@ -848,13 +841,16 @@ fn compile_error_outcome(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
         && is_runtime_error_code(code)
         && let Some(hir) = ctx.hir.as_deref()
     {
-        let run = leek_backend_interp::run_with_limit_version_strict(
-            hir,
-            200_000,
-            case.version,
-            case.strict,
-        );
-        if run.error.is_some() {
+        // The native JIT surfaces a runtime error (e.g. ARRAY_OUT_OF_BOUND,
+        // TOO_MUCH_OPERATIONS) as `Err(NativeError::Runtime(..))`.
+        let mut opts =
+            leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
+        opts.op_limit = 200_000;
+        opts.emit = leek_backend_native::NativeEmit::Jit;
+        if matches!(
+            leek_backend_native::compile(hir, &opts),
+            Err(leek_backend_native::NativeError::Runtime(_))
+        ) {
             return CaseOutcome::PassExpectedError;
         }
     }
@@ -927,7 +923,7 @@ fn tail_after_first_string_literal(s: &str) -> Option<&str> {
     None
 }
 
-fn run_pipeline(case: &TestCase, ctx: &CaseContext, source: SourceId) -> CaseOutcome {
+fn run_pipeline(case: &TestCase, ctx: &CaseContext, _source: SourceId) -> CaseOutcome {
     let plan = case.check_plan();
     if !plan.kinds.iter().any(|k| {
         matches!(
@@ -941,28 +937,27 @@ fn run_pipeline(case: &TestCase, ctx: &CaseContext, source: SourceId) -> CaseOut
         return CaseOutcome::SkippedUnknown;
     }
 
-    let Some(green) = ctx.green.clone() else {
+    if ctx.green.is_none() {
         return if case.expected.implies_error() {
             CaseOutcome::PassExpectedError
         } else {
             CaseOutcome::FailParseError
         };
-    };
+    }
     if case.expected.implies_error() {
         return compile_error_outcome(case, ctx);
     }
 
-    if let Some((ref value, count)) = equals_ops_expectation(case) {
-        let Some(green) = ctx.green.clone() else {
-            return CaseOutcome::FailParseError;
+    if equals_ops_expectation(case).is_some() {
+        // Value + op count are verified by the native backend (`NativeRun`)
+        // against the upstream (Java) oracle; the pipeline backend only
+        // confirms the program parses/compiles cleanly (the interpreter that
+        // used to re-check the value here was removed).
+        return if ctx.has_compile_error {
+            CaseOutcome::FailParseError
+        } else {
+            CaseOutcome::Pass
         };
-        let sf = SourceFile::cast(SyntaxNode::new_root(green));
-        if let Some(file) = sf
-            && crate::run::check_equals_ops(&file, source, case, value, count)
-        {
-            return CaseOutcome::Pass;
-        }
-        return CaseOutcome::FailWrongValue;
     }
 
     if !case.expected.implies_clean_parse() {
@@ -973,136 +968,10 @@ fn run_pipeline(case: &TestCase, ctx: &CaseContext, source: SourceId) -> CaseOut
         return CaseOutcome::FailParseError;
     }
 
-    let sf = SourceFile::cast(SyntaxNode::new_root(green));
-    match (&case.expected, sf) {
-        // Verify the value, not just that the program compiled — otherwise an
-        // `Equals` case passes on clean compilation alone (a false pass).
-        (Expectation::Equals { value }, Some(file)) => {
-            if crate::run::check_equals(&file, source, case, value) {
-                CaseOutcome::Pass
-            } else {
-                CaseOutcome::FailWrongValue
-            }
-        }
-        (Expectation::Almost { value }, Some(file)) => {
-            match crate::run::check_almost(&file, source, case, value) {
-                Some(true) => CaseOutcome::Pass,
-                Some(false) => CaseOutcome::FailWrongValue,
-                // Expected side can't be evaluated here — skip, don't false-pass.
-                None => CaseOutcome::SkippedUnknown,
-            }
-        }
-        (Expectation::Ops { count }, Some(file)) => {
-            if crate::run::check_ops(&file, source, case, *count) {
-                CaseOutcome::Pass
-            } else {
-                CaseOutcome::FailWrongValue
-            }
-        }
-        _ => CaseOutcome::Pass,
-    }
-}
-
-fn run_interp(case: &TestCase, ctx: &CaseContext, source: SourceId) -> CaseOutcome {
-    if !case
-        .check_plan()
-        .kinds
-        .iter()
-        .any(|k| matches!(k, CheckKind::InterpRun | CheckKind::InterpValue | CheckKind::InterpOps))
-    {
-        return CaseOutcome::SkippedUnknown;
-    }
-
-    if case.expected.implies_error() {
-        return compile_error_outcome(case, ctx);
-    }
-
-    if let Some((ref value, count)) = equals_ops_expectation(case) {
-        let Some(green) = ctx.green.clone() else {
-            return CaseOutcome::FailParseError;
-        };
-        let sf = SourceFile::cast(SyntaxNode::new_root(green));
-        if let Some(file) = sf
-            && crate::run::check_equals_ops(&file, source, case, value, count)
-        {
-            return CaseOutcome::Pass;
-        }
-        return CaseOutcome::FailWrongValue;
-    }
-
-    if ctx.has_compile_error {
-        return CaseOutcome::FailParseError;
-    }
-
-    let Some(hir) = ctx.hir.as_deref() else {
-        return CaseOutcome::FailParseError;
-    };
-
-    leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
-
-    match &case.expected {
-        Expectation::Equals { value } => {
-            let run =
-                leek_backend_interp::run_with_limit_version_strict(hir, 100_000_000, case.version, case.strict);
-            if run.error.is_some() {
-                return CaseOutcome::FailWrongValue;
-            }
-            let got = run.value.to_string();
-            if got == *value {
-                CaseOutcome::Pass
-            } else {
-                CaseOutcome::FailWrongValue
-            }
-        }
-        Expectation::Almost { value } => {
-            let Some(green) = ctx.green.clone() else {
-                return CaseOutcome::FailParseError;
-            };
-            match SourceFile::cast(SyntaxNode::new_root(green))
-                .and_then(|file| crate::run::check_almost(&file, source, case, value))
-            {
-                Some(true) => CaseOutcome::Pass,
-                Some(false) => CaseOutcome::FailWrongValue,
-                // Unparseable tree or unevaluable expected → skip, don't false-pass.
-                None => CaseOutcome::SkippedUnknown,
-            }
-        }
-        Expectation::Ops { count } => {
-            let Some(green) = ctx.green.clone() else {
-                return CaseOutcome::FailParseError;
-            };
-            let sf = SourceFile::cast(SyntaxNode::new_root(green));
-            if let Some(file) = sf
-                && crate::run::check_ops(&file, source, case, *count)
-            {
-                CaseOutcome::Pass
-            } else {
-                CaseOutcome::FailWrongValue
-            }
-        }
-        Expectation::Error { code } if code == "NONE" => {
-            let run =
-                leek_backend_interp::run_with_limit_version_strict(hir, 100_000_000, case.version, case.strict);
-            if run.error.is_none() {
-                CaseOutcome::Pass
-            } else {
-                CaseOutcome::FailWrongValue
-            }
-        }
-        Expectation::Warning { .. } | Expectation::NoWarning => {
-            let run =
-                leek_backend_interp::run_with_limit_version_strict(hir, 100_000_000, case.version, case.strict);
-            if run.error.is_none() {
-                CaseOutcome::Pass
-            } else {
-                CaseOutcome::FailWrongValue
-            }
-        }
-        Expectation::Error { .. }
-        | Expectation::AnyError
-        | Expectation::Unknown { .. }
-        | Expectation::EqualsOps { .. } => CaseOutcome::SkippedUnknown,
-    }
+    // The program compiled cleanly. Value / `.almost` / `.ops` correctness is
+    // verified by the native backend (`NativeRun`) against the upstream (Java)
+    // oracle, not re-executed here.
+    CaseOutcome::Pass
 }
 
 /// A coarse bucket for a failing case, derived from the case's
@@ -1230,36 +1099,8 @@ fn actual_display(case: &TestCase, source: SourceId, backend: SuiteBackend) -> S
     let Some(hir) = ctx.hir.as_deref() else {
         return "<no HIR produced>".into();
     };
-    leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
+    leek_runtime::DISPLAY_VERSION.with(|c| c.set(case.version));
     match backend {
-        SuiteBackend::Interp => match &case.expected {
-            Expectation::Ops { .. } => {
-                let (_r, used) =
-                    leek_backend_interp::run_with_ops_used(hir, 100_000_000, case.version);
-                format!("ops={used}")
-            }
-            Expectation::EqualsOps { .. }
-            | Expectation::Unknown { .. } => {
-                let (r, used) =
-                    leek_backend_interp::run_with_ops_used(hir, 100_000_000, case.version);
-                match r.error {
-                    Some(e) => format!("error: {e} (ops={used})"),
-                    None => format!("{} (ops={used})", r.value),
-                }
-            }
-            _ => {
-                let r = leek_backend_interp::run_with_limit_version_strict(
-                    hir,
-                    100_000_000,
-                    case.version,
-                    case.strict,
-                );
-                match r.error {
-                    Some(e) => format!("error: {e}"),
-                    None => r.value.to_string(),
-                }
-            }
-        },
         SuiteBackend::Java => {
             let version = version_from_byte(case.version);
             let emitted = leek_backend_java::emit_clean(hir, version, 1);

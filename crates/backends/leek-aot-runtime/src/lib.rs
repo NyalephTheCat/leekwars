@@ -38,7 +38,7 @@ pub extern "C" fn leek_aot_error() -> *mut c_char {
 
 fn print_value(v: &Value, version: i32) {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(version as u8));
+    leek_runtime::DISPLAY_VERSION.with(|c| c.set(version as u8));
     println!("{v}");
 }
 

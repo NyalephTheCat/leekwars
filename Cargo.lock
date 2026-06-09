@@ -952,24 +952,8 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 name = "leek-aot-runtime"
 version = "0.0.1"
 dependencies = [
- "leek-backend-interp",
  "leek-backend-native",
  "leek-runtime",
-]
-
-[[package]]
-name = "leek-backend-interp"
-version = "0.0.1"
-dependencies = [
- "leek-builtins",
- "leek-diagnostics",
- "leek-hir",
- "leek-mir",
- "leek-parser",
- "leek-runtime",
- "leek-span",
- "leek-syntax",
- "leek-types",
 ]
 
 [[package]]
@@ -977,13 +961,14 @@ name = "leek-backend-java"
 version = "0.0.1"
 dependencies = [
  "base64",
- "leek-backend-interp",
+ "leek-backend-native",
  "leek-builtins",
  "leek-charge",
  "leek-diagnostics",
  "leek-environment",
  "leek-hir",
  "leek-parser",
+ "leek-runtime",
  "leek-span",
  "leek-syntax",
  "leek-text",
@@ -1030,7 +1015,6 @@ name = "leek-bench"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "leek-backend-interp",
  "leek-backend-java",
  "leek-backend-native",
  "leek-hir",
@@ -1045,12 +1029,13 @@ name = "leek-builtin-suite"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "leek-backend-interp",
+ "leek-backend-native",
  "leek-builtins",
  "leek-diagnostics",
  "leek-hir",
  "leek-pipeline",
  "leek-recipes",
+ "leek-runtime",
  "leek-span",
  "serde",
  "toml",
@@ -1077,12 +1062,13 @@ dependencies = [
 name = "leek-complexity"
 version = "0.0.1"
 dependencies = [
- "leek-backend-interp",
+ "leek-backend-native",
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
  "leek-parser",
  "leek-resolver",
+ "leek-runtime",
  "leek-span",
  "leek-syntax",
  "leek-types",
@@ -1275,12 +1261,13 @@ dependencies = [
 name = "leek-migrate"
 version = "0.0.1"
 dependencies = [
- "leek-backend-interp",
+ "leek-backend-native",
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
  "leek-parser",
  "leek-rewrite",
+ "leek-runtime",
  "leek-span",
  "leek-syntax",
 ]
@@ -1457,7 +1444,6 @@ name = "leek-test-driver"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "leek-backend-interp",
  "leek-backend-java",
  "leek-backend-native",
  "leek-backends",
@@ -1467,6 +1453,7 @@ dependencies = [
  "leek-parser",
  "leek-pipeline",
  "leek-recipes",
+ "leek-runtime",
  "leek-span",
  "leek-syntax",
  "rowan",
@@ -1515,7 +1502,6 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
- "leek-backend-interp",
  "leek-backend-java",
  "leek-backend-native",
  "leek-diagnostics",
@@ -1627,7 +1613,6 @@ dependencies = [
  "clap",
  "clap_complete",
  "ignore",
- "leek-backend-interp",
  "leek-backend-java",
  "leek-backend-native",
  "leek-backends",

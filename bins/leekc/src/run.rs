@@ -70,7 +70,7 @@ pub fn run() -> Result<ExitCode> {
 
     // Opt-in: register the library's constant values for folding so HIR
     // lowering replaces e.g. `WEAPON_PISTOL` with `37` for every backend
-    // (Java, MIR, native, interp) from the one pipeline hook.
+    // (Java, MIR, native) from the one pipeline hook.
     if cli.fold_constants {
         leek_prelude::activate_fold_constants(
             leek_environment::leekwars_constant_values()
@@ -208,13 +208,22 @@ pub fn run() -> Result<ExitCode> {
                     Version::V3 => 3,
                     Version::V4 => 4,
                 };
-                let r =
-                    leek_backend_interp::run_with_limit_version(hir.0.as_ref(), 20_000_000, v_byte);
-                if let Some(err) = r.error {
-                    eprintln!("error: {err}");
-                    return Ok(ExitCode::from(1));
+                // `--emit run` executes via the native JIT (the interpreter was
+                // removed). The 20M op budget matches the prior behaviour.
+                use leek_backend_native::{NativeArtifact, NativeEmit, NativeOptions};
+                let mut opts = NativeOptions::debug();
+                opts.version = v_byte;
+                opts.strict = pragmas.strict;
+                opts.op_limit = 20_000_000;
+                opts.emit = NativeEmit::Jit;
+                match leek_backend_native::compile(hir.0.as_ref(), &opts) {
+                    Ok(NativeArtifact::Value(v)) => println!("{v}"),
+                    Ok(_) => unreachable!("Jit emit yields a Value"),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return Ok(ExitCode::from(1));
+                    }
                 }
-                println!("{}", r.value);
             } else {
                 eprintln!("leekc: parse failed; cannot run");
             }

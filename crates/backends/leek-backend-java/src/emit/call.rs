@@ -280,6 +280,9 @@ impl super::Emitter<'_> {
                         self.write_expr(buf, a, false);
                     }
                     buf.push(')');
+                } else if self.write_builtin_class_construct(buf, name, &c.args) {
+                    // A built-in class called as a constructor (`Array()`,
+                    // `Map()`, `Set(1, 2)`, `Integer()`, …) — handled above.
                 } else {
                     buf.push_str(name);
                     buf.push('(');

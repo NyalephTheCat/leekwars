@@ -521,12 +521,17 @@ fn run_via_interp(code: &str, version_byte: u8) -> InterpOutcome {
                 None => return Err("parse failed".to_string()),
             };
             let (hir, _diags) = leek_hir::lower_file_versioned(&sf, source, version_byte);
-            let (result, ops) =
-                leek_backend_interp::run_with_ops_used(&hir, SNAPSHOT_OP_LIMIT, version_byte);
-            if let Some(err) = result.error {
-                Err(err)
-            } else {
-                Ok((result.value.to_string(), ops))
+            leek_runtime::DISPLAY_VERSION.with(|c| c.set(version_byte));
+            let mut opts = leek_backend_native::NativeOptions::release();
+            opts.version = version_byte;
+            opts.op_limit = SNAPSHOT_OP_LIMIT;
+            opts.emit = leek_backend_native::NativeEmit::Jit;
+            match leek_backend_native::compile(&hir, &opts) {
+                Ok(leek_backend_native::NativeArtifact::Value(v)) => {
+                    Ok((v.to_string(), leek_backend_native::ops_used()))
+                }
+                Ok(_) => Err("native produced no value".to_string()),
+                Err(e) => Err(e.to_string()),
             }
         }));
         let _ = tx.send(match outcome {

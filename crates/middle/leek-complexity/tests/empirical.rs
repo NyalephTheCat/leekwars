@@ -26,7 +26,6 @@
 
 use std::collections::HashMap;
 
-use leek_backend_interp::run_with_ops_used;
 use leek_complexity::{BigO, analyze_file};
 use leek_diagnostics::Severity;
 use leek_hir::lower_file;
@@ -53,13 +52,18 @@ fn to_hir(src: &str) -> leek_hir::HirFile {
     hir
 }
 
-/// Run the program through the interpreter and return the
-/// `ops_used` counter. We use a generous limit (50M) because
-/// quadratic fixtures at n=200 already hit single millions of ops.
+/// Run the program through the native JIT and return the `ops_used`
+/// counter (native charges ops at the same MIR sites the interpreter did).
+/// We use a generous limit (50M) because quadratic fixtures at n=200
+/// already hit single millions of ops.
 fn run_ops(src: &str) -> u64 {
     let hir = to_hir(src);
-    let (_result, ops) = run_with_ops_used(&hir, 50_000_000, 4);
-    ops
+    let mut opts = leek_backend_native::NativeOptions::release();
+    opts.version = 4;
+    opts.op_limit = 50_000_000;
+    opts.emit = leek_backend_native::NativeEmit::Jit;
+    let _ = leek_backend_native::compile(&hir, &opts);
+    leek_backend_native::ops_used()
 }
 
 /// Static prediction for the top-level main block. Returns the

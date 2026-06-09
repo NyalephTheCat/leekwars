@@ -18,7 +18,7 @@ use leek_mir::ir::{MirProgram, Rvalue, Statement};
 /// keys round-trip cleanly through JSON.
 #[derive(Serialize, Deserialize, Default)]
 pub struct AotMeta {
-    method_resolve: Vec<((String, String), usize)>,
+    method_resolve: Vec<(u32, String, usize)>,
     static_init: Vec<((u32, String), usize)>,
     user_fn_idx: Vec<(u32, usize)>,
     exact_arity: Vec<u32>,
@@ -41,7 +41,7 @@ impl AotMeta {
     pub(crate) fn build(
         program: &MirProgram,
         lambda_funcs: &HashMap<usize, (cranelift_module::FuncId, usize)>,
-        method_resolve: HashMap<(String, String), usize>,
+        method_resolve: HashMap<u32, HashMap<String, usize>>,
         static_init: HashMap<(u32, String), usize>,
         user_fn_idx: HashMap<u32, usize>,
         exact_arity: HashSet<u32>,
@@ -95,7 +95,12 @@ impl AotMeta {
             lambda_funcs.iter().map(|(&idx, &(_, arity))| (idx, arity)).collect();
 
         Self {
-            method_resolve: method_resolve.into_iter().collect(),
+            method_resolve: method_resolve
+                .into_iter()
+                .flat_map(|(cls, methods)| {
+                    methods.into_iter().map(move |(m, idx)| (cls, m, idx))
+                })
+                .collect(),
             static_init: static_init.into_iter().collect(),
             user_fn_idx: user_fn_idx.into_iter().collect(),
             exact_arity: exact_arity.into_iter().collect(),
@@ -123,7 +128,11 @@ impl AotMeta {
     /// publish the uniform-function addresses (`idx → (addr, arity)`).
     fn install(&self, lambda_addrs: HashMap<usize, (*const u8, usize)>) {
         use crate::runtime;
-        runtime::set_method_resolve(self.method_resolve.iter().cloned().collect());
+        let mut method_resolve: HashMap<u32, HashMap<String, usize>> = HashMap::new();
+        for (cls, m, idx) in &self.method_resolve {
+            method_resolve.entry(*cls).or_default().insert(m.clone(), *idx);
+        }
+        runtime::set_method_resolve(method_resolve);
         runtime::set_static_init(self.static_init.iter().cloned().collect());
         runtime::set_user_fn_idx(self.user_fn_idx.iter().cloned().collect());
         runtime::set_user_fn_exact_arity(self.exact_arity.iter().copied().collect::<HashSet<u32>>());

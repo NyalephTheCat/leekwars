@@ -75,7 +75,6 @@ pub struct BackendTable {
     pub java: Option<BackendSettings>,
     pub jar: Option<BackendSettings>,
     pub native: Option<BackendSettings>,
-    pub interp: Option<BackendSettings>,
     pub wasm: Option<BackendSettings>,
 }
 
@@ -84,11 +83,10 @@ impl BackendTable {
     ///
     /// If exactly one backend has `default = true`, that wins. Otherwise
     /// falls back to the first enabled backend in the order
-    /// java → interp → jar → native → wasm.
+    /// java → jar → native → wasm.
     pub fn default_kind(&self) -> Option<BackendKind> {
-        let entries: [(BackendKind, &Option<BackendSettings>); 5] = [
+        let entries: [(BackendKind, &Option<BackendSettings>); 4] = [
             (BackendKind::Java, &self.java),
-            (BackendKind::Interp, &self.interp),
             (BackendKind::Jar, &self.jar),
             (BackendKind::Native, &self.native),
             (BackendKind::Wasm, &self.wasm),
@@ -113,7 +111,6 @@ impl BackendTable {
             BackendKind::Java => self.java.as_ref(),
             BackendKind::Jar => self.jar.as_ref(),
             BackendKind::Native => self.native.as_ref(),
-            BackendKind::Interp => self.interp.as_ref(),
             BackendKind::Wasm => self.wasm.as_ref(),
         }
     }
@@ -124,7 +121,6 @@ pub enum BackendKind {
     Java,
     Jar,
     Native,
-    Interp,
     Wasm,
 }
 
@@ -134,7 +130,6 @@ impl BackendKind {
             BackendKind::Java => "java",
             BackendKind::Jar => "jar",
             BackendKind::Native => "native",
-            BackendKind::Interp => "interp",
             BackendKind::Wasm => "wasm",
         }
     }
@@ -144,7 +139,6 @@ impl BackendKind {
             "java" => BackendKind::Java,
             "jar" => BackendKind::Jar,
             "native" => BackendKind::Native,
-            "interp" => BackendKind::Interp,
             "wasm" => BackendKind::Wasm,
             _ => return None,
         })

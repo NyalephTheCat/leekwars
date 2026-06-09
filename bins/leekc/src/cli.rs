@@ -20,7 +20,7 @@ pub enum Emit {
     Hir,
     /// Dump the MIR (CFG of basic blocks per function).
     Mir,
-    /// Execute the MIR interpreter and print the program's result.
+    /// Execute via the native JIT and print the program's result.
     Run,
     /// Emit Java source (one `.java` file plus `.lines` sidecar).
     Java,

@@ -51,7 +51,7 @@ impl Backend for RustJavaEmit {
         which("javac").ok_or_else(|| anyhow::anyhow!("javac not in PATH"))?;
         which("java").ok_or_else(|| anyhow::anyhow!("java not in PATH"))?;
 
-        let compiled = compile_hir_file(source, opts.version)
+        let compiled = compile_hir_file(source, opts.version, opts.strict)
             .with_context(|| format!("compiling {}", source.display()))?;
         let hir = compiled.hir;
         let mut steps = compiled.steps;
@@ -111,6 +111,12 @@ impl Backend for RustJavaEmit {
         // the JIT can warm up and we don't pay class-load cost N
         // times. Runner prints one `INNER_NS=…` per iteration.
         let out = Command::new("java")
+            // v1 reals are formatted by the upstream runtime with a
+            // default-locale `DecimalFormat`; the corpus expects the French
+            // (comma-decimal) form the tests were authored in. Pin it so `0.5`
+            // renders as `0,5` (matching upstream + the expected values).
+            .arg("-Duser.language=fr")
+            .arg("-Duser.country=FR")
             .arg("-cp")
             .arg(&cp)
             .arg("Runner")
@@ -154,6 +160,12 @@ public class Runner {{
         AI ai = new {class_name}();
         ai.init();
         ai.staticInit();
+        // Discard system logs (the default `BasicAILog` prints each to
+        // stdout). The upstream test framework keeps logs separate from the
+        // result, so a soft warning — e.g. indexing `null` logs
+        // `VALUE_IS_NOT_AN_ARRAY` yet still returns null — must not pollute the
+        // captured value on stdout.
+        ai.getLogs().setStream(a -> {{}});
         Object first = null;
         for (int i = 0; i < runs; i++) {{
             ai.resetCounter();
@@ -163,7 +175,10 @@ public class Runner {{
             if (first == null) first = v;
             System.err.println("INNER_NS=" + (t1 - t0));
         }}
-        System.out.println(ai.string(first));
+        // Match the upstream test framework's result stringification
+        // (`TestCommon`: `ai.export(v, ...)`), which quotes strings — `string()`
+        // does not, so a top-level string result would mismatch the expected.
+        System.out.println(ai.export(first));
     }}
 }}
 "#,

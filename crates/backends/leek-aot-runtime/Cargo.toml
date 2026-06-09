@@ -14,7 +14,6 @@ crate-type = ["staticlib"]
 [dependencies]
 leek-runtime        = { workspace = true }
 leek-backend-native = { workspace = true }
-leek-backend-interp = { workspace = true }
 
 [lints]
 workspace = true

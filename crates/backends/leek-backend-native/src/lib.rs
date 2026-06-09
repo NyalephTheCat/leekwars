@@ -297,6 +297,11 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             // interpreter's strict-gated behavior.
             runtime::reset_runtime_error();
             runtime::set_strict(opts.strict);
+            // Set the value-display version BEFORE running, so version-specific
+            // string conversions during execution (e.g. a real's `.` vs `,`
+            // decimal separator in v1) and the caller's final `value.to_string()`
+            // both format correctly. (Was previously an interpreter side effect.)
+            leek_runtime::DISPLAY_VERSION.with(|c| c.set(opts.version));
             // Arm the op counter + budget for this run. The JIT'd body charges
             // ops at the same MIR sites the interpreter does (so counts match);
             // `ops_used()` reads the total after `main` returns.
@@ -498,7 +503,7 @@ fn define_program<M: Module>(
         cranelift_module::FuncId,
         ValTy,
         HashMap<usize, (cranelift_module::FuncId, usize)>,
-        HashMap<(String, String), usize>,
+        HashMap<u32, HashMap<String, usize>>,
         HashMap<(u32, String), usize>,
         HashMap<u32, usize>,
         std::collections::HashSet<u32>,

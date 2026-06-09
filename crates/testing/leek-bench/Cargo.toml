@@ -10,7 +10,6 @@ description = "Per-backend benchmark harness for Leekscript: interpreter, native
 leek-span         = { workspace = true }
 leek-syntax       = { workspace = true }
 leek-hir          = { workspace = true }
-leek-backend-interp = { workspace = true }
 leek-backend-java = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-pipeline     = { workspace = true }

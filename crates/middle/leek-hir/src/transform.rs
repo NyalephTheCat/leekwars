@@ -767,22 +767,36 @@ fn eliminate_in_stmts(stmts: &mut Vec<Stmt>, count: &mut usize) {
         // pure expression statement is only dead when it is NOT the last
         // statement — dropping the last one would change the result to null.
         let is_last = idx == last_idx;
+        // Folding a constant-condition `if`/loop to its taken branch is unsound
+        // at the TRAILING statement when the exposed branch is a bare expression
+        // statement: the last statement is the implicit return, and an `if`/loop
+        // *statement* yields `null`, whereas a bare expression yields its value.
+        // `if (true) count++` returns `null`, not the pre-increment count. (A
+        // block / other statement branch yields `null` too, so folding to those
+        // stays sound — matching the `Stmt::Expr` arm's existing `is_last`
+        // guard.) Dropping a dead trailing `if (false)`/`while (false)` is also
+        // unsound (it would expose the *previous* statement), so keep those too.
         match s {
             Stmt::If(i) => match const_bool(&i.cond) {
-                Some(true) => {
+                Some(true) if !(is_last && matches!(*i.then_branch, Stmt::Expr(_))) => {
                     *count += 1;
                     stmts.push(*i.then_branch);
                 }
-                Some(false) => {
+                Some(false)
+                    if !(is_last && matches!(i.else_branch.as_deref(), Some(Stmt::Expr(_)) | None)) =>
+                {
                     *count += 1;
                     if let Some(e) = i.else_branch {
                         stmts.push(*e);
                     }
                 }
-                None => stmts.push(Stmt::If(i)),
+                _ => stmts.push(Stmt::If(i)),
             },
-            Stmt::While(w) if const_bool(&w.cond) == Some(false) => *count += 1,
-            Stmt::DoWhile(d) if const_bool(&d.cond) == Some(false) => {
+            Stmt::While(w) if !is_last && const_bool(&w.cond) == Some(false) => *count += 1,
+            Stmt::DoWhile(d)
+                if const_bool(&d.cond) == Some(false)
+                    && !(is_last && matches!(*d.body, Stmt::Expr(_))) =>
+            {
                 *count += 1;
                 stmts.push(*d.body);
             }

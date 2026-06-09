@@ -226,6 +226,27 @@ impl ObjectData {
         self.index.get(name).map(|&i| &self.fields[i].1)
     }
 
+    /// Read a field by its dense slot index (its position in `fields`).
+    /// The native backend resolves a known class's field name to a stable
+    /// slot at compile time (`MirClass::field_layout`) and reads through
+    /// this — skipping the `index` hash. Sound because a natively-built
+    /// instance lays its fields out in `field_layout` slot order.
+    pub fn get_slot(&self, slot: usize) -> Option<&Value> {
+        self.fields.get(slot).map(|(_, v)| v)
+    }
+
+    /// Write a field by its dense slot index. Returns `false` if the slot
+    /// is out of range (the caller then falls back to the name path).
+    pub fn set_slot(&mut self, slot: usize, value: Value) -> bool {
+        match self.fields.get_mut(slot) {
+            Some(entry) => {
+                entry.1 = value;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn contains_key(&self, name: &str) -> bool {
         self.index.contains_key(name)
     }

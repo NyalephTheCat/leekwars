@@ -2,7 +2,7 @@
 //!
 //! Three backends are compared:
 //!
-//! - [`RustInterp`] — runs the program via [`leek_backend_interp`] in-process.
+//! - [`RustNative`] — runs the program via the native JIT in-process.
 //! - [`RustJavaEmit`] — emits Java with our backend, compiles with
 //!   `javac`, runs with `java`. Cold runs include javac.
 //! - [`UpstreamJava`] — invokes the upstream reference's
@@ -19,14 +19,14 @@
 //! Usage:
 //!
 //! ```no_run
-//! use leek_bench::{bench, BenchOptions, RustInterp, RustJavaEmit, UpstreamJava};
+//! use leek_bench::{bench, BenchOptions, RustNative, RustJavaEmit, UpstreamJava};
 //! use std::path::Path;
 //!
 //! let src = Path::new("fixtures/knapsack.leek");
 //! let opts = BenchOptions { runs: 10, version: 4 };
 //!
 //! for mut b in [
-//!     Box::new(RustInterp::new()) as Box<dyn leek_bench::Backend>,
+//!     Box::new(RustNative::new()) as Box<dyn leek_bench::Backend>,
 //!     Box::new(RustJavaEmit::auto()),
 //!     Box::new(UpstreamJava::auto()),
 //! ] {
@@ -38,7 +38,6 @@
 //! ```
 
 mod compile;
-mod runner_interp;
 mod runner_native;
 mod runner_rust_java;
 mod runner_upstream;
@@ -48,7 +47,6 @@ use std::time::Duration;
 
 pub use compile::{CompiledHir, compile_hir, compile_hir_file};
 
-pub use runner_interp::RustInterp;
 pub use runner_native::RustNative;
 pub use runner_rust_java::RustJavaEmit;
 pub use runner_upstream::UpstreamJava;
@@ -94,7 +92,7 @@ pub struct BenchSummary {
     /// First-run stdout, truncated to a short sample.
     pub stdout_sample: String,
     /// Per-step preparation timings, populated only by backends that
-    /// can expose them (today: [`RustInterp`]). Pairs of
+    /// can expose them (today: [`RustNative`]). Pairs of
     /// `(step_name, duration)` in pipeline execution order.
     pub prepare_steps: Vec<(String, Duration)>,
 }

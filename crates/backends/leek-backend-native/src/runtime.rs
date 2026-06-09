@@ -42,7 +42,30 @@ struct BoxState {
     boxes: Vec<*mut Value>,
 }
 
+/// Per-run dispatch tables — all installed once at run setup (before `main`)
+/// and READ-ONLY during execution. Merged into one thread-local so the hot
+/// call paths (`leek_call_method`, `dispatch_call_value`) resolve a method /
+/// lambda in a SINGLE `LocalKey::with` + `borrow` instead of 2–4 separate
+/// thread-local accesses. Lookups always copy out before invoking any callee,
+/// so the (shared) `RefCell` borrow is never held across re-entrant runtime code.
+#[derive(Default)]
+struct DispatchTables {
+    /// `function_idx` → (uniform-ABI address, param count incl. captures/`this`).
+    lambda_fns: HashMap<usize, (*const u8, usize)>,
+    /// `function_idx` → per-lambda `@`-by-ref mask over its user params.
+    lambda_byref: HashMap<usize, Vec<bool>>,
+    /// class `DefId` raw → method name → method's `program.functions` index.
+    method_resolve: HashMap<u32, HashMap<String, usize>>,
+    /// named-function-ref `DefId` raw → `program.functions` index.
+    user_fn_idx: HashMap<u32, usize>,
+    /// `DefId`s of method-valued user fns needing exact arity on an indirect call.
+    user_fn_exact_arity: HashSet<u32>,
+}
+
 thread_local! {
+    /// See [`DispatchTables`].
+    static DISPATCH: RefCell<DispatchTables> = RefCell::new(DispatchTables::default());
+
     /// See [`BoxState`]. Bump allocation replaces a `malloc` per value (the
     /// dominant native cost on boxing-heavy code) and `reset` retains the
     /// largest chunk, so steady-state runs (corpus, LSP, fights) allocate ~zero.
@@ -63,26 +86,6 @@ thread_local! {
     /// native reproduces the interpreter's RNG-dependent results exactly.
     static NATIVE_RNG: RefCell<Rng> = RefCell::new(Rng::new());
 
-    /// JIT-finalized lambda bodies, keyed by their `program.functions`
-    /// index → (address, total param count incl. captures). Populated after
-    /// `finalize_definitions` and before `main` runs, so `call_value` /
-    /// indirect calls can invoke lambdas. Methods compiled for use as values
-    /// (bound methods) are registered here too — keyed by their function
-    /// index, value = (uniform-ABI address, param count incl. `this`).
-    static LAMBDA_FNS: RefCell<HashMap<usize, (*const u8, usize)>> = RefCell::new(HashMap::new());
-
-    /// Per-lambda `@`-by-reference mask over its **user** parameters (captures
-    /// excluded), keyed by `function_idx`. Lets `param_byref_mask` tell the
-    /// higher-order builtins (`arrayMap`/`arrayFilter`/…) which callback args to
-    /// wrap in a `Value::Cell` so a `@v` reassignment writes back to the element.
-    static LAMBDA_BYREF: RefCell<HashMap<usize, Vec<bool>>> = RefCell::new(HashMap::new());
-
-    /// Method resolution for `instance['name']`: `(class_name, method_name)`
-    /// → the method's `program.functions` index. Installed per JIT run so the
-    /// index shim can build a `BoundMethod` value just like the interpreter's
-    /// `read_index_with_methods`.
-    static METHOD_RESOLVE: RefCell<HashMap<(String, String), usize>> = RefCell::new(HashMap::new());
-
     /// Static-field storage, keyed by `(owning-class def_id, field name)`,
     /// each holding a value handle. Lazily initialised on first read.
     static STATIC_FIELDS: RefCell<HashMap<(u32, String), *mut Value>> = RefCell::new(HashMap::new());
@@ -91,17 +94,6 @@ thread_local! {
     /// nullary init function's `program.functions` index (uniform-ABI,
     /// registered in `LAMBDA_FNS`). Only fields with an initialiser appear.
     static STATIC_INIT: RefCell<HashMap<(u32, String), usize>> = RefCell::new(HashMap::new());
-
-    /// Named-function references (`var f = foo`): `DefId` raw → the
-    /// function's `program.functions` index (uniform-ABI, in `LAMBDA_FNS`),
-    /// so a `Function::User` value can be invoked indirectly.
-    static USER_FN_IDX: RefCell<HashMap<u32, usize>> = RefCell::new(HashMap::new());
-
-    /// `DefId`s of user-function values that are *methods* (their function has
-    /// an owning class). An indirect call to one requires the EXACT parameter
-    /// count (including the implicit `this`); a mismatch yields null rather
-    /// than null-padding — mirroring the interpreter's `call_value`.
-    static USER_FN_EXACT_ARITY: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
 
     /// Each user class's parent for runtime `.super` navigation: class `DefId`
     /// raw → `Some((parent def, parent name))` for an explicit user parent, or
@@ -291,7 +283,7 @@ pub fn invoke_top_level_string(v: Value) -> Value {
     let Some(idx) = CLASS_STRING_METHOD.with(|c| c.borrow().get(&def).copied()) else {
         return v;
     };
-    let Some((addr, _)) = LAMBDA_FNS.with(|c| c.borrow().get(&idx).copied()) else {
+    let Some((addr, _)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied()) else {
         return v;
     };
     let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
@@ -308,17 +300,17 @@ pub fn set_class_parent(map: HashMap<u32, Option<(u32, String)>>) {
 
 /// Install the user-function-reference table for this run.
 pub fn set_user_fn_idx(map: HashMap<u32, usize>) {
-    USER_FN_IDX.with(|c| *c.borrow_mut() = map);
+    DISPATCH.with(|c| c.borrow_mut().user_fn_idx = map);
 }
 
 /// Install the set of method-derived user-fn `DefId`s requiring exact arity.
 pub fn set_user_fn_exact_arity(set: HashSet<u32>) {
-    USER_FN_EXACT_ARITY.with(|c| *c.borrow_mut() = set);
+    DISPATCH.with(|c| c.borrow_mut().user_fn_exact_arity = set);
 }
 
 /// Install the method-resolution table for this run (clearing any prior).
-pub fn set_method_resolve(map: HashMap<(String, String), usize>) {
-    METHOD_RESOLVE.with(|c| *c.borrow_mut() = map);
+pub fn set_method_resolve(map: HashMap<u32, HashMap<String, usize>>) {
+    DISPATCH.with(|c| c.borrow_mut().method_resolve = map);
 }
 
 /// Install the static-field initialiser table for this run.
@@ -354,7 +346,7 @@ pub extern "C" fn leek_static_get(class_def: i64, name: *mut Value) -> *mut Valu
     STATIC_FIELDS.with(|c| c.borrow_mut().insert(key.clone(), sentinel));
     let init = STATIC_INIT.with(|c| c.borrow().get(&key).copied());
     if let Some(idx) = init
-        && let Some((addr, _)) = LAMBDA_FNS.with(|c| c.borrow().get(&idx).copied())
+        && let Some((addr, _)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied())
     {
         let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
         let v = f(std::ptr::null(), 0);
@@ -419,12 +411,12 @@ pub extern "C" fn leek_static_set(class_def: i64, name: *mut Value, val: *mut Va
 
 /// Install the JIT-finalized lambda table for this run (clearing any prior).
 pub fn set_lambda_fns(map: HashMap<usize, (*const u8, usize)>) {
-    LAMBDA_FNS.with(|c| *c.borrow_mut() = map);
+    DISPATCH.with(|c| c.borrow_mut().lambda_fns = map);
 }
 
 /// Install the per-lambda user-param `@`-by-ref masks for this run.
 pub fn set_lambda_byref(map: HashMap<usize, Vec<bool>>) {
-    LAMBDA_BYREF.with(|c| *c.borrow_mut() = map);
+    DISPATCH.with(|c| c.borrow_mut().lambda_byref = map);
 }
 
 /// Invoke a function *value* with already-unboxed args, returning a `Value`.
@@ -467,7 +459,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
     match callee {
         Value::Function(Function::Lambda(cap)) => {
             let Some((addr, nparams)) =
-                LAMBDA_FNS.with(|c| c.borrow().get(&cap.function_idx).copied())
+                DISPATCH.with(|c| c.borrow().lambda_fns.get(&cap.function_idx).copied())
             else {
                 return Value::Null;
             };
@@ -485,9 +477,13 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             // Borrow the by-ref mask in place — the map holds an entry for every
             // lambda, so cloning it here allocated a `Vec<bool>` on every call.
             let ver = host.version();
-            let threaded = LAMBDA_BYREF.with(|c| {
+            let threaded = DISPATCH.with(|c| {
                 let b = c.borrow();
-                thread_args(args, b.get(&cap.function_idx).map_or(&[][..], |m| m.as_slice()), ver)
+                thread_args(
+                    args,
+                    b.lambda_byref.get(&cap.function_idx).map_or(&[][..], |m| m.as_slice()),
+                    ver,
+                )
             });
             for a in threaded {
                 argv.push(handle(a));
@@ -522,24 +518,28 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
         // uniform-compiled and registered by index in `LAMBDA_FNS`; the
         // `DefId` resolves to that index through `USER_FN_IDX`.
         Value::Function(Function::User(def)) => {
-            let Some(idx) = USER_FN_IDX.with(|c| c.borrow().get(&def.0).copied()) else {
-                return Value::Null;
-            };
-            let Some((addr, nparams)) = LAMBDA_FNS.with(|c| c.borrow().get(&idx).copied()) else {
+            // One TLS access resolves the index, address+arity, and the
+            // exact-arity flag together (was three separate thread-locals).
+            let Some((idx, addr, nparams, exact)) = DISPATCH.with(|c| {
+                let d = c.borrow();
+                let idx = d.user_fn_idx.get(&def.0).copied()?;
+                let (addr, nparams) = d.lambda_fns.get(&idx).copied()?;
+                Some((idx, addr, nparams, d.user_fn_exact_arity.contains(&def.0)))
+            }) else {
                 return Value::Null;
             };
             // A method read as a value (`var f = A.m`) requires the EXACT
             // parameter count including the implicit `this` — the interpreter
             // returns null on a mismatch rather than binding missing params to
             // null. Free-function refs keep null-padding (and surplus drop).
-            if USER_FN_EXACT_ARITY.with(|c| c.borrow().contains(&def.0)) && args.len() != nparams {
+            if exact && args.len() != nparams {
                 return Value::Null;
             }
             // Borrow the by-ref mask in place (no per-call `Vec<bool>` clone).
             let ver = host.version();
-            let mut full = LAMBDA_BYREF.with(|c| {
+            let mut full = DISPATCH.with(|c| {
                 let b = c.borrow();
-                thread_args(args, b.get(&idx).map_or(&[][..], |m| m.as_slice()), ver)
+                thread_args(args, b.lambda_byref.get(&idx).map_or(&[][..], |m| m.as_slice()), ver)
             });
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
@@ -552,7 +552,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
         // in which case that first arg is the receiver. The method body is
         // compiled with the uniform ABI and registered in `LAMBDA_FNS`.
         Value::Function(Function::BoundMethod { function_idx, receiver }) => {
-            let Some((addr, nparams)) = LAMBDA_FNS.with(|c| c.borrow().get(function_idx).copied())
+            let Some((addr, nparams)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(function_idx).copied())
             else {
                 return Value::Null;
             };
@@ -588,7 +588,7 @@ fn dispatch_call_value(host: &mut NativeHost, callee: &Value, args: Vec<Value>) 
             let Some(idx) = CLASS_CTOR_THUNK.with(|c| c.borrow().get(&def.0).copied()) else {
                 return Value::Null;
             };
-            let Some((addr, nparams)) = LAMBDA_FNS.with(|c| c.borrow().get(&idx).copied()) else {
+            let Some((addr, nparams)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied()) else {
                 return Value::Null;
             };
             let mut full = args;
@@ -634,38 +634,47 @@ pub extern "C" fn leek_call_method(
     argc: i64,
     version: i64,
 ) -> *mut Value {
-    let Some(method) = builtin_name(name) else {
+    let Some(method) = builtin_name_ref(name) else {
         return handle(Value::Null);
     };
-    let recv = unsafe { val(receiver) }.clone();
-    let args: Vec<Value> = (0..argc as isize)
-        .map(|i| unsafe { val(*argv.offset(i)) }.clone())
-        .collect();
-    // Instance method on the receiver's runtime class.
-    if let Value::Instance(inst) = &recv {
-        let class = inst.borrow().class_name.clone();
-        if let Some(idx) =
-            METHOD_RESOLVE.with(|m| m.borrow().get(&(class, method.clone())).copied())
-            && let Some((addr, nparams)) = LAMBDA_FNS.with(|c| c.borrow().get(&idx).copied())
-        {
-            let mut full = Vec::with_capacity(args.len() + 1);
-            full.push(recv);
-            full.extend(args);
-            full.resize(nparams, Value::Null);
+    // Instance method on the receiver's runtime class — the hot path. Build the
+    // uniform-ABI handle vector DIRECTLY from the caller's receiver + arg
+    // handles, skipping the clone-to-`Value`-then-rebox round-trip: the callee
+    // shares the same boxed values (the prior `.clone()` was an `Rc` clone, not
+    // a deep copy — so field mutations were already visible to the caller).
+    if let Value::Instance(inst) = unsafe { val(receiver) } {
+        let class_def = inst.borrow().class.0;
+        // One TLS access resolves the method index AND its address+arity.
+        if let Some((addr, nparams)) = DISPATCH.with(|c| {
+            let d = c.borrow();
+            d.method_resolve
+                .get(&class_def)
+                .and_then(|mm| mm.get(method))
+                .and_then(|&idx| d.lambda_fns.get(&idx).copied())
+        }) {
+            let mut handles: Vec<*mut Value> = Vec::with_capacity(nparams.max(argc as usize + 1));
+            handles.push(receiver);
+            for i in 0..argc as isize {
+                handles.push(unsafe { *argv.offset(i) });
+            }
+            // Pad missing params with null; truncate any surplus args.
+            handles.resize_with(nparams, || handle(Value::Null));
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
-            let handles: Vec<*mut Value> = full.into_iter().map(handle).collect();
             return f(handles.as_ptr(), handles.len() as i64);
         }
     }
     // Builtin method fallback (an unknown name / non-number receiver yields null,
-    // exactly as the interpreter's `run_builtin` does).
-    let mut all = Vec::with_capacity(args.len() + 1);
+    // exactly as the interpreter's `run_builtin` does) — needs owned `Value`s.
+    let recv = unsafe { val(receiver) }.clone();
+    let mut all = Vec::with_capacity(argc as usize + 1);
     all.push(recv);
-    all.extend(args);
+    for i in 0..argc as isize {
+        all.push(unsafe { val(*argv.offset(i)) }.clone());
+    }
     let mut host = NativeHost {
         version: version as u8,
     };
-    handle(leek_runtime::call_builtin(&mut host, &method, &all).unwrap_or(Value::Null))
+    handle(leek_runtime::call_builtin(&mut host, method, &all).unwrap_or(Value::Null))
 }
 
 #[unsafe(no_mangle)]
@@ -695,8 +704,21 @@ fn handle(v: Value) -> *mut Value {
     // thread-local pays on every access.
     BOX_STATE.with(|s| {
         let s = &mut *s.borrow_mut();
-        let p = std::ptr::from_mut(s.arena.get_or_insert_with(bumpalo::Bump::new).alloc(v));
-        s.boxes.push(p);
+        let r = s.arena.get_or_insert_with(bumpalo::Bump::new).alloc(v);
+        // Only register values that own heap (`Rc`/`Box`/`String`) for the
+        // run-end drop sweep. A trivially-droppable scalar (`Int`/`Real`/`Bool`/
+        // `Null`) — and `BuiltinClass`, a `&'static str` — has a no-op `Drop`, so
+        // recording it would just cost a `boxes` push here and a wasted
+        // `drop_in_place` in `free_run_boxes`. Its bump storage is reclaimed by
+        // the arena `reset` regardless.
+        let needs_drop = !matches!(
+            r,
+            Value::Int(_) | Value::Real(_) | Value::Bool(_) | Value::Null | Value::BuiltinClass(_)
+        );
+        let p = std::ptr::from_mut(r);
+        if needs_drop {
+            s.boxes.push(p);
+        }
         p
     })
 }
@@ -723,14 +745,14 @@ impl BuiltinHost for NativeHost {
     fn callback_arity(&self, callee: &Value) -> Option<usize> {
         match callee {
             Value::Function(Function::Lambda(cap)) => {
-                let params = LAMBDA_FNS.with(|c| c.borrow().get(&cap.function_idx).map(|&(_, n)| n))?;
+                let params = DISPATCH.with(|c| c.borrow().lambda_fns.get(&cap.function_idx).map(|&(_, n)| n))?;
                 Some(params.saturating_sub(cap.captured.borrow().len()))
             }
             // A named-function value (`arrayMap(a, f)`): its arity is the
             // compiled param count (no captures prepended for a free function).
             Value::Function(Function::User(def)) => {
-                let idx = USER_FN_IDX.with(|c| c.borrow().get(&def.0).copied())?;
-                LAMBDA_FNS.with(|c| c.borrow().get(&idx).map(|&(_, n)| n))
+                let idx = DISPATCH.with(|c| c.borrow().user_fn_idx.get(&def.0).copied())?;
+                DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).map(|&(_, n)| n))
             }
             Value::Function(Function::Builtin(name)) => leek_runtime::builtin_arity(name),
             // A class reference used as a HOF callback constructs the class;
@@ -738,7 +760,7 @@ impl BuiltinHost for NativeHost {
             // order builtin passes the right number of element args.
             Value::ClassRef(def, _) => {
                 let idx = CLASS_CTOR_THUNK.with(|c| c.borrow().get(&def.0).copied())?;
-                LAMBDA_FNS.with(|c| c.borrow().get(&idx).map(|&(_, n)| n))
+                DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).map(|&(_, n)| n))
             }
             _ => None,
         }
@@ -750,7 +772,7 @@ impl BuiltinHost for NativeHost {
         // A mask of all-`false` (or an unknown callee) returns `None` — no
         // wrapping needed, preserving the prior behaviour.
         if let Value::Function(Function::Lambda(cap)) = callee
-            && let Some(mask) = LAMBDA_BYREF.with(|c| c.borrow().get(&cap.function_idx).cloned())
+            && let Some(mask) = DISPATCH.with(|c| c.borrow().lambda_byref.get(&cap.function_idx).cloned())
             && mask.iter().any(|&b| b)
         {
             return Some(mask);
@@ -760,8 +782,8 @@ impl BuiltinHost for NativeHost {
         // element is wrapped in a `Value::Cell` and the reassigned value is read
         // back into the array.
         if let Value::Function(Function::User(def)) = callee
-            && let Some(idx) = USER_FN_IDX.with(|c| c.borrow().get(&def.0).copied())
-            && let Some(mask) = LAMBDA_BYREF.with(|c| c.borrow().get(&idx).cloned())
+            && let Some(idx) = DISPATCH.with(|c| c.borrow().user_fn_idx.get(&def.0).copied())
+            && let Some(mask) = DISPATCH.with(|c| c.borrow().lambda_byref.get(&idx).cloned())
             && mask.iter().any(|&b| b)
         {
             return Some(mask);
@@ -901,10 +923,11 @@ fn member_by_value(base: &Value, idx: &Value, version: u8) -> Value {
     if let (Value::Instance(inst), Value::String(name)) = (base, idx) {
         let b = inst.borrow();
         if b.fields.get(name.as_str()).is_none() {
-            let cls = b.class_name.clone();
+            let class_def = b.class.0;
             drop(b);
-            let key = (cls, name.as_ref().clone());
-            if let Some(fidx) = METHOD_RESOLVE.with(|m| m.borrow().get(&key).copied()) {
+            if let Some(fidx) = DISPATCH.with(|c| {
+                c.borrow().method_resolve.get(&class_def).and_then(|mm| mm.get(name.as_str())).copied()
+            }) {
                 return Value::Function(Function::BoundMethod {
                     function_idx: fidx,
                     receiver: Box::new(base.clone()),
@@ -926,6 +949,32 @@ fn read_member(base: &Value, name: &str, version: u8) -> Value {
         && let Some(v) = inst.borrow().fields.get(name)
     {
         return v.clone();
+    }
+    member_by_value(base, &Value::String(std::rc::Rc::new(name.to_owned())), version)
+}
+
+/// Read member `name` of `base` by its compile-time-resolved dense **slot**
+/// (its position in the class's `field_layout`). FAST PATH: an instance field
+/// reads through `get_slot(slot)` — a direct `Vec` index, skipping the `index`
+/// hash that [`read_member`]'s `fields.get(name)` pays. Sound because the native
+/// `new_instance` lays every instance's fields out in `field_layout` slot order,
+/// and an inherited field keeps the same slot in every subclass, so a base of
+/// static class `C` (or any subclass) holds `name` at `slot`. Any non-instance
+/// base (e.g. a `null` slot typed as an instance) falls back to the exact
+/// [`member_by_value`] name path, so the result is byte-identical to
+/// [`read_member`]. The `name` is used only for that cold fallback (and a
+/// debug-only slot/name consistency assert).
+fn read_member_slot(base: &Value, slot: usize, name: &str, version: u8) -> Value {
+    if let Value::Instance(inst) = base {
+        let b = inst.borrow();
+        if let Some(v) = b.fields.get_slot(slot) {
+            debug_assert_eq!(
+                b.fields.fields.get(slot).map(|(n, _)| n.as_str()),
+                Some(name),
+                "native field-slot/name mismatch"
+            );
+            return v.clone();
+        }
     }
     member_by_value(base, &Value::String(std::rc::Rc::new(name.to_owned())), version)
 }
@@ -981,6 +1030,49 @@ pub extern "C" fn leek_field_get_real(
 ) -> f64 {
     let name = unsafe { member_name(name_ptr, name_len) };
     read_member(unsafe { val(base) }, name, version as u8).to_real()
+}
+
+/// [`leek_field_get`] with the field's dense `slot` resolved at compile time —
+/// reads through [`read_member_slot`], skipping the field-name hash. `name`
+/// (`ptr`/`len`) is carried only for the cold non-instance fallback.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_get_slot(
+    base: *mut Value,
+    slot: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    version: i64,
+) -> *mut Value {
+    let name = unsafe { member_name(name_ptr, name_len) };
+    handle(read_member_slot(unsafe { val(base) }, slot as usize, name, version as u8))
+}
+
+/// Slot-resolved [`leek_field_get_int`] (`read_member_slot(..).to_long()`), for
+/// `integer x = obj.field` on a known class.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_get_slot_int(
+    base: *mut Value,
+    slot: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    version: i64,
+) -> i64 {
+    let name = unsafe { member_name(name_ptr, name_len) };
+    read_member_slot(unsafe { val(base) }, slot as usize, name, version as u8).to_long()
+}
+
+/// Slot-resolved [`leek_field_get_real`] (`read_member_slot(..).to_real()`), for
+/// `real x = obj.field` on a known class.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_get_slot_real(
+    base: *mut Value,
+    slot: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    version: i64,
+) -> f64 {
+    let name = unsafe { member_name(name_ptr, name_len) };
+    read_member_slot(unsafe { val(base) }, slot as usize, name, version as u8).to_real()
 }
 
 /// Read `base[idx]` with an **unboxed** integer index, returning a boxed
@@ -1097,6 +1189,54 @@ pub extern "C" fn leek_field_set(
             set_member(base, &Value::String(std::rc::Rc::new(name.to_owned())), v, version as u8);
         },
     }
+}
+
+/// [`leek_field_set`] with the field's dense `slot` resolved at compile time.
+/// FAST PATH: an instance field writes through `set_slot(slot, ..)` — a direct
+/// `Vec` index, skipping the `index` hash. Sound for the same reason as
+/// [`read_member_slot`]: a natively-built instance of the known class has `name`
+/// at `slot`. Any other base, or a slot somehow out of range, falls back to the
+/// exact [`leek_field_set`] name path (instance/object `set_field`, else
+/// [`set_member`]). `name` is carried only for that fallback.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_field_set_slot(
+    base: *mut Value,
+    slot: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    value: *mut Value,
+    version: i64,
+) {
+    if let Value::Instance(inst) = unsafe { val(base) } {
+        let mut b = inst.borrow_mut();
+        if (slot as usize) < b.fields.len() {
+            let v = unsafe { val(value) }.clone();
+            b.fields.set_slot(slot as usize, v);
+            return;
+        }
+    }
+    // Cold fallback (non-instance base, or an unexpectedly out-of-range slot):
+    // the exact `leek_field_set` name path.
+    let v = unsafe { val(value) }.clone();
+    let name = unsafe { member_name(name_ptr, name_len) };
+    match unsafe { val(base) } {
+        Value::Instance(_) | Value::Object(_) => {
+            leek_runtime::set_field(unsafe { val(base) }, name, v);
+        }
+        _ => unsafe {
+            set_member(base, &Value::String(std::rc::Rc::new(name.to_owned())), v, version as u8);
+        },
+    }
+}
+
+/// `base[idx] = value` with an **unboxed** integer index — identical to
+/// [`leek_value_set_index`] called with a boxed `Int` index (the v4-strict OOB
+/// check and `set_index` both read the index as an integer), minus the per-write
+/// heap box for the index. Used for `a[i] = v` when `i` is statically `integer`.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_set_index_int(base: *mut Value, idx: i64, value: *mut Value, version: i64) {
+    let v = unsafe { val(value) }.clone();
+    unsafe { set_member(base, &Value::Int(idx), v, version as u8) };
 }
 
 #[unsafe(no_mangle)]
@@ -1759,6 +1899,11 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_field_get_int", leek_field_get_int as *const u8),
         ("leek_field_get_real", leek_field_get_real as *const u8),
         ("leek_field_set", leek_field_set as *const u8),
+        ("leek_field_get_slot", leek_field_get_slot as *const u8),
+        ("leek_field_get_slot_int", leek_field_get_slot_int as *const u8),
+        ("leek_field_get_slot_real", leek_field_get_slot_real as *const u8),
+        ("leek_field_set_slot", leek_field_set_slot as *const u8),
+        ("leek_set_index_int", leek_set_index_int as *const u8),
         ("leek_index_int", leek_index_int as *const u8),
         ("leek_array_get_int", leek_array_get_int as *const u8),
         ("leek_array_get_real", leek_array_get_real as *const u8),

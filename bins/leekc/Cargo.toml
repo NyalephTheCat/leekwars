@@ -16,7 +16,6 @@ leek-syntax      = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-hir         = { workspace = true }
 leek-mir         = { workspace = true }
-leek-backend-interp = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-recipes     = { workspace = true }
 leek-environment = { workspace = true }

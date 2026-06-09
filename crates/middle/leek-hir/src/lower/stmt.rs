@@ -208,13 +208,16 @@ impl Lowerer {
         if let Some(ty) = declared_ty {
             for d in &mut decls {
                 d.ty = Some(ty.clone());
-                // For globals, the type lives on the `Def::Global`
-                // record too (the interp reads it from there at
-                // assignment-time to coerce).
-                if d.is_global
-                    && let Some(Def::Global(g)) = self.out.defs.get_mut(d.def.0 as usize)
-                {
-                    g.ty = Some(ty.clone());
+                // Mirror the declared type onto the symbol's `Def` record so a
+                // backend can recover a variable's declared type from a *use*
+                // (the HIR `Expr.ty` is untyped — always `Any`). Globals always
+                // did this (the interp read it to coerce); do it for locals too
+                // — the Java backend reads it to coerce typed-array element
+                // writes (`Array<real> a; a[0] = 5` must store `5.0`).
+                match self.out.defs.get_mut(d.def.0 as usize) {
+                    Some(Def::Global(g)) => g.ty = Some(ty.clone()),
+                    Some(Def::Local(l)) => l.ty = Some(ty.clone()),
+                    _ => {}
                 }
             }
         }

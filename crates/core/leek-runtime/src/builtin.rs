@@ -3,11 +3,9 @@
 //!
 //! These are the pure, stateless math builtins (`sqrt`, `cos`, `floor`,
 //! …): each takes scalar `f64` argument(s) and returns a scalar, with no
-//! operation metering, RNG, or game-API access. Both backends call the
-//! *same* function so the semantics can't drift — the interpreter
-//! invokes them directly on unboxed values (see
-//! `leek-backend-interp`'s `dispatch_unary_math`), and the native backend
-//! emits a Cranelift `call` to them as registered JIT symbols.
+//! operation metering, RNG, or game-API access. The native backend calls these
+//! *same* functions so the semantics can't drift — it emits a Cranelift `call`
+//! to them as registered JIT symbols.
 //!
 //! Functions are `extern "C"` so the native backend can call them across
 //! the FFI boundary with a stable ABI. Their addresses are exposed via

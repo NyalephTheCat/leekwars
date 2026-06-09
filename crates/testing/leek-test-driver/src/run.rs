@@ -2,7 +2,6 @@
 //! classify outcomes against upstream expectations.
 
 use std::collections::BTreeMap;
-use leek_parser::ast::SourceFile;
 use leek_span::SourceId;
 use serde::{Deserialize, Serialize};
 
@@ -113,85 +112,6 @@ pub fn run_manifest_all(manifest: &Manifest) -> crate::backends::MultiReport {
 /// Classify a single case on the pipeline backend.
 pub fn run_one(case: &TestCase, source: SourceId) -> CaseOutcome {
     crate::backends::run_case_backend(case, source, crate::backends::SuiteBackend::Pipeline)
-}
-
-/// Evaluate the expected `.almost(X)` side and compare with the program's
-/// runtime result. The expected side may be a plain float (`0.42`/`1.5e3`),
-/// a `value, delta` pair, or a small Java-math expression (`Math.PI / 2`,
-/// `Math.sqrt(2)`); evaluation is shared with the native backend via
-/// [`crate::backends::eval_java_almost_expected`]. Tolerance is
-/// `1e-9 * max(|expected|, 1)` unless an explicit delta is given — matching
-/// upstream's loose float comparison.
-///
-/// Returns `Some(true)`/`Some(false)` for a real verdict, or `None` when the
-/// expected side can't be evaluated here — the caller skips those rather than
-/// false-passing (the previous behaviour silently returned `true`).
-pub(crate) fn check_almost(
-    file: &SourceFile,
-    source: SourceId,
-    case: &TestCase,
-    expected_str: &str,
-) -> Option<bool> {
-    // Fail-closed: if we can't evaluate the expectation, skip — never pass.
-    let (expected, explicit_delta) = crate::backends::eval_java_almost_expected(expected_str)?;
-    let (hir, _) = leek_hir::lower_file_versioned(file, source, case.version);
-    leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
-    let run = leek_backend_interp::run_with_limit_version(&hir, 100_000_000, case.version);
-    if run.error.is_some() {
-        return Some(false);
-    }
-    // v1 formats reals with comma decimal — normalize.
-    let normalized = run.value.to_string().replace(',', ".");
-    let Ok(got) = normalized.parse::<f64>() else {
-        return Some(false);
-    };
-    let tol = explicit_delta.unwrap_or_else(|| 1e-9_f64.max(expected.abs() * 1e-9));
-    Some((got - expected).abs() <= tol)
-}
-
-/// Upstream `.equals("value")` — run the program on the interpreter and
-/// compare the produced value's display form. Mirrors the `Equals` arm of
-/// [`crate::backends::run_interp`] so the pipeline backend value-checks
-/// `Equals` cases instead of passing on clean compilation alone.
-pub(crate) fn check_equals(
-    file: &SourceFile,
-    source: SourceId,
-    case: &TestCase,
-    expected_value: &str,
-) -> bool {
-    let (hir, _) = leek_hir::lower_file_versioned(file, source, case.version);
-    leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
-    let run = leek_backend_interp::run_with_limit_version_strict(
-        &hir,
-        100_000_000,
-        case.version,
-        case.strict,
-    );
-    run.error.is_none() && run.value.to_string() == expected_value
-}
-
-/// Run the program and verify the op count matches upstream's
-/// `.ops(N)` expectation. Our op-cost model is approximate, so
-/// we only accept *exact* matches; mismatches are recorded as
-/// wrong-value (not false-pass).
-pub(crate) fn check_ops(file: &SourceFile, source: SourceId, case: &TestCase, expected: u64) -> bool {
-    let (hir, _) = leek_hir::lower_file_versioned(file, source, case.version);
-    let (_result, used) = leek_backend_interp::run_with_ops_used(&hir, 100_000_000, case.version);
-    used == expected
-}
-
-/// Upstream `.equalsOps("value", N)` — value and op count must both match.
-pub(crate) fn check_equals_ops(
-    file: &SourceFile,
-    source: SourceId,
-    case: &TestCase,
-    expected_value: &str,
-    expected_ops: u64,
-) -> bool {
-    let (hir, _) = leek_hir::lower_file_versioned(file, source, case.version);
-    leek_backend_interp::value::DISPLAY_VERSION.with(|c| c.set(case.version));
-    let (result, used) = leek_backend_interp::run_with_ops_used(&hir, 100_000_000, case.version);
-    result.error.is_none() && used == expected_ops && result.value.to_string() == expected_value
 }
 
 impl Report {
