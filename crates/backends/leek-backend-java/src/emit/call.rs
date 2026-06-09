@@ -4,10 +4,36 @@ use leek_types::Type;
 use super::EmitExpr;
 use super::{
     builtin_arity, builtin_arity_strict, is_primitive_number_expr, is_string_expr,
-    needs_v1_3_suffix, takes_function_arg,
+    needs_v1_3_suffix, receiver_collection_arg_cast, sanitize_ident, takes_function_arg,
 };
 use crate::mangle;
 impl super::Emitter<'_> {
+    /// If `receiver` is a class reference (`A`) and `method` is a static method
+    /// of that class, return the mangled class name (for the AI-level
+    /// `<class>_<method>_<arity>` call). `None` otherwise.
+    fn class_ref_static_method(&self, receiver: &Expr, method: &str) -> Option<String> {
+        if let ExprKind::Name(NameRef::Class(id)) = &receiver.kind
+            && let Some(Def::Class(c)) = self.hir.defs.get(id.0 as usize)
+            && c.methods.iter().any(|m| m.is_static && m.name == method)
+        {
+            return Some(mangle::class_name(self.opts, &c.name));
+        }
+        None
+    }
+
+    /// `A.<name>` where `<name>` is a static FIELD (not a method) — returns the
+    /// class's `ClassLeekValue` handle. `A.f(args)` then reads the field (a
+    /// callable, e.g. `static f = -> 12`) and `execute`s it.
+    fn class_ref_static_field(&self, receiver: &Expr, name: &str) -> Option<String> {
+        if let ExprKind::Name(NameRef::Class(id)) = &receiver.kind
+            && let Some(Def::Class(c)) = self.hir.defs.get(id.0 as usize)
+            && c.fields.iter().any(|f| f.is_static && f.name == name)
+        {
+            return Some(mangle::class_name(self.opts, &c.name));
+        }
+        None
+    }
+
     pub(crate) fn write_call(&self, buf: &mut String, c: &Call) {
         // If the callee is a builtin name the source has
         // reassigned (`cos = function() {…}; cos(...)`), route
@@ -36,6 +62,28 @@ impl super::Emitter<'_> {
         }
         match &c.callee {
             Callee::Function(NameRef::Builtin(name)) => {
+                // `max`/`min` are polymorphic over int/real and there's no
+                // `(Object, Object)` overload — picking long/double at compile
+                // time is wrong for a real-typed *variable* arg (`max(0, a)`
+                // with `a = 0.8` must give `0.8`, not `0`). Route 2-arg calls
+                // through a hoisted runtime-dispatch helper (like upstream's
+                // `Number_max_rr_ii`): long-long stays long, else widen to double.
+                if matches!(name.as_str(), "max" | "min") && c.args.len() == 2 {
+                    let helper = format!("__{name}2");
+                    let nm = name.clone();
+                    self.hoist_member(&helper, || format!(
+                        "private Object {helper}(Object a, Object b) throws LeekRunException {{ \
+                         if (a instanceof Long && b instanceof Long) return NumberClass.{nm}(this, (Long) a, (Long) b); \
+                         return NumberClass.{nm}(this, ((Number) a).doubleValue(), ((Number) b).doubleValue()); }}"
+                    ));
+                    buf.push_str(&helper);
+                    buf.push('(');
+                    self.write_expr(buf, &c.args[0], false);
+                    buf.push_str(", ");
+                    self.write_expr(buf, &c.args[1], false);
+                    buf.push(')');
+                    return;
+                }
                 // Two dispatch shapes from `builtins::lookup`:
                 //   • Static  → `<Class>.<name>(this, args...)`  (NumberClass.abs, StringClass.length, …)
                 //   • Receiver → `((<class>) arg0).<name>(this, args[1..])`
@@ -78,6 +126,13 @@ impl super::Emitter<'_> {
                                 buf.push_str(").size() : 0l");
                                 return;
                             }
+                            // The interval methods (`intervalMax`, …) live on
+                            // the CONCRETE `IntegerIntervalLeekValue` /
+                            // `RealIntervalLeekValue`, not the abstract
+                            // `IntervalLeekValue` the table names. When the
+                            // receiver is an interval literal we know which one;
+                            // cast to it so the method resolves.
+                            let class = self.concrete_receiver_class(class, name, receiver);
                             buf.push_str("((");
                             buf.push_str(class);
                             buf.push_str(") (Object) ");
@@ -87,13 +142,34 @@ impl super::Emitter<'_> {
                             buf.push_str(name);
                             buf.push_str(suffix);
                             buf.push('(');
-                            buf.push_str(self.ai_this());
+                            buf.push_str(&self.ai_this());
                             let cast_fn_arg = takes_function_arg(name);
+                            // Set/map binary ops (`setUnion`, `mapMerge`, …) take
+                            // the other collection as a concrete
+                            // `SetLeekValue`/`MapLeekValue` param, so the
+                            // `Object`-typed arg must be cast (else javac:
+                            // "Object cannot be converted to SetLeekValue").
+                            // `pushAll`/`arrayConcat` take another array of the
+                            // SAME (version-specific) class as the receiver, so
+                            // cast the arg to the resolved receiver `class`.
+                            let coll_arg_cast = receiver_collection_arg_cast(name).or(
+                                if matches!(name.as_str(), "pushAll" | "arrayConcat") {
+                                    Some(class)
+                                } else {
+                                    None
+                                },
+                            );
                             for (i, a) in c.args[1..].iter().enumerate() {
                                 buf.push_str(", ");
                                 if i == 0 && cast_fn_arg {
                                     buf.push_str("(FunctionLeekValue) ");
                                     self.write_expr(buf, a, true);
+                                } else if i == 0 && let Some(cls) = coll_arg_cast {
+                                    buf.push('(');
+                                    buf.push_str(cls);
+                                    buf.push_str(") (Object) (");
+                                    self.write_expr(buf, a, false);
+                                    buf.push(')');
                                 } else {
                                     self.write_expr(buf, a, false);
                                 }
@@ -145,7 +221,7 @@ impl super::Emitter<'_> {
                         buf.push_str(name);
                         buf.push_str(suffix);
                         buf.push('(');
-                        buf.push_str(self.ai_this());
+                        buf.push_str(&self.ai_this());
                         // Pick the primitive shape Java can overload on.
                         // If any arg is statically a real, force all the
                         // Object args to double too — Java overload
@@ -229,7 +305,7 @@ impl super::Emitter<'_> {
                                 buf.push_str(").");
                                 buf.push_str(coerce);
                                 buf.push_str("()");
-                            } else if class == "StringClass"
+                            } else if (class == "StringClass" || name.as_str() == "jsonDecode")
                                 && !is_string_expr(a)
                                 && !is_primitive_number_expr(a)
                             {
@@ -238,7 +314,9 @@ impl super::Emitter<'_> {
                                 // position. Primitive-typed args
                                 // (`substring(s, 2, 3)`) need no cast;
                                 // Object-typed locals (`u_big`, `u_rep`)
-                                // do — narrow to String.
+                                // do — narrow to String. `jsonDecode(String)`
+                                // is the same (its sibling `jsonEncode` takes
+                                // `Object`, so it stays uncast).
                                 buf.push_str("(String) ");
                                 self.write_expr(buf, a, true);
                             } else {
@@ -274,7 +352,7 @@ impl super::Emitter<'_> {
                     buf.push('.');
                     buf.push_str(name);
                     buf.push('(');
-                    buf.push_str(self.ai_this());
+                    buf.push_str(&self.ai_this());
                     for a in &c.args {
                         buf.push_str(", ");
                         self.write_expr(buf, a, false);
@@ -391,6 +469,19 @@ impl super::Emitter<'_> {
                         _ => None,
                     })
                     .unwrap_or_default();
+                // Which params are `@`-by-ref — a ref-box-local arg there is
+                // passed as the bare box so the callee aliases (and mutates) it.
+                let param_by_ref: Vec<bool> = self
+                    .hir
+                    .defs
+                    .iter()
+                    .find_map(|d| match d {
+                        Def::Function(f) if f.name == name => {
+                            Some(f.params.iter().map(|p| p.is_by_ref).collect())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 let wrap_long = matches!(return_ty, Some(Type::Integer));
                 if wrap_long {
                     buf.push_str("((Number) AI.load((Object) ");
@@ -401,8 +492,14 @@ impl super::Emitter<'_> {
                     if i > 0 {
                         buf.push_str(", ");
                     }
-                    let wants_real =
-                        matches!(param_tys.get(i).cloned().flatten(), Some(Type::Real),);
+                    if param_by_ref.get(i).copied().unwrap_or(false) && self.is_ref_box(a) {
+                        // Pass the box itself so the `@` param aliases it.
+                        buf.push_str(&self.ref_box_name(a));
+                        continue;
+                    }
+                    let param_ty = param_tys.get(i).cloned().flatten();
+                    let wants_real = matches!(param_ty, Some(Type::Real));
+                    let wants_int = matches!(param_ty, Some(Type::Integer));
                     let arg_is_int_literal = matches!(&a.kind, ExprKind::Literal(Literal::Int(_)));
                     if wants_real && arg_is_int_literal {
                         // Promote integer literal `12` → `12.0` so
@@ -418,6 +515,15 @@ impl super::Emitter<'_> {
                         buf.push_str("((Number) AI.load((Object) ");
                         self.write_expr(buf, a, false);
                         buf.push_str(")).doubleValue()");
+                    } else if wants_int && !arg_is_int_literal {
+                        // A typed `integer` parameter coerces the arg to a long
+                        // (`f(integer i); f(42.9)` → `42`), mirroring upstream's
+                        // primitive-typed signature. An int literal is already
+                        // long, so skip it; a real literal / expression goes
+                        // through `Number.longValue()`.
+                        buf.push_str("((Number) AI.load((Object) ");
+                        self.write_expr(buf, a, false);
+                        buf.push_str(")).longValue()");
                     } else {
                         self.write_expr(buf, a, false);
                     }
@@ -450,37 +556,135 @@ impl super::Emitter<'_> {
                 self.write_execute_args(buf, &c.args);
                 buf.push(')');
             }
-            Callee::Function(_) => {
-                buf.push_str("null");
-            }
-            Callee::Method { receiver, method } => {
-                // `callMethod` is on ObjectLeekValue, not Object —
-                // narrow the receiver so javac picks the right
-                // dispatch. The interstitial `(Object)` lets
-                // unrelated static types (`String`, etc.) through.
-                buf.push_str("((ObjectLeekValue) (Object) ");
-                self.write_expr(buf, receiver, false);
-                buf.push(')');
-                buf.push('.');
-                // The runtime dispatches by `<name>_<argCount>` —
-                // see `ObjectLeekValue.callMethod`'s lookup that
-                // splits on the last underscore and parses the
-                // suffix as an int. Without the suffix it falls
-                // into the not-found path and NumberFormatExceptions.
-                buf.push_str("callMethod(\"");
-                buf.push_str(method);
-                buf.push('_');
-                buf.push_str(&c.args.len().to_string());
-                // 2nd arg is a ClassLeekValue for visibility checks
-                // (`null` = no class context, allows public access).
-                buf.push_str("\", (ClassLeekValue) null");
-                for a in &c.args {
-                    buf.push_str(", ");
+            Callee::Function(NameRef::Super) => {
+                // `super(args)` — call the parent class's constructor body
+                // (`super.init(args)`); the parent's field defaults already ran
+                // via the Java constructor chain.
+                buf.push_str("super.init(");
+                for (i, a) in c.args.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
                     self.write_expr(buf, a, false);
                 }
                 buf.push(')');
             }
+            Callee::Function(NameRef::Class(id)) => {
+                // A class name used as a call is construction: `A(9)` ≡ `new
+                // A(9)`. Route to the AI's `new_<class>(args)` helper (runs the
+                // field-default ctor then `init`), the same as `write_new`. A
+                // builtin class (`Array(…)`, `Map(…)`) collapses to its literal.
+                let name = self.def_name(*id).to_string();
+                if !self.write_builtin_class_construct(buf, &name, &c.args) {
+                    buf.push_str("new_");
+                    buf.push_str(&mangle::class_name(self.opts, &name));
+                    buf.push('(');
+                    for (i, a) in c.args.iter().enumerate() {
+                        if i > 0 {
+                            buf.push_str(", ");
+                        }
+                        buf.push_str("(Object) (");
+                        self.write_expr(buf, a, false);
+                        buf.push(')');
+                    }
+                    buf.push(')');
+                }
+            }
+            Callee::Function(_) => {
+                buf.push_str("null");
+            }
+            Callee::Method { receiver, method } => {
+                if let Some(cname) = self.class_ref_static_method(receiver, method) {
+                    // `A.staticMethod(args)` — call the AI-level
+                    // `<class>_<method>_<arity>` body directly.
+                    buf.push_str(&cname);
+                    buf.push('_');
+                    buf.push_str(&sanitize_ident(method));
+                    buf.push('_');
+                    buf.push_str(&c.args.len().to_string());
+                    buf.push('(');
+                    for (i, a) in c.args.iter().enumerate() {
+                        if i > 0 {
+                            buf.push_str(", ");
+                        }
+                        self.write_expr(buf, a, false);
+                    }
+                    buf.push(')');
+                } else if let Some(cls) = self.class_ref_static_field(receiver, method) {
+                    // `A.f(args)` where `f` is a static FIELD holding a callable
+                    // (`static f = -> 12`) — read the field, then `execute` it.
+                    buf.push_str("execute(getField(");
+                    buf.push_str(&cls);
+                    buf.push_str(", \"");
+                    buf.push_str(method);
+                    buf.push_str("\", ");
+                    buf.push_str(&self.from_class());
+                    buf.push(')');
+                    self.write_execute_args(buf, &c.args);
+                    buf.push(')');
+                } else if matches!(&receiver.kind, ExprKind::Name(NameRef::Super)) {
+                    // `super.m(args)` — direct Java super call to the inherited
+                    // `u_<name>`.
+                    buf.push_str("super.u_");
+                    buf.push_str(&sanitize_ident(method));
+                    buf.push('(');
+                    for (i, a) in c.args.iter().enumerate() {
+                        if i > 0 {
+                            buf.push_str(", ");
+                        }
+                        self.write_expr(buf, a, false);
+                    }
+                    buf.push(')');
+                } else {
+                    // `obj.m(args)` — dynamic dispatch through the AI's
+                    // `callObjectAccess(receiver, "<leek name>", "u_<name>",
+                    // null, args…)`, which resolves to the method registered on
+                    // the value's `ClassLeekValue` (see
+                    // `emit_class_registration`).
+                    buf.push_str("callObjectAccess(");
+                    self.write_expr(buf, receiver, false);
+                    buf.push_str(", \"");
+                    buf.push_str(method);
+                    buf.push_str("\", \"u_");
+                    buf.push_str(&sanitize_ident(method));
+                    buf.push_str("\", ");
+                    buf.push_str(&self.from_class());
+                    for a in &c.args {
+                        // Cast each vararg to `(Object)` — a lone `null` arg
+                        // would otherwise bind as the whole `Object... args`
+                        // array being null (Java varargs ambiguity), NPE-ing the
+                        // dispatch.
+                        buf.push_str(", (Object) (");
+                        self.write_expr(buf, a, false);
+                        buf.push(')');
+                    }
+                    buf.push(')');
+                }
+            }
             Callee::Expr(e) => {
+                if let ExprKind::Index(base, key) = &e.kind {
+                    // `a['m'](args)` / `a[m](args)` — call a method (or callable
+                    // field) selected by an index key. Upstream routes this
+                    // through `executeArrayAccess(ai, base, key, null, args…)`,
+                    // which resolves a method name to the bound method (a plain
+                    // `get` would return null for a method).
+                    buf.push_str("LeekValueManager.executeArrayAccess(");
+                    buf.push_str(&self.ai_this());
+                    buf.push_str(", ");
+                    self.write_expr(buf, base, false);
+                    buf.push_str(", ");
+                    self.write_expr(buf, key, false);
+                    buf.push_str(", null");
+                    for a in &c.args {
+                        // `(Object)` cast so a lone `null` arg doesn't bind as a
+                        // null `Object... arguments` array.
+                        buf.push_str(", (Object) (");
+                        self.write_expr(buf, a, false);
+                        buf.push(')');
+                    }
+                    buf.push(')');
+                    return;
+                }
                 // `execute(fn, args...)` — AI instance method that
                 // dispatches to the `FunctionLeekValue.run(...)` of
                 // the callable, varargs-style for the trailing
@@ -518,7 +722,7 @@ impl super::Emitter<'_> {
         buf.push('.');
         buf.push_str(method);
         buf.push('(');
-        buf.push_str(self.ai_this());
+        buf.push_str(&self.ai_this());
         for (i, a) in args.iter().enumerate() {
             buf.push_str(", ");
             match params.get(i).cloned().flatten() {

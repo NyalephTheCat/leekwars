@@ -154,17 +154,19 @@ pub fn global(_opts: &Options, name: &str) -> String {
     format!("g_{}", safe_chars(name))
 }
 
-/// User class declaration: `class Cat` → `u_Cat`.
-pub fn class_name(opts: &Options, name: &str) -> String {
-    let safe = safe_chars(name);
-    if opts.is_clean() && !is_java_keyword(&safe) && !collides_with_runtime(&safe) {
-        safe
-    } else {
-        format!("u_{safe}")
-    }
+/// User class declaration: `class Cat` → `u_Cat`. Always `u_`-prefixed, even in
+/// clean mode: the runtime recovers the leek class name from the Java class name
+/// by stripping the first two chars (`getSimpleName().substring(2)`) when
+/// formatting a visibility-denial error, so a bare clean-mode name (`Cat`) makes
+/// that `substring(2)` throw `StringIndexOutOfBoundsException` instead of
+/// returning null. The prefix is a runtime contract, not just disambiguation.
+pub fn class_name(_opts: &Options, name: &str) -> String {
+    format!("u_{}", safe_chars(name))
 }
 
-/// User method on an inner class: `m_run`.
+/// User method on an inner class: `m_run`. Superseded by the inline `u_<name>`
+/// naming in `emit/class.rs`; kept for the deferred static-method work.
+#[allow(dead_code)]
 pub fn method(opts: &Options, name: &str) -> String {
     let safe = safe_chars(name);
     if opts.is_clean() && !is_java_keyword(&safe) && !collides_with_runtime(&safe) {
@@ -174,7 +176,8 @@ pub fn method(opts: &Options, name: &str) -> String {
     }
 }
 
-/// Static field on a user class: `s_n`.
+/// Static field on a user class: `s_n`. For the deferred static-field work.
+#[allow(dead_code)]
 pub fn static_field(_opts: &Options, name: &str) -> String {
     format!("s_{}", safe_chars(name))
 }

@@ -1,4 +1,6 @@
-use leek_hir::{DoWhileStmt, Expr, ForStmt, ForeachStmt, IfStmt, Stmt, VarDecl, WhileStmt};
+use leek_hir::{
+    DoWhileStmt, Expr, ExprKind, ForStmt, ForeachStmt, IfStmt, NameRef, Stmt, VarDecl, WhileStmt,
+};
 
 use super::traits::EmitStmt;
 use super::{
@@ -119,11 +121,14 @@ impl EmitStmt for Emitter<'_> {
 impl Emitter<'_> {
     pub(crate) fn emit_stmts(&mut self, stmts: &[Stmt]) {
         // Clean-mode dead-code-elim: drop everything past a definite
-        // terminator at this nesting level.
+        // terminator at this nesting level — a `break`/`continue`/`return`, or
+        // any statement that always returns / never falls through (e.g. an
+        // infinite `while (true)`). Otherwise javac rejects the trailing code as
+        // unreachable.
         let cutoff = if self.opts.dead_code_elim {
             stmts
                 .iter()
-                .position(is_terminator)
+                .position(|s| is_terminator(s) || super::stmt_definitely_returns(s))
                 .map_or(stmts.len(), |p| p + 1)
         } else {
             stmts.len()
@@ -142,15 +147,26 @@ impl Emitter<'_> {
         // and javac rejects with "might not have been initialized".
         let prev = self.initializing_def.replace(Some(v.def));
         let init = match &v.init {
-            Some(e) => self.expr_with_ops(e, 1),
+            Some(e) => {
+                let raw = self.v1_clone_with_ops(e, 1);
+                // A statically-typed scalar local coerces its initializer to the
+                // declared type, mirroring upstream `compileConvert`: the runtime
+                // is type-erased, so `integer b = a[1]` (real array) must store an
+                // integer and `real b = 5` a double. `longint`/`real`/`bool` all
+                // take `Object`, so the untyped HIR value drops straight in.
+                self.coerce_decl(v.ty.as_ref(), raw)
+            }
             // Uninitialized decl still costs 1 op upstream — match
             // the `LeekVariableDeclarationInstruction.writeJavaCode`
-            // baseline tick.
+            // baseline tick. A typed scalar defaults to its zero value
+            // (`0l`/`0.0`/`false`) rather than `null` — upstream never
+            // leaves a declared `integer` holding null.
             None => {
+                let base = self.decl_default(v.ty.as_ref());
                 if self.opts.emit_ops {
-                    "ops(null, 1)".into()
+                    format!("ops({base}, 1)")
                 } else {
-                    "null".into()
+                    base
                 }
             }
         };
@@ -161,7 +177,14 @@ impl Emitter<'_> {
             self.writer.add_line(&format!("g_init_{} = true;", v.name));
         } else {
             let name = mangle::local(self.opts, &v.name);
-            if self.boxed_locals.borrow().contains(&v.def) {
+            if self.ref_boxes.borrow().contains(&v.def) {
+                // Passed to a `@` param somewhere → store in a runtime `Box` so
+                // the callee can alias and mutate it. Reads emit `.get()`,
+                // writes route through `Box` methods (see `write_name` /
+                // `write_assignment`); the call site passes the box for `@` args.
+                self.writer
+                    .add_line_at(&format!("Box {name} = new Box(this, {init});"), line);
+            } else if self.boxed_locals.borrow().contains(&v.def) {
                 // Heap-box: a nested lambda captures-and-writes this local, so
                 // it's shared through a one-element `Object[]`. Reads/writes
                 // elsewhere go via `[0]` (see `write_name`).
@@ -176,6 +199,72 @@ impl Emitter<'_> {
             }
         }
     }
+    /// Render an expression, deep-copying it at **v1** when it's a *load* of an
+    /// existing value (a variable / field / index read). v1 has value
+    /// semantics: `var b = a; mutate(b)` must not alias `a`, so the load is
+    /// wrapped in `copy(...)` (mirrors upstream `JavaWriter.compileClone`). A
+    /// fresh value — literal, arithmetic, call, `new`, collection literal — is
+    /// already unaliased and isn't copied. No-op at v2+ (reference semantics).
+    /// Coerce an emitted value to a declared **scalar** type
+    /// (`integer`/`real`/`boolean`) via `longint`/`real`/`bool`. Composite
+    /// declared types (`Array<…>`, `Map<…>`, `Object`, untyped) pass through —
+    /// their element coercion happens at the store site, not here.
+    pub(crate) fn coerce_decl(&self, ty: Option<&leek_hir::Type>, inner: String) -> String {
+        use leek_hir::Type;
+        match ty {
+            Some(Type::Integer | Type::Real | Type::Boolean) => {
+                super::coerce_field_write(Some(super::java_type_for(ty)), &inner)
+            }
+            // `real? a = 12` stores `12.0`, but `real? a = null` must stay null —
+            // so use the null-tolerant `longintOrNull`/`realOrNull` converters
+            // (a plain `longint(null)` would throw).
+            Some(Type::Nullable(inner_ty)) => match inner_ty.as_ref() {
+                Type::Integer => format!("longintOrNull({inner})"),
+                Type::Real => format!("realOrNull({inner})"),
+                _ => inner,
+            },
+            _ => inner,
+        }
+    }
+
+    /// Default Java value for an uninitialized declared local: the zero of a
+    /// scalar type, else `null`.
+    fn decl_default(&self, ty: Option<&leek_hir::Type>) -> String {
+        use leek_hir::Type;
+        match ty {
+            Some(Type::Integer) => "0l".into(),
+            Some(Type::Real) => "0.0".into(),
+            Some(Type::Boolean) => "false".into(),
+            _ => "null".into(),
+        }
+    }
+
+    pub(crate) fn v1_clone(&self, e: &Expr) -> String {
+        let inner = self.expr_to_string(e);
+        if matches!(self.opts.version, leek_syntax::Version::V1)
+            && matches!(
+                &e.kind,
+                ExprKind::Name(NameRef::Local(_) | NameRef::Global(_))
+                    | ExprKind::Field(..)
+                    | ExprKind::Index(..)
+            )
+        {
+            format!("copy({inner})")
+        } else {
+            inner
+        }
+    }
+
+    /// [`Self::v1_clone`] wrapped in the `ops(value, n)` op-count overload (used
+    /// for a `var x = <init>` initializer).
+    fn v1_clone_with_ops(&self, e: &Expr, base_cost: u32) -> String {
+        let inner = self.v1_clone(e);
+        if !self.opts.emit_ops {
+            return inner;
+        }
+        format!("ops({inner}, {})", base_cost + expr_op_cost(e))
+    }
+
     /// Wrap an expression in the `ops(value, n)` overload when we're
     /// in op-counting mode; otherwise return the bare expression.
     /// `n` is the static cost contributed by this statement (the
@@ -445,11 +534,15 @@ impl Emitter<'_> {
             iter_counter: self.iter_counter,
             lambda_depth: std::cell::Cell::new(self.lambda_depth.get()),
             outlined: std::cell::RefCell::new(Vec::new()),
+            fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            in_outlined: std::cell::Cell::new(self.in_outlined.get()),
+            ref_boxes: std::cell::RefCell::new(self.ref_boxes.borrow().clone()),
             outline_counter: std::cell::Cell::new(self.outline_counter.get()),
             initializing_def: std::cell::Cell::new(self.initializing_def.get()),
             self_rec_def: std::cell::Cell::new(self.self_rec_def.get()),
             shadowed_builtins: std::cell::RefCell::new(self.shadowed_builtins.borrow().clone()),
             boxed_locals: std::cell::RefCell::new(self.boxed_locals.borrow().clone()),
+            current_class: std::cell::Cell::new(self.current_class.get()),
         };
         scratch.emit_stmts(&b.stmts);
         // Hand off any outlined-lambda helpers the scratch run
@@ -459,6 +552,9 @@ impl Emitter<'_> {
         self.outlined
             .borrow_mut()
             .append(&mut *scratch.outlined.borrow_mut());
+        self.fn_singletons
+            .borrow_mut()
+            .append(&mut *scratch.fn_singletons.borrow_mut());
         let (java, _) = scratch.writer.into_parts();
         java
     }

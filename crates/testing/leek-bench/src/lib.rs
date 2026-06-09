@@ -38,6 +38,7 @@
 //! ```
 
 mod compile;
+mod corpus_fast;
 mod runner_native;
 mod runner_rust_java;
 mod runner_upstream;
@@ -46,6 +47,7 @@ use std::path::Path;
 use std::time::Duration;
 
 pub use compile::{CompiledHir, compile_hir, compile_hir_file};
+pub use corpus_fast::{FastCase, FastOutcome, FastReport, run_fast_java_corpus};
 
 pub use runner_native::RustNative;
 pub use runner_rust_java::RustJavaEmit;

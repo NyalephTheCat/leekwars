@@ -120,11 +120,21 @@ impl super::Emitter<'_> {
         );
         for (i, p) in l.params.iter().enumerate() {
             let pname = mangle::local(self.opts, &p.name);
-            write!(
-                buf,
-                "var {pname} = (values.length > {i} ?  values[{i}] : null);"
-            )
-            .unwrap();
+            let src = format!("(values.length > {i} ?  values[{i}] : null)");
+            if self.is_v1_ref_param(p) {
+                // `@x` at v1: bind to the runtime `Box` — alias the caller's box
+                // if one was passed (the v1 runtime passes element boxes to `@`
+                // callbacks), else box a copy. Reads/writes of `x` then route
+                // through `Box` methods so mutations propagate.
+                write!(
+                    buf,
+                    "Box {pname} = {src} instanceof Box ? (Box) ({src}) : new Box(ai, load({src}));"
+                )
+                .unwrap();
+                self.ref_boxes.borrow_mut().insert(p.def);
+            } else {
+                write!(buf, "var {pname} = {src};").unwrap();
+            }
         }
         // Bump lambda nesting so `ai_this()` returns `ai` inside the
         // body — bare `this` would otherwise resolve to the
@@ -223,6 +233,10 @@ impl super::Emitter<'_> {
             // *is* the array, so no `[0]` there.
             if self.boxed_locals.borrow().contains(def_id) {
                 factory_buf.push_str("final Object[] ");
+            } else if self.ref_boxes.borrow().contains(def_id) {
+                // A captured `@`-ref-box param keeps its `Box` type so the body's
+                // `.get()`/`Box` mutators resolve.
+                factory_buf.push_str("final Box ");
             } else {
                 factory_buf.push_str("final Object ");
             }
@@ -247,17 +261,28 @@ impl super::Emitter<'_> {
         );
         for (i, p) in l.params.iter().enumerate() {
             let pname = mangle::local(self.opts, &p.name);
-            write!(
-                factory_buf,
-                "var {pname} = (values.length > {i} ?  values[{i}] : null);"
-            )
-            .unwrap();
+            let src = format!("(values.length > {i} ?  values[{i}] : null)");
+            if self.is_v1_ref_param(p) {
+                write!(
+                    factory_buf,
+                    "Box {pname} = {src} instanceof Box ? (Box) ({src}) : new Box(ai, load({src}));"
+                )
+                .unwrap();
+                self.ref_boxes.borrow_mut().insert(p.def);
+            } else {
+                write!(factory_buf, "var {pname} = {src};").unwrap();
+            }
         }
         self.lambda_depth.set(self.lambda_depth.get() + 1);
         if self.opts.emit_ops {
             factory_buf.push_str("ops(1);");
         }
+        // The factory is an AI-level method, so `<u_Class>.this` is out of scope
+        // inside it — render the body with the outlined flag so an instance
+        // `this` falls back to bare `this`.
+        let prev_outlined = self.in_outlined.replace(true);
         factory_buf.push_str(&self.render_block_to_string(body));
+        self.in_outlined.set(prev_outlined);
         if !ends_with_return(&body.stmts) {
             factory_buf.push_str("return null;");
         }

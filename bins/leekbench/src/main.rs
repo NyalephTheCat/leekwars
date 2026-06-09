@@ -15,7 +15,11 @@ use cli::{Cli, CorpusExpectation};
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.corpus {
-        run_corpus(&cli)
+        if cli.fast_java {
+            run_corpus_fast_java(&cli)
+        } else {
+            run_corpus(&cli)
+        }
     } else {
         let input = cli
             .input
@@ -122,6 +126,66 @@ fn run_single(cli: &Cli, input: &PathBuf) -> Result<()> {
 // ---------------------------------------------------------------------
 // Corpus mode
 // ---------------------------------------------------------------------
+
+/// Fast batch rust-java correctness sweep (`--corpus --fast-java`): one `javac`,
+/// one JVM, values only. See [`leek_bench::run_fast_java_corpus`].
+fn run_corpus_fast_java(cli: &Cli) -> Result<()> {
+    let manifest_owned;
+    let manifest = if let Some(path) = &cli.manifest {
+        manifest_owned =
+            Manifest::load(path).with_context(|| format!("load manifest {}", path.display()))?;
+        &manifest_owned
+    } else {
+        embedded_manifest()
+    };
+    // Only `equals(...)` cases carry a comparable value.
+    let cases: Vec<leek_bench::FastCase> = manifest
+        .cases
+        .iter()
+        .filter(|c| cli.include_disabled || c.enabled)
+        .filter(|c| expectation_matches(cli.corpus_expectation, c))
+        .filter(|c| case_matches_filter(c, cli.case_filter.as_deref()))
+        .filter_map(|c| match &c.expected {
+            Expectation::Equals { value } => Some(leek_bench::FastCase {
+                id: c.id.clone(),
+                code: c.code.clone(),
+                version: c.version,
+                strict: c.strict,
+                expected: value.clone(),
+            }),
+            _ => None,
+        })
+        .take(cli.limit.max(1))
+        .collect();
+
+    eprintln!("fast rust-java sweep: {} cases …", cases.len());
+    let report = leek_bench::run_fast_java_corpus(&cases, cli.corpus_lang_version)?;
+
+    println!(
+        "\n{} cases in {:.1}s ({} javac round(s))",
+        report.total,
+        report.elapsed.as_secs_f64(),
+        report.javac_rounds,
+    );
+    println!("  agree:     {} / {}", report.agree, report.total);
+    println!("  disagree:  {}", report.disagree());
+    println!("  errors:    {}", report.errors());
+    if cli.verbose {
+        for (id, outcome) in &report.failures {
+            match outcome {
+                leek_bench::FastOutcome::Disagree { got, expected } => {
+                    println!("  ✗ {id}\n      got      {got}\n      expected {expected}");
+                }
+                leek_bench::FastOutcome::CompileError => println!("  ⊗ {id}  (compile error)"),
+                leek_bench::FastOutcome::EmitError(e) => println!("  ⊘ {id}  (emit: {e})"),
+                leek_bench::FastOutcome::RuntimeError(e) => println!("  !  {id}  (runtime: {e})"),
+                leek_bench::FastOutcome::Timeout => println!("  ⏱ {id}  (timeout)"),
+                leek_bench::FastOutcome::NoResult => println!("  ?  {id}  (no result)"),
+            }
+        }
+    }
+    Ok(())
+}
 
 fn run_corpus(cli: &Cli) -> Result<()> {
     let manifest_owned;

@@ -27,6 +27,12 @@ pub struct Cli {
     #[arg(long)]
     pub corpus: bool,
 
+    /// Corpus mode: fast batch rust-java **correctness** sweep — emit every
+    /// case, compile in one `javac`, run in one JVM (minutes vs. hours). Checks
+    /// values only (no timing, native/upstream skipped).
+    #[arg(long = "fast-java")]
+    pub fast_java: bool,
+
     /// In corpus mode, max number of cases to run.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,

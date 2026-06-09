@@ -16,6 +16,7 @@ leek-hir         = { workspace = true }
 leek-types       = { workspace = true }
 leek-charge      = { workspace = true }
 leek-builtins    = { workspace = true }
+leek-runtime     = { workspace = true }
 leek-environment = { workspace = true }
 leek-text        = { workspace = true }
 

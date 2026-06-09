@@ -81,6 +81,26 @@ pub(crate) struct Emitter<'a> {
     /// rules accept those even when the original locals are
     /// reassignable).
     outlined: std::cell::RefCell<Vec<String>>,
+    /// Hoisted `FunctionLeekValue` singletons for first-class function/builtin
+    /// references (`var f = test`, `test == test`). One field per distinct
+    /// function so repeated references are the SAME instance — `equals_equals`
+    /// then compares two refs to one object (`test == test` → true). Keyed by
+    /// the field name; value is the full `private FunctionLeekValue <name> = …;`
+    /// declaration, emitted at class-body end like `outlined`.
+    fn_singletons: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+    /// True while rendering an *outlined* lambda body (one hoisted to an
+    /// AI-level `__anon_<n>` method). There, `<u_Class>.this` is NOT in scope
+    /// (the method isn't lexically inside the class), so a class-instance `this`
+    /// falls back to bare `this`. Inline lambdas (anonymous classes inside a
+    /// class method) keep `<u_Class>.this`.
+    in_outlined: std::cell::Cell<bool>,
+    /// `@`-by-ref parameter locals (at v1) currently in scope that are bound to
+    /// a runtime `Box`. Reads emit `<name>.get()`, writes route through the
+    /// `Box`'s `set`/`add_eq`/`increment`/… so a mutation propagates back to the
+    /// caller's variable / array element (the v1 runtime passes element boxes to
+    /// `@` callbacks). At v2+ `@` params are plain (no propagation), so this set
+    /// stays empty.
+    ref_boxes: std::cell::RefCell<std::collections::HashSet<leek_hir::DefId>>,
     /// Monotonic counter for `__anon_<n>` outlined-lambda names.
     outline_counter: std::cell::Cell<u32>,
     /// DefId currently being initialized by a `var X = …`. When the
@@ -112,6 +132,12 @@ pub(crate) struct Emitter<'a> {
     /// once by `collect_boxed_locals` in `emit_file`. `DefId`s are unique
     /// file-wide, so a single set serves every function.
     boxed_locals: std::cell::RefCell<std::collections::HashSet<leek_hir::DefId>>,
+    /// The user class whose method body is currently being emitted, if any.
+    /// Lets `this.field` / `this.method(...)` resolve to direct Java field /
+    /// method access (the generated class has real Java fields + `u_<m>`
+    /// methods) instead of the reflective `getField` / `callObjectAccess`
+    /// fallback used for `Object`-typed bases. `None` outside a class method.
+    current_class: std::cell::Cell<Option<&'a leek_hir::Class>>,
 }
 
 mod call;
@@ -135,23 +161,29 @@ impl<'a> Emitter<'a> {
             iter_counter: 0,
             lambda_depth: std::cell::Cell::new(0),
             outlined: std::cell::RefCell::new(Vec::new()),
+            fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            in_outlined: std::cell::Cell::new(false),
+            ref_boxes: std::cell::RefCell::new(std::collections::HashSet::new()),
             outline_counter: std::cell::Cell::new(0),
             initializing_def: std::cell::Cell::new(None),
             self_rec_def: std::cell::Cell::new(None),
             shadowed_builtins: std::cell::RefCell::new(std::collections::HashSet::new()),
             boxed_locals: std::cell::RefCell::new(std::collections::HashSet::new()),
+            current_class: std::cell::Cell::new(None),
         }
     }
 
-    /// Identifier to pass for the AI reference at this emit point.
-    /// Outside a lambda → `this`; inside a lambda → `ai` (the
-    /// lambda's own AI parameter). Anywhere we used to write `this`
-    /// for an AI handoff should call this instead.
-    pub(crate) fn ai_this(&self) -> &'static str {
+    /// Identifier to pass for the AI reference at this emit point. Inside a
+    /// lambda → `ai` (the lambda's own AI parameter); inside a class method →
+    /// `<AIClass>.this` (bare `this` there is the *instance*, not the AI); at
+    /// the AI top level → `this`. Anywhere we hand off the AI should call this.
+    pub(crate) fn ai_this(&self) -> String {
         if self.lambda_depth.get() > 0 {
-            "ai"
+            "ai".to_string()
+        } else if self.current_class.get().is_some() {
+            format!("{}.this", self.opts.class_name())
         } else {
-            "this"
+            "this".to_string()
         }
     }
 
@@ -233,6 +265,20 @@ impl<'a> Emitter<'a> {
                 self.emit_class(c);
             }
         }
+        // AI-level class members: the `ClassLeekValue` handle field and the
+        // `new_<class>(args)` construction helper, one per user class.
+        for def in &hir.defs {
+            if let Def::Class(c) = def {
+                self.emit_class_ai_member(c);
+            }
+        }
+        // AI-level static members: static-method bodies + the
+        // `createStaticClass_<C>` / `initClass_<C>` hooks run by `staticInit`.
+        for def in &hir.defs {
+            if let Def::Class(c) = def {
+                self.emit_class_static_members(c);
+            }
+        }
         // `__shadows` field — holds user-assigned values for any
         // builtin name the source reassigns. See
         // `collect_shadowed_builtins`. Empty when the program
@@ -268,16 +314,40 @@ impl<'a> Emitter<'a> {
         }
         self.writer
             .add_line(&format!("super({stmt_count}, {version});"));
+        // Register each user class's methods on its `ClassLeekValue` so dynamic
+        // dispatch (`callObjectAccess`) and construction (`execute`) work.
+        for def in &hir.defs {
+            if let Def::Class(c) = def {
+                self.emit_class_registration(c);
+            }
+        }
         if self.opts.is_clean() {
             self.writer.pop_indent();
         }
         self.writer.add_line("}");
 
-        // staticInit hook (kept for parity with the reference; empty
-        // unless the program declares classes with static fields, in
-        // which case `emit_class` registers initialization there).
+        // staticInit hook: declare then initialize each class's static fields
+        // (the `createStaticClass_<C>` / `initClass_<C>` hooks). Two passes so a
+        // static initializer can reference another class's statics.
         self.writer
             .add_line("public void staticInit() throws LeekRunException {");
+        if self.opts.is_clean() {
+            self.writer.push_indent();
+        }
+        for def in &hir.defs {
+            if let Def::Class(c) = def {
+                self.writer
+                    .add_line(&format!("createStaticClass_{}();", c.name));
+            }
+        }
+        for def in &hir.defs {
+            if let Def::Class(c) = def {
+                self.writer.add_line(&format!("initClass_{}();", c.name));
+            }
+        }
+        if self.opts.is_clean() {
+            self.writer.pop_indent();
+        }
         self.writer.add_line("}");
 
         // User functions. A bodiless function is an external signature
@@ -367,6 +437,11 @@ impl<'a> Emitter<'a> {
         let outlined: Vec<String> = std::mem::take(&mut *self.outlined.borrow_mut());
         for helper in outlined {
             self.writer.add_line(&helper);
+        }
+        // Hoisted first-class function/builtin singletons (`ufunction_<name>`).
+        let singletons = std::mem::take(&mut *self.fn_singletons.borrow_mut());
+        for decl in singletons.into_values() {
+            self.writer.add_line(&decl);
         }
 
         if self.opts.is_clean() {
@@ -598,6 +673,18 @@ pub(crate) fn is_primitive_number_expr(e: &Expr) -> bool {
     }
 }
 
+/// Coerce an emitted value `inner` to a class field's Java type for a write
+/// (`v = longint(inner)` for an `integer` field, etc.), mirroring upstream's
+/// `compileConvert`. `Object` / unknown fields store the value as-is.
+pub(crate) fn coerce_field_write(java_ty: Option<&str>, inner: &str) -> String {
+    match java_ty {
+        Some("long") => format!("longint({inner})"),
+        Some("double") => format!("real({inner})"),
+        Some("boolean") => format!("bool({inner})"),
+        _ => inner.to_string(),
+    }
+}
+
 pub(crate) fn java_type_for(ty: Option<&Type>) -> &'static str {
     match ty {
         Some(Type::Integer) => "long",
@@ -612,6 +699,22 @@ pub(crate) fn java_type_for(ty: Option<&Type>) -> &'static str {
 /// call site lets javac pick the right overload on the value class
 /// instead of failing with "Object cannot be converted to
 /// FunctionLeekValue".
+/// A receiver builtin whose first non-receiver argument is a concrete
+/// collection value class (`setUnion(set, OTHER_SET)`, `mapMerge(map, OTHER_MAP)`),
+/// so the `Object`-typed argument needs a cast to that class.
+pub(crate) fn receiver_collection_arg_cast(name: &str) -> Option<&'static str> {
+    match name {
+        "setDifference" | "setDisjunction" | "setIntersection" | "setIsSubsetOf" | "setUnion" => {
+            Some("SetLeekValue")
+        }
+        "mapMerge" | "mapPutAll" | "mapReplaceAll" => Some("MapLeekValue"),
+        // `intervalContains(value)` resolves to the abstract base's
+        // `(AI, Number)` overload — the `Object` arg must be cast to `Number`.
+        "intervalContains" => Some("Number"),
+        _ => None,
+    }
+}
+
 pub(crate) fn takes_function_arg(name: &str) -> bool {
     matches!(
         name,
@@ -1057,8 +1160,43 @@ pub(crate) fn stmt_definitely_returns(s: &Stmt) -> bool {
         // A `do { ... } while (cond)` body runs at least once, so a
         // body that always returns means the whole loop always
         // returns. Without this arm `javac` rejects the trailing
-        // `return null;` after the loop as unreachable.
-        Stmt::DoWhile(d) => stmt_definitely_returns(&d.body),
+        // `return null;` after the loop as unreachable. An infinite
+        // `do … while (true)` likewise never falls through.
+        Stmt::DoWhile(d) => stmt_definitely_returns(&d.body) || is_infinite_loop(&d.cond, &d.body),
+        // `while (true) { … }` with no `break` escaping the loop never
+        // completes normally — code after it is unreachable, so suppress
+        // the trailing `return null;`.
+        Stmt::While(w) => is_infinite_loop(&w.cond, &w.body),
+        // A `switch` always returns when it has a `default` arm and every arm
+        // (default included) definitely returns and none `break`s out.
+        Stmt::Switch(s) => {
+            s.arms.iter().any(|a| a.case.is_none())
+                && s.arms.iter().all(|a| {
+                    ends_with_return(&a.body) && !a.body.iter().any(stmt_has_own_break)
+                })
+        }
+        _ => false,
+    }
+}
+
+/// True for a `while`/`do-while` whose condition is the literal `true` and whose
+/// body has no `break` targeting it — an infinite loop that never falls through.
+fn is_infinite_loop(cond: &Expr, body: &Stmt) -> bool {
+    matches!(&cond.kind, ExprKind::Literal(Literal::Bool(true))) && !stmt_has_own_break(body)
+}
+
+/// Whether `s` contains a `break` that would exit the *current* loop — i.e. one
+/// not nested inside another loop or switch (which would capture it). Used to
+/// tell whether a `while(true)` is truly infinite.
+fn stmt_has_own_break(s: &Stmt) -> bool {
+    match s {
+        Stmt::Break(_) => true,
+        Stmt::Block(b) => b.stmts.iter().any(stmt_has_own_break),
+        Stmt::If(i) => {
+            stmt_has_own_break(&i.then_branch)
+                || i.else_branch.as_deref().is_some_and(stmt_has_own_break)
+        }
+        // A nested loop / switch captures its own `break`; don't descend.
         _ => false,
     }
 }

@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use super::traits::EmitExpr;
 use super::{
     Emitter, builtin_fn_wrapper, escape_string, expr_op_cost, is_div_expr, is_primitive_number,
-    is_primitive_number_expr, is_string_expr, java_class_name, sanitize_ident, user_fn_wrapper,
+    is_primitive_number_expr, is_string_expr, java_class_name, user_fn_wrapper,
 };
 use crate::mangle;
 
@@ -23,6 +23,98 @@ fn is_numeric_math_builtin(name: &str) -> bool {
             | "tanh" | "exp" | "log" | "log10" | "log2" | "floor" | "ceil" | "round" | "pow"
             | "atan2" | "hypot"
     )
+}
+
+/// The reflective `field_<op>_eq` helper for a compound assignment to an
+/// external object field (`a.f += r`). `None` for a plain `=`.
+fn field_compound_helper(op: BinaryOp) -> Option<&'static str> {
+    Some(match op {
+        BinaryOp::AddAssign => "field_add_eq",
+        BinaryOp::SubAssign => "field_sub_eq",
+        BinaryOp::MulAssign => "field_mul_eq",
+        BinaryOp::DivAssign => "field_div_eq",
+        BinaryOp::IntDivAssign => "field_intdiv_eq",
+        BinaryOp::ModAssign => "field_mod_eq",
+        BinaryOp::PowAssign => "field_pow_eq",
+        BinaryOp::BitAndAssign => "field_band_eq",
+        BinaryOp::BitOrAssign => "field_bor_eq",
+        BinaryOp::BitXorAssign => "field_bxor_eq",
+        BinaryOp::ShiftLAssign => "field_shl_eq",
+        BinaryOp::ShiftRAssign => "field_shr_eq",
+        BinaryOp::UShiftRAssign => "field_ushr_eq",
+        BinaryOp::NullCoalesceAssign => "field_coalesce_eq",
+        _ => return None,
+    })
+}
+
+/// Whether an interval bound makes the interval a `Real` one: a real literal
+/// (`1.0`, `∞`) or the `Infinity`/`INFINITY` keyword (possibly negated). A
+/// variable or arithmetic bound does NOT — upstream keys class selection on the
+/// literal token, treating `[a..5]` as an integer interval regardless of `a`'s
+/// inferred type.
+/// Whether `e` can be an operand of a raw Java `<`/`>`/`<=`/`>=` — an int/real
+/// (NOT bool: Java rejects `long > boolean`). Recurses through unary `-`/`+`.
+fn is_java_comparable_number(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Literal(Literal::Int(_) | Literal::Real(_)) => true,
+        ExprKind::Unary(UnaryOp::Neg | UnaryOp::Pos, inner) => is_java_comparable_number(inner),
+        _ => matches!(e.ty, Type::Integer | Type::Real),
+    }
+}
+
+/// Render a builtin constant's runtime [`Value`] as a Java literal.
+fn constant_literal(v: &leek_runtime::Value) -> String {
+    use leek_runtime::Value;
+    match v {
+        Value::Int(n) => format!("{n}l"),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+        Value::Real(f) if f.is_nan() => "Double.NaN".to_string(),
+        Value::Real(f) if f.is_infinite() => {
+            if *f < 0.0 {
+                "Double.NEGATIVE_INFINITY".to_string()
+            } else {
+                "Double.POSITIVE_INFINITY".to_string()
+            }
+        }
+        // A finite real constant — ensure a decimal point so it's a Java double.
+        Value::Real(f) => {
+            let s = format!("{f}");
+            if s.contains('.') || s.contains('e') || s.contains('E') {
+                s
+            } else {
+                format!("{s}.0")
+            }
+        }
+        Value::String(s) => format!("{:?}", s.as_str()),
+        // Composite constants don't occur in the builtin constant table.
+        _ => "null".to_string(),
+    }
+}
+
+/// Whether an interval literal is a `Real` interval (vs `Integer`): true when
+/// any *present* bound forces real, or when both bounds are absent (`[..]` /
+/// `]..[`). Used both to pick the construction class and to cast an interval
+/// literal to its concrete runtime class for a receiver-method call (the
+/// interval methods live on the concrete subclasses, not the abstract base).
+fn interval_is_real(iv: &IntervalExpr) -> bool {
+    let present = [iv.start.as_deref(), iv.end.as_deref()];
+    let has_present = present.iter().any(Option::is_some);
+    let any_real = present.into_iter().flatten().any(bound_forces_real);
+    any_real || !has_present
+}
+
+fn bound_forces_real(e: &Expr) -> bool {
+    match &e.kind {
+        // A *finite* real literal forces a real interval. The `∞` / `-∞` symbol
+        // lowers to an infinite real literal but does NOT — upstream emits
+        // `]-∞..5]` as an `IntegerInterval` (the infinite bound is just the
+        // sentinel). Only the `Infinity` *keyword* (a builtin name) forces real.
+        ExprKind::Literal(Literal::Real(r)) => r.is_finite(),
+        ExprKind::Name(NameRef::Builtin(n)) => n == "Infinity" || n == "INFINITY",
+        ExprKind::Unary(_, inner) => bound_forces_real(inner),
+        _ => false,
+    }
 }
 
 impl Emitter<'_> {
@@ -72,16 +164,21 @@ impl EmitExpr for Emitter<'_> {
             ExprKind::Postfix(op, x) => self.write_postfix(buf, *op, x),
             ExprKind::Call(c) => self.write_call(buf, c),
             ExprKind::Field(b, name) => {
-                // Reference shape: `getField(base, "name", null)` —
-                // an AI instance method. Direct `base.getField(...)`
-                // would only work when `base` is statically a
-                // `LeekValue` subtype; we'd hit `cannot find symbol`
-                // on bare `Object` references otherwise.
-                buf.push_str("getField(");
-                self.write_expr(buf, b, false);
-                buf.push_str(", \"");
-                buf.push_str(name);
-                buf.push_str("\", null)");
+                // `this.field` inside a class method reads the real Java field
+                // directly (the class is a `NativeObjectLeekValue` subclass with
+                // public fields). Any other base is `Object`-typed, so go
+                // through the reflective `getField(base, "name", null)`.
+                if self.is_own_instance_field(b, name) {
+                    buf.push_str(&self.own_instance_field_ref(name));
+                } else {
+                    buf.push_str("getField(");
+                    self.write_expr(buf, b, false);
+                    buf.push_str(", \"");
+                    buf.push_str(name);
+                    buf.push_str("\", ");
+                    buf.push_str(&self.from_class());
+                    buf.push(')');
+                }
             }
             ExprKind::Index(b, i) => {
                 // Reference shape: `get(base, index, null)` — a 3-arg
@@ -126,7 +223,11 @@ impl Emitter<'_> {
                 }
                 let name = self.def_name(*id).to_string();
                 let mangled = mangle::local(self.opts, &name);
-                if self.boxed_locals.borrow().contains(id) {
+                if self.ref_boxes.borrow().contains(id) {
+                    // `@`-ref param bound to a `Box` — read its current value.
+                    buf.push_str(&mangled);
+                    buf.push_str(".get()");
+                } else if self.boxed_locals.borrow().contains(id) {
                     // Captured-and-written by a nested lambda → shared via a
                     // one-element `Object[]`; every read/write goes through `[0]`.
                     buf.push_str(&mangled);
@@ -149,7 +250,10 @@ impl Emitter<'_> {
                 let name = self.def_name(*id).to_string();
                 let mangled = mangle::function(self.opts, &name);
                 let arity = self.user_fn_arity(*id);
-                buf.push_str(&user_fn_wrapper(&mangled, arity));
+                // A hoisted singleton so repeated refs are the same instance
+                // (`test == test` → true).
+                let field = format!("ufunction_{mangled}");
+                buf.push_str(&self.fn_singleton(field, || user_fn_wrapper(&mangled, arity)));
             }
             NameRef::Class(id) => {
                 let name = self.def_name(*id).to_string();
@@ -199,25 +303,59 @@ impl Emitter<'_> {
                         buf.push_str("Class");
                     }
                     other => {
-                        // First-class reference to a builtin function
-                        // (`var f = cos` / `arrayMap([1,2,3], cos)`).
-                        // Mirrors upstream's `writeAnonymousSystemFunctions`,
-                        // which synthesizes a per-AI `FunctionLeekValue` for
-                        // every builtin that escapes its call shape — except
-                        // we emit it inline at the use site so we don't
-                        // need to thread "used builtins" state through the
-                        // emitter.
-                        if let Some(snippet) = builtin_fn_wrapper(other, self.opts.version) {
-                            buf.push_str(&snippet);
+                        // A builtin *constant* (`SORT_DESC`, `TYPE_ARRAY`, …)
+                        // folds to its literal value (upstream does the same —
+                        // there's no Java symbol for it). `lookup_constant` is
+                        // constants-only, so a builtin *function* name still
+                        // falls through to the `FunctionLeekValue` wrapper below.
+                        if let Some(lit) = leek_runtime::lookup_constant(other)
+                            .map(|v| constant_literal(&v))
+                        {
+                            buf.push_str(&lit);
+                        } else if builtin_fn_wrapper(other, self.opts.version).is_some() {
+                            // First-class reference to a builtin function
+                            // (`var f = cos` / `arrayMap([1,2,3], cos)`).
+                            // Mirrors upstream's `writeAnonymousSystemFunctions`,
+                            // which synthesizes a per-AI `FunctionLeekValue` for
+                            // every builtin that escapes its call shape. Hoisted
+                            // to a singleton so `endsWith == endsWith` → true.
+                            let field = format!("anonymous_{}", super::sanitize_ident(other));
+                            let v = self.opts.version;
+                            buf.push_str(&self.fn_singleton(field, || {
+                                builtin_fn_wrapper(other, v).unwrap()
+                            }));
                         } else {
                             buf.push_str(other);
                         }
                     }
                 }
             }
-            NameRef::This => buf.push_str("this"),
+            NameRef::This => {
+                // Inside a class, `this` is the instance — emit the qualified
+                // `<u_Class>.this` so it stays the enclosing instance even
+                // inside an INLINE lambda (where bare `this` is the
+                // `FunctionLeekValue`). In an OUTLINED lambda (an AI-level
+                // method) `<u_Class>.this` is out of scope, so fall back to bare
+                // `this`; at top level it's the AI (`this`).
+                match self.current_class.get() {
+                    Some(c) if !self.in_outlined.get() => {
+                        buf.push_str(&mangle::class_name(self.opts, &c.name));
+                        buf.push_str(".this");
+                    }
+                    _ => buf.push_str("this"),
+                }
+            }
             NameRef::Super => buf.push_str("super"),
-            NameRef::Class_ => buf.push_str("this.getClass()"),
+            NameRef::Class_ => {
+                // `class` (the current class) is its `ClassLeekValue` handle
+                // inside a method (`class.name` → the class name); fall back to
+                // `this.getClass()` outside a class context.
+                if let Some(c) = self.current_class.get() {
+                    buf.push_str(&mangle::class_name(self.opts, &c.name));
+                } else {
+                    buf.push_str("this.getClass()");
+                }
+            }
             NameRef::Unresolved(name) => {
                 // Fall back to the mangled local form so the surrounding
                 // code still parses. The interpreter would surface the
@@ -293,14 +431,28 @@ impl Emitter<'_> {
                 buf.push(')');
             }
             BinaryOp::Eq => {
-                buf.push_str("equals_equals(");
+                // v1–v3 `==` is the *loose* equality `eq` (type-coercing:
+                // `true == 1`, `1 == "1"`); v4 promoted `==` to the stricter
+                // `equals_equals` and moved loose compare out. (`===` is the
+                // strict/identity form — handled by `IdentityEq`.)
+                let f = if matches!(self.opts.version, leek_syntax::Version::V4) {
+                    "equals_equals("
+                } else {
+                    "eq("
+                };
+                buf.push_str(f);
                 self.write_expr(buf, l, false);
                 buf.push_str(", ");
                 self.write_expr(buf, r, false);
                 buf.push(')');
             }
             BinaryOp::Ne => {
-                buf.push_str("notequals_equals(");
+                let f = if matches!(self.opts.version, leek_syntax::Version::V4) {
+                    "notequals_equals("
+                } else {
+                    "neq("
+                };
+                buf.push_str(f);
                 self.write_expr(buf, l, false);
                 buf.push_str(", ");
                 self.write_expr(buf, r, false);
@@ -387,25 +539,32 @@ impl Emitter<'_> {
                 buf.push(')');
             }
             BinaryOp::In => {
-                // `x in c`: AI has `contains(haystack, needle)` as an
-                // instance method.
-                buf.push_str("contains(");
+                // `x in c`: AI's `operatorIn(container, value)` dispatches over
+                // intervals / arrays / maps / sets (there is no `contains`
+                // instance method — that was a wrong guess).
+                buf.push_str("operatorIn(");
                 self.write_expr(buf, r, false);
                 buf.push_str(", ");
                 self.write_expr(buf, l, false);
                 buf.push(')');
             }
             BinaryOp::NotIn => {
-                buf.push_str("!contains(");
+                buf.push_str("!operatorIn(");
                 self.write_expr(buf, r, false);
                 buf.push_str(", ");
                 self.write_expr(buf, l, false);
                 buf.push(')');
             }
             BinaryOp::Is | BinaryOp::Instanceof => {
+                // AI's `instanceOf(value, classValue)` — the class operand is a
+                // `ClassLeekValue` (the builtin `arrayClass`/`mapClass`/… fields,
+                // or a user class's `u_<C>` handle), NOT a Java type, so the
+                // native `instanceof` operator can't be used.
+                buf.push_str("instanceOf(");
                 self.write_expr(buf, l, false);
-                buf.push_str(" instanceof ");
-                buf.push_str(&self.expr_to_string(r));
+                buf.push_str(", ");
+                self.write_expr(buf, r, false);
+                buf.push(')');
             }
             _ => unreachable!("assignment ops handled above"),
         }
@@ -538,7 +697,10 @@ impl Emitter<'_> {
         java_op: &str,
         runtime_fn: &str,
     ) {
-        if is_primitive_number_expr(l) && is_primitive_number_expr(r) {
+        // Raw Java `<`/`>` needs both operands to be actual numbers — a `bool`
+        // is "primitive" but `10l > false` is a javac error, so a bool operand
+        // (or anything non-numeric) routes through the runtime helper.
+        if is_java_comparable_number(l) && is_java_comparable_number(r) {
             self.write_expr(buf, l, true);
             buf.push(' ');
             buf.push_str(java_op);
@@ -579,6 +741,47 @@ impl Emitter<'_> {
     }
 
     pub(crate) fn write_assignment(&self, buf: &mut String, op: BinaryOp, l: &Expr, r: &Expr) {
+        // `@`-ref param (a runtime `Box`) — route writes through `Box` methods
+        // so they propagate to the caller's variable / array element.
+        if self.is_ref_box(l) {
+            let ExprKind::Name(NameRef::Local(id)) = &l.kind else {
+                unreachable!("is_ref_box implies Name(Local)")
+            };
+            let name = mangle::local(self.opts, &self.def_name(*id).to_string());
+            let method = match op {
+                BinaryOp::Assign => "set",
+                BinaryOp::AddAssign => "add_eq",
+                BinaryOp::SubAssign => "sub_eq",
+                BinaryOp::MulAssign => "mul_eq",
+                BinaryOp::DivAssign => "div_eq",
+                _ => "",
+            };
+            if !method.is_empty() {
+                buf.push_str(&name);
+                buf.push('.');
+                buf.push_str(method);
+                buf.push('(');
+                self.write_expr(buf, r, false);
+                buf.push(')');
+            } else {
+                // No dedicated `Box` mutator — `set` the recomputed value.
+                let base = op.compound_base().unwrap_or(BinaryOp::Assign);
+                buf.push_str(&name);
+                buf.push_str(".set(");
+                if matches!(op, BinaryOp::Assign) {
+                    self.write_expr(buf, r, false);
+                } else {
+                    let expanded = Expr {
+                        kind: ExprKind::Binary(base, Box::new(l.clone()), Box::new(r.clone())),
+                        ty: l.ty.clone(),
+                        span: l.span,
+                    };
+                    self.write_expr(buf, &expanded, false);
+                }
+                buf.push(')');
+            }
+            return;
+        }
         // Index l-value? Route through the reference's `put*` helpers
         // — those are the only way to assign back through an
         // `Object`-typed array/map binding in Java.
@@ -594,15 +797,70 @@ impl Emitter<'_> {
         // RHS's side effects still happen and subsequent reads of
         // the builtin name read the original builtin (value
         // mismatch, not a compile error).
-        // `this.field = value` — emit as a direct Java field write
-        // (`<base>.<field> = value`) rather than going through the
-        // read-side `getField(...)` helper, which isn't assignable.
+        // Field write. `this.field = v` inside a class method writes the real
+        // Java field directly (coerced to the field's Java type). Any other
+        // base is `Object`-typed, so go through reflective
+        // `setField(base, "field", v, null)` (assignable; the read-side
+        // `getField` isn't).
         if let ExprKind::Field(base, fname) = &l.kind {
-            self.write_expr(buf, base, true);
-            buf.push('.');
-            buf.push_str(&sanitize_ident(fname));
-            buf.push_str(" = ");
-            self.write_expr(buf, r, false);
+            if self.is_own_instance_field(base, fname) {
+                // Direct Java field, qualified as `<Class>.this.<field>` (see
+                // `own_instance_field_ref`): dodges a same-named param shadow
+                // (`constructor(name) { this.name = name }` in clean mode) AND
+                // works inside a lambda (where bare `this` is the lambda). A
+                // compound `this.x <op>= r` becomes `…this.x = coerce(…this.x
+                // <op> r)` — the synthesized binary's read qualifies the same way.
+                buf.push_str(&self.own_instance_field_ref(fname));
+                buf.push_str(" = ");
+                let v = match self.compound_base_op(op) {
+                    Some(bop) => {
+                        let expanded = Expr {
+                            kind: ExprKind::Binary(bop, Box::new(l.clone()), Box::new(r.clone())),
+                            ty: l.ty.clone(),
+                            span: l.span,
+                        };
+                        self.expr_to_string(&expanded)
+                    }
+                    None => self.expr_to_string(r),
+                };
+                buf.push_str(&self.coerce_decl(self.own_field_ty(fname).as_ref(), v));
+            } else if let Some(helper) = field_compound_helper(op) {
+                // External field compound assign: `a.f <op>= r` →
+                // `field_<op>_eq(a, "f", r, null)`, which mutates the field and
+                // returns the new value (a plain `setField` would store only the
+                // RHS and drop the `<op>`).
+                let helper = if self.is_v1_pow_assign(op) { "field_pow_eq" } else { helper };
+                buf.push_str(helper);
+                buf.push('(');
+                self.write_expr(buf, base, false);
+                buf.push_str(", \"");
+                buf.push_str(fname);
+                buf.push_str("\", ");
+                self.write_expr(buf, r, false);
+                buf.push_str(", ");
+                buf.push_str(&self.from_class());
+                buf.push(')');
+            } else {
+                buf.push_str("setField(");
+                self.write_expr(buf, base, false);
+                buf.push_str(", \"");
+                buf.push_str(fname);
+                buf.push_str("\", ");
+                // A typed static field coerces a numeric-literal write to its
+                // declared type (`static real reel; titi.reel = 10` stores
+                // `10.0`, so `.class` reads `Real`). Only a statically-numeric
+                // value is coerced (a bare var could be null).
+                match self.static_field_scalar_ty(base, fname) {
+                    Some(ty) if self.expr_is_numeric(r) => {
+                        let v = self.expr_to_string(r);
+                        buf.push_str(&self.coerce_decl(Some(&ty), v));
+                    }
+                    _ => self.write_expr(buf, r, false),
+                }
+                buf.push_str(", ");
+                buf.push_str(&self.from_class());
+                buf.push(')');
+            }
             return;
         }
         if let ExprKind::Name(NameRef::Builtin(name)) = &l.kind {
@@ -633,7 +891,7 @@ impl Emitter<'_> {
         // Compound forms decompose to `l = (l <op> r)` because the
         // type-narrowing on the result might be different from the
         // l-value's declared type. Plain `=` is a straight assign.
-        if let Some(base) = op.compound_base() {
+        if let Some(base) = self.compound_base_op(op) {
             // Synthesize a non-compound binary so write_binary handles
             // promotion / concat / runtime-fn routing for us.
             let expanded = Expr {
@@ -643,7 +901,11 @@ impl Emitter<'_> {
             };
             self.write_expr(buf, l, false);
             buf.push_str(" = ");
-            self.write_expr(buf, &expanded, false);
+            // A typed scalar target (`integer g_x; g_x %= 5`) holds a primitive
+            // `long`/`double`, so the `Object`-typed binary result must coerce
+            // back — same as the plain-`=` path.
+            let v = self.expr_to_string(&expanded);
+            buf.push_str(&self.coerce_decl(self.assign_target_scalar_ty(l), v));
         } else {
             // Treat `<local> = lambda` the same way as `var <local> =
             // lambda`: prime `initializing_def` so the lambda emit
@@ -658,7 +920,12 @@ impl Emitter<'_> {
             }
             self.write_expr(buf, l, false);
             buf.push_str(" = ");
-            self.write_expr(buf, r, false);
+            // v1 value semantics: a plain `b = a` deep-copies a composite
+            // load so `b` doesn't alias `a` (see `v1_clone`).
+            // A statically-typed scalar target coerces the RHS to its declared
+            // type (`integer b; b = a[1]` stores an int) — same `compileConvert`
+            // rule as the var-decl initializer.
+            buf.push_str(&self.coerce_decl(self.assign_target_scalar_ty(l), self.v1_clone(r)));
             self.initializing_def.set(prev);
         }
     }
@@ -681,7 +948,7 @@ impl Emitter<'_> {
             BinaryOp::SubAssign => "put_sub_eq",
             BinaryOp::MulAssign => "put_mul_eq",
             BinaryOp::DivAssign => "put_div_eq",
-            BinaryOp::IntDivAssign => "put_div_eq",
+            BinaryOp::IntDivAssign => "put_intdiv_eq",
             BinaryOp::ModAssign => "put_mod_eq",
             BinaryOp::PowAssign => "put_pow_eq",
             BinaryOp::BitAndAssign => "put_band_eq",
@@ -689,10 +956,12 @@ impl Emitter<'_> {
             BinaryOp::BitXorAssign => "put_bxor_eq",
             BinaryOp::ShiftLAssign => "put_shl_eq",
             BinaryOp::ShiftRAssign => "put_shr_eq",
-            BinaryOp::UShiftRAssign => "put_shr_eq",
-            BinaryOp::NullCoalesceAssign => "putv4",
+            BinaryOp::UShiftRAssign => "put_ushr_eq",
+            BinaryOp::NullCoalesceAssign => "put_coalesce_eq",
             _ => "putv4",
         };
+        // v1 `^=` is power-assign, not xor.
+        let helper = if self.is_v1_pow_assign(op) { "put_pow_eq" } else { helper };
         buf.push_str(helper);
         buf.push('(');
         self.write_expr(buf, base, false);
@@ -732,17 +1001,193 @@ impl Emitter<'_> {
         self.write_expr(buf, value, false);
     }
 
-    /// The declared element type of `base` when it's a local declared as a
-    /// (statically) typed array — `Array<real> a` → `Real`. Recovered from the
-    /// def table since the HIR `Expr.ty` is `Any` here.
+    /// The declared scalar type of an assignment l-value, when it's a local or
+    /// global declared `integer`/`real`/`boolean`. Used to coerce the RHS of a
+    /// plain `=` the same way the var-decl initializer is coerced.
+    fn assign_target_scalar_ty(&self, l: &Expr) -> Option<&Type> {
+        let ty = match &l.kind {
+            ExprKind::Name(NameRef::Local(id)) => match self.hir.defs.get(id.0 as usize) {
+                Some(Def::Local(d)) => d.ty.as_ref(),
+                _ => None,
+            },
+            ExprKind::Name(NameRef::Global(id)) => match self.hir.defs.get(id.0 as usize) {
+                Some(Def::Global(d)) => d.ty.as_ref(),
+                _ => None,
+            },
+            _ => None,
+        };
+        match ty {
+            Some(t @ (Type::Integer | Type::Real | Type::Boolean)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The declared element type stored *through* an index l-value on `base`,
+    /// when `base` is a local with a statically typed container — `Array<real>
+    /// a` → `Real` (write `a[i] = …`), `Map<k, real> m` → `Real` (write `m[k] =
+    /// …`). Recovered from the def table since the HIR `Expr.ty` is `Any` here.
     fn local_array_elem_ty(&self, base: &Expr) -> Option<Type> {
         if let ExprKind::Name(NameRef::Local(id)) = &base.kind
             && let Some(Def::Local(l)) = self.hir.defs.get(id.0 as usize)
-            && let Some(Type::Array(elem)) = &l.ty
         {
-            return Some((**elem).clone());
+            return match &l.ty {
+                Some(Type::Array(elem)) => Some((**elem).clone()),
+                Some(Type::Map(_, val)) => Some((**val).clone()),
+                _ => None,
+            };
         }
         None
+    }
+
+    /// True when `base.name` is `this.<field>` inside a class method and
+    /// `<field>` is one of that class's own instance fields — so it's emitted
+    /// as a direct Java field access instead of reflective `getField`/`setField`
+    /// (the class is a `NativeObjectLeekValue` subclass with real Java fields).
+    /// A reference to the current class's own instance field, qualified as
+    /// `<u_Class>.this.<field>`. The enclosing-instance form (not bare `this.`)
+    /// is correct both directly in a method and inside a lambda created in that
+    /// method (where bare `this` is the `FunctionLeekValue`, not the instance),
+    /// and it can't be shadowed by a same-named param (clean mode doesn't prefix
+    /// params). Falls back to bare `this.` if no class context (shouldn't happen
+    /// — `is_own_instance_field` already gates on `current_class`).
+    fn own_instance_field_ref(&self, field: &str) -> String {
+        match self.current_class.get() {
+            Some(c) => format!("{}.this.{}", mangle::class_name(self.opts, &c.name), field),
+            None => format!("this.{field}"),
+        }
+    }
+
+    pub(crate) fn is_own_instance_field(&self, base: &Expr, name: &str) -> bool {
+        matches!(&base.kind, ExprKind::Name(NameRef::This))
+            && self
+                .current_class
+                .get()
+                .is_some_and(|c| c.fields.iter().any(|f| !f.is_static && f.name == name))
+    }
+
+    /// Whether `p` is a `@`-by-ref parameter at v1 — the only version where a
+    /// write through it propagates to the caller (via a runtime `Box`). At v2+
+    /// `@` params are plain.
+    pub(crate) fn is_v1_ref_param(&self, p: &leek_hir::Param) -> bool {
+        p.is_by_ref && matches!(self.opts.version, leek_syntax::Version::V1)
+    }
+
+    /// Whether the l-value/operand is a `@`-ref-param bound to a runtime `Box`
+    /// (so reads use `.get()` and writes route through `Box` methods).
+    pub(crate) fn is_ref_box(&self, e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::Name(NameRef::Local(id)) if self.ref_boxes.borrow().contains(id))
+    }
+
+    /// The Java name of the `Box` variable backing a `@`-ref param.
+    pub(crate) fn ref_box_name(&self, e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Name(NameRef::Local(id)) => {
+                mangle::local(self.opts, &self.def_name(*id).to_string())
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Register (once) a hoisted `FunctionLeekValue` singleton field named
+    /// `field`, initialized to `make()`'s wrapper, and return the field name to
+    /// reference at the use site. Repeated references to the same function thus
+    /// reuse one instance, so `f == f` compares equal.
+    pub(crate) fn fn_singleton(&self, field: String, make: impl FnOnce() -> String) -> String {
+        if !self.fn_singletons.borrow().contains_key(&field) {
+            let decl = format!("private FunctionLeekValue {field} = {};", make());
+            self.fn_singletons.borrow_mut().insert(field.clone(), decl);
+        }
+        field
+    }
+
+    /// Register (once, dedup'd by `key`) a hoisted class member — any full
+    /// declaration (e.g. a runtime-dispatch helper method) emitted at class-body
+    /// end alongside the function singletons.
+    pub(crate) fn hoist_member(&self, key: &str, make: impl FnOnce() -> String) {
+        if !self.fn_singletons.borrow().contains_key(key) {
+            let decl = make();
+            self.fn_singletons.borrow_mut().insert(key.to_string(), decl);
+        }
+    }
+
+    /// The base binary op a compound assignment decomposes to, accounting for
+    /// the v1 quirk where `^=` is exponent-assign (power), not bitwise-xor —
+    /// even though the binary `^` is xor at every version.
+    fn compound_base_op(&self, op: BinaryOp) -> Option<BinaryOp> {
+        if matches!(op, BinaryOp::BitXorAssign)
+            && matches!(self.opts.version, leek_syntax::Version::V1)
+        {
+            return Some(BinaryOp::Pow);
+        }
+        op.compound_base()
+    }
+
+    /// True when `op` is `^=` and we're at v1 — where it means power-assign, so
+    /// the index/field put-helper must be the `pow` variant, not `bxor`.
+    fn is_v1_pow_assign(&self, op: BinaryOp) -> bool {
+        matches!(op, BinaryOp::BitXorAssign)
+            && matches!(self.opts.version, leek_syntax::Version::V1)
+    }
+
+    /// The calling-class argument for a visibility-checked member access
+    /// (`getField`/`setField`/`callObjectAccess`/`field_*_eq`). Inside a class
+    /// (a method body or the static initializer) this is that class's
+    /// `ClassLeekValue` handle, granting the access rights the class legitimately
+    /// has (private/protected to itself and its hierarchy); at top level it's
+    /// `null`. Passing the real context — as upstream does — stops a class's own
+    /// private member from being wrongly denied (which read back as `null`).
+    pub(crate) fn from_class(&self) -> String {
+        match self.current_class.get() {
+            Some(c) => mangle::class_name(self.opts, &c.name),
+            None => "null".to_string(),
+        }
+    }
+
+    /// The Java type of the current class's own instance field `name` (for
+    /// write coercion: `this.x = longint(v)` when `x` is an `integer` field).
+    pub(crate) fn own_field_java_ty(&self, name: &str) -> Option<&'static str> {
+        self.current_class.get().and_then(|c| {
+            c.fields
+                .iter()
+                .find(|f| !f.is_static && f.name == name)
+                .map(|f| super::java_type_for(f.ty.as_ref()))
+        })
+    }
+
+    /// The current class's own instance field `name`'s declared HIR type — for
+    /// write coercion that must also handle nullable scalars (`real? x;
+    /// this.x = 5` stores `5.0` via `realOrNull`, which `own_field_java_ty`
+    /// (→ `Object` for a nullable) can't express).
+    /// The declared scalar type of a static field `<Class>.<name>` (for a write
+    /// coercion). `None` unless `base` is a class reference and the field is a
+    /// static `integer`/`real`/`boolean`/nullable-scalar.
+    fn static_field_scalar_ty(&self, base: &Expr, name: &str) -> Option<Type> {
+        let ExprKind::Name(NameRef::Class(id)) = &base.kind else {
+            return None;
+        };
+        let Some(Def::Class(c)) = self.hir.defs.get(id.0 as usize) else {
+            return None;
+        };
+        let ty = c
+            .fields
+            .iter()
+            .find(|f| f.is_static && f.name == name)?
+            .ty
+            .clone()?;
+        matches!(
+            ty,
+            Type::Integer | Type::Real | Type::Boolean | Type::Nullable(_)
+        )
+        .then_some(ty)
+    }
+
+    pub(crate) fn own_field_ty(&self, name: &str) -> Option<Type> {
+        self.current_class.get().and_then(|c| {
+            c.fields
+                .iter()
+                .find(|f| !f.is_static && f.name == name)
+                .and_then(|f| f.ty.clone())
+        })
     }
 
     /// Whether `e` is statically, unambiguously a number — an int/real literal,
@@ -765,6 +1210,33 @@ impl Emitter<'_> {
     /// (`put_add_eq(base, idx, 1l, null)` / `put_sub_eq(...)`), which returns
     /// the new value. `a[i]` lowers to `get(...)`, not assignable in Java, so
     /// the plain `<x> = add(<x>, 1l)` form can't be used for an indexed target.
+    /// Emit `++`/`--` on an *external* field l-value (`A.a++`, `obj.f++`,
+    /// `a[0].f++`) via `field_add_eq`/`field_sub_eq` (returns the new value).
+    /// `obj.f` reads as `getField(...)`, not a Java l-value, so the plain
+    /// `<x> = add(<x>, 1l)` form can't be used. Own `this.f` is a real Java field
+    /// and stays on the direct path.
+    fn write_field_incdec(&self, buf: &mut String, helper: &str, base: &Expr, fname: &str) {
+        buf.push_str(helper);
+        buf.push('(');
+        self.write_expr(buf, base, false);
+        buf.push_str(", \"");
+        buf.push_str(fname);
+        buf.push_str("\", 1l, ");
+        buf.push_str(&self.from_class());
+        buf.push(')');
+    }
+
+    /// Whether `x` is an external (non-own-`this`) field l-value, needing the
+    /// `field_*_eq` inc/dec path rather than a direct Java field assignment.
+    fn is_external_field<'b>(&self, x: &'b Expr) -> Option<(&'b Expr, &'b str)> {
+        if let ExprKind::Field(base, fname) = &x.kind
+            && !self.is_own_instance_field(base, fname)
+        {
+            return Some((base, fname));
+        }
+        None
+    }
+
     fn write_index_incdec(&self, buf: &mut String, helper: &str, base: &Expr, idx: &Expr) {
         buf.push_str(helper);
         buf.push('(');
@@ -819,8 +1291,13 @@ impl Emitter<'_> {
                 // compound `a[i] += 1`. Reference shape for a plain l-value:
                 // `u_x = add(u_x, 1l)` (`add`/`sub` are bare AI instance
                 // methods).
-                if let ExprKind::Index(base, idx) = &x.kind {
+                if self.is_ref_box(x) {
+                    buf.push_str(&self.ref_box_name(x));
+                    buf.push_str(".increment()");
+                } else if let ExprKind::Index(base, idx) = &x.kind {
                     self.write_index_incdec(buf, "put_add_eq", base, idx);
+                } else if let Some((base, fname)) = self.is_external_field(x) {
+                    self.write_field_incdec(buf, "field_add_eq", base, fname);
                 } else {
                     self.write_expr(buf, x, false);
                     buf.push_str(" = add(");
@@ -829,8 +1306,13 @@ impl Emitter<'_> {
                 }
             }
             UnaryOp::PreDec => {
-                if let ExprKind::Index(base, idx) = &x.kind {
+                if self.is_ref_box(x) {
+                    buf.push_str(&self.ref_box_name(x));
+                    buf.push_str(".decrement()");
+                } else if let ExprKind::Index(base, idx) = &x.kind {
                     self.write_index_incdec(buf, "put_sub_eq", base, idx);
+                } else if let Some((base, fname)) = self.is_external_field(x) {
+                    self.write_field_incdec(buf, "field_sub_eq", base, fname);
                 } else {
                     self.write_expr(buf, x, false);
                     buf.push_str(" = sub(");
@@ -851,8 +1333,13 @@ impl Emitter<'_> {
                 // l-value goes through `put_add_eq` (returns the new value),
                 // so the old value is `sub(put_add_eq(...), 1)`.
                 buf.push_str("sub(");
-                if let ExprKind::Index(base, idx) = &x.kind {
+                if self.is_ref_box(x) {
+                    buf.push_str(&self.ref_box_name(x));
+                    buf.push_str(".increment()");
+                } else if let ExprKind::Index(base, idx) = &x.kind {
                     self.write_index_incdec(buf, "put_add_eq", base, idx);
+                } else if let Some((base, fname)) = self.is_external_field(x) {
+                    self.write_field_incdec(buf, "field_add_eq", base, fname);
                 } else {
                     self.write_expr(buf, x, false);
                     buf.push_str(" = add(");
@@ -863,8 +1350,13 @@ impl Emitter<'_> {
             }
             PostfixOp::PostDec => {
                 buf.push_str("add(");
-                if let ExprKind::Index(base, idx) = &x.kind {
+                if self.is_ref_box(x) {
+                    buf.push_str(&self.ref_box_name(x));
+                    buf.push_str(".decrement()");
+                } else if let ExprKind::Index(base, idx) = &x.kind {
                     self.write_index_incdec(buf, "put_sub_eq", base, idx);
+                } else if let Some((base, fname)) = self.is_external_field(x) {
+                    self.write_field_incdec(buf, "field_sub_eq", base, fname);
                 } else {
                     self.write_expr(buf, x, false);
                     buf.push_str(" = sub(");
@@ -898,14 +1390,14 @@ impl Emitter<'_> {
             buf.push_str("new ");
             buf.push_str(class);
             buf.push('(');
-            buf.push_str(self.ai_this());
+            buf.push_str(&self.ai_this());
             buf.push(')');
             return;
         }
         buf.push_str("new ");
         buf.push_str(class);
         buf.push('(');
-        buf.push_str(self.ai_this());
+        buf.push_str(&self.ai_this());
         buf.push_str(", new Object[] { ");
         for (i, it) in items.iter().enumerate() {
             if i > 0 {
@@ -920,20 +1412,25 @@ impl Emitter<'_> {
         // v1–v3: maps reuse `LegacyArrayLeekValue` (single backing
         // store for both array and map shapes). v4: dedicated
         // `MapLeekValue` with ordered keys.
-        let class = if matches!(self.opts.version, leek_syntax::Version::V4) {
-            "MapLeekValue"
-        } else {
+        let legacy = !matches!(self.opts.version, leek_syntax::Version::V4);
+        let class = if legacy {
             "LegacyArrayLeekValue"
+        } else {
+            "MapLeekValue"
         };
         if pairs.is_empty() {
             buf.push_str("new ");
             buf.push_str(class);
-            buf.push_str("(this)");
+            buf.push('(');
+            buf.push_str(&self.ai_this());
+            buf.push(')');
             return;
         }
         buf.push_str("new ");
         buf.push_str(class);
-        buf.push_str("(this, new Object[] { ");
+        buf.push('(');
+        buf.push_str(&self.ai_this());
+        buf.push_str(", new Object[] { ");
         for (i, (k, v)) in pairs.iter().enumerate() {
             if i > 0 {
                 buf.push_str(", ");
@@ -942,12 +1439,21 @@ impl Emitter<'_> {
             buf.push_str(", ");
             self.write_expr(buf, v, false);
         }
-        buf.push_str(" })");
+        buf.push_str(" }");
+        // v1–v3 `LegacyArrayLeekValue` is one unified collection; the trailing
+        // `isKeyValue` flag tells its `Object[]` constructor to read pairs
+        // (`true`) rather than push sequentially (`false`). Without it a map
+        // literal builds a 0,1,2,… auto-keyed array. `MapLeekValue` (v4) has no
+        // such flag — its constructor always reads pairs.
+        if legacy {
+            buf.push_str(", true");
+        }
+        buf.push(')');
     }
 
     pub(crate) fn write_set(&self, buf: &mut String, items: &[Expr]) {
         buf.push_str("new SetLeekValue(");
-        buf.push_str(self.ai_this());
+        buf.push_str(&self.ai_this());
         buf.push_str(", new Object[] { ");
         for (i, it) in items.iter().enumerate() {
             if i > 0 {
@@ -963,7 +1469,7 @@ impl Emitter<'_> {
         // Keys are statically known so they go through `String[]`, not
         // a flat alternating `Object[]`.
         buf.push_str("new ObjectLeekValue(");
-        buf.push_str(self.ai_this());
+        buf.push_str(&self.ai_this());
         buf.push_str(", new String[] { ");
         for (i, (k, _)) in fields.iter().enumerate() {
             if i > 0 {
@@ -1011,39 +1517,90 @@ impl Emitter<'_> {
         }
     }
 
+    /// Refine a receiver-builtin's cast class to the concrete runtime type when
+    /// the table names an abstract base we can't call methods on. Today: an
+    /// interval literal receiver (`intervalMax([1..2])`) is cast to
+    /// `Integer`/`RealIntervalLeekValue` (where the methods live) instead of the
+    /// abstract `IntervalLeekValue`. A non-literal interval still falls back to
+    /// the abstract class (would need a runtime-dispatch wrapper like upstream).
+    pub(crate) fn concrete_receiver_class(
+        &self,
+        class: &'static str,
+        method: &str,
+        receiver: &Expr,
+    ) -> &'static str {
+        // `intervalContains` lives on the abstract base (it has a `Number`
+        // overload that dispatches) — keep the abstract cast; the concrete
+        // subclasses only expose `(long)`/`(double)`, which an `Object` arg
+        // can't match. All other interval methods are concrete-only.
+        if class == "IntervalLeekValue"
+            && method != "intervalContains"
+            && let ExprKind::Interval(iv) = &receiver.kind
+        {
+            return if interval_is_real(iv) {
+                "RealIntervalLeekValue"
+            } else {
+                "IntegerIntervalLeekValue"
+            };
+        }
+        class
+    }
+
     pub(crate) fn write_interval(&self, buf: &mut String, iv: &IntervalExpr) {
         // Reference shape:
         //   `new IntegerIntervalLeekValue(this, minClosed, from, maxClosed, to)`
         // `IntervalLeekValue` itself is abstract — pick Integer- or
         // Real- variant based on whether any endpoint is a real
         // literal. Step is part of runtime semantics, not the ctor.
-        let any_real = [iv.start.as_deref(), iv.end.as_deref(), iv.step.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(|e| matches!(&e.kind, ExprKind::Literal(Literal::Real(_))));
-        let cls = if any_real {
+        // A `Real` interval when any *present* endpoint is a real literal or the
+        // `Infinity` keyword, or when BOTH bounds are absent (`[..]` / `]..[`).
+        // Variable / expression bounds count as integer (upstream keys on the
+        // literal token, not the inferred type: `var a = 1.5; [a..5]` is still
+        // an `IntegerInterval`).
+        let real = interval_is_real(iv);
+        let cls = if real {
             "RealIntervalLeekValue"
         } else {
             "IntegerIntervalLeekValue"
         };
-        let default_endpoint = if any_real { "0.0" } else { "0l" };
+        // Sentinels for an *absent* bound. A closed bracket on the missing side
+        // (`[…` / `…]`) collapses to the zero sentinel (the empty `[..]`); an
+        // open bracket (`]…` / `…[`) means unbounded → ±∞ (`Long.MIN/MAX_VALUE`
+        // for integer intervals, `Double.(NEGATIVE|POSITIVE)_INFINITY` for real).
+        let (zero, neg_inf, pos_inf) = if real {
+            ("0.0", "Double.NEGATIVE_INFINITY", "Double.POSITIVE_INFINITY")
+        } else {
+            ("0l", "Long.MIN_VALUE", "Long.MAX_VALUE")
+        };
         buf.push_str("new ");
         buf.push_str(cls);
         buf.push('(');
-        buf.push_str(self.ai_this());
-        buf.push_str(", ");
-        buf.push_str(if iv.start_inclusive { "true" } else { "false" });
+        buf.push_str(&self.ai_this());
+        // Start. An absent bound always emits `inclusive = false`.
         buf.push_str(", ");
         match &iv.start {
-            Some(e) => self.write_expr(buf, e, false),
-            None => buf.push_str(default_endpoint),
+            Some(e) => {
+                buf.push_str(if iv.start_inclusive { "true" } else { "false" });
+                buf.push_str(", ");
+                self.write_expr(buf, e, false);
+            }
+            None => {
+                buf.push_str("false, ");
+                buf.push_str(if iv.start_inclusive { zero } else { neg_inf });
+            }
         }
-        buf.push_str(", ");
-        buf.push_str(if iv.end_inclusive { "true" } else { "false" });
+        // End.
         buf.push_str(", ");
         match &iv.end {
-            Some(e) => self.write_expr(buf, e, false),
-            None => buf.push_str(default_endpoint),
+            Some(e) => {
+                buf.push_str(if iv.end_inclusive { "true" } else { "false" });
+                buf.push_str(", ");
+                self.write_expr(buf, e, false);
+            }
+            None => {
+                buf.push_str("false, ");
+                buf.push_str(if iv.end_inclusive { zero } else { pos_inf });
+            }
         }
         buf.push(')');
     }
@@ -1089,14 +1646,21 @@ impl Emitter<'_> {
         if self.write_builtin_class_construct(buf, &n.class, &n.args) {
             return;
         }
-        buf.push_str("new ");
+        // A user class: construct via the AI's `new_<class>(args)` helper, which
+        // runs the field-default constructor then the user `init(...)`. (`new
+        // u_X(...)` directly would skip `init` / RAM accounting.) Each arg is
+        // cast to `(Object)` so a lone `null` doesn't bind as a null
+        // `Object... args` array (Java varargs ambiguity).
+        buf.push_str("new_");
         buf.push_str(&mangle::class_name(self.opts, &n.class));
         buf.push('(');
         for (i, a) in n.args.iter().enumerate() {
             if i > 0 {
                 buf.push_str(", ");
             }
+            buf.push_str("(Object) (");
             self.write_expr(buf, a, false);
+            buf.push(')');
         }
         buf.push(')');
     }

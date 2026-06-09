@@ -204,7 +204,7 @@ fn which(prog: &str) -> Option<PathBuf> {
     None
 }
 
-fn detect_upstream_classpath() -> Option<PathBuf> {
+pub(crate) fn detect_upstream_classpath() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     for ancestor in cwd.ancestors() {
         let p = ancestor.join("official-generator/leek-wars-generator/leekscript/build/classes");
@@ -215,8 +215,31 @@ fn detect_upstream_classpath() -> Option<PathBuf> {
     None
 }
 
-fn build_classpath(upstream: &Path) -> String {
-    let mut parts: Vec<String> = vec![upstream.display().to_string()];
+pub(crate) fn build_classpath(upstream: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    // Prefer the fat reference jar — it is the exact build the corpus
+    // `equals(...)` expectations were generated from. It MUST come first: the
+    // `build/classes` root holds a stale partial tree (`build/classes/leekscript`,
+    // an older build) that shadows the fresh `build/classes/java/main` classes
+    // on the classpath, so without the jar first, e.g. `MapLeekValue`'s
+    // Object[] constructor resolves to an old array-style version and every map
+    // literal renders wrong. Jar-first makes the fresh classes win everywhere.
+    // `upstream` is `.../leekscript/build/classes`; the jar sits at
+    // `.../leekscript/leekscript.jar` (two levels up).
+    if let Some(jar) = upstream
+        .ancestors()
+        .map(|a| a.join("leekscript.jar"))
+        .find(|p| p.is_file())
+    {
+        parts.push(jar.display().to_string());
+    }
+    // Fresh compiled tree (matches the jar), then the legacy root as a fallback
+    // for anything only present there.
+    let fresh = upstream.join("java/main");
+    if fresh.is_dir() {
+        parts.push(fresh.display().to_string());
+    }
+    parts.push(upstream.display().to_string());
     if let Some(home) = std::env::var_os("HOME") {
         let cache = PathBuf::from(home).join(".gradle/caches/modules-2/files-2.1");
         if cache.is_dir() {

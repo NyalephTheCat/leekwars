@@ -1,4 +1,4 @@
-use leek_hir::{ExprKind, SwitchStmt};
+use leek_hir::{ExprKind, Literal, SwitchStmt};
 
 impl super::Emitter<'_> {
     pub(crate) fn emit_switch(&mut self, sw: &SwitchStmt) {
@@ -6,11 +6,15 @@ impl super::Emitter<'_> {
         // constant of a switchable type (int or string). Otherwise
         // lower to an if-else chain, which mirrors the reference's
         // exact-mode behavior.
+        // A native Java `switch` only works when every case is an INTEGER
+        // literal — the discriminant is narrowed to `int`, and Java case labels
+        // must be `int` constants. A string / real / bool case (or a non-literal)
+        // falls through to the `eq`-based if-else chain.
         if self.opts.native_switch
             && sw.arms.iter().all(|a| {
                 a.case
                     .as_ref()
-                    .is_none_or(|c| matches!(&c.kind, ExprKind::Literal(_)))
+                    .is_none_or(|c| matches!(&c.kind, ExprKind::Literal(Literal::Int(_))))
             })
         {
             let disc = self.expr_to_string(&sw.discriminant);
@@ -20,7 +24,11 @@ impl super::Emitter<'_> {
             for arm in &sw.arms {
                 match &arm.case {
                     Some(c) => {
-                        let lit = self.expr_to_string(c);
+                        // Bare `int` label (no `l` suffix): `case 1:` not `case 1l:`.
+                        let lit = match &c.kind {
+                            ExprKind::Literal(Literal::Int(n)) => n.to_string(),
+                            _ => self.expr_to_string(c),
+                        };
                         self.writer.add_line(&format!("case {lit}: {{"));
                     }
                     None => self.writer.add_line("default: {"),
@@ -41,8 +49,10 @@ impl super::Emitter<'_> {
         for (i, arm) in sw.arms.iter().enumerate() {
             if let Some(c) = &arm.case {
                 let case = self.expr_to_string(c);
+                // `eq` is the AI instance method (loose equality), matching
+                // upstream's switch lowering — there is no `LeekOperations.eq`.
                 self.writer.add_line(&format!(
-                    "if (__idx == -1 && LeekOperations.eq(this, __scrut, {case})) __idx = {i};"
+                    "if (__idx == -1 && eq(__scrut, {case})) __idx = {i};"
                 ));
             }
         }
@@ -54,7 +64,17 @@ impl super::Emitter<'_> {
         self.writer.add_line("switch (__idx) {");
         self.writer.push_indent();
         for (i, arm) in sw.arms.iter().enumerate() {
-            self.writer.add_line(&format!("case {i}:"));
+            // Emit the Leek `default` arm as a Java `default:` label (not a
+            // numbered `case`): when every arm returns, a `switch` *with a
+            // default* is seen by javac as never completing normally, so a
+            // function ending in such a switch needs no trailing return (and
+            // emitting one would be unreachable). A numbered-only switch can
+            // "fall through" in javac's eyes → "missing return".
+            if arm.case.is_none() {
+                self.writer.add_line("default:");
+            } else {
+                self.writer.add_line(&format!("case {i}:"));
+            }
             self.writer.push_indent();
             self.emit_stmts(&arm.body);
             self.writer.pop_indent();
