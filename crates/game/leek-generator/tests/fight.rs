@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use leek_game_runtime::{EffectKind, GameHost}; // `life`/… accessors on `Fight`
-use leek_generator::{run_ai, run_fight, shared, ActiveEffect, Entity, Fight, FightRef};
-use leek_hir::{lower_file_versioned, HirFile};
+use leek_generator::{ActiveEffect, Entity, Fight, FightRef, run_ai, run_fight, shared};
+use leek_hir::{HirFile, lower_file_versioned};
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
@@ -39,7 +39,10 @@ fn layer_queries_and_map() {
     let f = arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
     assert_eq!(run(&f, "return getEntity()"), "1");
     assert_eq!(run(&f, "return getCellX(33)"), "3");
-    assert_eq!(run(&f, "return getCellDistance(getCell(), getCell(2))"), "6");
+    assert_eq!(
+        run(&f, "return getCellDistance(getCell(), getCell(2))"),
+        "6"
+    );
     assert_eq!(run(&f, "return isOnSameLine(0, 33)"), "true");
 }
 
@@ -49,9 +52,18 @@ fn layer_actions_move_and_say() {
         Entity::new(1, "Bot", 0, 0).with_points(5, 10),
         Entity::new(2, "Foe", 33, 1),
     );
-    assert_eq!(run(&f, "moveTowardCell(33, 3) return getCellDistance(getCell(), 33)"), "3");
+    assert_eq!(
+        run(
+            &f,
+            "moveTowardCell(33, 3) return getCellDistance(getCell(), 33)"
+        ),
+        "3"
+    );
     run(&f, "say(\"engaging\")");
-    assert_eq!(f.borrow().log().last().map(|(_, m)| m.clone()), Some("engaging".to_string()));
+    assert_eq!(
+        f.borrow().log().last().map(|(_, m)| m.clone()),
+        Some("engaging".to_string())
+    );
 }
 
 #[test]
@@ -63,16 +75,24 @@ fn weapon_damage_formula() {
     );
     assert_eq!(run(&f, "return useWeapon(2)"), "1"); // USE_SUCCESS
     let life = f.borrow().life(2).unwrap();
-    assert!((80..=85).contains(&life), "str-0 pistol left {life}, expected 80..=85");
+    assert!(
+        (80..=85).contains(&life),
+        "str-0 pistol left {life}, expected 80..=85"
+    );
 
     // strength 100 doubles the roll: 30–40 → foe ends at 60–70.
     let f = arena(
-        Entity::new(1, "Bot", 0, 0).with_weapon(WEAPON_PISTOL).with_strength(100),
+        Entity::new(1, "Bot", 0, 0)
+            .with_weapon(WEAPON_PISTOL)
+            .with_strength(100),
         Entity::new(2, "Foe", 33, 1),
     );
     run(&f, "useWeapon(2)");
     let life = f.borrow().life(2).unwrap();
-    assert!((60..=70).contains(&life), "str-100 pistol left {life}, expected 60..=70");
+    assert!(
+        (60..=70).contains(&life),
+        "str-100 pistol left {life}, expected 60..=70"
+    );
 }
 
 #[test]
@@ -84,21 +104,28 @@ fn shields_reduce_damage() {
     );
     run(&f, "useWeapon(2)");
     let life = f.borrow().life(2).unwrap();
-    assert!((90..=95).contains(&life), "shielded foe left {life}, expected 90..=95");
+    assert!(
+        (90..=95).contains(&life),
+        "shielded foe left {life}, expected 90..=95"
+    );
 }
 
 #[test]
 fn use_rules_range_and_tp() {
     // m_laser min range 5, but Foe is 6 away → in range; move it close first.
     let f = arena(
-        Entity::new(1, "Bot", 0, 0).with_weapon(WEAPON_M_LASER).with_points(5, 12),
+        Entity::new(1, "Bot", 0, 0)
+            .with_weapon(WEAPON_M_LASER)
+            .with_points(5, 12),
         Entity::new(2, "Foe", 11, 1), // (1,1) → distance 2 < min range 5
     );
     assert_eq!(run(&f, "return useWeapon(2)"), "-1"); // USE_INVALID_TARGET (out of range)
 
     // Not enough TP: pistol costs 3, give the bot 2.
     let f = arena(
-        Entity::new(1, "Bot", 0, 0).with_weapon(WEAPON_PISTOL).with_points(5, 2),
+        Entity::new(1, "Bot", 0, 0)
+            .with_weapon(WEAPON_PISTOL)
+            .with_points(5, 2),
         Entity::new(2, "Foe", 33, 1),
     );
     assert_eq!(run(&f, "return useWeapon(2)"), "-2"); // USE_NOT_ENOUGH_TP
@@ -121,23 +148,28 @@ fn stat_getters() {
 #[test]
 fn chip_damage_and_heal() {
     // spark (8–16, range 0–10) hits the foe at distance 6.
-    let f = arena(
-        Entity::new(1, "Bot", 0, 0),
-        Entity::new(2, "Foe", 33, 1),
-    );
+    let f = arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
     assert_eq!(run(&f, &format!("return useChip({CHIP_SPARK}, 2)")), "1"); // USE_SUCCESS
     let life = f.borrow().life(2).unwrap();
-    assert!((84..=92).contains(&life), "spark left {life}, expected 84..=92");
+    assert!(
+        (84..=92).contains(&life),
+        "spark left {life}, expected 84..=92"
+    );
 
     // cure heals self (wisdom 100 → ×2 on a 35–43 roll = 70–86).
     let f = arena(
-        Entity::new(1, "Bot", 0, 0).with_life(150).with_magic_stats(100, 0, 0, 0),
+        Entity::new(1, "Bot", 0, 0)
+            .with_life(150)
+            .with_magic_stats(100, 0, 0, 0),
         Entity::new(2, "Foe", 33, 1),
     );
     f.borrow_mut().deal_damage(1, 100); // wound Bot: 150 → 50
     run(&f, &format!("useChip({CHIP_CURE}, getEntity())"));
     let life = f.borrow().life(1).unwrap();
-    assert!((120..=136).contains(&life), "cure left {life}, expected 120..=136");
+    assert!(
+        (120..=136).contains(&life),
+        "cure left {life}, expected 120..=136"
+    );
 }
 
 #[test]
@@ -151,24 +183,31 @@ fn chip_shield_and_buff() {
     assert_eq!(run(&f, "return getAbsoluteShield()"), "50");
 
     // protein: +80–100 strength buff ×(1+science/100). science 0 → +80..100.
-    let f = arena(
-        Entity::new(1, "Bot", 0, 0),
-        Entity::new(2, "Foe", 33, 1),
-    );
+    let f = arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
     run(&f, &format!("useChip({CHIP_PROTEIN}, getEntity())"));
     let str_after = run(&f, "return getStrength()").parse::<i64>().unwrap();
-    assert!((80..=100).contains(&str_after), "protein gave strength {str_after}, expected 80..=100");
+    assert!(
+        (80..=100).contains(&str_after),
+        "protein gave strength {str_after}, expected 80..=100"
+    );
 }
 
 #[test]
 fn poison_over_time() {
     // A poison effect deals its value each turn for `turns` turns.
     let mut foe = Entity::new(2, "Foe", 33, 1).with_life(25);
-    foe.effects.push(ActiveEffect { kind: EffectKind::Poison, value: 10, turns: 3 });
+    foe.effects.push(ActiveEffect {
+        kind: EffectKind::Poison,
+        value: 10,
+        turns: 3,
+    });
     let f = arena(Entity::new(1, "Bot", 0, 0), foe);
     // Neither has an AI; the turn loop still ticks poison on the foe's turn.
     let outcome = run_fight(&f, &std::collections::HashMap::new(), 10, 4, false).expect("runs");
-    assert!(f.borrow().life(2).unwrap() <= 0, "poison should kill the foe");
+    assert!(
+        f.borrow().life(2).unwrap() <= 0,
+        "poison should kill the foe"
+    );
     assert_eq!(outcome.winner_team, Some(0));
 }
 
@@ -181,20 +220,29 @@ fn critical_hits() {
     let f = arena(bot, Entity::new(2, "Foe", 33, 1));
     assert_eq!(run(&f, "return useWeapon(2)"), "2"); // USE_CRITICAL
     let life = f.borrow().life(2).unwrap();
-    assert!((74..=81).contains(&life), "crit pistol left {life}, expected 74..=81");
+    assert!(
+        (74..=81).contains(&life),
+        "crit pistol left {life}, expected 74..=81"
+    );
 }
 
 #[test]
 fn life_steal_and_erosion() {
     // Wisdom 1000 → steal = full damage dealt; the bot (wounded to 50) heals.
     let f = arena(
-        Entity::new(1, "Bot", 0, 0).with_weapon(WEAPON_PISTOL).with_life(150).with_magic_stats(1000, 0, 0, 0),
+        Entity::new(1, "Bot", 0, 0)
+            .with_weapon(WEAPON_PISTOL)
+            .with_life(150)
+            .with_magic_stats(1000, 0, 0, 0),
         Entity::new(2, "Foe", 33, 1),
     );
     f.borrow_mut().deal_damage(1, 100); // Bot → 50
     run(&f, "useWeapon(2)");
     let bot = f.borrow().life(1).unwrap();
-    assert!((65..=70).contains(&bot), "life-steal left bot at {bot}, expected 65..=70");
+    assert!(
+        (65..=70).contains(&bot),
+        "life-steal left bot at {bot}, expected 65..=70"
+    );
     // Erosion: 15–20 damage × 0.05 rounds to 1 → foe max life 100 → 99.
     assert_eq!(run(&f, "return getTotalLife(2)"), "99");
 }
@@ -202,20 +250,29 @@ fn life_steal_and_erosion() {
 #[test]
 fn damage_return() {
     // Foe reflects 50% of incoming damage (pre-shield 15–20 → 8–10 back).
-    let bot = Entity::new(1, "Bot", 0, 0).with_weapon(WEAPON_PISTOL).with_life(150);
+    let bot = Entity::new(1, "Bot", 0, 0)
+        .with_weapon(WEAPON_PISTOL)
+        .with_life(150);
     let mut foe = Entity::new(2, "Foe", 33, 1);
     foe.damage_return = 50;
     let f = arena(bot, foe);
     run(&f, "useWeapon(2)");
     let bot = f.borrow().life(1).unwrap();
-    assert!((140..=143).contains(&bot), "return damage left bot at {bot}, expected 140..=143");
+    assert!(
+        (140..=143).contains(&bot),
+        "return damage left bot at {bot}, expected 140..=143"
+    );
 }
 
 #[test]
 fn buff_any_stat() {
     // A buff effect raises the effective stat; here agility +30.
     let mut bot = Entity::new(1, "Bot", 0, 0);
-    bot.effects.push(ActiveEffect { kind: EffectKind::Buff(leek_game_runtime::Stat::Agility), value: 30, turns: 5 });
+    bot.effects.push(ActiveEffect {
+        kind: EffectKind::Buff(leek_game_runtime::Stat::Agility),
+        value: 30,
+        turns: 5,
+    });
     let f = arena(bot, Entity::new(2, "Foe", 33, 1));
     assert_eq!(run(&f, "return getAgility()"), "30");
 }
@@ -233,7 +290,10 @@ fn poison_via_venom() {
     run(&f, &format!("useChip({CHIP_VENOM}, 2)")); // 15–20/turn for 3 turns
     f.borrow_mut().tick_effects(2); // one turn of poison
     let life = f.borrow().life(2).unwrap();
-    assert!((80..=85).contains(&life), "after 1 poison tick foe at {life}, expected 80..=85");
+    assert!(
+        (80..=85).contains(&life),
+        "after 1 poison tick foe at {life}, expected 80..=85"
+    );
 }
 
 #[test]
@@ -242,7 +302,10 @@ fn vulnerability_via_fracture() {
     run(&f, &format!("useChip({CHIP_FRACTURE}, 2)"));
     // Relative vulnerability is stored as a negative relative shield (20–25).
     let rel = f.borrow().relative_shield(2);
-    assert!((-25..=-20).contains(&rel), "fracture gave relative shield {rel}, expected -25..=-20");
+    assert!(
+        (-25..=-20).contains(&rel),
+        "fracture gave relative shield {rel}, expected -25..=-20"
+    );
 }
 
 #[test]
@@ -263,17 +326,28 @@ fn shackle_via_tranquilizer() {
     run(&f, &format!("useChip({CHIP_TRANQUILIZER}, 2)"));
     // Strength shackle is a negative strength buff (magic 0 → 20–25).
     let s = f.borrow().strength(2).unwrap();
-    assert!((-25..=-20).contains(&s), "tranquilizer gave strength {s}, expected -25..=-20");
+    assert!(
+        (-25..=-20).contains(&s),
+        "tranquilizer gave strength {s}, expected -25..=-20"
+    );
 }
 
 #[test]
 fn antidote_clears_poison() {
     let mut bot = Entity::new(1, "Bot", 0, 0);
-    bot.effects.push(ActiveEffect { kind: EffectKind::Poison, value: 10, turns: 5 });
+    bot.effects.push(ActiveEffect {
+        kind: EffectKind::Poison,
+        value: 10,
+        turns: 5,
+    });
     let f = arena(bot, Entity::new(2, "Foe", 33, 1));
     run(&f, &format!("useChip({CHIP_ANTIDOTE}, getEntity())")); // clears poison
     f.borrow_mut().tick_effects(1);
-    assert_eq!(f.borrow().life(1), Some(100), "antidote should have removed the poison");
+    assert_eq!(
+        f.borrow().life(1),
+        Some(100),
+        "antidote should have removed the poison"
+    );
 }
 
 #[test]
@@ -287,12 +361,19 @@ fn resurrect_a_dead_entity() {
     f.borrow_mut().deal_damage(2, 999); // kill the foe
     assert_eq!(f.borrow().life(2), Some(0));
     run(&f, &format!("useChip({CHIP_RESURRECTION}, 2)"));
-    assert_eq!(f.borrow().life(2), Some(100), "resurrection should revive the foe");
+    assert_eq!(
+        f.borrow().life(2),
+        Some(100),
+        "resurrection should revive the foe"
+    );
 }
 
 #[test]
 fn vitality_raises_max_and_heals() {
-    let f = arena(Entity::new(1, "Bot", 0, 0).with_life(100), Entity::new(2, "Foe", 33, 1));
+    let f = arena(
+        Entity::new(1, "Bot", 0, 0).with_life(100),
+        Entity::new(2, "Foe", 33, 1),
+    );
     f.borrow_mut().grant_vitality(1, 50);
     assert_eq!(f.borrow().max_life(1), Some(150));
     assert_eq!(f.borrow().life(1), Some(150));
@@ -325,8 +406,14 @@ fn area_of_effect_hits_neighbours() {
             .with_entity(Entity::new(3, "FoeB", 34, 1)),
     );
     run(&f, "useWeapon(2)");
-    assert!(f.borrow().life(2).unwrap() < 100, "primary target should be hit");
-    assert!(f.borrow().life(3).unwrap() < 100, "neighbour should be caught in the blast");
+    assert!(
+        f.borrow().life(2).unwrap() < 100,
+        "primary target should be hit"
+    );
+    assert!(
+        f.borrow().life(3).unwrap() < 100,
+        "neighbour should be caught in the blast"
+    );
 }
 
 #[test]
@@ -336,9 +423,15 @@ fn cooldowns_block_reuse() {
         Entity::new(1, "Bot", 0, 0).with_points(5, 20),
         Entity::new(2, "Foe", 33, 1),
     );
-    assert_eq!(run(&f, &format!("return useChip({CHIP_CURE}, getEntity())")), "1"); // USE_SUCCESS
+    assert_eq!(
+        run(&f, &format!("return useChip({CHIP_CURE}, getEntity())")),
+        "1"
+    ); // USE_SUCCESS
     assert_eq!(run(&f, &format!("return getCooldown({CHIP_CURE})")), "2");
-    assert_eq!(run(&f, &format!("return useChip({CHIP_CURE}, getEntity())")), "-4"); // USE_TOO_MANY_USES
+    assert_eq!(
+        run(&f, &format!("return useChip({CHIP_CURE}, getEntity())")),
+        "-4"
+    ); // USE_TOO_MANY_USES
     // After a turn (regen ticks cooldowns), it drops to 1.
     f.borrow_mut().regen(1);
     assert_eq!(run(&f, &format!("return getCooldown({CHIP_CURE})")), "1");
@@ -379,7 +472,10 @@ fn team_and_turn_queries() {
     let mut ais: HashMap<i64, HirFile> = HashMap::new();
     ais.insert(1, compile("say(\"\" + getTurn())"));
     run_fight(&f, &ais, 3, 4, false).expect("runs");
-    assert_eq!(f.borrow().log().first().map(|(_, m)| m.clone()), Some("1".to_string()));
+    assert_eq!(
+        f.borrow().log().first().map(|(_, m)| m.clone()),
+        Some("1".to_string())
+    );
 }
 
 #[test]
@@ -387,7 +483,10 @@ fn turn_loop_to_victory() {
     // Bot: strength 100 + pistol (12 TP → 4 hits of 30–40) kills the 100-life
     // foe; Foe has no AI.
     let f = arena(
-        Entity::new(1, "Bot", 0, 0).with_weapon(WEAPON_PISTOL).with_strength(100).with_points(5, 12),
+        Entity::new(1, "Bot", 0, 0)
+            .with_weapon(WEAPON_PISTOL)
+            .with_strength(100)
+            .with_points(5, 12),
         Entity::new(2, "Foe", 33, 1),
     );
     let mut ais: HashMap<i64, HirFile> = HashMap::new();

@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use leek_runtime::{builtin_op_cost, neg, IntervalValue, Value};
+use leek_runtime::{IntervalValue, Value, builtin_op_cost, neg};
 
 fn interval(start: f64, end: f64) -> Value {
     Value::Interval(Rc::new(IntervalValue {
@@ -40,7 +40,10 @@ fn wide_interval_count_does_not_overflow() {
     // raw `i64` subtraction `(hi - lo + 1)` and overflow. It must now produce
     // a large positive count (saturating) without panicking.
     let n = interval(-1.0e18, 1.0e18).to_long();
-    assert!(n > 0, "wide interval count should be a large positive, got {n}");
+    assert!(
+        n > 0,
+        "wide interval count should be a large positive, got {n}"
+    );
 }
 
 #[test]

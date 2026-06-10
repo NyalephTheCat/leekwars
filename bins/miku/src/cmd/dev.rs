@@ -71,9 +71,8 @@ fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let version = cmd.lang_version;
     let sink = TimingSink::new();
-    let pipeline =
-        leek_recipes::pipeline_timed(Target::Hir, &RecipeParams::permissive(), &sink)
-            .expect("recipe");
+    let pipeline = leek_recipes::pipeline_timed(Target::Hir, &RecipeParams::permissive(), &sink)
+        .expect("recipe");
     let _run = pipeline.run(Input {
         source: SourceId::new(1).unwrap(),
         text: text.into(),

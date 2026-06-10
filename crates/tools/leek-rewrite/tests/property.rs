@@ -17,6 +17,15 @@ impl Rng {
     fn below(&mut self, n: u64) -> u64 {
         if n == 0 { 0 } else { self.next() % n }
     }
+    /// [`Self::below`] as `u32` (every bound in these tests is tiny).
+    fn below32(&mut self, n: u64) -> u32 {
+        u32::try_from(self.below(n)).unwrap()
+    }
+}
+
+/// `SOURCE.len()` as `u32` (the source is a short fixed string).
+fn source_len() -> u32 {
+    u32::try_from(SOURCE.len()).unwrap()
 }
 
 const SOURCE: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP";
@@ -41,19 +50,21 @@ fn reference_apply(source: &str, mut edits: Vec<(u32, u32, String)>) -> String {
 /// Generate a random set of *non-overlapping* edits over SOURCE by walking
 /// left-to-right and leaving gaps, so they're valid by construction.
 fn gen_disjoint(rng: &mut Rng) -> Vec<(u32, u32, String)> {
-    let len = SOURCE.len() as u32;
+    let len = source_len();
     let mut edits = Vec::new();
     let mut pos = 0u32;
     while pos < len {
-        let gap = rng.below(4) as u32; // 0..3 untouched bytes (0 → adjacent)
+        let gap = rng.below32(4); // 0..3 untouched bytes (0 → adjacent)
         pos += gap;
         if pos >= len {
             break;
         }
-        let span = rng.below(4) as u32; // 0..3 → includes zero-length inserts
+        let span = rng.below32(4); // 0..3 → includes zero-length inserts
         let end = (pos + span).min(len);
         let repl_len = rng.below(4);
-        let repl: String = (0..repl_len).map(|_| (b'!' + (rng.below(10) as u8)) as char).collect();
+        let repl: String = (0..repl_len)
+            .map(|_| (b'!' + u8::try_from(rng.below(10)).unwrap()) as char)
+            .collect();
         edits.push((pos, end, repl));
         pos = end.max(pos + 1); // ensure progress even for zero-length spans
     }
@@ -73,7 +84,7 @@ fn disjoint_edits_are_order_independent_and_match_reference() {
             let mut shuffled = edits.clone();
             // Fisher–Yates with the same PRNG.
             for i in (1..shuffled.len()).rev() {
-                let j = rng.below((i + 1) as u64) as usize;
+                let j = usize::try_from(rng.below((i + 1) as u64)).unwrap();
                 shuffled.swap(i, j);
             }
             let mut set = EditSet::new(SOURCE.len());
@@ -89,15 +100,15 @@ fn disjoint_edits_are_order_independent_and_match_reference() {
 #[test]
 fn overlapping_edits_are_always_rejected_never_silently_wrong() {
     let mut rng = Rng(0x0123_4567_89AB_CDEF);
-    let len = SOURCE.len() as u32;
+    let len = source_len();
     for _ in 0..5000 {
         // Two random spans; push both. If they overlap (share an interior
         // byte), the second push MUST be rejected. If they only touch or are
         // disjoint, both succeed and the result matches the reference.
-        let a0 = rng.below(len as u64) as u32;
-        let a1 = (a0 + rng.below(5) as u32).min(len);
-        let b0 = rng.below(len as u64) as u32;
-        let b1 = (b0 + rng.below(5) as u32).min(len);
+        let a0 = rng.below32(u64::from(len));
+        let a1 = (a0 + rng.below32(5)).min(len);
+        let b0 = rng.below32(u64::from(len));
+        let b1 = (b0 + rng.below32(5)).min(len);
 
         let mut set = EditSet::new(SOURCE.len());
         set.push(a0, a1, "X".into()).unwrap();
@@ -115,7 +126,10 @@ fn overlapping_edits_are_always_rejected_never_silently_wrong() {
                 "overlapping edits ({a0}..{a1}) & ({b0}..{b1}) must be rejected, got {res:?}",
             );
         } else if strictly_disjoint {
-            assert!(res.is_ok(), "strictly disjoint edits must be accepted, got {res:?}");
+            assert!(
+                res.is_ok(),
+                "strictly disjoint edits must be accepted, got {res:?}"
+            );
         }
         // In every case (including ambiguous zero-length-at-boundary edits) the
         // core safety invariant holds: the push either cleanly succeeds or is a
@@ -124,9 +138,15 @@ fn overlapping_edits_are_always_rejected_never_silently_wrong() {
         if res.is_ok() {
             let expected = reference_apply(
                 SOURCE,
-                set.iter().map(|e| (e.start, e.end, e.replacement.clone())).collect(),
+                set.iter()
+                    .map(|e| (e.start, e.end, e.replacement.clone()))
+                    .collect(),
             );
-            assert_eq!(set.apply(SOURCE), expected, "applied result diverged from reference");
+            assert_eq!(
+                set.apply(SOURCE),
+                expected,
+                "applied result diverged from reference"
+            );
         } else {
             assert!(
                 matches!(res, Err(EditError::Overlap { .. })),

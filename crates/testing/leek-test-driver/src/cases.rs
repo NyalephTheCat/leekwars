@@ -66,16 +66,31 @@ pub struct CaseAudit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expectation {
-    Equals { value: String },
-    Error { code: String },
-    Warning { code: String },
+    Equals {
+        value: String,
+    },
+    Error {
+        code: String,
+    },
+    Warning {
+        code: String,
+    },
     NoWarning,
     AnyError,
-    Almost { value: String },
-    Ops { count: u64 },
+    Almost {
+        value: String,
+    },
+    Ops {
+        count: u64,
+    },
     /// `.equalsOps("value", N)` — result string and op count.
-    EqualsOps { value: String, count: u64 },
-    Unknown { detail: String },
+    EqualsOps {
+        value: String,
+        count: u64,
+    },
+    Unknown {
+        detail: String,
+    },
 }
 
 impl Expectation {

@@ -80,7 +80,9 @@ fn diagnostic(span: Span, kind: &str) -> Diagnostic {
         span,
         format!("this `else` is unnecessary — the `if` branch always `{kind}`s"),
     )
-    .with_note("drop the `else` and dedent its body; control only reaches it when the `if` was false")
+    .with_note(
+        "drop the `else` and dedent its body; control only reaches it when the `if` was false",
+    )
 }
 
 #[cfg(test)]
@@ -103,27 +105,35 @@ mod tests {
 
     #[test]
     fn flags_else_after_return() {
-        let d = run("function f(x) {\n  if (x < 0) {\n    return -1\n  } else {\n    return 1\n  }\n}\n");
+        let d = run(
+            "function f(x) {\n  if (x < 0) {\n    return -1\n  } else {\n    return 1\n  }\n}\n",
+        );
         assert_eq!(d.len(), 1, "got {d:?}");
         assert!(d[0].message.contains("return"), "{d:?}");
     }
 
     #[test]
     fn flags_else_after_break_in_loop() {
-        let d = run("function f(x) {\n  while (true) {\n    if (x) {\n      break\n    } else {\n      x = 1\n    }\n  }\n  return x\n}\n");
+        let d = run(
+            "function f(x) {\n  while (true) {\n    if (x) {\n      break\n    } else {\n      x = 1\n    }\n  }\n  return x\n}\n",
+        );
         assert_eq!(d.len(), 1, "got {d:?}");
         assert!(d[0].message.contains("break"), "{d:?}");
     }
 
     #[test]
     fn ignores_else_when_then_falls_through() {
-        let d = run("function f(x) {\n  if (x < 0) {\n    x = 1\n  } else {\n    x = 2\n  }\n  return x\n}\n");
+        let d = run(
+            "function f(x) {\n  if (x < 0) {\n    x = 1\n  } else {\n    x = 2\n  }\n  return x\n}\n",
+        );
         assert!(d.is_empty(), "got {d:?}");
     }
 
     #[test]
     fn ignores_else_if_chain() {
-        let d = run("function f(x) {\n  if (x < 0) {\n    return -1\n  } else if (x > 0) {\n    return 1\n  }\n  return 0\n}\n");
+        let d = run(
+            "function f(x) {\n  if (x < 0) {\n    return -1\n  } else if (x > 0) {\n    return 1\n  }\n  return 0\n}\n",
+        );
         assert!(d.is_empty(), "got {d:?}");
     }
 }

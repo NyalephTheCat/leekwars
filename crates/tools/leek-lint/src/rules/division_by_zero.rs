@@ -52,8 +52,7 @@ fn diagnostic(op: BinaryOp, span: leek_span::Span) -> Diagnostic {
         BinaryOp::Mod => ("take", "modulo by zero"),
         _ => ("divide", "division by zero"),
     };
-    Diagnostic::warning(codes::DIVISION_BY_ZERO, span, what.to_string())
-    .with_note(format!(
+    Diagnostic::warning(codes::DIVISION_BY_ZERO, span, what.to_string()).with_note(format!(
         "you can't {verb} by zero — this faults or yields a non-finite value at runtime"
     ))
 }

@@ -388,7 +388,7 @@ mod tests {
         // `a` appears exactly once.
         let count = paths
             .iter()
-            .filter(|p| **p == PathBuf::from("/a.leek"))
+            .filter(|p| p.as_path() == std::path::Path::new("/a.leek"))
             .count();
         assert_eq!(count, 1);
     }

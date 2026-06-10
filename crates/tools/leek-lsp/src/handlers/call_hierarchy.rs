@@ -85,7 +85,8 @@ pub fn incoming(
         HashMap::new();
 
     for file in crate::handlers::program_scope::program_scope(ws, &item.uri) {
-        let Some(run) = crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+        let Some(run) =
+            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
         else {
             continue;
         };
@@ -100,8 +101,13 @@ pub fn incoming(
         };
         let fns = hir_functions(&hir.0);
 
-        let occs =
-            crate::handlers::occurrences_in_file(ws, &file.uri, file.source_file, target, SymbolKind::Function);
+        let occs = crate::handlers::occurrences_in_file(
+            ws,
+            &file.uri,
+            file.source_file,
+            target,
+            SymbolKind::Function,
+        );
         for occ in occs.iter().filter(|o| !o.is_declaration) {
             // Which function's body contains this call site?
             let Some((caller_name, caller_span)) = fns
@@ -195,16 +201,25 @@ pub fn outgoing(
         };
         let Some(callee) = callee else { continue };
         let end = u32::from(tok.text_range().end());
-        buckets
-            .entry(callee)
-            .or_default()
-            .push(span_to_range(pm, Span::new(home.source_file.source(&ws.db), start, end)));
+        buckets.entry(callee).or_default().push(span_to_range(
+            pm,
+            Span::new(home.source_file.source(&ws.db), start, end),
+        ));
     }
 
     let mut out = Vec::new();
     for (callee, from_ranges) in buckets {
-        let Some(fi) = funcs.get(&callee) else { continue };
-        let to = item_for(ws, &fi.uri, fi.source_file, &callee, fi.def_span, fi.full_span);
+        let Some(fi) = funcs.get(&callee) else {
+            continue;
+        };
+        let to = item_for(
+            ws,
+            &fi.uri,
+            fi.source_file,
+            &callee,
+            fi.def_span,
+            fi.full_span,
+        );
         out.push(lsp::CallHierarchyOutgoingCall { to, from_ranges });
     }
     Some(out)
@@ -227,7 +242,8 @@ fn program_functions(
 ) -> HashMap<String, FuncInfo> {
     let mut out: HashMap<String, FuncInfo> = HashMap::new();
     for file in scope {
-        let Some(run) = crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+        let Some(run) =
+            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
         else {
             continue;
         };

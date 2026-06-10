@@ -94,9 +94,7 @@ impl Checker {
 
     pub(crate) fn check_var_decl(&mut self, v: &VarDeclStmt) {
         let init = v.syntax().children().find_map(Expr::cast);
-        let init_ty = init
-            .as_ref()
-            .map_or(Type::Any, |e| self.infer_expr(e));
+        let init_ty = init.as_ref().map_or(Type::Any, |e| self.infer_expr(e));
 
         // Track `x = []` / `x = [:]` (empty-literal initializers)
         // for the strict-v4 index-assign check below.

@@ -364,7 +364,13 @@ const TERNARY_BP_R: u8 = 6;
 /// Left/right binding power for a binary operator. `None` for
 /// tokens that don't open a binary expression.
 fn binary_bp(kind: S) -> Option<(u8, u8)> {
-    use S::{Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, BackslashEq, StarStarEq, AmpEq, PipeEq, CaretEq, ShiftLeftEq, ShiftRightEq, UShiftRightEq, QuestionQuestionEq, PipePipe, QuestionQuestion, KwOr, AmpAmp, KwXor, KwAnd, Pipe, Caret, Amp, EqEq, NotEq, EqEqEq, NotEqEq, KwIs, Lt, Le, Gt, Ge, KwIn, ShiftLeft, ShiftRight, UShiftRight, Plus, Minus, Star, Slash, Percent, Backslash, StarStar};
+    use S::{
+        Amp, AmpAmp, AmpEq, Backslash, BackslashEq, Caret, CaretEq, Eq, EqEq, EqEqEq, Ge, Gt,
+        KwAnd, KwIn, KwIs, KwOr, KwXor, Le, Lt, Minus, MinusEq, NotEq, NotEqEq, Percent, PercentEq,
+        Pipe, PipeEq, PipePipe, Plus, PlusEq, QuestionQuestion, QuestionQuestionEq, ShiftLeft,
+        ShiftLeftEq, ShiftRight, ShiftRightEq, Slash, SlashEq, Star, StarEq, StarStar, StarStarEq,
+        UShiftRight, UShiftRightEq,
+    };
     Some(match kind {
         // Level 0 (assignment): right-associative.
         Eq | PlusEq | MinusEq | StarEq | SlashEq | PercentEq | BackslashEq | StarStarEq | AmpEq

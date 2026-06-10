@@ -5,7 +5,9 @@ use leek_syntax::{SyntaxKind as S, SyntaxNode};
 
 use crate::doc::{Doc, concat, group, indent, line, softline, space, text};
 
-use super::{child_nodes, comma_sep, fmt_node, is_trivia, token_text, trailing_comma_doc, with_ctx};
+use super::{
+    child_nodes, comma_sep, fmt_node, is_trivia, token_text, trailing_comma_doc, with_ctx,
+};
 
 /// `LiteralExpr` / `NameRef` — leaf expressions, emit their tokens
 /// verbatim.
@@ -91,8 +93,7 @@ fn pad_edge(on: bool) -> Doc {
 /// The `:` separator in map / object entries, padded per
 /// `space_before_colon` / `space_after_colon`.
 fn colon_doc() -> Doc {
-    let (before, after) =
-        with_ctx(|cx| (cx.opts.space_before_colon, cx.opts.space_after_colon));
+    let (before, after) = with_ctx(|cx| (cx.opts.space_before_colon, cx.opts.space_after_colon));
     let mut s = String::new();
     if before {
         s.push(' ');
@@ -271,14 +272,16 @@ pub(super) fn format_new(node: &SyntaxNode) -> Doc {
     for el in node.children_with_tokens() {
         match el {
             NodeOrToken::Token(t) if is_trivia(&t) => {}
-            NodeOrToken::Token(t) => if t.kind() == S::KwNew {
-                parts.push(text("new"));
-                parts.push(space());
-                last_was_space = true;
-            } else {
-                parts.push(token_text(&t));
-                last_was_space = false;
-            },
+            NodeOrToken::Token(t) => {
+                if t.kind() == S::KwNew {
+                    parts.push(text("new"));
+                    parts.push(space());
+                    last_was_space = true;
+                } else {
+                    parts.push(token_text(&t));
+                    last_was_space = false;
+                }
+            }
             NodeOrToken::Node(child) => {
                 if !last_was_space && !parts.is_empty() {
                     // No space — `Type(args)` runs together.

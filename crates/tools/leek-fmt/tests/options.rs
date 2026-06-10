@@ -4,8 +4,8 @@ use leek_fmt::{FormatOptions, IndentStyle, TrailingComma, format_source};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
-fn fmt_with(opts: FormatOptions, src: &str) -> String {
-    format_source(src, SourceId::new(1).unwrap(), Version::V4, &opts)
+fn fmt_with(opts: &FormatOptions, src: &str) -> String {
+    format_source(src, SourceId::new(1).unwrap(), Version::V4, opts)
 }
 
 fn opts() -> FormatOptions {
@@ -16,7 +16,7 @@ fn opts() -> FormatOptions {
 fn tabs_indent_uses_tab_chars() {
     let mut o = opts();
     o.indent_style = IndentStyle::Tabs;
-    let out = fmt_with(o, "function f() { return 1; }\n");
+    let out = fmt_with(&o, "function f() { return 1; }\n");
     assert!(
         out.contains("\treturn 1"),
         "expected tab indent, got: {out:?}"
@@ -27,7 +27,7 @@ fn tabs_indent_uses_tab_chars() {
 fn space_indent_uses_indent_width() {
     let mut o = opts();
     o.indent = 2;
-    let out = fmt_with(o, "function f() { return 1; }\n");
+    let out = fmt_with(&o, "function f() { return 1; }\n");
     assert!(
         out.contains("\n  return 1"),
         "expected 2-space indent, got: {out:?}"
@@ -40,7 +40,7 @@ fn trailing_comma_always_emits_on_break() {
     o.trailing_comma = TrailingComma::Always;
     o.max_line_length = 30; // force the list to break
     let src = "var x = [argument_one, argument_two, argument_three];\n";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     assert!(
         out.contains("argument_three,\n]"),
         "expected trailing comma on broken list, got: {out:?}"
@@ -53,7 +53,7 @@ fn trailing_comma_never_strips_existing() {
     o.trailing_comma = TrailingComma::Never;
     o.max_line_length = 30;
     let src = "var x = [argument_one, argument_two, argument_three,];\n";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     assert!(
         !out.contains("argument_three,\n]"),
         "expected no trailing comma, got: {out:?}"
@@ -67,8 +67,8 @@ fn trailing_comma_preserve_keeps_user_choice() {
     o.max_line_length = 30;
     let with_comma = "var x = [argument_one, argument_two, argument_three,];\n";
     let no_comma = "var x = [argument_one, argument_two, argument_three];\n";
-    assert!(fmt_with(o.clone(), with_comma).contains("argument_three,\n]"));
-    assert!(!fmt_with(o, no_comma).contains("argument_three,\n]"));
+    assert!(fmt_with(&o, with_comma).contains("argument_three,\n]"));
+    assert!(!fmt_with(&o, no_comma).contains("argument_three,\n]"));
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn trailing_comma_never_in_flat_mode() {
     // Even with Always, flat (short) lists should not get a comma.
     let mut o = opts();
     o.trailing_comma = TrailingComma::Always;
-    let out = fmt_with(o, "var x = [1, 2, 3];\n");
+    let out = fmt_with(&o, "var x = [1, 2, 3];\n");
     assert!(
         !out.contains("3,]"),
         "flat list should not have trailing comma, got: {out:?}"
@@ -88,7 +88,7 @@ fn max_blank_lines_zero_collapses_all() {
     let mut o = opts();
     o.max_blank_lines = 0;
     let src = "var a = 1;\n\n\n\nvar b = 2;\n";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     // No `\n\n` should appear inside the body (only at most the
     // single trailing `\n`).
     assert!(
@@ -102,7 +102,7 @@ fn max_blank_lines_one_caps_runs() {
     let mut o = opts();
     o.max_blank_lines = 1;
     let src = "var a = 1;\n\n\n\nvar b = 2;\n";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     assert!(
         out.contains("\n\nvar b"),
         "expected one blank between items, got: {out:?}"
@@ -117,7 +117,7 @@ fn max_blank_lines_one_caps_runs() {
 fn space_before_call_paren() {
     let mut o = opts();
     o.space_before_call_paren = true;
-    let out = fmt_with(o, "var x = foo(1, 2);\n");
+    let out = fmt_with(&o, "var x = foo(1, 2);\n");
     assert!(
         out.contains("foo (1, 2)"),
         "expected space before (, got: {out:?}"
@@ -133,7 +133,7 @@ function    weird(  x,y ){return x+y;}
 // fmt: on
 function nice() { return 2; }
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         out.contains("function    weird(  x,y ){return x+y;}"),
         "off region not preserved verbatim: {out:?}"
@@ -150,7 +150,7 @@ function ok() { return 1; }
 function    weird(  x){return x;}
 function    also_weird(  y){return y;}
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         out.contains("function    weird(  x){return x;}"),
         "first off-region function not verbatim: {out:?}"
@@ -169,7 +169,7 @@ var a   =  1;
 var b   =   2;
 var c   =   3;
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         out.contains("var a = 1;"),
         "unmarked stmt should reformat: {out:?}"
@@ -187,7 +187,7 @@ var c   =   3;
 #[test]
 fn alternate_skip_spelling_works() {
     let src = "// fmt: skip\nvar x   =  1;\n";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         out.contains("var x   =  1;"),
         "fmt: skip not honored: {out:?}"
@@ -205,7 +205,7 @@ fn pragma_set_changes_trailing_comma() {
 // fmt: trailing_comma = always
 var x = [one_argument, two_argument, three_argument];
 ";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     assert!(
         out.contains("three_argument,\n]"),
         "set trailing_comma=always didn't take: {out:?}"
@@ -224,7 +224,7 @@ var b = [one_argument, two_argument, three_argument];
 // fmt: pop
 var c = [one_argument, two_argument, three_argument];
 ";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
 
     // a: never (from default), b: always (pushed), c: never (popped back).
     let lines: Vec<&str> = out.lines().collect();
@@ -260,7 +260,7 @@ fn pragma_pop_with_empty_stack_is_noop() {
 // fmt: pop
 var x = 1;
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         out.contains("var x = 1;"),
         "stray pop broke formatter: {out:?}"
@@ -276,7 +276,7 @@ var a = 1;
 
 var b = 2;
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         !out.contains("\n\n"),
         "max_blank_lines = 0 should collapse blanks: {out:?}"
@@ -289,7 +289,7 @@ fn pragma_comment_itself_is_hidden_from_output() {
 // fmt: trailing_comma = always
 var x = 1;
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         !out.contains("// fmt:"),
         "pragma comment should be suppressed: {out:?}"
@@ -301,14 +301,17 @@ fn quoted_and_unquoted_values_equivalent() {
     // String enum values should accept both `tabs` and `"tabs"`.
     let src_quoted = "// fmt: trailing_comma = \"always\"\nvar x = [\n  a,\n  b,\n  c\n];\n";
     let src_unquoted = "// fmt: trailing_comma = always\nvar x = [\n  a,\n  b,\n  c\n];\n";
-    assert_eq!(fmt_with(opts(), src_quoted), fmt_with(opts(), src_unquoted));
+    assert_eq!(
+        fmt_with(&opts(), src_quoted),
+        fmt_with(&opts(), src_unquoted)
+    );
 }
 
 #[test]
 fn unknown_pragma_key_is_ignored() {
     // No panic, formatter still runs to completion.
     let src = "// fmt: nonexistent_key = whatever\nvar x = 1;\n";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(out.contains("var x = 1;"));
 }
 
@@ -348,7 +351,7 @@ var a = [one_argument, two_argument, three_argument];
 var b = [one_argument, two_argument, three_argument];
 var c = [one_argument, two_argument, three_argument];
 ";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     let lines: Vec<&str> = out.lines().collect();
     let a_end = lines.iter().position(|l| l == &"];").unwrap();
     let b_end = a_end + 1 + lines[a_end + 1..].iter().position(|l| l == &"];").unwrap();
@@ -376,7 +379,7 @@ fn pragma_next_stacks_multiple_overrides() {
 // fmt: next max_blank_lines = 0
 var b = [one_argument, two_argument, three_argument];
 ";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     assert!(
         out.contains("three_argument,\n]"),
         "next trailing_comma=always should take effect: {out:?}"
@@ -387,7 +390,7 @@ var b = [one_argument, two_argument, three_argument];
 fn pragma_next_without_following_item_is_silent() {
     // `next` at end of file should not panic or carry over.
     let src = "var a = 1;\n// fmt: next trailing_comma = always\n";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(out.contains("var a = 1;"));
 }
 
@@ -401,7 +404,7 @@ fn pragma_next_does_not_leak_to_subsequent_items() {
 var a = [one_argument, two_argument, three_argument];
 var b = [one_argument, two_argument, three_argument];
 ";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     let lines: Vec<&str> = out.lines().collect();
     let a_end = lines.iter().position(|l| l == &"];").unwrap();
     let b_end = a_end + 1 + lines[a_end + 1..].iter().position(|l| l == &"];").unwrap();
@@ -426,7 +429,7 @@ class Foo {
     public b() { return [one_argument, two_argument, three_argument]; }
 }
 ";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     assert!(
         out.contains("three_argument,\n        ]"),
         "next pragma should work in class body: {out:?}"
@@ -454,7 +457,7 @@ function after() {
     return 3;
 }
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     // `outer` and `after` should use 4-space indent, `inner` should
     // use 2-space indent.
     assert!(
@@ -483,7 +486,7 @@ function tabs() {
 }
 // fmt: pop
 ";
-    let out = fmt_with(opts(), src);
+    let out = fmt_with(&opts(), src);
     assert!(
         out.contains("\n    return 1"),
         "first body keeps spaces: {out:?}"
@@ -506,7 +509,7 @@ function wide() { return [aaa, bbb, ccc, ddd]; }
 function narrow() { return [aaa, bbb, ccc, ddd]; }
 // fmt: pop
 ";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     // The default region keeps the array on one line.
     assert!(
         out.contains("return [aaa, bbb, ccc, ddd]"),
@@ -527,30 +530,42 @@ function narrow() { return [aaa, bbb, ccc, ddd]; }
 fn space_inside_brackets_pads_collections() {
     let mut o = opts();
     o.space_inside_brackets = true;
-    let out = fmt_with(o, "var x = [1, 2, 3];\n");
-    assert!(out.contains("[ 1, 2, 3 ]"), "expected padded array, got: {out:?}");
+    let out = fmt_with(&o, "var x = [1, 2, 3];\n");
+    assert!(
+        out.contains("[ 1, 2, 3 ]"),
+        "expected padded array, got: {out:?}"
+    );
 }
 
 #[test]
 fn space_inside_brackets_off_by_default() {
-    let out = fmt_with(opts(), "var x = [1, 2, 3];\n");
-    assert!(out.contains("[1, 2, 3]"), "default should be tight, got: {out:?}");
+    let out = fmt_with(&opts(), "var x = [1, 2, 3];\n");
+    assert!(
+        out.contains("[1, 2, 3]"),
+        "default should be tight, got: {out:?}"
+    );
 }
 
 #[test]
 fn space_inside_parens_pads_call_arguments() {
     let mut o = opts();
     o.space_inside_parens = true;
-    let out = fmt_with(o, "foo(a, b);\n");
-    assert!(out.contains("foo( a, b )"), "expected padded call, got: {out:?}");
+    let out = fmt_with(&o, "foo(a, b);\n");
+    assert!(
+        out.contains("foo( a, b )"),
+        "expected padded call, got: {out:?}"
+    );
 }
 
 #[test]
 fn space_inside_parens_pads_paren_expr() {
     let mut o = opts();
     o.space_inside_parens = true;
-    let out = fmt_with(o, "var x = (a + b);\n");
-    assert!(out.contains("( a + b )"), "expected padded paren, got: {out:?}");
+    let out = fmt_with(&o, "var x = (a + b);\n");
+    assert!(
+        out.contains("( a + b )"),
+        "expected padded paren, got: {out:?}"
+    );
 }
 
 // ---- brace_style ----
@@ -559,9 +574,12 @@ fn space_inside_parens_pads_paren_expr() {
 fn brace_style_next_line_for_functions() {
     let mut o = opts();
     o.brace_style = leek_fmt::BraceStyle::NextLine;
-    let out = fmt_with(o, "function f() { return 1; }\n");
+    let out = fmt_with(&o, "function f() { return 1; }\n");
     // The opening brace goes on its own line under `function f()`.
-    assert!(out.contains("function f()\n{"), "expected Allman brace, got: {out:?}");
+    assert!(
+        out.contains("function f()\n{"),
+        "expected Allman brace, got: {out:?}"
+    );
 }
 
 #[test]
@@ -569,7 +587,7 @@ fn brace_style_next_line_for_if_else() {
     let mut o = opts();
     o.brace_style = leek_fmt::BraceStyle::NextLine;
     let src = "function f() { if (x) { return 1; } else { return 2; } }\n";
-    let out = fmt_with(o, src);
+    let out = fmt_with(&o, src);
     assert!(out.contains("if (x)\n"), "if brace on next line: {out:?}");
     // `else` starts its own line after the closing brace.
     assert!(out.contains("}\n    else\n"), "else on own line: {out:?}");
@@ -577,7 +595,7 @@ fn brace_style_next_line_for_if_else() {
 
 #[test]
 fn brace_style_default_is_same_line() {
-    let out = fmt_with(opts(), "function f() { return 1; }\n");
+    let out = fmt_with(&opts(), "function f() { return 1; }\n");
     assert!(out.contains("function f() {"), "default K&R: {out:?}");
 }
 
@@ -586,8 +604,8 @@ fn brace_style_next_line_is_idempotent() {
     let mut o = opts();
     o.brace_style = leek_fmt::BraceStyle::NextLine;
     let src = "class C extends B {\n    m() {\n        for (var i = 0; i < 3; i++) {\n            x();\n        }\n    }\n}\n";
-    let once = fmt_with(o.clone(), src);
-    let twice = fmt_with(o, &once);
+    let once = fmt_with(&o, src);
+    let twice = fmt_with(&o, &once);
     assert_eq!(once, twice, "next_line formatting must be idempotent");
 }
 
@@ -597,13 +615,16 @@ fn brace_style_next_line_is_idempotent() {
 fn space_after_comma_off_tightens_lists() {
     let mut o = opts();
     o.space_after_comma = false;
-    let out = fmt_with(o, "var x = [1, 2, 3];\n");
-    assert!(out.contains("[1,2,3]"), "expected tight commas, got: {out:?}");
+    let out = fmt_with(&o, "var x = [1, 2, 3];\n");
+    assert!(
+        out.contains("[1,2,3]"),
+        "expected tight commas, got: {out:?}"
+    );
 }
 
 #[test]
 fn space_after_comma_default_on() {
-    let out = fmt_with(opts(), "foo(a,b,c);\n");
+    let out = fmt_with(&opts(), "foo(a,b,c);\n");
     assert!(out.contains("foo(a, b, c)"), "default spaced, got: {out:?}");
 }
 
@@ -613,14 +634,17 @@ fn space_after_comma_default_on() {
 fn control_keyword_paren_can_be_tight() {
     let mut o = opts();
     o.space_after_control_keyword = false;
-    let out = fmt_with(o, "function f() { if (x) { return 1; } while (y) { return 2; } }\n");
+    let out = fmt_with(
+        &o,
+        "function f() { if (x) { return 1; } while (y) { return 2; } }\n",
+    );
     assert!(out.contains("if(x)"), "expected if(x), got: {out:?}");
     assert!(out.contains("while(y)"), "expected while(y), got: {out:?}");
 }
 
 #[test]
 fn control_keyword_paren_default_spaced() {
-    let out = fmt_with(opts(), "function f() { if (x) { return 1; } }\n");
+    let out = fmt_with(&opts(), "function f() { if (x) { return 1; } }\n");
     assert!(out.contains("if (x)"), "default spaced, got: {out:?}");
 }
 
@@ -630,7 +654,7 @@ fn control_keyword_paren_default_spaced() {
 fn arrow_spacing_can_be_tight() {
     let mut o = opts();
     o.space_around_arrow = false;
-    let out = fmt_with(o, "var f = x -> x;\n");
+    let out = fmt_with(&o, "var f = x -> x;\n");
     // The lambda param is parenthesised; the point is the arrow is tight.
     assert!(out.contains(")->x"), "expected tight arrow, got: {out:?}");
     assert!(!out.contains("-> x"), "no space after arrow, got: {out:?}");
@@ -638,7 +662,7 @@ fn arrow_spacing_can_be_tight() {
 
 #[test]
 fn return_arrow_default_spaced() {
-    let out = fmt_with(opts(), "function f() -> integer { return 1; }\n");
+    let out = fmt_with(&opts(), "function f() -> integer { return 1; }\n");
     assert!(out.contains("-> integer"), "default spaced, got: {out:?}");
 }
 
@@ -648,7 +672,7 @@ fn return_arrow_default_spaced() {
 fn space_before_colon_pads_map_keys() {
     let mut o = opts();
     o.space_before_colon = true;
-    let out = fmt_with(o, "var m = [a: 1, b: 2];\n");
+    let out = fmt_with(&o, "var m = [a: 1, b: 2];\n");
     assert!(out.contains("a : 1"), "expected `a : 1`, got: {out:?}");
 }
 
@@ -656,7 +680,7 @@ fn space_before_colon_pads_map_keys() {
 fn space_after_colon_off_tightens_map() {
     let mut o = opts();
     o.space_after_colon = false;
-    let out = fmt_with(o, "var m = [a: 1, b: 2];\n");
+    let out = fmt_with(&o, "var m = [a: 1, b: 2];\n");
     assert!(out.contains("a:1"), "expected `a:1`, got: {out:?}");
 }
 
@@ -666,23 +690,29 @@ fn space_after_colon_off_tightens_map() {
 fn pad_line_comments_adds_space() {
     let mut o = opts();
     o.pad_line_comments = true;
-    let out = fmt_with(o, "//hello\nvar x = 1;\n");
-    assert!(out.contains("// hello"), "expected padded comment, got: {out:?}");
+    let out = fmt_with(&o, "//hello\nvar x = 1;\n");
+    assert!(
+        out.contains("// hello"),
+        "expected padded comment, got: {out:?}"
+    );
 }
 
 #[test]
 fn pad_line_comments_leaves_doc_comments() {
     let mut o = opts();
     o.pad_line_comments = true;
-    let out = fmt_with(o, "///doc\nvar x = 1;\n");
+    let out = fmt_with(&o, "///doc\nvar x = 1;\n");
     // `///` is a doc comment; it keeps its form (no extra space inserted
     // after the third slash).
-    assert!(out.contains("///doc"), "doc comment untouched, got: {out:?}");
+    assert!(
+        out.contains("///doc"),
+        "doc comment untouched, got: {out:?}"
+    );
 }
 
 #[test]
 fn pad_line_comments_off_by_default() {
-    let out = fmt_with(opts(), "//tight\nvar x = 1;\n");
+    let out = fmt_with(&opts(), "//tight\nvar x = 1;\n");
     assert!(out.contains("//tight"), "default preserves, got: {out:?}");
 }
 
@@ -696,7 +726,7 @@ fn combined_nondefault_config_is_idempotent() {
     o.space_before_colon = true;
     o.brace_style = leek_fmt::BraceStyle::NextLine;
     let src = "function f(a, b) { if (a) { return [x: 1, y: 2]; } }\n";
-    let once = fmt_with(o.clone(), src);
-    let twice = fmt_with(o, &once);
+    let once = fmt_with(&o, src);
+    let twice = fmt_with(&o, &once);
     assert_eq!(once, twice, "combined config must be idempotent");
 }

@@ -32,7 +32,9 @@ impl LintRule for RedundantBoolean {
                         if let Some(v) = bool_lit(b) {
                             out.push(diagnostic(*op, v, e, a, /* literal_on_right = */ true));
                         } else if let Some(v) = bool_lit(a) {
-                            out.push(diagnostic(*op, v, e, b, /* literal_on_right = */ false));
+                            out.push(diagnostic(
+                                *op, v, e, b, /* literal_on_right = */ false,
+                            ));
                         }
                     }
                 });
@@ -69,7 +71,9 @@ fn diagnostic(
         expr.span,
         "comparison against a boolean literal is redundant".to_string(),
     )
-    .with_note(format!("a boolean is already truthy on its own — {example}"))
+    .with_note(format!(
+        "a boolean is already truthy on its own — {example}"
+    ))
     .with_suggestion(simplify(expr.span, operand.span, literal_on_right, negate))
 }
 

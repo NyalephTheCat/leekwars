@@ -45,9 +45,7 @@ pub fn handle(
         }
 
         let mut out: Vec<lsp::Location> = Vec::new();
-        if include_declaration
-            && let Some(sym) = table.symbol(target_id)
-        {
+        if include_declaration && let Some(sym) = table.symbol(target_id) {
             out.push(loc(uri, doc.pos_map(), sym.def_span));
         }
         for r in &table.references {

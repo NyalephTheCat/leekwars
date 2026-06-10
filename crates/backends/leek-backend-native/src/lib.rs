@@ -48,17 +48,17 @@ mod options;
 mod runtime;
 mod translate;
 
-pub use debug::{frame_name, render_frame_vars, set_debug_hook, DebugHook};
-pub use game::{set_game_runtime, GameRuntime};
+pub use debug::{DebugHook, frame_name, render_frame_vars, set_debug_hook};
+pub use game::{GameRuntime, set_game_runtime};
 pub use options::{NativeEmit, NativeError, NativeOptions, OptLevel};
 pub use runtime::ops_used;
 
 use std::collections::HashMap;
 
-use cranelift::codegen::{self, settings, Context};
-use cranelift::prelude::{types, AbiParam, Configurable};
+use cranelift::codegen::{self, Context, settings};
+use cranelift::prelude::{AbiParam, Configurable, types};
 use cranelift_frontend::FunctionBuilderContext;
-use cranelift_module::{default_libcall_names, Linkage, Module};
+use cranelift_module::{Linkage, Module, default_libcall_names};
 
 use leek_hir::HirFile;
 use leek_runtime::Value;
@@ -147,9 +147,22 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             let mut func = make_func(sig.ret);
             let mut fb_ctx = FunctionBuilderContext::new();
             translate::translate_function(
-                &mut func, &mut fb_ctx, main, &sig, lang, &fn_rets, None, &HashMap::new(),
-                &HashMap::new(), &program, &global_tys, &native_directives,
-                &std::collections::HashSet::new(), false, false, false,
+                &mut func,
+                &mut fb_ctx,
+                main,
+                &sig,
+                lang,
+                &fn_rets,
+                None,
+                &HashMap::new(),
+                &HashMap::new(),
+                &program,
+                &global_tys,
+                &native_directives,
+                &std::collections::HashSet::new(),
+                false,
+                false,
+                false,
             )?;
             Ok(NativeArtifact::Text(func.display().to_string()))
         }
@@ -161,9 +174,22 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             ctx.set_disasm(true);
             let mut fb_ctx = FunctionBuilderContext::new();
             translate::translate_function(
-                &mut ctx.func, &mut fb_ctx, main, &sig, lang, &fn_rets, None, &HashMap::new(),
-                &HashMap::new(), &program, &global_tys, &native_directives,
-                &std::collections::HashSet::new(), false, false, false,
+                &mut ctx.func,
+                &mut fb_ctx,
+                main,
+                &sig,
+                lang,
+                &fn_rets,
+                None,
+                &HashMap::new(),
+                &HashMap::new(),
+                &program,
+                &global_tys,
+                &native_directives,
+                &std::collections::HashSet::new(),
+                false,
+                false,
+                false,
             )?;
             ctx.compile(isa.as_ref(), &mut Default::default())
                 .map_err(|e| NativeError::Compile(format!("{e:?}")))?;
@@ -175,16 +201,24 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
         }
         NativeEmit::Object(path) => {
             let isa = build_isa(opts)?;
-            let ob = cranelift_object::ObjectBuilder::new(
-                isa,
-                "leek",
-                default_libcall_names(),
-            )
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            let ob = cranelift_object::ObjectBuilder::new(isa, "leek", default_libcall_names())
+                .map_err(|e| NativeError::Compile(e.to_string()))?;
             let mut module = cranelift_object::ObjectModule::new(ob);
             // Object emit isn't executed, so lambda addresses / the method
             // table aren't needed.
-            let _ = define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game, false)?;
+            let _ = define_program(
+                &mut module,
+                &program,
+                main,
+                lang,
+                &fn_rets,
+                &global_tys,
+                &native_directives,
+                &class_thunks,
+                opts.debug_hooks,
+                opts.link_game,
+                false,
+            )?;
             let bytes = module
                 .finish()
                 .emit()
@@ -208,8 +242,28 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
                 jb.symbol(sym, addr);
             }
             let mut module = cranelift_jit::JITModule::new(jb);
-            let (id, ret_ty, lambda_funcs, method_resolve, static_init, user_fn_idx, exact_arity, class_string_method) =
-                define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game, false)?;
+            let (
+                id,
+                ret_ty,
+                lambda_funcs,
+                method_resolve,
+                static_init,
+                user_fn_idx,
+                exact_arity,
+                class_string_method,
+            ) = define_program(
+                &mut module,
+                &program,
+                main,
+                lang,
+                &fn_rets,
+                &global_tys,
+                &native_directives,
+                &class_thunks,
+                opts.debug_hooks,
+                opts.link_game,
+                false,
+            )?;
             module
                 .finalize_definitions()
                 .map_err(|e| NativeError::Compile(e.to_string()))?;
@@ -217,9 +271,7 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             // count) so `call_value` / indirect calls can invoke them.
             let lambda_addrs: HashMap<usize, (*const u8, usize)> = lambda_funcs
                 .iter()
-                .map(|(&idx, &(fid, nparams))| {
-                    (idx, (module.get_finalized_function(fid), nparams))
-                })
+                .map(|(&idx, &(fid, nparams))| (idx, (module.get_finalized_function(fid), nparams)))
                 .collect();
             runtime::set_lambda_fns(lambda_addrs);
             // Per-lambda user-param `@`-by-ref masks (captures excluded) for the
@@ -316,21 +368,18 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             // pointer is a valid host function.
             let value = match ret_ty {
                 ValTy::Real => {
-                    let f = unsafe {
-                        std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr)
-                    };
+                    let f =
+                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr) };
                     Value::Real(f())
                 }
                 ValTy::Bool => {
-                    let f = unsafe {
-                        std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)
-                    };
+                    let f =
+                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
                     Value::Bool(f() != 0)
                 }
                 ValTy::Int => {
-                    let f = unsafe {
-                        std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)
-                    };
+                    let f =
+                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
                     Value::Int(f())
                 }
                 // A composite / boxed result: the function returns a
@@ -399,7 +448,13 @@ fn collect_native_directives(hir: &HirFile) -> HashMap<leek_hir::DefId, String> 
                     .backend_directives
                     .iter()
                     .find(|(b, _)| b == "native")
-                    .map(|(_, body)| body.split(['(', ' ']).next().unwrap_or(body).trim().to_string())
+                    .map(|(_, body)| {
+                        body.split(['(', ' '])
+                            .next()
+                            .unwrap_or(body)
+                            .trim()
+                            .to_string()
+                    })
                     .unwrap_or_else(|| f.name.clone());
                 Some((leek_hir::DefId(i as u32), name))
             }
@@ -444,8 +499,28 @@ pub fn compile_object_with_meta(
     let ob = cranelift_object::ObjectBuilder::new(isa, "leek", default_libcall_names())
         .map_err(|e| NativeError::Compile(e.to_string()))?;
     let mut module = cranelift_object::ObjectModule::new(ob);
-    let (_main_id, _ret, lambda_funcs, method_resolve, static_init, user_fn_idx, exact_arity, class_string_method) =
-        define_program(&mut module, &program, main, lang, &fn_rets, &global_tys, &native_directives, &class_thunks, opts.debug_hooks, opts.link_game, /* external_uniform */ true)?;
+    let (
+        _main_id,
+        _ret,
+        lambda_funcs,
+        method_resolve,
+        static_init,
+        user_fn_idx,
+        exact_arity,
+        class_string_method,
+    ) = define_program(
+        &mut module,
+        &program,
+        main,
+        lang,
+        &fn_rets,
+        &global_tys,
+        &native_directives,
+        &class_thunks,
+        opts.debug_hooks,
+        opts.link_game,
+        /* external_uniform */ true,
+    )?;
     let bytes = module
         .finish()
         .emit()
@@ -672,7 +747,10 @@ fn define_program<M: Module>(
     // values (`var f = C.staticMethod`): uniform-compile each so a
     // `Function::User` value can be invoked through `dispatch_call_value`.
     let mut user_fn_idx = translate::function_ref_info(program, &reachable_indices);
-    user_fn_idx.extend(translate::static_method_value_info(program, &reachable_indices));
+    user_fn_idx.extend(translate::static_method_value_info(
+        program,
+        &reachable_indices,
+    ));
     for &idx in user_fn_idx.values() {
         value_methods.insert(idx);
     }
@@ -830,17 +908,12 @@ fn build_isa(opts: &NativeOptions) -> Result<codegen::isa::OwnedTargetIsa, Nativ
         bool_str(opts.preserve_frame_pointers),
     )?;
     let flags = settings::Flags::new(fb);
-    let builder =
-        cranelift_native::builder().map_err(|e| NativeError::Compile(e.to_string()))?;
+    let builder = cranelift_native::builder().map_err(|e| NativeError::Compile(e.to_string()))?;
     builder
         .finish(flags)
         .map_err(|e| NativeError::Compile(e.to_string()))
 }
 
 fn bool_str(b: bool) -> &'static str {
-    if b {
-        "true"
-    } else {
-        "false"
-    }
+    if b { "true" } else { "false" }
 }

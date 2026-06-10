@@ -1,6 +1,6 @@
 //! End-to-end JIT tests: source → HIR → Cranelift → run.
 
-use leek_backend_native::{compile, run, NativeArtifact, NativeEmit, NativeError, NativeOptions};
+use leek_backend_native::{NativeArtifact, NativeEmit, NativeError, NativeOptions, compile, run};
 use leek_hir::lower_file_versioned;
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::SourceId;
@@ -66,7 +66,8 @@ function abs(real x) -> real;\n";
     let prelude_ast = SourceFile::cast(SyntaxNode::new_root(p.green)).expect("prelude");
     let u = parse(user_src, source, Version::V4);
     let user_ast = SourceFile::cast(SyntaxNode::new_root(u.green)).expect("user");
-    let (h, _d) = leek_hir::lower_file_with_prelude(&user_ast, source, 4, &prelude_ast, prelude_source);
+    let (h, _d) =
+        leek_hir::lower_file_with_prelude(&user_ast, source, 4, &prelude_ast, prelude_source);
     let out = match run(&h, &NativeOptions::debug()) {
         Ok(v) => v.to_string(),
         Err(e) => format!("ERR: {e}"),
@@ -98,7 +99,8 @@ function abs(real x) -> real;\n";
     let prelude_ast = SourceFile::cast(SyntaxNode::new_root(p.green)).expect("prelude");
     let u = parse(user_src, source, Version::V4);
     let user_ast = SourceFile::cast(SyntaxNode::new_root(u.green)).expect("user");
-    let (h, _d) = leek_hir::lower_file_with_prelude(&user_ast, source, 4, &prelude_ast, prelude_source);
+    let (h, _d) =
+        leek_hir::lower_file_with_prelude(&user_ast, source, 4, &prelude_ast, prelude_source);
     let out = match run(&h, &NativeOptions::debug()) {
         Ok(v) => v.to_string(),
         Err(e) => format!("ERR: {e}"),
@@ -123,9 +125,18 @@ fn comparisons_yield_bool() {
 
 #[test]
 fn locals_and_control_flow() {
-    assert_eq!(jit("var x = 10 if (x > 5) { return x } else { return 0 }"), "10");
-    assert_eq!(jit("var s = 0 for (var i = 1; i <= 5; i++) { s = s + i } return s"), "15");
-    assert_eq!(jit("var n = 0 var i = 0 while (i < 10) { n = n + 2 i = i + 1 } return n"), "20");
+    assert_eq!(
+        jit("var x = 10 if (x > 5) { return x } else { return 0 }"),
+        "10"
+    );
+    assert_eq!(
+        jit("var s = 0 for (var i = 1; i <= 5; i++) { s = s + i } return s"),
+        "15"
+    );
+    assert_eq!(
+        jit("var n = 0 var i = 0 while (i < 10) { n = n + 2 i = i + 1 } return n"),
+        "20"
+    );
 }
 
 #[test]
@@ -136,7 +147,10 @@ fn reals() {
     assert_eq!(jit("return 1.5 * 2"), "3.0"); // mixed int/real promotes
     assert_eq!(jit("real x = 42 return x"), "42.0");
     assert_eq!(jit("return 3.0 < 3.5"), "true");
-    assert_eq!(jit("var x = 0.0 for (var i = 0; i < 4; i++) { x = x + 0.5 } return x"), "2.0");
+    assert_eq!(
+        jit("var x = 0.0 for (var i = 0; i < 4; i++) { x = x + 0.5 } return x"),
+        "2.0"
+    );
 }
 
 #[test]
@@ -184,7 +198,10 @@ fn pow_and_poly_builtins() {
     // `**` operator: int**int (const small exp) stays int; any-real → real.
     assert_eq!(jit("return 2 ** 10"), "1024");
     assert_eq!(jit("return 2.0 ** 3"), "8.0");
-    assert_eq!(jit("var b = 3 return 2 ** b"), "ERR: unsupported: integer ** with non-constant/large exponent");
+    assert_eq!(
+        jit("var b = 3 return 2 ** b"),
+        "ERR: unsupported: integer ** with non-constant/large exponent"
+    );
     // pow builtin is always real.
     assert_eq!(jit("return pow(2, 10)"), "1024.0");
     assert_eq!(jit("return atan2(0, 1)"), "0.0");
@@ -201,19 +218,33 @@ fn pow_and_poly_builtins() {
 #[test]
 fn user_function_calls() {
     assert_eq!(jit("function foo() { return 42 } return foo()"), "42");
-    assert_eq!(jit("function sq(real x) -> real { return x * x } return sq(3.0)"), "9.0");
-    assert_eq!(jit("function add(integer a, integer b) { return a + b } return add(3, 4)"), "7");
+    assert_eq!(
+        jit("function sq(real x) -> real { return x * x } return sq(3.0)"),
+        "9.0"
+    );
+    assert_eq!(
+        jit("function add(integer a, integer b) { return a + b } return add(3, 4)"),
+        "7"
+    );
     // Calls compose with arithmetic and other calls.
-    assert_eq!(jit("function d(integer x) { return x * 2 } return d(5) + d(10)"), "30");
+    assert_eq!(
+        jit("function d(integer x) { return x * 2 } return d(5) + d(10)"),
+        "30"
+    );
     // Recursion.
     assert_eq!(
-        jit("function fact(integer n) { if (n <= 1) { return 1 } return n * fact(n - 1) } return fact(5)"),
+        jit(
+            "function fact(integer n) { if (n <= 1) { return 1 } return n * fact(n - 1) } return fact(5)"
+        ),
         "120"
     );
     // A function returning an array works (the callee's result is a handle).
     assert_eq!(jit("function mk() { return [1, 2] } return mk()"), "[1, 2]");
     // A string-returning callee works (the result is a handle).
-    assert_eq!(jit("function greet() { return \"hi\" } return greet()"), "\"hi\"");
+    assert_eq!(
+        jit("function greet() { return \"hi\" } return greet()"),
+        "\"hi\""
+    );
 }
 
 #[test]
@@ -228,7 +259,10 @@ fn arrays() {
     assert_eq!(jit("var a = [10, 20, 30] return a[9]"), "null");
     // count + push.
     assert_eq!(jit("var a = [1, 2, 3] return count(a)"), "3");
-    assert_eq!(jit("var a = [1, 2] push(a, 3) push(a, 4) return count(a)"), "4");
+    assert_eq!(
+        jit("var a = [1, 2] push(a, 3) push(a, 4) return count(a)"),
+        "4"
+    );
     assert_eq!(jit("var a = [] push(a, 7) return a[0]"), "7");
     // Index assignment (v4 in-range write; out-of-range is a no-op).
     assert_eq!(jit("var a = [1, 2, 3] a[0] = 5 return a[0]"), "5");
@@ -248,7 +282,10 @@ fn arrays() {
     );
     // v1 pass-by-value: a function mutating its array arg doesn't affect the caller's.
     assert_eq!(
-        jit_v("function f(x) { x[0] = 9 } var a = [1, 2, 3] f(a) return a[0]", 1),
+        jit_v(
+            "function f(x) { x[0] = 9 } var a = [1, 2, 3] f(a) return a[0]",
+            1
+        ),
         "1"
     );
     assert_eq!(jit_v("var a = [1] a[0] = 2 return a[0]", 2), "2");
@@ -268,12 +305,24 @@ fn dynamic_value_ops() {
 
 #[test]
 fn foreach_loops() {
-    assert_eq!(jit("var s = 0 for (var x in [1, 2, 3, 4]) { s = s + x } return s"), "10");
-    assert_eq!(jit("var p = 1 for (var x in [1, 2, 3, 4]) { p = p * x } return p"), "24");
+    assert_eq!(
+        jit("var s = 0 for (var x in [1, 2, 3, 4]) { s = s + x } return s"),
+        "10"
+    );
+    assert_eq!(
+        jit("var p = 1 for (var x in [1, 2, 3, 4]) { p = p * x } return p"),
+        "24"
+    );
     // Sum of a real array.
-    assert_eq!(jit("var s = 0.0 for (var x in [1.5, 2.5]) { s = s + x } return s"), "4.0");
+    assert_eq!(
+        jit("var s = 0.0 for (var x in [1.5, 2.5]) { s = s + x } return s"),
+        "4.0"
+    );
     // Build an array in the loop.
-    assert_eq!(jit("var a = [] for (var x in [1, 2, 3]) { push(a, x) } return count(a)"), "3");
+    assert_eq!(
+        jit("var a = [] for (var x in [1, 2, 3]) { push(a, x) } return count(a)"),
+        "3"
+    );
     // v1 is gated (value semantics); v2+ works.
     assert_eq!(
         jit_v("var s = 0 for (var x in [1, 2]) { s = s + x } return s", 1),
@@ -293,7 +342,10 @@ fn strings() {
     assert_eq!(jit("return count('hello')"), "5");
     assert_eq!(jit("var s = 'abc' return s[1]"), "\"b\"");
     // foreach over a string, building a reversed copy.
-    assert_eq!(jit("var s = '' for (var c in 'abc') { s = c + s } return s"), "\"cba\"");
+    assert_eq!(
+        jit("var s = '' for (var c in 'abc') { s = c + s } return s"),
+        "\"cba\""
+    );
     // v1 is gated; v2+ works.
     assert_eq!(jit_v("return 'a' + 'b'", 1), "\"ab\"");
 }
@@ -308,11 +360,17 @@ fn maps_and_sets() {
     assert_eq!(jit("var s = <1, 2, 3> return count(s)"), "3");
     assert_eq!(jit("return <1, 2, 2, 3>"), "<1, 2, 3>");
     // foreach over a map iterates values.
-    assert_eq!(jit("var t = 0 for (var v in [1: 10, 2: 20]) { t = t + v } return t"), "30");
+    assert_eq!(
+        jit("var t = 0 for (var v in [1: 10, 2: 20]) { t = t + v } return t"),
+        "30"
+    );
     // Map index-assignment, compound-assignment, and reference aliasing.
     assert_eq!(jit("var m = ['a': 10] m['a'] = 99 return m['a']"), "99");
     assert_eq!(jit("var m = ['a': 10] m['a'] += 5 return m['a']"), "15");
-    assert_eq!(jit("var m = ['a': 1] var b = m b['c'] = 2 return count(m)"), "2");
+    assert_eq!(
+        jit("var m = ['a': 1] var b = m b['c'] = 2 return count(m)"),
+        "2"
+    );
     assert_eq!(jit("var m = [:] m[1] = 'x' return m[1]"), "\"x\"");
     // v2+ works; v1 is gated. v1–v3 map lookups coerce real keys.
     assert_eq!(jit_v("return [1: 2]", 1), "[1 : 2]");
@@ -324,8 +382,14 @@ fn intervals() {
     assert_eq!(jit("return [1..5]"), "[1..5]");
     assert_eq!(jit("return [2..2]"), "[2..2]");
     // foreach over an interval walks it in unit steps.
-    assert_eq!(jit("var s = 0 for (var x in [1..4]) { s = s + x } return s"), "10");
-    assert_eq!(jit("var n = 0 for (var x in [1..10]) { n = n + 1 } return n"), "10");
+    assert_eq!(
+        jit("var s = 0 for (var x in [1..4]) { s = s + x } return s"),
+        "10"
+    );
+    assert_eq!(
+        jit("var n = 0 for (var x in [1..10]) { n = n + 1 } return n"),
+        "10"
+    );
     // v4-only for now.
     assert_eq!(jit_v("return [1..5]", 1), "[1..5]");
 }
@@ -344,9 +408,15 @@ fn stdlib_builtins() {
 
 #[test]
 fn untyped_function_params() {
-    assert_eq!(jit("function add(a, b) { return a + b } return add(3, 4)"), "7");
+    assert_eq!(
+        jit("function add(a, b) { return a + b } return add(3, 4)"),
+        "7"
+    );
     assert_eq!(jit("function inc(x) { return x + 1 } return inc(41)"), "42");
-    assert_eq!(jit("function pick(a, b, c) { return a } return pick(7, 8, 9)"), "7");
+    assert_eq!(
+        jit("function pick(a, b, c) { return a } return pick(7, 8, 9)"),
+        "7"
+    );
 }
 
 #[test]
@@ -367,7 +437,12 @@ fn globals() {
 #[test]
 fn release_profile_matches_debug() {
     assert_eq!(
-        run(&hir("var s = 0 for (var i = 0; i < 100; i++) { s = s + i } return s"), &NativeOptions::release()).map(|v| v.to_string()).unwrap(),
+        run(
+            &hir("var s = 0 for (var i = 0; i < 100; i++) { s = s + i } return s"),
+            &NativeOptions::release()
+        )
+        .map(|v| v.to_string())
+        .unwrap(),
         "4950"
     );
 }
@@ -414,7 +489,9 @@ fn unsupported_constructs_are_reported() {
 fn classes() {
     // Field read after constructor.
     assert_eq!(
-        jit("class A { public integer x = 0 constructor(v) { this.x = v } public get() { return this.x } } var a = new A(7) return a.get()"),
+        jit(
+            "class A { public integer x = 0 constructor(v) { this.x = v } public get() { return this.x } } var a = new A(7) return a.get()"
+        ),
         "7"
     );
     // Field initializer coerced to the declared type (`real x = 12` → 12.0).
@@ -424,17 +501,23 @@ fn classes() {
     );
     // Constructor arg + mutating method + method-to-method state.
     assert_eq!(
-        jit("class Counter { public integer n = 0 constructor(s) { this.n = s } public inc() { this.n = this.n + 1 return this.n } } var c = new Counter(10) c.inc() return c.inc()"),
+        jit(
+            "class Counter { public integer n = 0 constructor(s) { this.n = s } public inc() { this.n = this.n + 1 return this.n } } var c = new Counter(10) c.inc() return c.inc()"
+        ),
         "12"
     );
     // Inheritance: overridden method + inherited protected field + ctor.
     assert_eq!(
-        jit("class Animal { protected string name = \"?\" constructor(n) { this.name = n } public speak() { return this.name + \" makes a sound\" } } class Dog extends Animal { public speak() { return this.name + \" barks\" } } var d = new Dog(\"Rex\") return d.speak()"),
+        jit(
+            "class Animal { protected string name = \"?\" constructor(n) { this.name = n } public speak() { return this.name + \" makes a sound\" } } class Dog extends Animal { public speak() { return this.name + \" barks\" } } var d = new Dog(\"Rex\") return d.speak()"
+        ),
         "\"Rex barks\""
     );
     // A method calling another method on `this`.
     assert_eq!(
-        jit("class M { public a() { return this.b() + 1 } public b() { return 10 } } var m = new M() return m.a()"),
+        jit(
+            "class M { public a() { return this.b() + 1 } public b() { return 10 } } var m = new M() return m.a()"
+        ),
         "11"
     );
 }
@@ -442,11 +525,23 @@ fn classes() {
 #[test]
 fn hof_with_lambda_and_named_function() {
     // Lambda callbacks.
-    assert_eq!(jit("var a = [1,2,3]; return arrayMap(a, x -> x * 10)[2]"), "30");
-    assert_eq!(jit("var a = [1,2,3,4]; return count(arrayFilter(a, x -> x > 2))"), "2");
-    assert_eq!(jit("var a = [1,2,3,4]; return arrayFoldLeft(a, (acc, x) -> acc + x, 0)"), "10");
+    assert_eq!(
+        jit("var a = [1,2,3]; return arrayMap(a, x -> x * 10)[2]"),
+        "30"
+    );
+    assert_eq!(
+        jit("var a = [1,2,3,4]; return count(arrayFilter(a, x -> x > 2))"),
+        "2"
+    );
+    assert_eq!(
+        jit("var a = [1,2,3,4]; return arrayFoldLeft(a, (acc, x) -> acc + x, 0)"),
+        "10"
+    );
     // Named user function passed as a value.
-    assert_eq!(jit("function dbl(x){return x*2;} var a=[1,2,3]; return arrayMap(a, dbl)[1]"), "4");
+    assert_eq!(
+        jit("function dbl(x){return x*2;} var a=[1,2,3]; return arrayMap(a, dbl)[1]"),
+        "4"
+    );
     // Value-capture closure.
     assert_eq!(jit("var n = 5; var f = x -> x + n; return f(10)"), "15");
 }
@@ -456,7 +551,10 @@ fn hof_with_builtin_as_value() {
     // A builtin function passed by name as a HOF callback — boxed as a
     // `Function::Builtin` handle and dispatched by the runtime.
     assert_eq!(jit("var a = [-1, -5]; return arrayMap(a, abs)[1]"), "5");
-    assert_eq!(jit("var a = [4.0, 9.0]; return arrayMap(a, sqrt)[1]"), "3.0");
+    assert_eq!(
+        jit("var a = [4.0, 9.0]; return arrayMap(a, sqrt)[1]"),
+        "3.0"
+    );
     // As a plain function value, then called.
     assert_eq!(jit("var f = abs; return f(-7)"), "7");
 }
@@ -471,13 +569,17 @@ fn readonly_closure_capture_works() {
 fn shared_mutation_through_cells_works() {
     // A captured *scalar* counter mutated through a closure (cell semantics).
     assert_eq!(
-        jit("var c = 0; var inc = function(){ c = c + 1 }; for (var i = 0; i < 100; i++) { inc() } return c"),
+        jit(
+            "var c = 0; var inc = function(){ c = c + 1 }; for (var i = 0; i < 100; i++) { inc() } return c"
+        ),
         "100"
     );
     // A captured *composite* mutated through one closure and read through
     // another — both closures must share the same underlying cell.
     assert_eq!(
-        jit("var shared = [0]; var inc = function(){ shared[0]++ }; var get = function(){ return shared[0] }; for (var i = 0; i < 100; i++) { inc() } return get()"),
+        jit(
+            "var shared = [0]; var inc = function(){ shared[0]++ }; var get = function(){ return shared[0] }; for (var i = 0; i < 100; i++) { inc() } return get()"
+        ),
         "100"
     );
     // Reassigning a captured int-typed local to a string through a closure:
@@ -493,16 +595,28 @@ fn shared_mutation_through_cells_works() {
 fn rng_builtins_draw_from_a_persistent_sequence() {
     // Range checks (the shape of the upstream RNG tests).
     assert_eq!(jit("var a = rand() return a >= 0 and a < 1"), "true");
-    assert_eq!(jit("var a = randInt(5, 10) return a >= 5 and a <= 10"), "true");
-    assert_eq!(jit("var a = randFloat(500, 510) return a >= 500 and a < 510"), "true");
+    assert_eq!(
+        jit("var a = randInt(5, 10) return a >= 5 and a <= 10"),
+        "true"
+    );
+    assert_eq!(
+        jit("var a = randFloat(500, 510) return a >= 500 and a < 510"),
+        "true"
+    );
     // The generator advances across calls (no per-call reset) — two draws
     // from a wide range differ.
-    assert_eq!(jit("var a = randInt(0, 1000000); var b = randInt(0, 1000000); return a != b"), "true");
+    assert_eq!(
+        jit("var a = randInt(0, 1000000); var b = randInt(0, 1000000); return a != b"),
+        "true"
+    );
 }
 
 #[test]
 fn in_place_collection_builtins() {
-    assert_eq!(jit("var r = ['a','b','c','a']; arrayRemoveAll(r, 'a'); return count(r)"), "2");
+    assert_eq!(
+        jit("var r = ['a','b','c','a']; arrayRemoveAll(r, 'a'); return count(r)"),
+        "2"
+    );
     assert_eq!(jit("var m = [:]; mapFill(m, 5); return count(m)"), "0");
     assert_eq!(jit("debug('hi'); return 42"), "42");
 }
@@ -530,14 +644,19 @@ fn method_call_on_constructor_function_local() {
 fn static_method_as_value() {
     // `var f = C.staticMethod` boxes a Function::User handle; calling it
     // dispatches indirectly to the uniform-compiled method body.
-    assert_eq!(jit("class A { static m() { return 42 } } var f = A.m; return f()"), "42");
+    assert_eq!(
+        jit("class A { static m() { return 42 } } var f = A.m; return f()"),
+        "42"
+    );
     assert_eq!(
         jit("class A { static add(x, y) { return x + y } } var f = A.add; return f(3, 4)"),
         "7"
     );
     // Passed as a HOF callback.
     assert_eq!(
-        jit("class A { static dbl(x) { return x * 2 } } var a = [1, 2, 3]; return arrayMap(a, A.dbl)[2]"),
+        jit(
+            "class A { static dbl(x) { return x * 2 } } var a = [1, 2, 3]; return arrayMap(a, A.dbl)[2]"
+        ),
         "6"
     );
 }
@@ -575,17 +694,23 @@ fn virtual_method_dispatch() {
     // `this.m()` inside a base method dispatches to the receiver's RUNTIME
     // class's override.
     assert_eq!(
-        jit("class A { m() { return 'parent' } t() { return this.m() } } class B extends A { m() { return 'child' } } return new B().t()"),
+        jit(
+            "class A { m() { return 'parent' } t() { return this.m() } } class B extends A { m() { return 'child' } } return new B().t()"
+        ),
         "\"child\""
     );
     // A base instance still gets the base method.
     assert_eq!(
-        jit("class A { m() { return 'parent' } t() { return this.m() } } class B extends A { m() { return 'child' } } return new A().t()"),
+        jit(
+            "class A { m() { return 'parent' } t() { return this.m() } } class B extends A { m() { return 'child' } } return new A().t()"
+        ),
         "\"parent\""
     );
     // Multi-level: C inherits B's override.
     assert_eq!(
-        jit("class A { v() { return 1 } t() { return this.v() } } class B extends A { v() { return 2 } } class C extends B {} return new C().t()"),
+        jit(
+            "class A { v() { return 1 } t() { return this.v() } } class B extends A { v() { return 2 } } class C extends B {} return new C().t()"
+        ),
         "2"
     );
 }
@@ -597,7 +722,10 @@ fn object_literal_method_calls() {
         jit("class A { static m() { return 12 } } var r = {x: A.m} return r.x()"),
         "12"
     );
-    assert_eq!(jit("var o = {add: (a, b) -> a + b} return o.add(3, 4)"), "7");
+    assert_eq!(
+        jit("var o = {add: (a, b) -> a + b} return o.add(3, 4)"),
+        "7"
+    );
     // A missing field name is a builtin method on the object.
     assert_eq!(jit("return {a: 5, b: 6}.keys()"), r#"["a", "b"]"#);
     // A builtin-class field constructs.
@@ -613,9 +741,15 @@ fn non_constant_default_arguments() {
         "10"
     );
     // Default references an earlier parameter.
-    assert_eq!(jit("function f(x, y = x + 1) { return x * y } return f(5)"), "30");
+    assert_eq!(
+        jit("function f(x, y = x + 1) { return x * y } return f(5)"),
+        "30"
+    );
     // Explicit arg overrides a non-const default.
-    assert_eq!(jit("function f(x, y = x + 1) { return x * y } return f(5, 10)"), "50");
+    assert_eq!(
+        jit("function f(x, y = x + 1) { return x * y } return f(5, 10)"),
+        "50"
+    );
     // Chained defaults: a later default reads an earlier filled one.
     assert_eq!(
         jit("function f(x, y = x + 1, z = y + 1) { return x + y + z } return f(5)"),
@@ -623,7 +757,9 @@ fn non_constant_default_arguments() {
     );
     // Static method default calling another static method.
     assert_eq!(
-        jit("class A { static v() { return 55 } static m(x, y = v()) { return x * y } } return A.m(2)"),
+        jit(
+            "class A { static v() { return 55 } static m(x, y = v()) { return x * y } } return A.m(2)"
+        ),
         "110"
     );
     // Instance method default calling an instance method (v2+).
@@ -633,30 +769,44 @@ fn non_constant_default_arguments() {
     );
     // Constructor with a non-const default.
     assert_eq!(
-        jit("class A { f static v() { return 55 } constructor(x, y = v()) { this.f = x * y } } return new A(2).f"),
+        jit(
+            "class A { f static v() { return 55 } constructor(x, y = v()) { this.f = x * y } } return new A(2).f"
+        ),
         "110"
     );
     // A multi-block (ternary / conditional) default is filled too.
-    assert_eq!(jit("function f(x, y = x > 0 ? 10 : 20) { return x + y } return f(5)"), "15");
-    assert_eq!(jit("function f(x, y = x > 0 ? 10 : 20) { return x + y } return f(-3)"), "17");
+    assert_eq!(
+        jit("function f(x, y = x > 0 ? 10 : 20) { return x + y } return f(5)"),
+        "15"
+    );
+    assert_eq!(
+        jit("function f(x, y = x > 0 ? 10 : 20) { return x + y } return f(-3)"),
+        "17"
+    );
 }
 
 #[test]
 fn aliased_class_receiver_dispatch() {
     // `var x = this; x.m()` — the alias's class is tracked for dispatch.
     assert_eq!(
-        jit("class A { private m() { return 5 } public n() { var x = this return x.m() } } return new A().n()"),
+        jit(
+            "class A { private m() { return 5 } public n() { var x = this return x.m() } } return new A().n()"
+        ),
         "5"
     );
     // `(obj as C).m()` — a cast of a known instance keeps the class.
     assert_eq!(
-        jit("class T { public boolean no() { return false } } var t = new T() return (t as T).no()"),
+        jit(
+            "class T { public boolean no() { return false } } var t = new T() return (t as T).no()"
+        ),
         "false"
     );
     // Dispatch through an alias is VIRTUAL: a typed-A param holding a B
     // resolves B's override.
     assert_eq!(
-        jit("class A { m() { return \"p\" } } class B extends A { m() { return \"c\" } } class C { f(A obj) { var x = obj return x.m() } } return new C().f(new B())"),
+        jit(
+            "class A { m() { return \"p\" } } class B extends A { m() { return \"c\" } } class C { f(A obj) { var x = obj return x.m() } } return new C().f(new B())"
+        ),
         "\"c\""
     );
 }
@@ -685,7 +835,10 @@ fn v1_division_by_zero_is_null() {
 #[test]
 fn class_ref_index_member() {
     // `A['m']` resolves a member like `A.m` (static/instance method as value).
-    assert_eq!(jit("class A { static m() { return 42 } } return A[\"m\"]()"), "42");
+    assert_eq!(
+        jit("class A { static m() { return 42 } } return A[\"m\"]()"),
+        "42"
+    );
     assert_eq!(
         jit("class A { m(x) { return x * 2 } } var f = A[\"m\"] return f(new A(), 9)"),
         "18"
@@ -714,12 +867,18 @@ fn method_not_found_falls_back_to_builtin() {
     assert_eq!(jit("class A {} return new A().sqrt()"), "null");
     assert_eq!(jit("class A {} return sqrt(new A())"), "null");
     // A genuine builtin method on an instance still works.
-    assert_eq!(jit("class A { x = 5 } return new A().string()"), "\"A {x: 5}\"");
+    assert_eq!(
+        jit("class A { x = 5 } return new A().string()"),
+        "\"A {x: 5}\""
+    );
 }
 
 #[test]
 fn as_casts() {
-    assert_eq!(jit("Array<Array<real>> a = [[1.0, 7.0]]; integer b = a[0][1] as integer; return b"), "7");
+    assert_eq!(
+        jit("Array<Array<real>> a = [[1.0, 7.0]]; integer b = a[0][1] as integer; return b"),
+        "7"
+    );
     assert_eq!(jit("return 5.9 as integer"), "5.9");
     assert_eq!(jit("return [1, 2] as Array<integer>"), "[1, 2]");
     assert_eq!(jit("real r = 3 as real; return r"), "3.0");
@@ -763,13 +922,17 @@ fn super_method_dispatch() {
     // `super.m()` from a subclass calls the parent's method statically with
     // the real `this` as receiver.
     assert_eq!(
-        jit("class A { m() { return 1 } } class B extends A { m() { return super.m() + 10 } } var b = new B(); return b.m()"),
+        jit(
+            "class A { m() { return 1 } } class B extends A { m() { return super.m() + 10 } } var b = new B(); return b.m()"
+        ),
         "11"
     );
     // `super.m()` reaches a method that reads `this`-state via an override
     // chain (the parent method runs against the actual instance).
     assert_eq!(
-        jit("class A { integer v = 7 base() { return v } } class B extends A { base() { return super.base() * 2 } } var b = new B(); return b.base()"),
+        jit(
+            "class A { integer v = 7 base() { return v } } class B extends A { base() { return super.base() * 2 } } var b = new B(); return b.base()"
+        ),
         "14"
     );
 }
@@ -780,7 +943,9 @@ fn recursive_var_lambda_self_reference() {
     // binding is a shared `Value::Cell` the lambda captured by raw handle, so
     // the self-recursive call resolves (the `LambdaCapture` patch is a no-op).
     assert_eq!(
-        jit("var fact = function(x) { if (x <= 1) { return 1 } return x * fact(x - 1) }; return fact(5)"),
+        jit(
+            "var fact = function(x) { if (x <= 1) { return 1 } return x * fact(x - 1) }; return fact(5)"
+        ),
         "120"
     );
 }
@@ -791,7 +956,10 @@ fn poly_builtins_on_dynamic_values() {
     // `call_builtin` (the inline int-vs-real form can't apply).
     assert_eq!(jit("any x = -5; return abs(x)"), "5");
     assert_eq!(jit("any x = -3; return signum(x)"), "-1");
-    assert_eq!(jit("integer | null x = null; if (x != null) { return abs(x) } return abs(-7)"), "7");
+    assert_eq!(
+        jit("integer | null x = null; if (x != null) { return abs(x) } return abs(-7)"),
+        "7"
+    );
 }
 
 #[test]
@@ -812,7 +980,10 @@ fn builtin_class_instanceof_static_and_new() {
     assert_eq!(jit("var x = Real.NaN; return x != x"), "true");
     // `new <BuiltinClass>(args)`.
     assert_eq!(jit("var a = new Array(); push(a, 5); return count(a)"), "1");
-    assert_eq!(jit("var o = new Object(); return o instanceof Object"), "true");
+    assert_eq!(
+        jit("var o = new Object(); return o instanceof Object"),
+        "true"
+    );
     assert_eq!(jit("return new Integer(7)"), "7");
     assert_eq!(jit("return Number.name"), "\"Number\"");
     assert_eq!(jit("return Array.fields"), "[]");
@@ -829,9 +1000,18 @@ fn index_of_non_composite_is_null() {
 fn mixed_value_null_return() {
     // An untyped function that returns a value on some paths and falls
     // through (null) on others compiles with a boxed result.
-    assert_eq!(jit("function f(x) { if (x > 0) { return x } } return f(5)"), "5");
-    assert_eq!(jit("function f(x) { if (x > 0) { return x } } return f(-1)"), "null");
-    assert_eq!(jit("function f(x) { if (x > 0) { return x } } var r = f(-1); return r == null"), "true");
+    assert_eq!(
+        jit("function f(x) { if (x > 0) { return x } } return f(5)"),
+        "5"
+    );
+    assert_eq!(
+        jit("function f(x) { if (x > 0) { return x } } return f(-1)"),
+        "null"
+    );
+    assert_eq!(
+        jit("function f(x) { if (x > 0) { return x } } var r = f(-1); return r == null"),
+        "true"
+    );
 }
 
 #[test]
@@ -840,12 +1020,27 @@ fn constant_default_arguments() {
     // padded at the call site; supplied args win.
     assert_eq!(jit("function f(x = 2) { return x } return f()"), "2");
     assert_eq!(jit("function f(x = 2) { return x } return f(7)"), "7");
-    assert_eq!(jit("function f(a, b = 10) { return a + b } return f(5)"), "15");
-    assert_eq!(jit("function g(s = 'hi') { return s } return g()"), "\"hi\"");
+    assert_eq!(
+        jit("function f(a, b = 10) { return a + b } return f(5)"),
+        "15"
+    );
+    assert_eq!(
+        jit("function g(s = 'hi') { return s } return g()"),
+        "\"hi\""
+    );
     // Constructor defaults.
-    assert_eq!(jit("class A { f constructor(x = 2) { f = x } } return new A().f"), "2");
-    assert_eq!(jit("class A { f constructor(x = 2) { f = x } } return new A(9).f"), "9");
-    assert_eq!(jit("class A { s constructor(a, b = 3) { s = a + b } } return new A(10).s"), "13");
+    assert_eq!(
+        jit("class A { f constructor(x = 2) { f = x } } return new A().f"),
+        "2"
+    );
+    assert_eq!(
+        jit("class A { f constructor(x = 2) { f = x } } return new A(9).f"),
+        "9"
+    );
+    assert_eq!(
+        jit("class A { s constructor(a, b = 3) { s = a + b } } return new A(10).s"),
+        "13"
+    );
 }
 
 #[test]
@@ -855,16 +1050,28 @@ fn class_meta_property() {
     assert_eq!(jit("return (5).class.name"), "\"Integer\"");
     assert_eq!(jit("var a = [1,2]; return a.class == Array"), "true");
     // A user instance's class is a ClassRef carrying its name.
-    assert_eq!(jit("class A {} var o = new A(); return o.class.name"), "\"A\"");
-    assert_eq!(jit("class A {} var o = new A(); return o.class instanceof Class"), "true");
+    assert_eq!(
+        jit("class A {} var o = new A(); return o.class.name"),
+        "\"A\""
+    );
+    assert_eq!(
+        jit("class A {} var o = new A(); return o.class instanceof Class"),
+        "true"
+    );
 }
 
 #[test]
 fn typed_map_value_coercion() {
     // `Map<K, real>` coerces an int write to real; `Map<K, integer>`
     // truncates a real write — like typed arrays.
-    assert_eq!(jit("Map<integer, real> m = new Map(); m[1] = 5; return m[1]"), "5.0");
-    assert_eq!(jit("Map<integer, integer> m = new Map(); m[1] = 5.7; return m[1]"), "5");
+    assert_eq!(
+        jit("Map<integer, real> m = new Map(); m[1] = 5; return m[1]"),
+        "5.0"
+    );
+    assert_eq!(
+        jit("Map<integer, integer> m = new Map(); m[1] = 5.7; return m[1]"),
+        "5"
+    );
 }
 
 #[test]
@@ -874,22 +1081,30 @@ fn emit_clif_dumps_ir() {
     let NativeArtifact::Text(ir) = compile(&hir("return 1 + 2"), &opts).unwrap() else {
         panic!("expected CLIF text");
     };
-    assert!(ir.contains("function"), "CLIF should render a function: {ir}");
+    assert!(
+        ir.contains("function"),
+        "CLIF should render a function: {ir}"
+    );
     assert!(ir.contains("return"), "CLIF should contain a return: {ir}");
 }
-
-
-
-
 
 #[test]
 fn byref_param_in_place_mutation() {
     // `@t` by-ref param: in-place mutation propagates to the caller via the
     // shared Rc (no cell needed). Reassigning a `@t` param still skips.
-    assert_eq!(jit("function f(@t) { push(t, 9) } var a = [1, 2]; f(a); return a"), "[1, 2, 9]");
-    assert_eq!(jit("function f(@t) { t[0] = 99 } var a = [1, 2]; f(a); return a"), "[99, 2]");
+    assert_eq!(
+        jit("function f(@t) { push(t, 9) } var a = [1, 2]; f(a); return a"),
+        "[1, 2, 9]"
+    );
+    assert_eq!(
+        jit("function f(@t) { t[0] = 99 } var a = [1, 2]; f(a); return a"),
+        "[99, 2]"
+    );
     // `@a` expression alias (already worked) — kept as a regression guard.
-    assert_eq!(jit("var a = [1, 2]; var b = @a; push(b, 5); return a"), "[1, 2, 5]");
+    assert_eq!(
+        jit("var a = [1, 2]; var b = @a; push(b, 5); return a"),
+        "[1, 2, 5]"
+    );
 }
 
 #[test]
@@ -899,16 +1114,37 @@ fn v1_read_only_byref_param_compiles() {
     // to a value param, so it must compile rather than skip on the blanket
     // v1 by-ref gate. (`needs_cell_semantics` only gates v1 by-ref params
     // that are actually mutated or escape.)
-    assert_eq!(jit_v("function t(@c) { var cell = c; if (cell != null) 1; } return t(300)", 1), "null");
-    assert_eq!(jit_v("function t(@c) { var cell = c return cell != null } return t(300)", 1), "true");
+    assert_eq!(
+        jit_v(
+            "function t(@c) { var cell = c; if (cell != null) 1; } return t(300)",
+            1
+        ),
+        "null"
+    );
+    assert_eq!(
+        jit_v(
+            "function t(@c) { var cell = c return cell != null } return t(300)",
+            1
+        ),
+        "true"
+    );
     assert_eq!(jit_v("function t(@a) {} t([[12], [12]]) return 7", 1), "7");
     // A v1 by-ref param mutated *in place* (`push`) propagates through the
     // shared `Rc` — the call site suppresses the by-ref arg's deep-clone.
-    assert_eq!(jit_v("function f(@t) { push(t, 9) } var a = []; f(a); return a", 1), "[9]");
+    assert_eq!(
+        jit_v(
+            "function f(@t) { push(t, 9) } var a = []; f(a); return a",
+            1
+        ),
+        "[9]"
+    );
     // A *reassigned* v1 by-ref param is now cell-threaded (the caller passes
     // its shared cell, the rebind's cell-write propagates back) — `a` becomes
     // `[9]`, matching the interpreter's by-reference semantics.
-    assert_eq!(jit_v("function f(@t) { t = [9] } var a = []; f(a); return a", 1), "[9]");
+    assert_eq!(
+        jit_v("function f(@t) { t = [9] } var a = []; f(a); return a", 1),
+        "[9]"
+    );
 }
 
 #[test]
@@ -941,7 +1177,10 @@ fn indirect_lambda_under_arity_call_binds_null_not_segfault() {
     assert_eq!(jit("var f = (a, b) => b; return f(1)"), "null");
     // A named-function ref invoked under-arity through a value is likewise
     // padded (the missing param binds to null).
-    assert_eq!(jit("function f(x) { return x } var g = f; return g()"), "null");
+    assert_eq!(
+        jit("function f(x) { return x } var g = f; return g()"),
+        "null"
+    );
 }
 
 #[test]
@@ -959,7 +1198,13 @@ fn v4_strict_out_of_bounds_array_write_is_runtime_error() {
     assert!(strict_v4("var a = [1, 2, 3] return a[100] = 12").contains("ARRAY_OUT_OF_BOUND"));
     assert!(strict_v4("var a = [1, 2, 3] return a[-100] = 12").contains("ARRAY_OUT_OF_BOUND"));
     // An in-bounds write is unaffected.
-    assert_eq!(strict_v4("var a = [1, 2, 3] a[1] = 9 return a"), "[1, 9, 3]");
+    assert_eq!(
+        strict_v4("var a = [1, 2, 3] a[1] = 9 return a"),
+        "[1, 9, 3]"
+    );
     // Non-strict v4 silently drops the OOB write (no error), matching upstream.
-    assert_eq!(jit_v("var a = [1, 2, 3] a[100] = 12 return a", 4), "[1, 2, 3]");
+    assert_eq!(
+        jit_v("var a = [1, 2, 3] a[100] = 12 return a", 4),
+        "[1, 2, 3]"
+    );
 }

@@ -6,13 +6,16 @@ use std::path::PathBuf;
 use leek_scenario::{Scenario, StatKind};
 
 fn examples_dir() -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../examples/fight"))
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../examples/fight"
+    ))
 }
 
 #[test]
 fn toml_flat_entities_roundtrip() {
     let scn = Scenario::from_toml_str(
-        r#"
+        r"
         seed = 42
         max_turns = 30
 
@@ -31,7 +34,7 @@ fn toml_flat_entities_roundtrip() {
         id = 2
         team = 1
         cell = 99
-        "#,
+        ",
     )
     .expect("parse toml");
 
@@ -75,7 +78,7 @@ fn json_nested_entities_flatten_with_team_from_index() {
 #[test]
 fn profile_overlay_is_sparse() {
     let mut scn = Scenario::from_toml_str(
-        r#"
+        r"
         max_turns = 64
         [map]
         width = 10
@@ -93,7 +96,7 @@ fn profile_overlay_is_sparse() {
         id = 1
         strength = 900
         weapons = [47]
-        "#,
+        ",
     )
     .unwrap();
 
@@ -120,7 +123,7 @@ fn extends_and_leek_refs_resolve() {
 
     // Map + seed came from the inherited base-arena.toml.
     assert_eq!(scn.map.as_ref().unwrap().width, 17);
-    assert_eq!(scn.seed, Some(1234567));
+    assert_eq!(scn.seed, Some(1_234_567));
 
     // The hero entity inherited stats from leeks/hero.toml, kept its own
     // id/cell/team/ai, and no longer carries a `leek` reference.

@@ -132,7 +132,7 @@ impl super::Emitter<'_> {
                             // `IntervalLeekValue` the table names. When the
                             // receiver is an interval literal we know which one;
                             // cast to it so the method resolves.
-                            let class = self.concrete_receiver_class(class, name, receiver);
+                            let class = Self::concrete_receiver_class(class, name, receiver);
                             buf.push_str("((");
                             buf.push_str(class);
                             buf.push_str(") (Object) ");
@@ -164,7 +164,9 @@ impl super::Emitter<'_> {
                                 if i == 0 && cast_fn_arg {
                                     buf.push_str("(FunctionLeekValue) ");
                                     self.write_expr(buf, a, true);
-                                } else if i == 0 && let Some(cls) = coll_arg_cast {
+                                } else if i == 0
+                                    && let Some(cls) = coll_arg_cast
+                                {
                                     buf.push('(');
                                     buf.push_str(cls);
                                     buf.push_str(") (Object) (");
@@ -626,7 +628,7 @@ impl super::Emitter<'_> {
                     buf.push_str(", \"");
                     buf.push_str(method);
                     buf.push_str("\", ");
-                    buf.push_str(&self.from_class());
+                    buf.push_str(&self.calling_class());
                     buf.push(')');
                     self.write_execute_args(buf, &c.args);
                     buf.push(')');
@@ -656,7 +658,7 @@ impl super::Emitter<'_> {
                     buf.push_str("\", \"u_");
                     buf.push_str(&sanitize_ident(method));
                     buf.push_str("\", ");
-                    buf.push_str(&self.from_class());
+                    buf.push_str(&self.calling_class());
                     for a in &c.args {
                         // Cast each vararg to `(Object)` — a lone `null` arg
                         // would otherwise bind as the whole `Object... args`

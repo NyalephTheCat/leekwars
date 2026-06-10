@@ -175,8 +175,14 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
     let version = effective_version(&src_text, cx.source(), cx.version_byte());
     let flags = cx.flags();
     if let Some((prelude, prelude_src)) = parse_prelude(flags.prelude) {
-        let (hir, diagnostics) =
-            lower_file_with_prelude_with_flags(&ast, cx.source(), version, &prelude, prelude_src, flags);
+        let (hir, diagnostics) = lower_file_with_prelude_with_flags(
+            &ast,
+            cx.source(),
+            version,
+            &prelude,
+            prelude_src,
+            flags,
+        );
         return (finish_hir(hir, opt), diagnostics);
     }
     let (hir, diagnostics) = lower_file_versioned_with_flags(&ast, cx.source(), version, flags);

@@ -4,7 +4,7 @@ mod linked;
 
 use std::path::{Path, PathBuf};
 
-pub use linked::{is_linked, LINKED};
+pub use linked::{LINKED, is_linked};
 
 use anyhow::{Result, bail};
 use leek_manifest::{BackendKind, BackendSettings, JavaMode, Manifest};

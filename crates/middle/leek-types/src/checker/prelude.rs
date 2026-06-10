@@ -16,8 +16,8 @@ pub(crate) use crate::ty::{
     unify_types,
 };
 
+pub(crate) use super::Checker;
 pub(crate) use super::helpers::{
     binary_result_type, has_return_stmt, is_compound_assignment, is_plain_assignment,
     literal_key_canonical,
 };
-pub(crate) use super::Checker;

@@ -120,16 +120,10 @@ impl Checker {
         let non_null = strip_nullable(&cur);
         if is_eq {
             // `== null`: true → null, false → non-null.
-            (
-                vec![(name.clone(), Type::Null)],
-                vec![(name, non_null)],
-            )
+            (vec![(name.clone(), Type::Null)], vec![(name, non_null)])
         } else {
             // `!= null`: true → non-null, false → null.
-            (
-                vec![(name.clone(), non_null)],
-                vec![(name, Type::Null)],
-            )
+            (vec![(name.clone(), non_null)], vec![(name, Type::Null)])
         }
     }
 }

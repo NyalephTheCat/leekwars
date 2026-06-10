@@ -19,9 +19,27 @@ use crate::mangle;
 fn is_numeric_math_builtin(name: &str) -> bool {
     matches!(
         name,
-        "sqrt" | "cbrt" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh"
-            | "tanh" | "exp" | "log" | "log10" | "log2" | "floor" | "ceil" | "round" | "pow"
-            | "atan2" | "hypot"
+        "sqrt"
+            | "cbrt"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "exp"
+            | "log"
+            | "log10"
+            | "log2"
+            | "floor"
+            | "ceil"
+            | "round"
+            | "pow"
+            | "atan2"
+            | "hypot"
     )
 }
 
@@ -176,7 +194,7 @@ impl EmitExpr for Emitter<'_> {
                     buf.push_str(", \"");
                     buf.push_str(name);
                     buf.push_str("\", ");
-                    buf.push_str(&self.from_class());
+                    buf.push_str(&self.calling_class());
                     buf.push(')');
                 }
             }
@@ -308,8 +326,8 @@ impl Emitter<'_> {
                         // there's no Java symbol for it). `lookup_constant` is
                         // constants-only, so a builtin *function* name still
                         // falls through to the `FunctionLeekValue` wrapper below.
-                        if let Some(lit) = leek_runtime::lookup_constant(other)
-                            .map(|v| constant_literal(&v))
+                        if let Some(lit) =
+                            leek_runtime::lookup_constant(other).map(|v| constant_literal(&v))
                         {
                             buf.push_str(&lit);
                         } else if builtin_fn_wrapper(other, self.opts.version).is_some() {
@@ -321,9 +339,9 @@ impl Emitter<'_> {
                             // to a singleton so `endsWith == endsWith` → true.
                             let field = format!("anonymous_{}", super::sanitize_ident(other));
                             let v = self.opts.version;
-                            buf.push_str(&self.fn_singleton(field, || {
-                                builtin_fn_wrapper(other, v).unwrap()
-                            }));
+                            buf.push_str(
+                                &self.fn_singleton(field, || builtin_fn_wrapper(other, v).unwrap()),
+                            );
                         } else {
                             buf.push_str(other);
                         }
@@ -735,7 +753,7 @@ impl Emitter<'_> {
             let ExprKind::Name(NameRef::Local(id)) = &l.kind else {
                 unreachable!("is_ref_box implies Name(Local)")
             };
-            let name = mangle::local(self.opts, &self.def_name(*id).to_string());
+            let name = mangle::local(self.opts, self.def_name(*id));
             let method = match op {
                 BinaryOp::Assign => "set",
                 BinaryOp::AddAssign => "add_eq",
@@ -744,14 +762,7 @@ impl Emitter<'_> {
                 BinaryOp::DivAssign => "div_eq",
                 _ => "",
             };
-            if !method.is_empty() {
-                buf.push_str(&name);
-                buf.push('.');
-                buf.push_str(method);
-                buf.push('(');
-                self.write_expr(buf, r, false);
-                buf.push(')');
-            } else {
+            if method.is_empty() {
                 // No dedicated `Box` mutator — `set` the recomputed value.
                 let base = op.compound_base().unwrap_or(BinaryOp::Assign);
                 buf.push_str(&name);
@@ -766,6 +777,13 @@ impl Emitter<'_> {
                     };
                     self.write_expr(buf, &expanded, false);
                 }
+                buf.push(')');
+            } else {
+                buf.push_str(&name);
+                buf.push('.');
+                buf.push_str(method);
+                buf.push('(');
+                self.write_expr(buf, r, false);
                 buf.push(')');
             }
             return;
@@ -811,13 +829,17 @@ impl Emitter<'_> {
                     }
                     None => self.expr_to_string(r),
                 };
-                buf.push_str(&self.coerce_decl(self.own_field_ty(fname).as_ref(), v));
+                buf.push_str(&Self::coerce_decl(self.own_field_ty(fname).as_ref(), v));
             } else if let Some(helper) = field_compound_helper(op) {
                 // External field compound assign: `a.f <op>= r` →
                 // `field_<op>_eq(a, "f", r, null)`, which mutates the field and
                 // returns the new value (a plain `setField` would store only the
                 // RHS and drop the `<op>`).
-                let helper = if self.is_v1_pow_assign(op) { "field_pow_eq" } else { helper };
+                let helper = if self.is_v1_pow_assign(op) {
+                    "field_pow_eq"
+                } else {
+                    helper
+                };
                 buf.push_str(helper);
                 buf.push('(');
                 self.write_expr(buf, base, false);
@@ -826,7 +848,7 @@ impl Emitter<'_> {
                 buf.push_str("\", ");
                 self.write_expr(buf, r, false);
                 buf.push_str(", ");
-                buf.push_str(&self.from_class());
+                buf.push_str(&self.calling_class());
                 buf.push(')');
             } else {
                 buf.push_str("setField(");
@@ -839,14 +861,14 @@ impl Emitter<'_> {
                 // `10.0`, so `.class` reads `Real`). Only a statically-numeric
                 // value is coerced (a bare var could be null).
                 match self.static_field_scalar_ty(base, fname) {
-                    Some(ty) if self.expr_is_numeric(r) => {
+                    Some(ty) if Self::expr_is_numeric(r) => {
                         let v = self.expr_to_string(r);
-                        buf.push_str(&self.coerce_decl(Some(&ty), v));
+                        buf.push_str(&Self::coerce_decl(Some(&ty), v));
                     }
                     _ => self.write_expr(buf, r, false),
                 }
                 buf.push_str(", ");
-                buf.push_str(&self.from_class());
+                buf.push_str(&self.calling_class());
                 buf.push(')');
             }
             return;
@@ -893,7 +915,7 @@ impl Emitter<'_> {
             // `long`/`double`, so the `Object`-typed binary result must coerce
             // back — same as the plain-`=` path.
             let v = self.expr_to_string(&expanded);
-            buf.push_str(&self.coerce_decl(self.assign_target_scalar_ty(l), v));
+            buf.push_str(&Self::coerce_decl(self.assign_target_scalar_ty(l), v));
         } else {
             // Treat `<local> = lambda` the same way as `var <local> =
             // lambda`: prime `initializing_def` so the lambda emit
@@ -913,7 +935,10 @@ impl Emitter<'_> {
             // A statically-typed scalar target coerces the RHS to its declared
             // type (`integer b; b = a[1]` stores an int) — same `compileConvert`
             // rule as the var-decl initializer.
-            buf.push_str(&self.coerce_decl(self.assign_target_scalar_ty(l), self.v1_clone(r)));
+            buf.push_str(&Self::coerce_decl(
+                self.assign_target_scalar_ty(l),
+                self.v1_clone(r),
+            ));
             self.initializing_def.set(prev);
         }
     }
@@ -949,7 +974,11 @@ impl Emitter<'_> {
             _ => "putv4",
         };
         // v1 `^=` is power-assign, not xor.
-        let helper = if self.is_v1_pow_assign(op) { "put_pow_eq" } else { helper };
+        let helper = if self.is_v1_pow_assign(op) {
+            "put_pow_eq"
+        } else {
+            helper
+        };
         buf.push_str(helper);
         buf.push('(');
         self.write_expr(buf, base, false);
@@ -973,7 +1002,7 @@ impl Emitter<'_> {
     /// "only an int-or-real static value is converted" rule and avoiding a cast
     /// of a non-`Number` value.
     fn write_index_value(&self, buf: &mut String, op: BinaryOp, base: &Expr, value: &Expr) {
-        if op == BinaryOp::Assign && self.expr_is_numeric(value) {
+        if op == BinaryOp::Assign && Self::expr_is_numeric(value) {
             let suffix = match self.local_array_elem_ty(base) {
                 Some(Type::Real) => Some(").doubleValue()"),
                 Some(Type::Integer) => Some(").longValue()"),
@@ -1073,7 +1102,14 @@ impl Emitter<'_> {
     /// `ops(...)` wrappers so the right side is charged only when evaluated. The
     /// operator's own cost rides on the always-evaluated left operand — matching
     /// the reference's `ops(l, lc + opCost) && ops(r, rc)` shape.
-    fn write_short_circuit(&self, buf: &mut String, l: &Expr, r: &Expr, java_op: &str, op: BinaryOp) {
+    fn write_short_circuit(
+        &self,
+        buf: &mut String,
+        l: &Expr,
+        r: &Expr,
+        java_op: &str,
+        op: BinaryOp,
+    ) {
         buf.push('(');
         let lb = self.expr_to_bool(l);
         let rb = self.expr_to_bool(r);
@@ -1109,7 +1145,11 @@ impl Emitter<'_> {
             return String::new();
         }
         let n = params.iter().filter(|p| !p.is_by_ref).count();
-        if n > 0 { format!("ops({n});") } else { String::new() }
+        if n > 0 {
+            format!("ops({n});")
+        } else {
+            String::new()
+        }
     }
 
     /// Whether the l-value/operand is a `@`-ref-param bound to a runtime `Box`
@@ -1121,9 +1161,7 @@ impl Emitter<'_> {
     /// The Java name of the `Box` variable backing a `@`-ref param.
     pub(crate) fn ref_box_name(&self, e: &Expr) -> String {
         match &e.kind {
-            ExprKind::Name(NameRef::Local(id)) => {
-                mangle::local(self.opts, &self.def_name(*id).to_string())
-            }
+            ExprKind::Name(NameRef::Local(id)) => mangle::local(self.opts, self.def_name(*id)),
             _ => String::new(),
         }
     }
@@ -1146,7 +1184,9 @@ impl Emitter<'_> {
     pub(crate) fn hoist_member(&self, key: &str, make: impl FnOnce() -> String) {
         if !self.fn_singletons.borrow().contains_key(key) {
             let decl = make();
-            self.fn_singletons.borrow_mut().insert(key.to_string(), decl);
+            self.fn_singletons
+                .borrow_mut()
+                .insert(key.to_string(), decl);
         }
     }
 
@@ -1176,28 +1216,13 @@ impl Emitter<'_> {
     /// has (private/protected to itself and its hierarchy); at top level it's
     /// `null`. Passing the real context — as upstream does — stops a class's own
     /// private member from being wrongly denied (which read back as `null`).
-    pub(crate) fn from_class(&self) -> String {
+    pub(crate) fn calling_class(&self) -> String {
         match self.current_class.get() {
             Some(c) => mangle::class_name(self.opts, &c.name),
             None => "null".to_string(),
         }
     }
 
-    /// The Java type of the current class's own instance field `name` (for
-    /// write coercion: `this.x = longint(v)` when `x` is an `integer` field).
-    pub(crate) fn own_field_java_ty(&self, name: &str) -> Option<&'static str> {
-        self.current_class.get().and_then(|c| {
-            c.fields
-                .iter()
-                .find(|f| !f.is_static && f.name == name)
-                .map(|f| super::java_type_for(f.ty.as_ref()))
-        })
-    }
-
-    /// The current class's own instance field `name`'s declared HIR type — for
-    /// write coercion that must also handle nullable scalars (`real? x;
-    /// this.x = 5` stores `5.0` via `realOrNull`, which `own_field_java_ty`
-    /// (→ `Object` for a nullable) can't express).
     /// The declared scalar type of a static field `<Class>.<name>` (for a write
     /// coercion). `None` unless `base` is a class reference and the field is a
     /// static `integer`/`real`/`boolean`/nullable-scalar.
@@ -1234,10 +1259,10 @@ impl Emitter<'_> {
     /// a negation of one, or a numeric math builtin (`round`/`floor`/`sqrt`/…).
     /// Deliberately conservative: a bare `+`/`*` etc. is excluded because
     /// without types it could be string or array concatenation, not arithmetic.
-    fn expr_is_numeric(&self, e: &Expr) -> bool {
+    fn expr_is_numeric(e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Literal(Literal::Int(_) | Literal::Real(_)) => true,
-            ExprKind::Unary(UnaryOp::Neg, x) => self.expr_is_numeric(x),
+            ExprKind::Unary(UnaryOp::Neg, x) => Self::expr_is_numeric(x),
             ExprKind::Call(c) => matches!(
                 &c.callee,
                 Callee::Function(NameRef::Builtin(n)) if is_numeric_math_builtin(n)
@@ -1262,7 +1287,7 @@ impl Emitter<'_> {
         buf.push_str(", \"");
         buf.push_str(fname);
         buf.push_str("\", 1l, ");
-        buf.push_str(&self.from_class());
+        buf.push_str(&self.calling_class());
         buf.push(')');
     }
 
@@ -1564,7 +1589,6 @@ impl Emitter<'_> {
     /// abstract `IntervalLeekValue`. A non-literal interval still falls back to
     /// the abstract class (would need a runtime-dispatch wrapper like upstream).
     pub(crate) fn concrete_receiver_class(
-        &self,
         class: &'static str,
         method: &str,
         receiver: &Expr,
@@ -1608,7 +1632,11 @@ impl Emitter<'_> {
         // open bracket (`]…` / `…[`) means unbounded → ±∞ (`Long.MIN/MAX_VALUE`
         // for integer intervals, `Double.(NEGATIVE|POSITIVE)_INFINITY` for real).
         let (zero, neg_inf, pos_inf) = if real {
-            ("0.0", "Double.NEGATIVE_INFINITY", "Double.POSITIVE_INFINITY")
+            (
+                "0.0",
+                "Double.NEGATIVE_INFINITY",
+                "Double.POSITIVE_INFINITY",
+            )
         } else {
             ("0l", "Long.MIN_VALUE", "Long.MAX_VALUE")
         };
@@ -1618,29 +1646,23 @@ impl Emitter<'_> {
         buf.push_str(&self.ai_this());
         // Start. An absent bound always emits `inclusive = false`.
         buf.push_str(", ");
-        match &iv.start {
-            Some(e) => {
-                buf.push_str(if iv.start_inclusive { "true" } else { "false" });
-                buf.push_str(", ");
-                self.write_expr(buf, e, false);
-            }
-            None => {
-                buf.push_str("false, ");
-                buf.push_str(if iv.start_inclusive { zero } else { neg_inf });
-            }
+        if let Some(e) = &iv.start {
+            buf.push_str(if iv.start_inclusive { "true" } else { "false" });
+            buf.push_str(", ");
+            self.write_expr(buf, e, false);
+        } else {
+            buf.push_str("false, ");
+            buf.push_str(if iv.start_inclusive { zero } else { neg_inf });
         }
         // End.
         buf.push_str(", ");
-        match &iv.end {
-            Some(e) => {
-                buf.push_str(if iv.end_inclusive { "true" } else { "false" });
-                buf.push_str(", ");
-                self.write_expr(buf, e, false);
-            }
-            None => {
-                buf.push_str("false, ");
-                buf.push_str(if iv.end_inclusive { zero } else { pos_inf });
-            }
+        if let Some(e) = &iv.end {
+            buf.push_str(if iv.end_inclusive { "true" } else { "false" });
+            buf.push_str(", ");
+            self.write_expr(buf, e, false);
+        } else {
+            buf.push_str("false, ");
+            buf.push_str(if iv.end_inclusive { zero } else { pos_inf });
         }
         buf.push(')');
     }

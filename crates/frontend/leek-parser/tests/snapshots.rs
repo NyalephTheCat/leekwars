@@ -2,6 +2,8 @@
 //!
 //! Run `cargo insta review` after intentional grammar changes.
 
+use std::fmt::Write as _;
+
 use leek_parser::parse;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxElement, SyntaxNode, Version};
@@ -13,8 +15,7 @@ fn src() -> SourceId {
 fn dump(node: &SyntaxNode) -> String {
     let mut out = String::new();
     fn walk(node: &SyntaxNode, depth: usize, out: &mut String) {
-        out.push_str(&"  ".repeat(depth));
-        out.push_str(&format!("{:?}\n", node.kind()));
+        let _ = writeln!(out, "{}{:?}", "  ".repeat(depth), node.kind());
         for child in node.children_with_tokens() {
             match child {
                 SyntaxElement::Node(n) => walk(&n, depth + 1, out),
@@ -22,8 +23,13 @@ fn dump(node: &SyntaxNode) -> String {
                     if t.kind().is_trivia() {
                         continue;
                     }
-                    out.push_str(&"  ".repeat(depth + 1));
-                    out.push_str(&format!("{:?} {:?}\n", t.kind(), t.text()));
+                    let _ = writeln!(
+                        out,
+                        "{}{:?} {:?}",
+                        "  ".repeat(depth + 1),
+                        t.kind(),
+                        t.text()
+                    );
                 }
             }
         }

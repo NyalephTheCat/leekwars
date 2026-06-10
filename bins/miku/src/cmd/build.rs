@@ -14,13 +14,13 @@ use leek_recipes::{RecipeParams, Target};
 use crate::cli::{Build, ColorWhen, MessageFormat};
 
 pub fn run(
-    args: Build,
+    args: &Build,
     manifest_path: Option<&Path>,
     color: ColorWhen,
     format: MessageFormat,
     quiet: bool,
     verbose: bool,
-    environment: Option<std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
+    environment: Option<&std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
     for w in &project.warnings {
@@ -74,9 +74,9 @@ pub fn run(
 
     match backend {
         BackendKind::Java => {
-            emit_java(&project, &driver_run.run, version, &args, quiet, environment)
+            emit_java(&project, &driver_run.run, version, args, quiet, environment)
         }
-        BackendKind::Native => emit_native(&project, &driver_run.run, &args, quiet),
+        BackendKind::Native => emit_native(&project, &driver_run.run, args, quiet),
         BackendKind::Jar => {
             bail!("jar backend not yet supported in this toolchain");
         }
@@ -118,18 +118,13 @@ fn emit_java(
     version: leek_syntax::Version,
     args: &Build,
     quiet: bool,
-    environment: Option<std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
+    environment: Option<&std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
 ) -> Result<ExitCode> {
     let hir = result
         .get::<HirArtifact>()
         .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
 
-    let settings = project
-        .manifest
-        .backend
-        .java
-        .clone()
-        .unwrap_or_default();
+    let settings = project.manifest.backend.java.clone().unwrap_or_default();
 
     let clean = java_clean_mode(args.clean, &settings);
     let mut opts = if clean {
@@ -138,7 +133,7 @@ fn emit_java(
         leek_backend_java::Options::exact(version, 0)
     }
     .with_source_path(project.entry_path().display().to_string());
-    if let Some(env) = &environment {
+    if let Some(env) = environment {
         opts = opts.with_environment(env.clone());
     }
 

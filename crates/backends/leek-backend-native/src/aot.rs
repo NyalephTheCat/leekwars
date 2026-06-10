@@ -213,7 +213,10 @@ pub fn compile_to_executable(
 
     // Generate the C entry point and link everything with cc.
     let main_c = tmp.join("leek_entry.c");
-    write_file(&main_c, &main_c_source(ret, opts, &blob, meta.lambda_entries()))?;
+    write_file(
+        &main_c,
+        &main_c_source(ret, opts, &blob, meta.lambda_entries()),
+    )?;
     let lib_dir = locate_static_runtime(quiet)?;
 
     if !quiet {
@@ -231,13 +234,19 @@ pub fn compile_to_executable(
         .arg("-lleek_aot_runtime")
         .args(SYS_LIBS)
         .stdin(Stdio::null())
-        .stdout(if quiet { Stdio::null() } else { Stdio::inherit() })
+        .stdout(if quiet {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        })
         .stderr(Stdio::inherit());
-    let status = cmd
-        .status()
-        .map_err(|e| NativeError::Compile(format!("running `{cc}` (a C compiler on PATH?): {e}")))?;
+    let status = cmd.status().map_err(|e| {
+        NativeError::Compile(format!("running `{cc}` (a C compiler on PATH?): {e}"))
+    })?;
     if !status.success() {
-        return Err(NativeError::Compile("cc link of the AOT executable failed".into()));
+        return Err(NativeError::Compile(
+            "cc link of the AOT executable failed".into(),
+        ));
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -347,8 +356,8 @@ fn op_limit_literal(limit: u64) -> String {
 /// release archive, then debug; builds it once with `cargo` if neither exists.
 fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
     let root = workspace_root()?;
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root.join("target"), PathBuf::from);
+    let target =
+        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
     let archive = "libleek_aot_runtime.a";
     for profile in ["release", "debug"] {
         let dir = target.join(profile);
@@ -367,10 +376,16 @@ fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
         .arg("leek-aot-runtime")
         .current_dir(&root)
         .stdin(Stdio::null())
-        .stdout(if quiet { Stdio::null() } else { Stdio::inherit() })
+        .stdout(if quiet {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        })
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| NativeError::Compile(format!("building static runtime (cargo on PATH?): {e}")))?;
+        .map_err(|e| {
+            NativeError::Compile(format!("building static runtime (cargo on PATH?): {e}"))
+        })?;
     if !status.success() {
         return Err(NativeError::Compile(
             "building the AOT static runtime failed".into(),
@@ -396,11 +411,13 @@ fn workspace_root() -> Result<PathBuf, NativeError> {
 }
 
 fn mkdirs(p: &Path) -> Result<(), NativeError> {
-    std::fs::create_dir_all(p).map_err(|e| NativeError::Compile(format!("creating {}: {e}", p.display())))
+    std::fs::create_dir_all(p)
+        .map_err(|e| NativeError::Compile(format!("creating {}: {e}", p.display())))
 }
 
 fn write_file(p: &Path, contents: &str) -> Result<(), NativeError> {
-    std::fs::write(p, contents).map_err(|e| NativeError::Compile(format!("writing {}: {e}", p.display())))
+    std::fs::write(p, contents)
+        .map_err(|e| NativeError::Compile(format!("writing {}: {e}", p.display())))
 }
 
 #[cfg(test)]
@@ -422,7 +439,10 @@ mod tests {
 
     #[test]
     fn scalar_array_and_string_programs_are_aot_able() {
-        assert_eq!(reason("function f(n) { return n * 2 }\nreturn f(21)\n"), None);
+        assert_eq!(
+            reason("function f(n) { return n * 2 }\nreturn f(21)\n"),
+            None
+        );
         assert_eq!(
             reason("var a = []\nfor (var i = 0; i < 3; i++) { push(a, i) }\nreturn count(a)\n"),
             None
@@ -434,7 +454,10 @@ mod tests {
 
     #[test]
     fn pointer_baking_constructs_are_rejected() {
-        assert_eq!(reason("var f = x -> x + 1\nreturn f(5)\n"), Some("lambdas / closures"));
+        assert_eq!(
+            reason("var f = x -> x + 1\nreturn f(5)\n"),
+            Some("lambdas / closures")
+        );
         assert_eq!(
             reason("function g(x) { return x }\nvar h = g\nreturn h(1)\n"),
             Some("first-class function references")

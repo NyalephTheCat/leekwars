@@ -84,7 +84,12 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
         experimental_imports,
         experimental_overloads,
     };
-    resolve_collecting(&ast, cx.source(), version_from_byte(cx.version_byte()), opts)
+    resolve_collecting(
+        &ast,
+        cx.source(),
+        version_from_byte(cx.version_byte()),
+        opts,
+    )
 }
 
 /// True when the file opts into experimental function overloads via a

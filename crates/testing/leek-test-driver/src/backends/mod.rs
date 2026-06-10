@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use leek_backends::version_from_byte;
 use leek_diagnostics::Severity;
-use leek_hir::pipeline::HirArtifact;
 use leek_hir::HirFile;
+use leek_hir::pipeline::HirArtifact;
 use leek_manifest::{BackendKind, BackendTable};
 use leek_pipeline::Input;
 use leek_recipes::{RecipeParams, Target};
@@ -62,9 +62,7 @@ pub fn detect_backends(table: Option<&BackendTable>) -> Vec<SuiteBackend> {
         let Some(sb) = SuiteBackend::from_manifest_kind(kind) else {
             continue;
         };
-        let enabled = table
-            .and_then(|t| t.get(kind))
-            .is_none_or(|s| s.enable);
+        let enabled = table.and_then(|t| t.get(kind)).is_none_or(|s| s.enable);
         if enabled && !out.contains(&sb) {
             out.push(sb);
         }
@@ -489,9 +487,16 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 /// fabricate a verdict.
 fn eval_java_math(s: &str) -> Option<f64> {
     let tokens = lex_java_math(s)?;
-    let mut p = MathParser { tokens: &tokens, pos: 0 };
+    let mut p = MathParser {
+        tokens: &tokens,
+        pos: 0,
+    };
     let v = p.expr()?;
-    if p.pos == p.tokens.len() { Some(v) } else { None }
+    if p.pos == p.tokens.len() {
+        Some(v)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -739,7 +744,8 @@ pub fn native_skip_histogram(manifest: &Manifest) -> Vec<NativeSkipRow> {
         let Some(hir) = ctx.hir.as_deref() else {
             continue;
         };
-        let opts = leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
+        let opts =
+            leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
         if let Err(e) = leek_backend_native::run(hir, &opts) {
             let reason = normalize_native_skip(&e);
             let entry = hist.entry(reason).or_insert((0, case.code.clone()));
@@ -788,7 +794,8 @@ pub fn native_skips_matching(manifest: &Manifest, filter: &str) -> Vec<NativeSki
         let Some(hir) = ctx.hir.as_deref() else {
             continue;
         };
-        let opts = leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
+        let opts =
+            leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
         if let Err(e) = leek_backend_native::run(hir, &opts) {
             let reason = normalize_native_skip(&e);
             if reason.to_lowercase().contains(&needle) {
@@ -928,10 +935,7 @@ fn run_pipeline(case: &TestCase, ctx: &CaseContext, _source: SourceId) -> CaseOu
     if !plan.kinds.iter().any(|k| {
         matches!(
             k,
-            CheckKind::Parse
-                | CheckKind::Resolve
-                | CheckKind::Typecheck
-                | CheckKind::Hir
+            CheckKind::Parse | CheckKind::Resolve | CheckKind::Typecheck | CheckKind::Hir
         )
     }) {
         return CaseOutcome::SkippedUnknown;
@@ -1088,7 +1092,10 @@ fn first_error_message(case: &TestCase, source: SourceId) -> String {
         .diagnostics()
         .iter()
         .find(|d| d.severity == Severity::Error)
-        .map_or_else(|| "<no error message>".into(), |d| format!("[{}] {}", d.code.0, d.message))
+        .map_or_else(
+            || "<no error message>".into(),
+            |d| format!("[{}] {}", d.code.0, d.message),
+        )
 }
 
 fn actual_display(case: &TestCase, source: SourceId, backend: SuiteBackend) -> String {
@@ -1111,8 +1118,8 @@ fn actual_display(case: &TestCase, source: SourceId, backend: SuiteBackend) -> S
             }
         }
         SuiteBackend::Native => {
-            let opts = leek_backend_native::NativeOptions::release()
-                .with_lang(case.version, case.strict);
+            let opts =
+                leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
             match leek_backend_native::run(hir, &opts) {
                 Ok(v) => v.to_string(),
                 Err(e) => format!("{e}"),

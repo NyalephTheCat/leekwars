@@ -11,7 +11,7 @@ use crate::cli::Fmt;
 use leek_backends::version_from_byte;
 use leek_project::Project;
 
-pub fn run(args: Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
+pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
     for w in &project.warnings {
         eprintln!("warning: {w}");

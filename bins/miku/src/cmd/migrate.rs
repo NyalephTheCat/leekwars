@@ -31,7 +31,7 @@ use leek_syntax::{Version, parse_pragmas};
 use crate::cli::{Migrate, MigrateVersion};
 use leek_project::Project;
 
-pub fn run(args: Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
+pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
     for w in &project.warnings {
         eprintln!("warning: {w}");
@@ -225,7 +225,8 @@ fn version_label(v: Version) -> &'static str {
 }
 
 fn display_relative(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root).map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
+    p.strip_prefix(root)
+        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 // Suppress an unused-import warning if `MigrateVersion` is not

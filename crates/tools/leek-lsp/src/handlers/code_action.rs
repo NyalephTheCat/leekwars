@@ -63,7 +63,8 @@ pub fn handle(
                 continue;
             }
             for sug in &diag.suggestions {
-                let Some(lsp_edits) = validate_edits(&sug.edits, source_len, source_id, doc.pos_map())
+                let Some(lsp_edits) =
+                    validate_edits(&sug.edits, source_len, source_id, doc.pos_map())
                 else {
                     continue;
                 };
@@ -175,7 +176,9 @@ fn single_file_edit(uri: &lsp::Url, edits: Vec<lsp::TextEdit>) -> lsp::Workspace
 fn kind_requested(only: Option<&Vec<lsp::CodeActionKind>>, kind: &lsp::CodeActionKind) -> bool {
     match only {
         None => true,
-        Some(kinds) => kinds.iter().any(|req| kind_matches(req.as_str(), kind.as_str())),
+        Some(kinds) => kinds
+            .iter()
+            .any(|req| kind_matches(req.as_str(), kind.as_str())),
     }
 }
 
@@ -198,7 +201,7 @@ fn ranges_overlap(a_start: u32, a_end: u32, b_start: u32, b_end: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_diagnostics::{codes, Suggestion};
+    use leek_diagnostics::{Suggestion, codes};
 
     fn edit(start: u32, end: u32, repl: &str) -> DiagEdit {
         DiagEdit {
@@ -281,6 +284,9 @@ mod tests {
     fn source_only_excludes_quickfix() {
         let only = vec![lsp::CodeActionKind::SOURCE_FIX_ALL];
         assert!(!kind_requested(Some(&only), &lsp::CodeActionKind::QUICKFIX));
-        assert!(kind_requested(Some(&only), &lsp::CodeActionKind::SOURCE_FIX_ALL));
+        assert!(kind_requested(
+            Some(&only),
+            &lsp::CodeActionKind::SOURCE_FIX_ALL
+        ));
     }
 }

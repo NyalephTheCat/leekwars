@@ -70,10 +70,9 @@ impl Lowerer {
             .syntax()
             .children()
             .any(|c| c.kind() == SyntaxKind::Block);
-        let allowed = leek_syntax::doc::directives_enabled(
-            &self.source_text,
-            self.flags.function_signatures,
-        ) && !has_body;
+        let allowed =
+            leek_syntax::doc::directives_enabled(&self.source_text, self.flags.function_signatures)
+                && !has_body;
         if !allowed {
             self.diagnostics.push(leek_diagnostics::Diagnostic::warning(
                 leek_diagnostics::codes::BACKEND_DIRECTIVE_NOT_ALLOWED,

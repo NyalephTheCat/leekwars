@@ -1,6 +1,10 @@
 //! Local-type inference (moved verbatim from translate/mod.rs).
 
-use super::{MirFunction, Lang, FnRets, MirProgram, HashMap, LocalId, ValTy, NativeError, new_class_locals, aliased_class_locals, classref_locals, pinned_valty, scalar_valty, HashSet, Statement, Rvalue, Place, BinOp, is_const_zero, rvalue_ty, call_result_ty, join, Type};
+use super::{
+    BinOp, FnRets, HashMap, HashSet, Lang, LocalId, MirFunction, MirProgram, NativeError, Place,
+    Rvalue, Statement, Type, ValTy, aliased_class_locals, call_result_ty, classref_locals,
+    is_const_zero, join, new_class_locals, pinned_valty, rvalue_ty, scalar_valty,
+};
 
 /// Static value-kind per local.
 ///
@@ -101,7 +105,11 @@ pub(super) fn infer_local_tys(
         for id in &forced_ref {
             tys.insert(*id, ValTy::Ref);
         }
-        let frozen: HashSet<LocalId> = pinned.keys().copied().chain(forced_ref.iter().copied()).collect();
+        let frozen: HashSet<LocalId> = pinned
+            .keys()
+            .copied()
+            .chain(forced_ref.iter().copied())
+            .collect();
         loop {
             let mut changed = false;
             for block in &f.blocks {
@@ -118,7 +126,12 @@ pub(super) fn infer_local_tys(
                         Statement::Call {
                             dest: Some(Place::Local(id)),
                             call,
-                        } => (*id, call_result_ty(call, &tys, rets, program, &f.locals, &nc, &alias, &crefs, lang)),
+                        } => (
+                            *id,
+                            call_result_ty(
+                                call, &tys, rets, program, &f.locals, &nc, &alias, &crefs, lang,
+                            ),
+                        ),
                         _ => continue,
                     };
                     if frozen.contains(&id) {
@@ -157,7 +170,9 @@ pub(super) fn infer_local_tys(
                         Statement::Call {
                             dest: Some(Place::Local(aid)),
                             call,
-                        } if *aid == id => call_result_ty(call, &tys, rets, program, &f.locals, &nc, &alias, &crefs, lang),
+                        } if *aid == id => call_result_ty(
+                            call, &tys, rets, program, &f.locals, &nc, &alias, &crefs, lang,
+                        ),
                         _ => continue,
                     };
                     match t {

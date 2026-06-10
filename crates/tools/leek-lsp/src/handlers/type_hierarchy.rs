@@ -7,8 +7,8 @@
 //! cursor to a class (falling back to a cross-file lookup); `supertypes`
 //! reports its parent; `subtypes` finds every class whose parent is it.
 
-use leek_hir::pipeline::HirArtifact;
 use leek_hir::Def;
+use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::salsa::SourceFile;
 use leek_resolver::SymbolKind;
 use leek_span::{LineTable, Span};
@@ -32,7 +32,14 @@ pub fn prepare(
     if let Some(sym) = crate::handlers::resolve_symbol(table, offset)
         && sym.kind == SymbolKind::Class
     {
-        return Some(vec![item_for(ws, uri, doc.source_file, &sym.name, sym.def_span, sym.full_span)]);
+        return Some(vec![item_for(
+            ws,
+            uri,
+            doc.source_file,
+            &sym.name,
+            sym.def_span,
+            sym.full_span,
+        )]);
     }
 
     // 2. Cross-file: the cursor is on a use of a class declared in an
@@ -102,7 +109,8 @@ struct ClassInfo {
 fn program_classes(ws: &Workspace, home_uri: &lsp::Url) -> Vec<ClassInfo> {
     let mut out: Vec<ClassInfo> = Vec::new();
     for file in crate::handlers::program_scope::program_scope(ws, home_uri) {
-        let Some(run) = crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+        let Some(run) =
+            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
         else {
             continue;
         };

@@ -3,15 +3,11 @@
 use leek_diagnostics::{Diagnostic as LeekDiagnostic, Severity};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{span_to_range, PosMap};
+use crate::util::position::{PosMap, span_to_range};
 
 /// Map a Leek diagnostic to the LSP wire shape, including catalog
 /// metadata and secondary labels as `relatedInformation`.
-pub fn to_lsp(
-    diag: &LeekDiagnostic,
-    pm: PosMap<'_>,
-    uri: Option<&lsp::Url>,
-) -> lsp::Diagnostic {
+pub fn to_lsp(diag: &LeekDiagnostic, pm: PosMap<'_>, uri: Option<&lsp::Url>) -> lsp::Diagnostic {
     let code_description = diag
         .code
         .meta()

@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::cli::Profile;
 

@@ -1,6 +1,6 @@
 //! Run the upstream JUnit suite on every linked backend (`upstream_cases.toml`).
 
-use leek_test_corpus::{baseline_path, embedded_manifest, run_upstream_suite, MultiReport};
+use leek_test_corpus::{MultiReport, baseline_path, embedded_manifest, run_upstream_suite};
 
 #[test]
 fn manifest_has_cases() {
@@ -55,8 +55,6 @@ fn no_regressions_against_baseline() {
 
     let improvements: usize = diff.improvements.values().map(std::vec::Vec::len).sum();
     if improvements > 0 {
-        eprintln!(
-            "\n{improvements} improvements vs baseline (update with --save-baseline)",
-        );
+        eprintln!("\n{improvements} improvements vs baseline (update with --save-baseline)",);
     }
 }

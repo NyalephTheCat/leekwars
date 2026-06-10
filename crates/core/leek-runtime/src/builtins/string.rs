@@ -26,7 +26,9 @@ pub(crate) fn dispatch_string(name: &str, args: &[Value]) -> Option<Value> {
             if let (Value::String(s), Some(i)) = (&args[0], args[1].as_int()) {
                 let chars: Vec<char> = s.chars().collect();
                 if i >= 0 && (crate::clamp_index(i)) < chars.len() {
-                    return Some(Value::String(Rc::new(chars[crate::clamp_index(i)].to_string())));
+                    return Some(Value::String(Rc::new(
+                        chars[crate::clamp_index(i)].to_string(),
+                    )));
                 }
             }
             Value::String(Rc::new(String::new()))
@@ -49,8 +51,9 @@ pub(crate) fn dispatch_string(name: &str, args: &[Value]) -> Option<Value> {
                     if (0xD800..=0xDBFF).contains(&hi) && idx + 1 < units.len() {
                         let lo = units[idx + 1];
                         if (0xDC00..=0xDFFF).contains(&lo) {
-                            let cp =
-                                0x10000 + (((u32::from(hi)) - 0xD800) << 10) + ((u32::from(lo)) - 0xDC00);
+                            let cp = 0x10000
+                                + (((u32::from(hi)) - 0xD800) << 10)
+                                + ((u32::from(lo)) - 0xDC00);
                             return Some(Value::Int(i64::from(cp)));
                         }
                     }

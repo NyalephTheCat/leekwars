@@ -402,9 +402,8 @@ fn parse_call(scanner: &mut Scanner) -> Result<(String, Expectation), String> {
                 .parse::<u64>()
                 .ok()
                 .map(|count| Expectation::Ops { count }),
-            "equalsOps" => parse_equals_ops_args(&inner).map(|(value, count)| {
-                Expectation::EqualsOps { value, count }
-            }),
+            "equalsOps" => parse_equals_ops_args(&inner)
+                .map(|(value, count)| Expectation::EqualsOps { value, count }),
             _ if CHAIN_SETTERS.contains(&name.as_str()) => None, // setter — keep walking
             _ => Some(Expectation::Unknown { detail: name }),
         };
@@ -495,32 +494,35 @@ fn evaluate_java_literal(s: &str) -> Option<String> {
     let s = s.trim();
     // String.valueOf(<inner>)
     if let Some(rest) = s.strip_prefix("String.valueOf(")
-        && let Some(inner) = rest.strip_suffix(')') {
-            return evaluate_java_literal(inner.trim()).or_else(|| Some(inner.trim().to_string()));
-        }
+        && let Some(inner) = rest.strip_suffix(')')
+    {
+        return evaluate_java_literal(inner.trim()).or_else(|| Some(inner.trim().to_string()));
+    }
     // LeekConstants.TYPE_FOO.getIntValue() — fixed integer tags.
     if let Some(rest) = s.strip_prefix("LeekConstants.")
-        && let Some(name) = rest.strip_suffix(".getIntValue()") {
-            return match name {
-                "TYPE_NULL" => Some("0".into()),
-                "TYPE_NUMBER" => Some("1".into()),
-                "TYPE_BOOLEAN" => Some("2".into()),
-                "TYPE_STRING" => Some("3".into()),
-                "TYPE_ARRAY" => Some("4".into()),
-                "TYPE_FUNCTION" => Some("5".into()),
-                "TYPE_CLASS" => Some("6".into()),
-                "TYPE_OBJECT" => Some("7".into()),
-                "TYPE_MAP" => Some("8".into()),
-                "TYPE_SET" => Some("9".into()),
-                "TYPE_INTERVAL" => Some("10".into()),
-                _ => None,
-            };
-        }
+        && let Some(name) = rest.strip_suffix(".getIntValue()")
+    {
+        return match name {
+            "TYPE_NULL" => Some("0".into()),
+            "TYPE_NUMBER" => Some("1".into()),
+            "TYPE_BOOLEAN" => Some("2".into()),
+            "TYPE_STRING" => Some("3".into()),
+            "TYPE_ARRAY" => Some("4".into()),
+            "TYPE_FUNCTION" => Some("5".into()),
+            "TYPE_CLASS" => Some("6".into()),
+            "TYPE_OBJECT" => Some("7".into()),
+            "TYPE_MAP" => Some("8".into()),
+            "TYPE_SET" => Some("9".into()),
+            "TYPE_INTERVAL" => Some("10".into()),
+            _ => None,
+        };
+    }
     // Hex / decimal integer literal — also covers `0xFF00FF`.
     if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
-        && let Ok(n) = i64::from_str_radix(rest, 16) {
-            return Some(n.to_string());
-        }
+        && let Ok(n) = i64::from_str_radix(rest, 16)
+    {
+        return Some(n.to_string());
+    }
     if let Ok(n) = s.parse::<i64>() {
         return Some(n.to_string());
     }

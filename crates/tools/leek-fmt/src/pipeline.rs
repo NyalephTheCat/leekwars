@@ -67,10 +67,11 @@ fn run_format(cx: &Context<'_>, opts: &FormatOptions) -> String {
     // settings actually take effect.
     #[cfg(feature = "salsa")]
     if opts == &FormatOptions::default()
-        && let Some((db, file)) = cx.salsa() {
-            let out = format_query(db, file);
-            return out.text.as_ref().clone();
-        }
+        && let Some((db, file)) = cx.salsa()
+    {
+        let out = format_query(db, file);
+        return out.text.as_ref().clone();
+    }
 
     // Direct path: prefer the green tree the Parse step already
     // produced; otherwise re-run `parse()` from raw text.

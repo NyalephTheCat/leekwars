@@ -187,11 +187,22 @@ mod tests {
     #[test]
     fn round_trip_on_safe_ascii_subset() {
         // On the ASCII, quote-free subset the two directions are inverses.
-        for s in ["", "hello", "a\nb\tc", "tab\there", "back\\slash", "plain text 123"] {
+        for s in [
+            "",
+            "hello",
+            "a\nb\tc",
+            "tab\there",
+            "back\\slash",
+            "plain text 123",
+        ] {
             let escaped = escape_java(s, EscapeMode::V2Plus);
             // Re-wrap as a literal and unescape.
             let lit = format!("\"{escaped}\"");
-            assert_eq!(unescape(&lit, EscapeMode::V2Plus), *s, "round-trip failed for {s:?}");
+            assert_eq!(
+                unescape(&lit, EscapeMode::V2Plus),
+                *s,
+                "round-trip failed for {s:?}"
+            );
         }
     }
 

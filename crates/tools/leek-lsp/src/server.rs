@@ -117,7 +117,14 @@ impl LanguageServer for LeekLanguageServer {
             }
             {
                 let mut log: Vec<(bool, String)> = Vec::new();
-                log.push((false, format!("leek-lsp: loading {} librar{} {specs:?}", specs.len(), if specs.len() == 1 { "y" } else { "ies" })));
+                log.push((
+                    false,
+                    format!(
+                        "leek-lsp: loading {} librar{} {specs:?}",
+                        specs.len(),
+                        if specs.len() == 1 { "y" } else { "ies" }
+                    ),
+                ));
                 let mut total_fns = 0usize;
                 let mut total_consts = 0usize;
                 let mut any_err = false;
@@ -283,9 +290,7 @@ impl LanguageServer for LeekLanguageServer {
                             // `Delta { delta: true }` advertises both
                             // `…/full` and `…/full/delta`; `range: true`
                             // adds `…/semanticTokens/range`.
-                            full: Some(lsp::SemanticTokensFullOptions::Delta {
-                                delta: Some(true),
-                            }),
+                            full: Some(lsp::SemanticTokensFullOptions::Delta { delta: Some(true) }),
                             range: Some(true),
                             ..Default::default()
                         },
@@ -348,14 +353,12 @@ impl LanguageServer for LeekLanguageServer {
         let registration = lsp::Registration {
             id: "leek-watch-files".into(),
             method: "workspace/didChangeWatchedFiles".into(),
-            register_options: serde_json::to_value(
-                lsp::DidChangeWatchedFilesRegistrationOptions {
-                    watchers: vec![lsp::FileSystemWatcher {
-                        glob_pattern: lsp::GlobPattern::String("**/*.leek".into()),
-                        kind: None,
-                    }],
-                },
-            )
+            register_options: serde_json::to_value(lsp::DidChangeWatchedFilesRegistrationOptions {
+                watchers: vec![lsp::FileSystemWatcher {
+                    glob_pattern: lsp::GlobPattern::String("**/*.leek".into()),
+                    kind: None,
+                }],
+            })
             .ok(),
         };
         if let Err(e) = self.client.register_capability(vec![registration]).await {
@@ -426,8 +429,10 @@ impl LanguageServer for LeekLanguageServer {
             let Some(doc) = ws.doc(&uri) else {
                 return;
             };
-            let new_text =
-                crate::util::edits::apply_content_changes(doc.text.to_string(), &params.content_changes);
+            let new_text = crate::util::edits::apply_content_changes(
+                doc.text.to_string(),
+                &params.content_changes,
+            );
             ws.update(&uri, new_text);
             ws.set_doc_version(&uri, version);
         }
@@ -817,7 +822,9 @@ impl LanguageServer for LeekLanguageServer {
         let uri = params.text_document.uri;
         let range = params.range;
         let ws = self.state.lock().await;
-        Ok(guard("inlay_hint", || inlay_hints::handle(&ws, &uri, range)))
+        Ok(guard("inlay_hint", || {
+            inlay_hints::handle(&ws, &uri, range)
+        }))
     }
 
     async fn completion(
@@ -868,28 +875,23 @@ impl LanguageServer for LeekLanguageServer {
         }))
     }
 
-    async fn completion_resolve(
-        &self,
-        params: lsp::CompletionItem,
-    ) -> Result<lsp::CompletionItem> {
+    async fn completion_resolve(&self, params: lsp::CompletionItem) -> Result<lsp::CompletionItem> {
         let ws = self.state.lock().await;
         // `guard` needs a `Default`; `CompletionItem` isn't, so on a
         // panic fall back to returning the item unchanged.
         let item = params.clone();
-        Ok(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                completion::resolve(&ws, params)
-            }))
-            .unwrap_or(item),
-        )
+        Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            completion::resolve(&ws, params)
+        }))
+        .unwrap_or(item))
     }
 
     async fn inlay_hint_resolve(&self, params: lsp::InlayHint) -> Result<lsp::InlayHint> {
         let fallback = params.clone();
-        Ok(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inlay_hints::resolve(params)))
-                .unwrap_or(fallback),
-        )
+        Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inlay_hints::resolve(params)
+        }))
+        .unwrap_or(fallback))
     }
 
     async fn inline_value(
@@ -991,20 +993,19 @@ impl LeekLanguageServer {
             // `Linted` is a superset of `TypeChecked` (it runs through type
             // checking + HIR + the lint pass), so the editor's problems panel
             // shows lint findings alongside parse/type errors.
-            let lsp_diags: Vec<_> = if let Some(run) =
-                crate::pipeline::run_on_file(&ws, source_file, Target::Linted)
-            {
-                let pm = crate::util::position::PosMap::new(&line_table, &text);
-                run.diagnostics()
-                    .iter()
-                    .map(|d| to_lsp(d, pm, Some(&uri)))
-                    .collect()
-            } else {
-                if crate::trace_enabled() {
-                    eprintln!("leek-lsp: recipe planning failed for {uri}; no diagnostics");
-                }
-                Vec::new()
-            };
+            let lsp_diags: Vec<_> =
+                if let Some(run) = crate::pipeline::run_on_file(&ws, source_file, Target::Linted) {
+                    let pm = crate::util::position::PosMap::new(&line_table, &text);
+                    run.diagnostics()
+                        .iter()
+                        .map(|d| to_lsp(d, pm, Some(&uri)))
+                        .collect()
+                } else {
+                    if crate::trace_enabled() {
+                        eprintln!("leek-lsp: recipe planning failed for {uri}; no diagnostics");
+                    }
+                    Vec::new()
+                };
             drop(ws);
             (lsp_diags, Some(doc_version))
         };

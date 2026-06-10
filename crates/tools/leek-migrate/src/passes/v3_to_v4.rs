@@ -120,12 +120,13 @@ impl MigrationPass for V3ToV4 {
                 let new_third = format!("({third_text}) + 1");
                 let _ = edits.replace_node(third.syntax(), new_third);
             } else if let Some((_, new_name)) = RENAMES.iter().find(|(old, _)| *old == name)
-                && edits.replace_token(&ident, (*new_name).to_string()).is_ok() {
-                    consumed_ident_ranges.insert((
-                        u32::from(ident.text_range().start()),
-                        u32::from(ident.text_range().end()),
-                    ));
-                }
+                && edits.replace_token(&ident, (*new_name).to_string()).is_ok()
+            {
+                consumed_ident_ranges.insert((
+                    u32::from(ident.text_range().start()),
+                    u32::from(ident.text_range().end()),
+                ));
+            }
         }
 
         // Pass B — first-class references that aren't directly the
@@ -213,7 +214,6 @@ fn is_field_name_position(node: &SyntaxNode) -> bool {
     }
     false
 }
-
 
 fn deprecated_diag(old: &str, new: &str, span: Span, note: &str) -> Diagnostic {
     Diagnostic::warning(

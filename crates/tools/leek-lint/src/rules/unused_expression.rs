@@ -20,8 +20,8 @@
 use leek_diagnostics::{Diagnostic, codes};
 use leek_hir::{Expr, ExprKind, HirFile, Stmt};
 
-use super::structural::has_side_effect;
 use super::for_each_block;
+use super::structural::has_side_effect;
 use crate::LintRule;
 
 pub struct UnusedExpression;

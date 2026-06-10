@@ -124,11 +124,22 @@ mod tests {
         let lt = LineTable::new(text);
         let pm = PosMap::new(&lt, text);
         // `var x = 1`: the `1` is at byte/UTF-16 column 8 (ASCII → identity).
-        let off = pm.to_offset(lsp::Position { line: 0, character: 8 }).unwrap();
+        let off = pm
+            .to_offset(lsp::Position {
+                line: 0,
+                character: 8,
+            })
+            .unwrap();
         assert_eq!(off, 8);
-        assert_eq!(&text[off as usize..off as usize + 1], "1");
+        assert_eq!(&text[(off as usize)..=(off as usize)], "1");
         // Reverse direction is identity too.
-        assert_eq!(pm.to_position(8), lsp::Position { line: 0, character: 8 });
+        assert_eq!(
+            pm.to_position(8),
+            lsp::Position {
+                line: 0,
+                character: 8
+            }
+        );
     }
 
     #[test]
@@ -139,21 +150,36 @@ mod tests {
         let pm = PosMap::new(&lt, text);
         // The closing quote on line 0: count UTF-16 units up to it.
         // `var s = "` = 9 units, then `é`=1, `😀`=2 → closing quote at unit 12.
-        let off = pm.to_offset(lsp::Position { line: 0, character: 12 }).unwrap();
-        assert_eq!(text.as_bytes()[off as usize], b'"', "should land on closing quote");
+        let off = pm
+            .to_offset(lsp::Position {
+                line: 0,
+                character: 12,
+            })
+            .unwrap();
+        assert_eq!(
+            text.as_bytes()[off as usize],
+            b'"',
+            "should land on closing quote"
+        );
         // And the reverse maps that byte back to UTF-16 column 12.
         let pos = pm.to_position(off);
-        assert_eq!(pos, lsp::Position { line: 0, character: 12 });
+        assert_eq!(
+            pos,
+            lsp::Position {
+                line: 0,
+                character: 12
+            }
+        );
     }
 
     #[test]
     fn round_trips_through_non_ascii() {
         let text = "// héllo 😀 wörld\nx";
         // The `x` on line 1 round-trips.
-        let x_byte = text.find('x').unwrap() as u32;
+        let x_byte = u32::try_from(text.find('x').unwrap()).unwrap();
         assert_eq!(round_trip(text, x_byte), x_byte);
         // A byte on the non-ASCII line round-trips too (the `w`).
-        let w_byte = text.find('w').unwrap() as u32;
+        let w_byte = u32::try_from(text.find('w').unwrap()).unwrap();
         assert_eq!(round_trip(text, w_byte), w_byte);
     }
 }

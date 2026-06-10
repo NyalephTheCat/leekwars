@@ -105,6 +105,9 @@ fn program(defs: &str, entry: &str, n: u64) -> String {
 /// Assert that `actual / a_at_small` matches `expected / e_at_small`
 /// within a relative tolerance. Used to compare the predicted vs
 /// observed scaling without pinning absolute constants.
+// Op counts in these tests are far below 2^52, so the `u64 → f64` casts in
+// the ratio math are exact.
+#[allow(clippy::cast_precision_loss)]
 fn assert_scaling_close(
     actual_big: u64,
     actual_small: u64,
@@ -127,6 +130,7 @@ fn assert_scaling_close(
 /// Confirm the empirical exponent of growth matches the big-O.
 /// `log_ratio = log(actual_big / actual_small) / log(n_big / n_small)`
 /// should land near 0 for `O(1)`, 1 for `O(n)`, 2 for `O(n²)`.
+#[allow(clippy::cast_precision_loss)] // op counts ≪ 2^52 — casts are exact
 fn empirical_exponent(actual_big: u64, actual_small: u64, n_big: u64, n_small: u64) -> f64 {
     let ratio = (actual_big as f64 / actual_small.max(1) as f64).ln();
     let n_ratio = (n_big as f64 / n_small.max(1) as f64).ln();

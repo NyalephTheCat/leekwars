@@ -253,8 +253,7 @@ pub(crate) fn dispatch_array(
                                 }
                             }
                         }
-                        found
-                            .map_or(Value::Int(-1), |i| Value::Int(crate::len_as_int(i)))
+                        found.map_or(Value::Int(-1), |i| Value::Int(crate::len_as_int(i)))
                     }
                 } else {
                     Value::Null
@@ -834,7 +833,12 @@ pub(crate) fn higher_order_array(
 /// v1-v3 passed `(index, value)` while v4+ flipped to
 /// `(value, index)`. We dispatch on the runtime version so each
 /// corpus variant lines up with its upstream expectation.
-pub(crate) fn ho_args(host: &dyn BuiltinHost, fun: &Value, index: i64, value: &Value) -> Vec<Value> {
+pub(crate) fn ho_args(
+    host: &dyn BuiltinHost,
+    fun: &Value,
+    index: i64,
+    value: &Value,
+) -> Vec<Value> {
     match host.callback_arity(fun) {
         Some(0) => vec![],
         None | Some(1) => vec![value.clone()],
@@ -893,10 +897,11 @@ pub(crate) fn iter_array(
         // mutations from `function(@v) { v = ... }` land in
         // `a[i]`.
         if let Some(value_arg_idx) = ho_value_arg_index(host, fun)
-            && let Some(Some(cell)) = mapping.get(value_arg_idx) {
-                let new_v = cell.borrow().clone();
-                a.borrow_mut()[i] = new_v;
-            }
+            && let Some(Some(cell)) = mapping.get(value_arg_idx)
+        {
+            let new_v = cell.borrow().clone();
+            a.borrow_mut()[i] = new_v;
+        }
     }
     Ok(arr.clone())
 }
@@ -1037,7 +1042,9 @@ pub(crate) fn split_string(s: &Value, sep: &Value, limit: Option<&Value>) -> Val
     let (Value::String(s), Value::String(sep)) = (s, sep) else {
         return Value::Null;
     };
-    let limit = limit.and_then(super::super::value::types::Value::as_int).unwrap_or(-1);
+    let limit = limit
+        .and_then(super::super::value::types::Value::as_int)
+        .unwrap_or(-1);
     let parts: Vec<Value> = if sep.is_empty() {
         s.chars()
             .map(|c| Value::String(Rc::new(c.to_string())))
@@ -1150,7 +1157,9 @@ pub(crate) fn sort_array(arr: &Value, mode: Option<&Value>, version: u8) -> Valu
     let Value::Array(a) = arr else {
         return Value::Null;
     };
-    let mode_int = mode.and_then(super::super::value::types::Value::as_int).unwrap_or(0);
+    let mode_int = mode
+        .and_then(super::super::value::types::Value::as_int)
+        .unwrap_or(0);
     if mode_int == 2 {
         // SORT_RANDOM — Fisher-Yates with a deterministic seed
         // derived from the length, since the corpus doesn't

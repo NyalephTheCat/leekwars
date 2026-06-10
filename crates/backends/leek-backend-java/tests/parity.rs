@@ -23,6 +23,7 @@
 //! test infrastructure is the substrate that closes that gap one
 //! lowering at a time.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
@@ -75,8 +76,8 @@ fn unified_diff_labeled(
 ) -> String {
     let diff = TextDiff::from_lines(expected, actual);
     let mut out = String::new();
-    out.push_str(&format!("--- {expected_label}\n"));
-    out.push_str(&format!("+++ {actual_label}\n"));
+    let _ = writeln!(out, "--- {expected_label}");
+    let _ = writeln!(out, "+++ {actual_label}");
     for change in diff.iter_all_changes() {
         let tag = match change.tag() {
             ChangeTag::Delete => '-',
@@ -138,7 +139,7 @@ fn parity_with_java_reference() {
             .lines()
             .filter(|l| l.starts_with('-') && !l.starts_with("---"))
             .count();
-        summary.push_str(&format!("{stem}: +{added} -{removed} lines vs golden\n"));
+        let _ = writeln!(summary, "{stem}: +{added} -{removed} lines vs golden");
     }
     fs::write(snap_dir.join("SUMMARY.txt"), &summary).expect("write summary");
 }
@@ -273,8 +274,8 @@ fn ops_cost_matches_corpus() {
             "cases.tsv:{}: expected `value\\tjvm_ops\\tstatic_ops\\tsnippet`, got: {line}",
             lineno + 1
         );
-        let _value = cols[0]; // sanity-only on the Rust side
-        let _jvm_ops = cols[1]; // checked by the Java side
+        // cols[0] (value) is sanity-only on the Rust side; cols[1] (jvm_ops)
+        // is checked by the Java side.
         let expected_ops: u32 = cols[2]
             .trim()
             .parse()
@@ -434,26 +435,28 @@ fn corpus_value_matches_snapshot() {
                 } else {
                     value_mismatch += 1;
                     if mismatches.lines().count() < 50 {
-                        mismatches.push_str(&format!(
-                            "snapshot:{} v{}: code={:?}\n  expected={:?}\n  got={:?}\n",
+                        let _ = writeln!(
+                            mismatches,
+                            "snapshot:{} v{}: code={:?}\n  expected={:?}\n  got={:?}",
                             lineno + 1,
                             version_byte,
                             code,
                             expected_value,
                             value
-                        ));
+                        );
                     }
                 }
             }
             InterpOutcome::Err(msg) => {
                 interp_err += 1;
                 if mismatches.lines().count() < 50 {
-                    mismatches.push_str(&format!(
-                        "snapshot:{} v{}: code={:?} interp err: {msg}\n",
+                    let _ = writeln!(
+                        mismatches,
+                        "snapshot:{} v{}: code={:?} interp err: {msg}",
                         lineno + 1,
                         version_byte,
                         code,
-                    ));
+                    );
                 }
             }
         }
@@ -516,9 +519,8 @@ fn run_via_interp(code: &str, version_byte: u8) -> InterpOutcome {
             let source = SourceId::new(1).unwrap();
             let parsed = parse(&code, source, version);
             let root = SyntaxNode::new_root(parsed.green);
-            let sf = match leek_parser::ast::SourceFile::cast(root) {
-                Some(s) => s,
-                None => return Err("parse failed".to_string()),
+            let Some(sf) = leek_parser::ast::SourceFile::cast(root) else {
+                return Err("parse failed".to_string());
             };
             let (hir, _diags) = leek_hir::lower_file_versioned(&sf, source, version_byte);
             leek_runtime::DISPLAY_VERSION.with(|c| c.set(version_byte));
@@ -636,9 +638,8 @@ fn rust_emit_matches_snapshot_on_jvm() {
         // Emit Java for this snippet via the Rust backend. Skip the
         // case (rather than failing) when emission itself blows up —
         // those are reported by the static parity tests, not here.
-        let java = match emit_via_rust(&code, version_byte, lineno) {
-            Some(j) => j,
-            None => continue,
+        let Some(java) = emit_via_rust(&code, version_byte, lineno) else {
+            continue;
         };
         cases.push(JvmCase {
             id: format!("L{}", lineno + 1),
@@ -668,9 +669,7 @@ fn rust_emit_matches_snapshot_on_jvm() {
     let mut ops_diffs: Vec<(String, u8, String, i64, u64, u64)> = Vec::new();
 
     for case in &cases {
-        let res = if let Some(r) = results.get(&case.id) {
-            r
-        } else {
+        let Some(res) = results.get(&case.id) else {
             jvm_err += 1;
             continue;
         };
@@ -678,26 +677,28 @@ fn rust_emit_matches_snapshot_on_jvm() {
             jvm_err += 1;
             // Cap lifted: with strict-mode rows filtered out, the
             // remaining errors all warrant inspection.
-            mismatches.push_str(&format!(
-                "{}: v{} code={:?}\n  jvm err: {}\n",
+            let _ = writeln!(
+                mismatches,
+                "{}: v{} code={:?}\n  jvm err: {}",
                 case.id, case.version, case.code, res.error
-            ));
+            );
             continue;
         }
         if res.value == case.expected_value {
             value_ok += 1;
         } else {
             value_mismatch += 1;
-            mismatches.push_str(&format!(
-                "{}: v{} code={:?}\n  expected={:?}\n  got     ={:?}\n",
+            let _ = writeln!(
+                mismatches,
+                "{}: v{} code={:?}\n  expected={:?}\n  got     ={:?}",
                 case.id, case.version, case.code, case.expected_value, res.value
-            ));
+            );
         }
         if res.ops == case.expected_ops {
             ops_ok += 1;
         } else {
             ops_mismatch += 1;
-            let delta = res.ops as i64 - case.expected_ops as i64;
+            let delta = i64::try_from(res.ops).unwrap() - i64::try_from(case.expected_ops).unwrap();
             ops_diffs.push((
                 case.id.clone(),
                 case.version,
@@ -714,14 +715,15 @@ fn rust_emit_matches_snapshot_on_jvm() {
         let mut drift_report = String::new();
         ops_diffs.sort_by_key(|(_, _, _, d, _, _)| -d.abs());
         for (id, v, code, delta, exp, got) in &ops_diffs {
-            drift_report.push_str(&format!(
-                "{id}: v{v} delta={delta:+} expected={exp} got={got} code={code:?}\n"
-            ));
+            let _ = writeln!(
+                drift_report,
+                "{id}: v{v} delta={delta:+} expected={exp} got={got} code={code:?}"
+            );
         }
         let _ = fs::write(snapshots_dir().join("OPS_DRIFT.txt"), drift_report);
     }
 
-    let total = cases.len() as u32;
+    let total = u32::try_from(cases.len()).unwrap();
     let report = format!(
         "rust-emit JVM parity: {total} cases\n\
          \u{2713} value: {value_ok}/{total} ({:.1}%)\n\
@@ -871,9 +873,8 @@ fn run_harness(
     let mut results = std::collections::HashMap::new();
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
+        let Ok(line) = line else {
+            break;
         };
         let cols: Vec<&str> = line.splitn(4, '\t').collect();
         if cols.len() != 4 {

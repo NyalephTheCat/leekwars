@@ -71,9 +71,9 @@ fn random_token_soup_doesnt_panic_and_roundtrips() {
     // A small alphabet of lexically-meaningful fragments; random sequences of
     // them stress error recovery without needing a real grammar.
     const FRAGS: &[&str] = &[
-        "var ", "x", "y", "=", "1", "2.5", "+", "-", "*", "(", ")", "{", "}", "[", "]",
-        ";", ",", ".", "function", "return ", "if", "else", "=>", "->", "\"s\"", " ",
-        "\n", "class", ":", "?", "for", "while", "//c\n", "true", "null", "@", "&&",
+        "var ", "x", "y", "=", "1", "2.5", "+", "-", "*", "(", ")", "{", "}", "[", "]", ";", ",",
+        ".", "function", "return ", "if", "else", "=>", "->", "\"s\"", " ", "\n", "class", ":",
+        "?", "for", "while", "//c\n", "true", "null", "@", "&&",
     ];
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15; // fixed seed
     let mut next = || {
@@ -87,7 +87,8 @@ fn random_token_soup_doesnt_panic_and_roundtrips() {
         let len = (next() % 24) as usize;
         let mut s = String::new();
         for _ in 0..len {
-            s.push_str(FRAGS[(next() as usize) % FRAGS.len()]);
+            let idx = usize::try_from(next() % FRAGS.len() as u64).unwrap();
+            s.push_str(FRAGS[idx]);
         }
         roundtrips(&s);
     }

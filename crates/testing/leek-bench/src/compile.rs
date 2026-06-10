@@ -38,7 +38,11 @@ pub fn compile_hir(input: Input) -> Result<(CompiledHir, Run<'static>)> {
 }
 
 /// Convenience: read a `.leek` file and compile to HIR.
-pub fn compile_hir_file(path: &std::path::Path, version_byte: u8, strict: bool) -> Result<CompiledHir> {
+pub fn compile_hir_file(
+    path: &std::path::Path,
+    version_byte: u8,
+    strict: bool,
+) -> Result<CompiledHir> {
     use leek_span::SourceId;
 
     let text =

@@ -84,7 +84,9 @@ impl Checker {
             && let Some(param_tys) = self.user_fn_param_types.get(name).cloned()
         {
             for (i, arg) in arg_exprs.iter().enumerate() {
-                let Some(Type::FunctionWithReturn { ret: expected_ret, .. }) = param_tys.get(i)
+                let Some(Type::FunctionWithReturn {
+                    ret: expected_ret, ..
+                }) = param_tys.get(i)
                 else {
                     continue;
                 };
@@ -126,7 +128,9 @@ impl Checker {
         if !self.opts.strict {
             return result;
         }
-        let Some(name) = callee_name else { return result };
+        let Some(name) = callee_name else {
+            return result;
+        };
         // Pick the entry with the highest `min_version` ≤ current,
         // so v4 sees its tighter signature while v1-v3 see the
         // legacy wider one.

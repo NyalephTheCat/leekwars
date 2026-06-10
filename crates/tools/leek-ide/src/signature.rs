@@ -272,7 +272,10 @@ pub fn typeref_text(node: &SyntaxNode) -> String {
 
 fn class_parent_name(node: &SyntaxNode) -> Option<String> {
     let mut saw_extends = false;
-    for tok in node.children_with_tokens().filter_map(leek_syntax::language::NodeOrToken::into_token) {
+    for tok in node
+        .children_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+    {
         if tok.kind() == SyntaxKind::KwExtends {
             saw_extends = true;
         } else if saw_extends && tok.kind() == SyntaxKind::Ident {

@@ -8,7 +8,6 @@ description = "Fight-scenario format for Leekscript: a mergable, file-composable
 
 [dependencies]
 leek-generator    = { workspace = true }
-leek-game-runtime = { workspace = true }
 leek-hir          = { workspace = true }
 leek-recipes      = { workspace = true }
 leek-pipeline     = { workspace = true }

@@ -143,20 +143,26 @@ mod tests {
 
     #[test]
     fn flags_duplicate_literal_case() {
-        let d = run("function f(x) {\n  switch (x) {\n    case 1: return 1\n    case 1: return 2\n  }\n  return 0\n}\n");
+        let d = run(
+            "function f(x) {\n  switch (x) {\n    case 1: return 1\n    case 1: return 2\n  }\n  return 0\n}\n",
+        );
         assert_eq!(d.len(), 1, "got {d:?}");
         assert_eq!(d[0].labels.len(), 1, "{d:?}");
     }
 
     #[test]
     fn ignores_distinct_cases() {
-        let d = run("function f(x) {\n  switch (x) {\n    case 1: return 1\n    case 2: return 2\n  }\n  return 0\n}\n");
+        let d = run(
+            "function f(x) {\n  switch (x) {\n    case 1: return 1\n    case 2: return 2\n  }\n  return 0\n}\n",
+        );
         assert!(d.is_empty(), "got {d:?}");
     }
 
     #[test]
     fn ignores_default_arm() {
-        let d = run("function f(x) {\n  switch (x) {\n    case 1: return 1\n    default: return 2\n  }\n  return 0\n}\n");
+        let d = run(
+            "function f(x) {\n  switch (x) {\n    case 1: return 1\n    default: return 2\n  }\n  return 0\n}\n",
+        );
         assert!(d.is_empty(), "got {d:?}");
     }
 }

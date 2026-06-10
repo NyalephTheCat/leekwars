@@ -150,6 +150,9 @@ mod tests {
             };
             matches!(&l.body, LambdaBody::Block(b) if matches!(b.stmts.first(), Some(Stmt::Charge(_))))
         });
-        assert!(body_charged, "lambda body block should receive a block-entry charge");
+        assert!(
+            body_charged,
+            "lambda body block should receive a block-entry charge"
+        );
     }
 }

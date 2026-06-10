@@ -63,7 +63,10 @@ fn main() -> ExitCode {
 
     let result = match cmd.as_str() {
         "run" => cmd_run(rest),
-        "failures" => cmd_failures(rest),
+        "failures" => {
+            cmd_failures(rest);
+            Ok(())
+        }
         "unknown" => {
             cmd_unknown();
             Ok(())
@@ -153,18 +156,33 @@ fn print_summary(s: &Summary) {
     let pct = |n: u32| f64::from(n) * 100.0 / f64::from(active);
     println!(" total:    {}", s.total);
     if s.skipped_disabled > 0 {
-        println!(" disabled: {:>5} (excluded from pass/fail/skip rates)", s.skipped_disabled);
+        println!(
+            " disabled: {:>5} (excluded from pass/fail/skip rates)",
+            s.skipped_disabled
+        );
     }
-    println!(" pass:     {:>5} ({:.1}%)", s.pass_total(), pct(s.pass_total()));
-    println!(" fail:     {:>5} ({:.1}%)", s.fail_total(), pct(s.fail_total()));
+    println!(
+        " pass:     {:>5} ({:.1}%)",
+        s.pass_total(),
+        pct(s.pass_total())
+    );
+    println!(
+        " fail:     {:>5} ({:.1}%)",
+        s.fail_total(),
+        pct(s.fail_total())
+    );
     if s.skipped_unknown > 0 {
-        println!(" skipped:  {:>5} ({:.1}%)", s.skipped_unknown, pct(s.skipped_unknown));
+        println!(
+            " skipped:  {:>5} ({:.1}%)",
+            s.skipped_unknown,
+            pct(s.skipped_unknown)
+        );
     }
 }
 
 // ───────────────────────── failures ─────────────────────────
 
-fn cmd_failures(args: &[String]) -> Result<()> {
+fn cmd_failures(args: &[String]) {
     let force_run = args.iter().any(|a| a == "--run");
     let mut backend_filter: Option<SuiteBackend> = None;
     let mut category_filter: Option<String> = None;
@@ -183,15 +201,14 @@ fn cmd_failures(args: &[String]) -> Result<()> {
     // deeply enough to blow the 8 MB main-thread stack, and the
     // per-case probe re-runs the interpreter on the same inputs.
     let report = run_on_large_stack("failures", move || {
-        build_failure_report(backend_filter, category_filter, force_run)
+        build_failure_report(backend_filter, category_filter.as_deref(), force_run)
     });
     print!("{report}");
-    Ok(())
 }
 
 fn build_failure_report(
     backend_filter: Option<SuiteBackend>,
-    category_filter: Option<String>,
+    category_filter: Option<&str>,
     force_run: bool,
 ) -> String {
     let manifest = embedded_manifest();
@@ -200,7 +217,10 @@ fn build_failure_report(
     let src = SourceId::new(1).unwrap();
 
     let mut out = String::new();
-    let _ = writeln!(out, "\n══════════ upstream suite — failure report ══════════");
+    let _ = writeln!(
+        out,
+        "\n══════════ upstream suite — failure report ══════════"
+    );
 
     // Default to the saved baseline (instant). A full re-run of ~10k
     // cases × 3 backends is minutes long, so we only do it on `--run`
@@ -222,7 +242,11 @@ fn build_failure_report(
         );
         m
     } else {
-        let _ = writeln!(out, "  no baseline found — fresh run on {}", backend_list(&backends));
+        let _ = writeln!(
+            out,
+            "  no baseline found — fresh run on {}",
+            backend_list(&backends)
+        );
         backends::run_manifest(manifest, &backends)
     };
 
@@ -262,10 +286,7 @@ fn build_failure_report(
             let Some(ids) = by_cat.get(&cat) else {
                 continue;
             };
-            if category_filter
-                .as_deref()
-                .is_some_and(|f| !cat.label().contains(f))
-            {
+            if category_filter.is_some_and(|f| !cat.label().contains(f)) {
                 continue;
             }
             let _ = writeln!(out, "\n  [{}]  ({} cases)", cat.label(), ids.len());
@@ -283,8 +304,16 @@ fn build_failure_report(
 }
 
 fn write_overall_table(out: &mut String, multi: &MultiReport) {
-    let _ = writeln!(out, "\n  {:<10} {:>8} {:>8} {:>8} {:>8}", "backend", "active", "pass", "fail", "skip");
-    let _ = writeln!(out, "  {:-<10} {:->8} {:->8} {:->8} {:->8}", "", "", "", "", "");
+    let _ = writeln!(
+        out,
+        "\n  {:<10} {:>8} {:>8} {:>8} {:>8}",
+        "backend", "active", "pass", "fail", "skip"
+    );
+    let _ = writeln!(
+        out,
+        "  {:-<10} {:->8} {:->8} {:->8} {:->8}",
+        "", "", "", "", ""
+    );
     for (name, report) in &multi.backends {
         let s = &report.summary;
         let _ = writeln!(
@@ -318,13 +347,18 @@ fn cmd_unknown() {
     for c in &m.cases {
         if let Expectation::Unknown { detail } = &c.expected {
             *hist.entry(detail.clone()).or_default() += 1;
-            sample.entry(detail.clone()).or_insert_with(|| c.code.clone());
+            sample
+                .entry(detail.clone())
+                .or_insert_with(|| c.code.clone());
         }
     }
     let mut v: Vec<_> = hist.iter().collect();
     v.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
     for (k, n) in v.iter().take(25) {
-        let s = sample.get(*k).map(|s| s.replace('\n', "\\n")).unwrap_or_default();
+        let s = sample
+            .get(*k)
+            .map(|s| s.replace('\n', "\\n"))
+            .unwrap_or_default();
         println!("{:6} {}  | {}", n, k, truncate(&s, 80));
     }
 }
@@ -337,7 +371,10 @@ fn cmd_native_skips(rest: &[String]) {
     // contains the substring — full source + expected value — for triage.
     if let Some(filter) = rest.first() {
         let cases = backends::native_skips_matching(m, filter);
-        println!("native skips matching {filter:?} — {} case(s)\n", cases.len());
+        println!(
+            "native skips matching {filter:?} — {} case(s)\n",
+            cases.len()
+        );
         for (i, c) in cases.iter().enumerate() {
             println!("── case {i} [{}] expect={} ──", c.reason, c.expected);
             println!("{}\n", c.code);
@@ -351,7 +388,12 @@ fn cmd_native_skips(rest: &[String]) {
     println!("  {:->6}  {:-<28}  {:-<40}", "", "", "");
     for r in &rows {
         let sample = r.sample.replace('\n', " ");
-        println!("  {:>6}  {:<28}  {}", r.count, r.reason, truncate(&sample, 60));
+        println!(
+            "  {:>6}  {:<28}  {}",
+            r.count,
+            r.reason,
+            truncate(&sample, 60)
+        );
     }
 }
 

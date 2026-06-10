@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use leek_backend_native::{frame_name, render_frame_vars, run, DebugHook, NativeOptions};
+use leek_backend_native::{DebugHook, NativeOptions, frame_name, render_frame_vars, run};
 use leek_hir::lower_file_versioned;
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::{LineTable, SourceId};
@@ -33,7 +33,9 @@ impl DebugHook for Recorder {
 
 #[test]
 fn safepoints_fire_and_render_locals() {
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let src = "var x = 40\nvar y = 2\nreturn x + y\n";
     let source = SourceId::new(1).unwrap();
     let parsed = parse(src, source, Version::V4);
@@ -45,7 +47,9 @@ fn safepoints_fire_and_render_locals() {
         hits: Mutex::new(Vec::new()),
     });
     leek_backend_native::set_debug_hook(Some(rec.clone()));
-    let opts = NativeOptions::debug().with_lang(4, false).with_debug_hooks(true);
+    let opts = NativeOptions::debug()
+        .with_lang(4, false)
+        .with_debug_hooks(true);
     let result = run(&hir, &opts);
     leek_backend_native::set_debug_hook(None);
 
@@ -55,7 +59,10 @@ fn safepoints_fire_and_render_locals() {
     let hits = rec.hits.lock().unwrap();
     let lines: Vec<u32> = hits.iter().map(|(l, _)| *l).collect();
     for expected in [1u32, 2, 3] {
-        assert!(lines.contains(&expected), "line {expected} never hit; lines={lines:?}");
+        assert!(
+            lines.contains(&expected),
+            "line {expected} never hit; lines={lines:?}"
+        );
     }
 
     // By the line-3 safepoint (before `return x + y`), both locals are set.
@@ -77,7 +84,9 @@ fn safepoints_fire_and_render_locals() {
 
 #[test]
 fn renders_reference_locals() {
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // A string local is a boxed `Value` handle (kind 3); it should render
     // via the runtime's `Display`, not crash.
     let src = "var s = \"hi\"\nvar n = 7\nreturn count(s) + n\n";
@@ -91,7 +100,9 @@ fn renders_reference_locals() {
         hits: Mutex::new(Vec::new()),
     });
     leek_backend_native::set_debug_hook(Some(rec.clone()));
-    let opts = NativeOptions::debug().with_lang(4, false).with_debug_hooks(true);
+    let opts = NativeOptions::debug()
+        .with_lang(4, false)
+        .with_debug_hooks(true);
     let result = run(&hir, &opts);
     leek_backend_native::set_debug_hook(None);
     assert!(result.is_ok(), "native run failed: {result:?}");
@@ -108,12 +119,17 @@ fn renders_reference_locals() {
         .find(|(n, _)| n == "s")
         .map(|(_, v)| v.clone())
         .expect("local `s` present");
-    assert!(s.contains("hi"), "expected `s` to render containing 'hi', got {s:?}");
+    assert!(
+        s.contains("hi"),
+        "expected `s` to render containing 'hi', got {s:?}"
+    );
 }
 
 #[test]
 fn safepoint_on_bare_return_line() {
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // `return a` is a bare terminator with no statement on its line; the
     // per-terminator safepoint must still let a debugger stop there.
     let src = "var a = 5\nreturn a\n";
@@ -127,13 +143,18 @@ fn safepoint_on_bare_return_line() {
         hits: Mutex::new(Vec::new()),
     });
     leek_backend_native::set_debug_hook(Some(rec.clone()));
-    let opts = NativeOptions::debug().with_lang(4, false).with_debug_hooks(true);
+    let opts = NativeOptions::debug()
+        .with_lang(4, false)
+        .with_debug_hooks(true);
     let result = run(&hir, &opts);
     leek_backend_native::set_debug_hook(None);
     assert_eq!(result.unwrap().to_string(), "5");
 
     let lines: Vec<u32> = rec.hits.lock().unwrap().iter().map(|(l, _)| *l).collect();
-    assert!(lines.contains(&2), "no safepoint on the bare `return` line 2; lines={lines:?}");
+    assert!(
+        lines.contains(&2),
+        "no safepoint on the bare `return` line 2; lines={lines:?}"
+    );
 }
 
 /// Records the live call depth (via enter/leave) at every safepoint.
@@ -164,7 +185,9 @@ impl DebugHook for StackRec {
 
 #[test]
 fn shadow_stack_tracks_call_depth() {
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // `inc` is called from the top level: a safepoint inside `inc` runs at
     // depth 2, the top-level ones at depth 1.
     let src = "function inc(x) { return x + 1 }\nvar r = inc(41)\nreturn r\n";
@@ -180,7 +203,9 @@ fn shadow_stack_tracks_call_depth() {
         names: Mutex::new(Vec::new()),
     });
     leek_backend_native::set_debug_hook(Some(rec.clone()));
-    let opts = NativeOptions::debug().with_lang(4, false).with_debug_hooks(true);
+    let opts = NativeOptions::debug()
+        .with_lang(4, false)
+        .with_debug_hooks(true);
     let result = run(&hir, &opts);
     leek_backend_native::set_debug_hook(None);
     assert_eq!(result.unwrap().to_string(), "42");
@@ -197,5 +222,9 @@ fn shadow_stack_tracks_call_depth() {
         "expected a depth-1 safepoint at the top level; samples={samples:?}"
     );
     // Frame must have fully unwound by program end.
-    assert_eq!(rec.depth.load(Ordering::SeqCst), 0, "frames left unbalanced");
+    assert_eq!(
+        rec.depth.load(Ordering::SeqCst),
+        0,
+        "frames left unbalanced"
+    );
 }

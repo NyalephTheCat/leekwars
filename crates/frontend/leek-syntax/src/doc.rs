@@ -52,7 +52,9 @@ impl BackendDirectives {
 
     /// Iterate `(backend, body)` pairs in deterministic order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.by_backend.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+        self.by_backend
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     /// Build directly from `(backend, body)` pairs — used by the HIR
@@ -309,7 +311,7 @@ mod tests {
     use super::*;
 
     fn at(src: &str, marker: &str) -> u32 {
-        src.find(marker).expect("marker") as u32
+        u32::try_from(src.find(marker).expect("marker")).unwrap()
     }
 
     #[test]
@@ -385,7 +387,10 @@ mod tests {
         let (_, directives) =
             extract_backend_directives("@java-backend: f(%0)\n@native-backend: g(%0)");
         assert_eq!(directives.render("java", &["a"]), Some("f(a)".to_string()));
-        assert_eq!(directives.render("native", &["b"]), Some("g(b)".to_string()));
+        assert_eq!(
+            directives.render("native", &["b"]),
+            Some("g(b)".to_string())
+        );
         assert_eq!(directives.render("interp", &["c"]), None);
     }
 

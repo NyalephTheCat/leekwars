@@ -23,7 +23,7 @@
 //! use std::path::Path;
 //!
 //! let src = Path::new("fixtures/knapsack.leek");
-//! let opts = BenchOptions { runs: 10, version: 4 };
+//! let opts = BenchOptions { runs: 10, version: 4, strict: false };
 //!
 //! for mut b in [
 //!     Box::new(RustNative::new()) as Box<dyn leek_bench::Backend>,

@@ -32,8 +32,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
     // blindly: a bad range falls back to no edit instead of panicking
     // and crashing the language server.
     let original = &doc.text;
-    let original_slice =
-        original.get(target_range.start as usize..target_range.end as usize)?;
+    let original_slice = original.get(target_range.start as usize..target_range.end as usize)?;
     if original_slice == replacement {
         return Some(Vec::new());
     }

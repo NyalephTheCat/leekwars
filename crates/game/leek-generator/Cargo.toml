@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Leek-wars fight orchestrator: holds the world model, launches AIs, and bridges game builtins into native execution (the leek-wars-generator equivalent)."
+description = "Leek-wars fight orchestrator: launches AIs, runs the turn loop, and bridges game builtins into native execution (the leek-wars-generator equivalent). The world model lives in leek-game-runtime."
 
 [dependencies]
 leek-game-runtime   = { workspace = true }

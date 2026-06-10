@@ -5,7 +5,7 @@
 //! wins, an absent one inherits; a non-empty `weapons`/`chips` vector replaces,
 //! an empty one inherits. Entities are matched by `id`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use crate::schema::{EntitySpec, Scenario, ScenarioPatch};
 
@@ -88,7 +88,10 @@ pub fn overlay_scenario(base: &mut Scenario, child: &Scenario) {
 /// overlaid in place; one with a new id (or none) is appended.
 pub fn merge_entities(base: &mut Vec<EntitySpec>, patch: &[EntitySpec]) {
     for p in patch {
-        match p.id.and_then(|id| base.iter_mut().find(|b| b.id == Some(id))) {
+        match p
+            .id
+            .and_then(|id| base.iter_mut().find(|b| b.id == Some(id)))
+        {
             Some(slot) => overlay_entity(slot, p),
             None => base.push(p.clone()),
         }

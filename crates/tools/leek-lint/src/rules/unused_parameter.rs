@@ -137,7 +137,11 @@ fn collect_stmt(s: &Stmt, out: &mut HashSet<DefId>) {
                 }
             }
         }
-        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Include(_) | Stmt::Import(_) | Stmt::Charge(_) => {}
+        Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Include(_)
+        | Stmt::Import(_)
+        | Stmt::Charge(_) => {}
     }
 }
 

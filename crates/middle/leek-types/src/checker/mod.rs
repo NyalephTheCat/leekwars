@@ -143,7 +143,10 @@ impl Checker {
     /// if no such field is declared anywhere in the chain.
     pub(crate) fn lookup_field_type(&self, class: &str, field: &str) -> Option<Type> {
         self.walk_chain(class, |c| {
-            self.class_field_types.get(c).and_then(|m| m.get(field)).cloned()
+            self.class_field_types
+                .get(c)
+                .and_then(|m| m.get(field))
+                .cloned()
         })
     }
 
@@ -253,4 +256,3 @@ impl Checker {
         None
     }
 }
-

@@ -68,6 +68,7 @@ impl std::fmt::Debug for RecipeParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecipeParams")
             .field("stop_on_diagnostics", &self.stop_on_diagnostics)
+            .field("opt", &self.opt)
             .field("want", &self.want.as_ref().map(|_| ".."))
             .finish()
     }

@@ -57,10 +57,12 @@ pub extern "C" fn leek_aot_print_bool(v: i64, version: i32) {
     print_value(&Value::Bool(v != 0), version);
 }
 
-/// Print a `Ref`-typed result. `ptr` must be the pointer returned by a
-/// `Ref`-typed `leek_main`.
+/// Print a `Ref`-typed result.
+///
+/// # Safety
+/// `ptr` must be the pointer returned by a `Ref`-typed `leek_main`.
 #[unsafe(no_mangle)]
-pub extern "C" fn leek_aot_print_ref(ptr: *mut Value, version: i32) {
+pub unsafe extern "C" fn leek_aot_print_ref(ptr: *mut Value, version: i32) {
     let v = unsafe { leek_backend_native::aot::aot_finish_ref(ptr) };
     print_value(&v, version);
 }

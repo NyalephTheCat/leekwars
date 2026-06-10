@@ -696,9 +696,8 @@ pub(super) fn format_for_stmt(node: &SyntaxNode) -> Doc {
                     // A child node (VarDeclStmt / ExprStmt) ending
                     // with its own `;` should be followed by a space
                     // before the next clause's first token.
-                    let ends_with_semi = child
-                        .last_token()
-                        .is_some_and(|t| t.kind() == S::Semicolon);
+                    let ends_with_semi =
+                        child.last_token().is_some_and(|t| t.kind() == S::Semicolon);
                     parts.push(child_doc);
                     if ends_with_semi {
                         parts.push(space());

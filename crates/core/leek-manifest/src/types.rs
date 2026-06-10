@@ -93,15 +93,17 @@ impl BackendTable {
         ];
         for (kind, slot) in &entries {
             if let Some(s) = slot
-                && s.is_default {
-                    return Some(*kind);
-                }
+                && s.is_default
+            {
+                return Some(*kind);
+            }
         }
         for (kind, slot) in &entries {
             if let Some(s) = slot
-                && s.enable {
-                    return Some(*kind);
-                }
+                && s.enable
+            {
+                return Some(*kind);
+            }
         }
         None
     }

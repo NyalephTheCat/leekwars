@@ -16,8 +16,8 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use leek_hir::pipeline::HirArtifact;
 use leek_hir::Def;
+use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::salsa::SourceFile;
 use leek_resolver::SymbolKind;
 use leek_span::{LineTable, Span};
@@ -142,7 +142,8 @@ struct ProgClass {
 fn program_classes(ws: &Workspace, home_uri: &lsp::Url) -> Vec<ProgClass> {
     let mut out: Vec<ProgClass> = Vec::new();
     for file in crate::handlers::program_scope::program_scope(ws, home_uri) {
-        let Some(run) = crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+        let Some(run) =
+            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
         else {
             continue;
         };

@@ -92,10 +92,10 @@ pub fn bound_of_for(stmt: &ForStmt, ctx: &BoundContext) -> LoopBound {
 }
 
 pub fn bound_of_foreach(stmt: &ForeachStmt, ctx: &BoundContext) -> LoopBound {
-    bound_from_iter_expr(&stmt.iter, ctx)
-        .map_or(LoopBound::Unknown(
-            "foreach iter isn't a parameter / count(param)",
-        ), LoopBound::Size)
+    bound_from_iter_expr(&stmt.iter, ctx).map_or(
+        LoopBound::Unknown("foreach iter isn't a parameter / count(param)"),
+        LoopBound::Size,
+    )
 }
 
 pub fn bound_of_while(stmt: &WhileStmt, ctx: &BoundContext) -> LoopBound {
@@ -194,9 +194,10 @@ fn bound_from_value_expr(e: &Expr, ctx: &BoundContext) -> Option<LoopBound> {
         return Some(LoopBound::Const(n));
     }
     if let ExprKind::Name(NameRef::Local(id)) = &e.kind
-        && let Some((idx, name)) = ctx.params.lookup(*id) {
-            return Some(LoopBound::Size(SizeVar::new(idx, name)));
-        }
+        && let Some((idx, name)) = ctx.params.lookup(*id)
+    {
+        return Some(LoopBound::Size(SizeVar::new(idx, name)));
+    }
     if let Some(size) = bound_from_iter_expr(e, ctx) {
         return Some(LoopBound::Size(size));
     }
@@ -284,9 +285,10 @@ fn step_in_body(body: &Stmt, counter_id: leek_hir::DefId) -> Option<CounterStep>
         // too risky to claim monotonicity.
         if let Stmt::Expr(e) = s
             && let Some(step) = step_shape(Some(e), counter_id)
-                && !matches!(step, CounterStep::Unrecognised) {
-                    return Some(step);
-                }
+            && !matches!(step, CounterStep::Unrecognised)
+        {
+            return Some(step);
+        }
     }
     None
 }

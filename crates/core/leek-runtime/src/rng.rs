@@ -7,7 +7,11 @@
 //
 // PRNG bit math reinterprets between signed/unsigned and builds floats from
 // raw bits; the casts here are deliberate, not lossy coercions.
-#![allow(clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss)]
+#![allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss
+)]
 
 /// A seeded xorshift64 generator.
 #[derive(Debug, Clone)]
@@ -33,7 +37,11 @@ impl Rng {
     /// default, since xorshift can't escape an all-zero state).
     pub fn with_seed(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 

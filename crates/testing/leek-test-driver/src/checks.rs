@@ -90,7 +90,11 @@ impl TestCase {
             Expectation::Error { code } if code == "NONE" => {
                 // No error expected → native must also compile + run it
                 // cleanly (it shares the frontend that produces errors).
-                kinds.extend([CheckKind::InterpRun, CheckKind::JavaEmit, CheckKind::NativeRun]);
+                kinds.extend([
+                    CheckKind::InterpRun,
+                    CheckKind::JavaEmit,
+                    CheckKind::NativeRun,
+                ]);
             }
             Expectation::Error { .. }
             | Expectation::AnyError
@@ -99,7 +103,11 @@ impl TestCase {
                 // Native participates in structural (error/warning) cases too:
                 // compile errors are produced by the shared frontend native
                 // depends on, and warning/clean cases must run cleanly on it.
-                kinds.extend([CheckKind::InterpRun, CheckKind::JavaEmit, CheckKind::NativeRun]);
+                kinds.extend([
+                    CheckKind::InterpRun,
+                    CheckKind::JavaEmit,
+                    CheckKind::NativeRun,
+                ]);
             }
             // Legacy manifest rows store `.equalsOps(...)` as `unknown`; they
             // still carry a verifiable value, so let native check it.

@@ -2,9 +2,7 @@
 
 use std::process::ExitCode;
 
-use anyhow::Result;
-
-pub fn run() -> Result<ExitCode> {
+pub fn run() -> ExitCode {
     leek_lsp::run_stdio();
-    Ok(ExitCode::SUCCESS)
+    ExitCode::SUCCESS
 }

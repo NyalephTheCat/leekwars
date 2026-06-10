@@ -15,7 +15,7 @@ use crate::cli::{ColorWhen, MessageFormat, Run};
 const OP_BUDGET: u64 = 20_000_000;
 
 pub fn run(
-    args: Run,
+    args: &Run,
     manifest_path: Option<&Path>,
     color: ColorWhen,
     format: MessageFormat,
@@ -40,7 +40,7 @@ pub fn run(
         return Ok(ExitCode::from(1));
     }
 
-    let hir = if let Some(h) = driver_run.run.get::<HirArtifact>() { h } else {
+    let Some(hir) = driver_run.run.get::<HirArtifact>() else {
         eprintln!("miku: lowering produced no HIR");
         return Ok(ExitCode::from(1));
     };

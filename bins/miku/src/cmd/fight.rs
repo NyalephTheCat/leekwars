@@ -4,14 +4,14 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use leek_scenario::{
     Bracket, MatrixAxes, RandomSpec, RandomTarget, Scenario, StatKind, TestReport, TournamentSpec,
 };
 
 use crate::cli::{BracketArg, Fight, FightFormat, FightMode, RandomTargetArg};
 
-pub fn run(args: Fight, quiet: bool) -> Result<ExitCode> {
+pub fn run(args: &Fight, quiet: bool) -> Result<ExitCode> {
     // A fight always needs the leek-wars game builtins resolvable at compile
     // time, so register them up front (idempotent — harmless if `--library
     // leekwars` already did). This makes plain `miku fight scenario.toml` work.
@@ -56,17 +56,17 @@ pub fn run(args: Fight, quiet: bool) -> Result<ExitCode> {
     match args.mode {
         FightMode::Single => run_single(&scn, &base_dir, hero_team, args.format, quiet),
         FightMode::Matrix => {
-            let report = run_matrix_mode(&args, &scn, &base_dir, hero_team)?;
+            let report = run_matrix_mode(args, &scn, &base_dir, hero_team)?;
             render_report(&report, args.format);
             Ok(verdict(&report))
         }
         FightMode::Tournament => {
-            let report = run_tournament_mode(&args, &scn, &base_dir, hero_team)?;
+            let report = run_tournament_mode(args, &scn, &base_dir, hero_team)?;
             render_report(&report, args.format);
             Ok(ExitCode::SUCCESS)
         }
         FightMode::Random => {
-            let report = run_random_mode(&args, &scn, &base_dir, hero_team)?;
+            let report = run_random_mode(args, &scn, &base_dir, hero_team)?;
             render_report(&report, args.format);
             Ok(verdict(&report))
         }
@@ -241,7 +241,10 @@ fn render_human(report: &TestReport) {
     use leek_scenario::FightResult;
 
     println!("mode: {}", report.mode);
-    println!("{:<48} {:>10} {:>8} {:>6} {:>6}", "label", "seed", "winner", "turns", "result");
+    println!(
+        "{:<48} {:>10} {:>8} {:>6} {:>6}",
+        "label", "seed", "winner", "turns", "result"
+    );
     for c in &report.cells {
         let winner = c.winner.map_or_else(|| "-".to_string(), |t| t.to_string());
         let result = match c.result {
@@ -268,7 +271,10 @@ fn render_human(report: &TestReport) {
 
     if !report.standings.is_empty() {
         println!("\nleaderboard:");
-        println!("{:<4} {:<24} {:>4} {:>4} {:>4} {:>4}", "#", "entrant", "pts", "W", "L", "D");
+        println!(
+            "{:<4} {:<24} {:>4} {:>4} {:>4} {:>4}",
+            "#", "entrant", "pts", "W", "L", "D"
+        );
         for (i, s) in report.standings.iter().enumerate() {
             println!(
                 "{:<4} {:<24} {:>4} {:>4} {:>4} {:>4}",

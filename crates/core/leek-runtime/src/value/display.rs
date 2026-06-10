@@ -66,10 +66,10 @@ pub(super) fn loose_eq_inner(
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Real(a), Value::Real(b)) => a == b,
-        (Value::Int(i), Value::Real(r)) | (Value::Real(r), Value::Int(i)) => crate::int_to_real(*i) == *r,
-        (Value::Bool(b), Value::Int(i)) | (Value::Int(i), Value::Bool(b)) => {
-            i64::from(*b) == *i
+        (Value::Int(i), Value::Real(r)) | (Value::Real(r), Value::Int(i)) => {
+            crate::int_to_real(*i) == *r
         }
+        (Value::Bool(b), Value::Int(i)) | (Value::Int(i), Value::Bool(b)) => i64::from(*b) == *i,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Array(a), Value::Array(b)) => {
             let aa = a.borrow();
@@ -193,9 +193,10 @@ fn write_child(
 ) -> std::fmt::Result {
     let id = composite_id(v);
     if let Some(id) = id
-        && !visited.insert(id) {
-            return f.write_str("<...>");
-        }
+        && !visited.insert(id)
+    {
+        return f.write_str("<...>");
+    }
     write_value_inner(f, v, visited)
 }
 
@@ -252,12 +253,11 @@ fn write_value_inner(
             // integers 0..n-1, render as a plain array (no keys),
             // matching `LegacyArrayLeekValue.toString`'s `isInOrder`
             // path. v4 always shows `key : value` pairs.
-            let in_order_array = DISPLAY_VERSION.get() <= 3
-                && mm
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .all(|(i, (k, _))| matches!(k, Value::Int(j) if *j == crate::len_as_int(i)));
+            let in_order_array =
+                DISPLAY_VERSION.get() <= 3
+                    && mm.entries.iter().enumerate().all(
+                        |(i, (k, _))| matches!(k, Value::Int(j) if *j == crate::len_as_int(i)),
+                    );
             for (i, (k, v)) in mm.entries.iter().enumerate() {
                 if i > 0 {
                     f.write_str(", ")?;
@@ -391,10 +391,11 @@ fn write_bare(out: &mut String, v: &Value, visited: &mut std::collections::HashS
     use std::fmt::Write as _;
     let id = composite_id(v);
     if let Some(id) = id
-        && !visited.insert(id) {
-            out.push_str("<...>");
-            return;
-        }
+        && !visited.insert(id)
+    {
+        out.push_str("<...>");
+        return;
+    }
     match v {
         Value::String(s) => out.push_str(s),
         Value::Array(a) => {

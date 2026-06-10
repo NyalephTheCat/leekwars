@@ -157,7 +157,8 @@ impl<'a> super::Emitter<'a> {
             Some(p) => format!(" extends {}", mangle::class_name(self.opts, p)),
             None => " extends NativeObjectLeekValue".into(),
         };
-        self.writer.add_line(&format!("public class {name}{extends} {{"));
+        self.writer
+            .add_line(&format!("public class {name}{extends} {{"));
         self.writer.push_indent();
         let prev = self.current_class.replace(Some(c));
 
@@ -170,7 +171,8 @@ impl<'a> super::Emitter<'a> {
         for f in &inst_fields {
             let ty = java_type_for(f.ty.as_ref());
             let fin = if f.is_final { "@Final " } else { "" };
-            self.writer.add_line(&format!("{fin}public {ty} {};", f.name));
+            self.writer
+                .add_line(&format!("{fin}public {ty} {};", f.name));
         }
 
         // Field-default constructor: reserve RAM, then init each field.
@@ -185,7 +187,7 @@ impl<'a> super::Emitter<'a> {
                 // field coerces too: `real? a = 12` stores `12.0` via
                 // `realOrNull`. The field's Java type is `Object` for nullables,
                 // so the boxed `Double`/`Long` drops in.
-                let v = self.coerce_decl(f.ty.as_ref(), self.expr_to_string(init));
+                let v = Self::coerce_decl(f.ty.as_ref(), self.expr_to_string(init));
                 self.writer.add_line(&format!("{} = {v};", f.name));
             }
         }
@@ -197,8 +199,9 @@ impl<'a> super::Emitter<'a> {
         // an instance. Each field is shallow-copied at `level == 1`, else
         // recursively `copy`d. A subclass chains to the parent's clone ctor
         // first. Without this, `clone(obj)` returns null.
-        self.writer
-            .add_line(&format!("public {name}({name} o, int level) throws LeekRunException {{"));
+        self.writer.add_line(&format!(
+            "public {name}({name} o, int level) throws LeekRunException {{"
+        ));
         self.writer.push_indent();
         if c.parent.is_some() {
             self.writer.add_line("super(o, level);");
@@ -307,7 +310,7 @@ impl<'a> super::Emitter<'a> {
                 Some(d) => self.expr_to_string(d),
                 None => "null".into(),
             };
-            binds.push_str(&format!(" Object {name} = {val};"));
+            let _ = write!(binds, " Object {name} = {val};");
         }
         let call_args = m
             .params
@@ -329,8 +332,9 @@ impl<'a> super::Emitter<'a> {
             .map(|p| format!("Object {}", mangle::local(self.opts, &p.name)))
             .collect::<Vec<_>>()
             .join(", ");
-        self.writer
-            .add_line(&format!("public Object init({params}) throws LeekRunException {{"));
+        self.writer.add_line(&format!(
+            "public Object init({params}) throws LeekRunException {{"
+        ));
         self.writer.push_indent();
         if let Some(body) = &m.body {
             self.emit_stmts(&body.stmts);
@@ -385,8 +389,10 @@ impl<'a> super::Emitter<'a> {
             // Wire inheritance: the parent's methods/fields are inherited via
             // the `ClassLeekValue` chain (Java `extends` handles the instance
             // side).
-            self.writer
-                .add_line(&format!("{name}.setParent({});", mangle::class_name(self.opts, p)));
+            self.writer.add_line(&format!(
+                "{name}.setParent({});",
+                mangle::class_name(self.opts, p)
+            ));
         }
         self.writer.add_line(&format!(
             "{name}.initFields = new FunctionLeekValue(0) {{public Object run(AI ai, Object u_this, Object... values) throws LeekRunException {{ return null; }}}};"
@@ -399,7 +405,11 @@ impl<'a> super::Emitter<'a> {
             // shorter one for each leading default param (`m(x = 2)` is callable
             // as `m()` and `m(2)`), each dispatching to the matching `u_m`
             // overload (`emit_method_default_overload`).
-            let min = m.params.iter().position(|p| p.default.is_some()).unwrap_or(full);
+            let min = m
+                .params
+                .iter()
+                .position(|p| p.default.is_some())
+                .unwrap_or(full);
             for arity in min..=full {
                 let call_args = (0..arity)
                     .map(|i| format!("(Object) args[{i}]"))
@@ -477,8 +487,11 @@ impl<'a> super::Emitter<'a> {
                     let mut binds = String::new();
                     for p in &m.params[arity..] {
                         let pn = mangle::local(self.opts, &p.name);
-                        let val = p.default.as_ref().map_or("null".into(), |d| self.expr_to_string(d));
-                        binds.push_str(&format!(" Object {pn} = {val};"));
+                        let val = p
+                            .default
+                            .as_ref()
+                            .map_or("null".into(), |d| self.expr_to_string(d));
+                        let _ = write!(binds, " Object {pn} = {val};");
                     }
                     let all = m
                         .params
@@ -510,14 +523,16 @@ impl<'a> super::Emitter<'a> {
         self.writer.pop_indent();
         self.writer.add_line("}");
         // `initClass_<C>`: set each static field's value.
-        self.writer
-            .add_line(&format!("private void initClass_{}() throws LeekRunException {{", c.name));
+        self.writer.add_line(&format!(
+            "private void initClass_{}() throws LeekRunException {{",
+            c.name
+        ));
         self.writer.push_indent();
         for f in &static_fields {
             if let Some(init) = &f.init {
                 // Coerce to the declared scalar type like instance fields
                 // (`static real? a = 12` → `12.0`).
-                let v = self.coerce_decl(f.ty.as_ref(), self.expr_to_string(init));
+                let v = Self::coerce_decl(f.ty.as_ref(), self.expr_to_string(init));
                 self.writer
                     .add_line(&format!("{name}.initField(\"{}\", {v});", f.name));
             }

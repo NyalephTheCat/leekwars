@@ -130,19 +130,25 @@ mod tests {
 
     #[test]
     fn flags_repeated_condition() {
-        let d = run("function f(x) {\n  if (x > 0) { return 1 } else if (x > 0) { return 2 }\n  return 0\n}\n");
+        let d = run(
+            "function f(x) {\n  if (x > 0) { return 1 } else if (x > 0) { return 2 }\n  return 0\n}\n",
+        );
         assert_eq!(d.len(), 1, "got {d:?}");
     }
 
     #[test]
     fn ignores_distinct_conditions() {
-        let d = run("function f(x) {\n  if (x > 0) { return 1 } else if (x < 0) { return 2 }\n  return 0\n}\n");
+        let d = run(
+            "function f(x) {\n  if (x > 0) { return 1 } else if (x < 0) { return 2 }\n  return 0\n}\n",
+        );
         assert!(d.is_empty(), "got {d:?}");
     }
 
     #[test]
     fn flags_third_arm_duplicate() {
-        let d = run("function f(x) {\n  if (x == 1) { return 1 } else if (x == 2) { return 2 } else if (x == 1) { return 3 }\n  return 0\n}\n");
+        let d = run(
+            "function f(x) {\n  if (x == 1) { return 1 } else if (x == 2) { return 2 } else if (x == 1) { return 3 }\n  return 0\n}\n",
+        );
         assert_eq!(d.len(), 1, "got {d:?}");
     }
 }

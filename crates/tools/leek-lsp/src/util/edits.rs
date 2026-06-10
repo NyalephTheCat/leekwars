@@ -39,7 +39,10 @@ pub fn apply_content_changes(
                 let len = text.len();
                 // A missing/over-long position clamps to the buffer end,
                 // matching how editors treat an out-of-range column.
-                let start = pm.to_offset(range.start).map_or(len, |o| o as usize).min(len);
+                let start = pm
+                    .to_offset(range.start)
+                    .map_or(len, |o| o as usize)
+                    .min(len);
                 let end = pm
                     .to_offset(range.end)
                     .map_or(len, |o| o as usize)

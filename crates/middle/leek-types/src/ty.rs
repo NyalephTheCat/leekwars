@@ -44,7 +44,10 @@ pub enum Type {
     /// (`Function< => R>`, or a bare typed return). Powers the
     /// IMPOSSIBLE_CAST check (return side) and arity/parameter
     /// inspection.
-    FunctionWithReturn { params: Vec<Type>, ret: Box<Type> },
+    FunctionWithReturn {
+        params: Vec<Type>,
+        ret: Box<Type>,
+    },
     /// `[a..b]` interval literal.
     Interval,
     /// `T?` — nullable wrapper. Permits `null`, but the inner type
@@ -96,10 +99,9 @@ impl Type {
             // caught at call sites by `check_call`.
             (Type::Function, Type::FunctionWithReturn { .. }) => true,
             (Type::FunctionWithReturn { .. }, Type::Function) => true,
-            (
-                Type::FunctionWithReturn { ret: a, .. },
-                Type::FunctionWithReturn { ret: b, .. },
-            ) => Type::assignable_to(a, b),
+            (Type::FunctionWithReturn { ret: a, .. }, Type::FunctionWithReturn { ret: b, .. }) => {
+                Type::assignable_to(a, b)
+            }
             // Class-instance match is name-based; generic arguments
             // don't affect assignment compatibility.
             (Type::ClassInstance(a, _), Type::ClassInstance(b, _)) => a == b,
@@ -174,7 +176,7 @@ pub(crate) fn unify_types(a: &Type, b: &Type) -> Type {
 /// String concatenation is handled by the caller before invoking
 /// this — `Plus` with a string operand short-circuits to String.
 pub(crate) fn promote_numeric(lhs: &Type, rhs: &Type) -> Type {
-    use Type::{Real, Integer, Boolean, Any};
+    use Type::{Any, Boolean, Integer, Real};
     match (lhs, rhs) {
         (Real, _) | (_, Real) => Real,
         (Integer, Integer) => Integer,
@@ -273,7 +275,10 @@ fn own_type_param_list(node: &SyntaxNode) -> Option<SyntaxNode> {
 pub(crate) fn collect_type_params(node: &SyntaxNode) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     if let Some(list) = own_type_param_list(node) {
-        for tok in list.children_with_tokens().filter_map(rowan::NodeOrToken::into_token) {
+        for tok in list
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+        {
             if tok.kind() == SyntaxKind::Ident {
                 out.insert(tok.text().to_string());
             }
@@ -288,7 +293,10 @@ pub(crate) fn collect_type_params(node: &SyntaxNode) -> std::collections::HashSe
 pub(crate) fn type_param_list_names(node: &SyntaxNode) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(list) = own_type_param_list(node) {
-        for tok in list.children_with_tokens().filter_map(rowan::NodeOrToken::into_token) {
+        for tok in list
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+        {
             if tok.kind() == SyntaxKind::Ident {
                 out.push(tok.text().to_string());
             }
@@ -352,7 +360,9 @@ fn gtype_from_node_primitive(
         n.children()
             .filter(|c| c.kind() == SyntaxKind::TypeRef)
             .nth(skip)
-            .map_or(GType::Concrete(Type::Any), |c| gtype_from_node(&c, typarams))
+            .map_or(GType::Concrete(Type::Any), |c| {
+                gtype_from_node(&c, typarams)
+            })
     };
     match name.to_ascii_lowercase().as_str() {
         "array" if has_generic => GType::Array(Box::new(arg_gtype(node, 0))),
@@ -464,9 +474,10 @@ fn type_from_node_primitive(node: &SyntaxNode) -> Type {
                 for a in init {
                     params.push(type_from_node(a));
                 }
-                let arrow = last
-                    .children_with_tokens()
-                    .any(|el| el.as_token().is_some_and(|t| t.kind() == SyntaxKind::FatArrow));
+                let arrow = last.children_with_tokens().any(|el| {
+                    el.as_token()
+                        .is_some_and(|t| t.kind() == SyntaxKind::FatArrow)
+                });
                 if arrow {
                     // Head type-name token before the `=>` is the final
                     // param (absent for `=> R`); the nested TypeRef after

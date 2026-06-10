@@ -53,7 +53,14 @@ impl AotMeta {
         for f in &program.functions {
             for b in &f.blocks {
                 for s in &b.statements {
-                    if let Statement::Assign(_, Rvalue::MakeLambda { function_idx, captures }) = s {
+                    if let Statement::Assign(
+                        _,
+                        Rvalue::MakeLambda {
+                            function_idx,
+                            captures,
+                        },
+                    ) = s
+                    {
                         ncaptures.insert(*function_idx, captures.len());
                     }
                 }
@@ -91,15 +98,15 @@ impl AotMeta {
                 .map(|(k, v)| (k, v.into_iter().collect()))
                 .collect();
 
-        let lambda_entries: Vec<(usize, usize)> =
-            lambda_funcs.iter().map(|(&idx, &(_, arity))| (idx, arity)).collect();
+        let lambda_entries: Vec<(usize, usize)> = lambda_funcs
+            .iter()
+            .map(|(&idx, &(_, arity))| (idx, arity))
+            .collect();
 
         Self {
             method_resolve: method_resolve
                 .into_iter()
-                .flat_map(|(cls, methods)| {
-                    methods.into_iter().map(move |(m, idx)| (cls, m, idx))
-                })
+                .flat_map(|(cls, methods)| methods.into_iter().map(move |(m, idx)| (cls, m, idx)))
                 .collect(),
             static_init: static_init.into_iter().collect(),
             user_fn_idx: user_fn_idx.into_iter().collect(),
@@ -130,13 +137,18 @@ impl AotMeta {
         use crate::runtime;
         let mut method_resolve: HashMap<u32, HashMap<String, usize>> = HashMap::new();
         for (cls, m, idx) in &self.method_resolve {
-            method_resolve.entry(*cls).or_default().insert(m.clone(), *idx);
+            method_resolve
+                .entry(*cls)
+                .or_default()
+                .insert(m.clone(), *idx);
         }
         runtime::set_method_resolve(method_resolve);
         runtime::set_static_init(self.static_init.iter().cloned().collect());
-        runtime::set_user_fn_idx(self.user_fn_idx.iter().cloned().collect());
-        runtime::set_user_fn_exact_arity(self.exact_arity.iter().copied().collect::<HashSet<u32>>());
-        runtime::set_class_string_method(self.class_string_method.iter().cloned().collect());
+        runtime::set_user_fn_idx(self.user_fn_idx.iter().copied().collect());
+        runtime::set_user_fn_exact_arity(
+            self.exact_arity.iter().copied().collect::<HashSet<u32>>(),
+        );
+        runtime::set_class_string_method(self.class_string_method.iter().copied().collect());
         runtime::set_lambda_byref(self.lambda_byref.iter().cloned().collect());
         runtime::set_class_parent(self.class_parent.iter().cloned().collect());
         runtime::set_class_ctor_thunk(self.class_ctor_thunk.iter().map(|&(k, v)| (k, v)).collect());

@@ -18,6 +18,7 @@
 //! - `--message-format json`: same as human for tests, but per-file
 //!   compile diagnostics are emitted as NDJSON through the reporter.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -37,7 +38,7 @@ use crate::util::reporter_from_cli;
 const DEFAULT_OP_BUDGET: u64 = 20_000_000;
 
 pub fn run(
-    args: Test,
+    args: &Test,
     manifest_path: Option<&Path>,
     color: ColorWhen,
     format: MessageFormat,
@@ -212,15 +213,17 @@ fn parse_annotations(text: &str) -> Annotations {
         } else if directive == "expect-fail" {
             out.expect_fail = true;
         } else if let Some(arg) = directive.strip_prefix("timeout")
-            && let Ok(n) = arg.trim().parse::<u64>() {
-                out.timeout = Some(n);
-            }
+            && let Ok(n) = arg.trim().parse::<u64>()
+        {
+            out.timeout = Some(n);
+        }
     }
     out
 }
 
 fn display_relative(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root).map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
+    p.strip_prefix(root)
+        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 /// Decide where the JUnit XML goes (manifest `[test].junit_xml` if
@@ -258,28 +261,27 @@ fn render_junit(project_name: &str, records: &[TestRecord]) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str("<testsuites>\n");
-    out.push_str(&format!(
-        "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{}\" errors=\"0\" time=\"{:.4}\">\n",
+    let _ = writeln!(
+        out,
+        "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{}\" errors=\"0\" time=\"{:.4}\">",
         xml_escape(project_name),
         total,
         failures,
         time,
-    ));
+    );
     for r in records {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "    <testcase classname=\"{}\" name=\"{}\" time=\"{:.4}\"",
             xml_escape(project_name),
             xml_escape(&r.name),
             r.duration_s,
-        ));
+        );
         match &r.failure {
             None => out.push_str("/>\n"),
             Some(reason) => {
                 out.push_str(">\n");
-                out.push_str(&format!(
-                    "      <failure message=\"{}\"/>\n",
-                    xml_escape(reason),
-                ));
+                let _ = writeln!(out, "      <failure message=\"{}\"/>", xml_escape(reason));
                 out.push_str("    </testcase>\n");
             }
         }

@@ -44,10 +44,8 @@ pub use leek_diagnostics::codes;
 /// executed (vs cached). Used by the memoization smoke test.
 #[cfg(all(test, feature = "salsa"))]
 pub(crate) mod salsa_probe {
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     pub(crate) static TYPECHECK_QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
-    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
 }
 
 // ---- Public entry points ----
@@ -224,7 +222,7 @@ mod index_tests {
     fn integer_literal_at_cursor() {
         let text = "var x = 5;";
         let r = run(text);
-        let offset = text.find('5').unwrap() as u32;
+        let offset = u32::try_from(text.find('5').unwrap()).unwrap();
         let entry = r.table.smallest_at(offset).expect("found typed expr");
         assert_eq!(entry.ty, Type::Integer);
     }
@@ -234,7 +232,7 @@ mod index_tests {
         // Real(f64) literal promotes the integer addition to Real.
         let text = "var n = 1 + 2.5;";
         let r = run(text);
-        let plus_offset = text.find('+').unwrap() as u32;
+        let plus_offset = u32::try_from(text.find('+').unwrap()).unwrap();
         let entry = r.table.smallest_at(plus_offset);
         // The innermost span at `+` may be the BinaryExpr itself.
         // Either way the inferred type should be Real.
@@ -248,9 +246,12 @@ mod index_tests {
     #[test]
     fn this_is_typed_as_enclosing_class() {
         let r = run("class Cat {\n  meow() { return this }\n}\n");
-        let offset = r"class Cat {
+        let offset = u32::try_from(
+            r"class Cat {
   meow() { return this"
-            .len() as u32
+                .len(),
+        )
+        .unwrap()
             - 4; // start of `this`
         let entry = r.table.smallest_at(offset).expect("typed `this`");
         assert_eq!(entry.ty, Type::ClassInstance("Cat".into(), vec![]));
@@ -419,7 +420,10 @@ mod index_tests {
     #[test]
     fn infers_ternary_branch_unification() {
         let r = run("var x = true ? 1 : 2\n");
-        assert_eq!(ty_at(&r, "var x = true ? 1 : 2\n", "true ? 1 : 2", 1), Type::Integer);
+        assert_eq!(
+            ty_at(&r, "var x = true ? 1 : 2\n", "true ? 1 : 2", 1),
+            Type::Integer
+        );
     }
 
     #[test]
@@ -524,8 +528,7 @@ mod index_tests {
     fn user_redefinition_shadows_library_generic() {
         // A user `pop` with a concrete return shadows the seeded
         // `pop<T>` generic — the user's `string` return wins.
-        let text =
-            "function pop(Array a) -> string { return \"x\" }\nvar x = pop([1, 2, 3])\n";
+        let text = "function pop(Array a) -> string { return \"x\" }\nvar x = pop([1, 2, 3])\n";
         let r = run_with_library(text, false);
         assert_eq!(ty_at(&r, text, "pop([1, 2, 3])", 1), Type::String);
     }

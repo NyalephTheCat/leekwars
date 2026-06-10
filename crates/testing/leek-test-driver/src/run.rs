@@ -1,9 +1,9 @@
 //! Run extracted upstream cases through the recipe pipeline and
 //! classify outcomes against upstream expectations.
 
-use std::collections::BTreeMap;
 use leek_span::SourceId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::cases::{Manifest, TestCase};
 

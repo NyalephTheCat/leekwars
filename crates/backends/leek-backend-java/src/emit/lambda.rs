@@ -741,7 +741,11 @@ pub(crate) fn collect_boxed_locals(
     scan_stmts(&hir.main, &mut var_decls, &mut captured_written);
     // A boxable local is one that is both a `var` declaration and is
     // captured-and-written by some first-level lambda.
-    out.extend(captured_written.into_iter().filter(|d| var_decls.contains(d)));
+    out.extend(
+        captured_written
+            .into_iter()
+            .filter(|d| var_decls.contains(d)),
+    );
 }
 
 fn scan_stmts(
@@ -781,8 +785,7 @@ fn find_first_level_lambda_writes(
 ) {
     if let ExprKind::Lambda(l) = &e.kind {
         if let LambdaBody::Block(b) = &l.body {
-            let mut inner: std::collections::HashSet<_> =
-                l.params.iter().map(|p| p.def).collect();
+            let mut inner: std::collections::HashSet<_> = l.params.iter().map(|p| p.def).collect();
             collect_inner_decls(b, &mut inner);
             for c in lambda_outer_captures(b, &inner) {
                 let one = std::iter::once(c).collect();

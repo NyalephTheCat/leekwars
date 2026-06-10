@@ -106,7 +106,10 @@ pub fn is_stale(target: &Path, manifest_dir: &Path) -> bool {
 pub fn regenerate(manifest_dir: &Path, out: &Path) -> Result<(), String> {
     let script = script_path(manifest_dir);
     if !script.exists() {
-        return Err(format!("generator script not found at {}", script.display()));
+        return Err(format!(
+            "generator script not found at {}",
+            script.display()
+        ));
     }
     let status = Command::new("bash")
         .arg(&script)
@@ -148,16 +151,23 @@ pub fn prepare_embed(manifest_dir: &Path, out_dir: &Path) {
     let skip = std::env::var_os("LEEK_SKIP_REFERENCE_REGEN").is_some();
     if is_stale(&committed, manifest_dir) {
         if !skip && submodule_present(manifest_dir) && jvm_available() {
-            println!("cargo:warning=reference dataset stale/missing — regenerating via official JVM suite (minutes)…");
+            println!(
+                "cargo:warning=reference dataset stale/missing — regenerating via official JVM suite (minutes)…"
+            );
             match regenerate(manifest_dir, &committed) {
                 Ok(()) => {
                     let rows = std::fs::read_to_string(&committed)
                         .map(|s| s.lines().filter(|l| !l.starts_with('#')).count())
                         .unwrap_or(0);
-                    println!("cargo:warning=regenerated {} ({rows} rows)", committed.display());
+                    println!(
+                        "cargo:warning=regenerated {} ({rows} rows)",
+                        committed.display()
+                    );
                 }
                 Err(e) => {
-                    println!("cargo:warning=reference regen failed: {e} (embedding committed/empty)");
+                    println!(
+                        "cargo:warning=reference regen failed: {e} (embedding committed/empty)"
+                    );
                 }
             }
         } else if committed.exists() {

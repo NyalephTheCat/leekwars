@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use leek_backend_native::NativeOptions;
 
-use crate::{compile_hir_file, Backend, BenchOptions, RunResult};
+use crate::{Backend, BenchOptions, RunResult, compile_hir_file};
 
 pub struct RustNative {
     hir: Option<std::sync::Arc<leek_hir::HirFile>>,

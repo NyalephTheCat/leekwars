@@ -8,8 +8,8 @@ pub mod run;
 
 pub use audit::audit_case;
 pub use backends::{
-    detect_backends, run_case_backend, run_manifest as run_manifest_backends, MultiDiff,
-    MultiReport, SuiteBackend,
+    MultiDiff, MultiReport, SuiteBackend, detect_backends, run_case_backend,
+    run_manifest as run_manifest_backends,
 };
 pub use cases::{CaseAudit, Expectation, Manifest, TestCase};
 pub use checks::{CasePlan, CheckKind};

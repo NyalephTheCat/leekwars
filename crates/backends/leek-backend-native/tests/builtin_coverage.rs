@@ -4,7 +4,7 @@
 //! assertions lock that in so a future change can't silently regress a
 //! builtin back to `Unsupported` or — worse — a wrong value.
 
-use leek_backend_native::{run, NativeOptions};
+use leek_backend_native::{NativeOptions, run};
 use leek_hir::lower_file_versioned;
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::SourceId;
@@ -38,6 +38,9 @@ fn newly_supported_builtins_match_interpreter() {
     ];
     for (src, expected) in cases {
         let got = native(&format!("// @version: 4\n{src}\n"));
-        assert_eq!(&got, expected, "native `{src}` = {got:?}, expected {expected:?}");
+        assert_eq!(
+            &got, expected,
+            "native `{src}` = {got:?}, expected {expected:?}"
+        );
     }
 }
