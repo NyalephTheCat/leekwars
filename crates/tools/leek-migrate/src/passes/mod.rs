@@ -1,5 +1,9 @@
 //! Individual migration passes.
 
+pub(crate) mod boundary12;
+pub(crate) mod boundary34;
+pub(crate) mod util;
+
 pub mod v1_to_v2;
 pub mod v2_to_v1;
 pub mod v2_to_v3;

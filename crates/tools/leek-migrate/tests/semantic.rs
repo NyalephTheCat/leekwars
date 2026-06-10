@@ -12,13 +12,16 @@
 //! output version target with the same code." A textual rename
 //! that changes runtime behaviour fails here.
 
+use std::sync::Arc;
+
 use leek_diagnostics::Severity;
-use leek_hir::lower_file;
+use leek_hir::pipeline::HirArtifact;
 use leek_migrate::migrate_text;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_pipeline::Input;
+use leek_recipes::{RecipeParams, Target};
 use leek_runtime::Value;
 use leek_span::SourceId;
-use leek_syntax::{SyntaxNode, Version};
+use leek_syntax::Version;
 
 fn id() -> SourceId {
     SourceId::new(1).unwrap()
@@ -33,30 +36,41 @@ fn version_num(v: Version) -> u8 {
     }
 }
 
-/// Lex+parse+lower+interpret. Returns the produced `Value`. Panics
-/// loudly on parse errors so a malformed fixture surfaces fast
-/// rather than silently returning `null`.
+/// Full versioned frontend (parser + resolver + HIR lowering) and a
+/// native JIT run — the same path `examples/corpus_verify.rs` uses.
+/// Panics loudly on compile errors so a malformed fixture surfaces
+/// fast rather than silently returning `null`.
 fn run(src: &str, version: Version) -> Value {
-    let parsed = parse(src, id(), version);
-    let fatal: Vec<_> = parsed
-        .diagnostics
+    let input = Input {
+        source: id(),
+        text: src.to_string().into(),
+        version_byte: version_num(version),
+        strict: false,
+        flags: leek_pipeline::FeatureFlags::from_env(),
+    };
+    let pipeline =
+        leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
+    let outcome = pipeline.run(input);
+    let fatal: Vec<_> = outcome
+        .diagnostics()
         .iter()
         .filter(|d| d.severity == Severity::Error)
+        .cloned()
         .collect();
     assert!(
         fatal.is_empty(),
-        "parse errors in fixture under {version:?}:\n{src}\n{fatal:?}",
+        "compile errors in fixture under {version:?}:\n{src}\n{fatal:?}",
     );
-    let root = SyntaxNode::new_root(parsed.green.clone());
-    let file = SourceFile::cast(root).expect("source file root");
-    let (hir, _diags) = lower_file(&file, id());
-    let mut opts = leek_backend_native::NativeOptions::release();
-    opts.version = version_num(version);
-    opts.op_limit = 1_000_000;
-    opts.emit = leek_backend_native::NativeEmit::Jit;
-    match leek_backend_native::compile(&hir, &opts) {
-        Ok(leek_backend_native::NativeArtifact::Value(v)) => v,
-        other => panic!("native run failed under {version:?}: {other:?}\nsource:\n{src}"),
+    let hir = outcome
+        .get::<HirArtifact>()
+        .map(|a| Arc::clone(&a.0))
+        .expect("hir artifact");
+    let opts = leek_backend_native::NativeOptions::release()
+        .with_lang(version_num(version), false)
+        .with_op_limit(1_000_000);
+    match leek_backend_native::run(&hir, &opts) {
+        Ok(v) => v,
+        Err(e) => panic!("native run failed under {version:?}: {e:?}\nsource:\n{src}"),
     }
 }
 
@@ -100,11 +114,47 @@ fn v1_to_v2_caret_assign_negative_exponent_via_chain() {
     );
 }
 
-// ─── v2 → v3 : pragma-only ──────────────────────────────────────────
+// ─── v1 → v2 : lexer quirks & constant folds ───────────────────────
 
 #[test]
-fn v2_to_v3_is_noop() {
+fn v1_to_v2_short_comment_rewrites() {
+    // `/*/` is a complete comment at v1; at v2 it would swallow the
+    // rest of the file. Must become `/**/` so `return 1` survives.
+    assert_round_trip("/*/ return 1\n", Version::V1, Version::V2);
+}
+
+#[test]
+fn v1_to_v2_escaped_delimiter_keeps_content() {
+    // v1 keeps the backslash of `\"` in the content (8 chars); the
+    // migrated spelling must preserve that at v2.
+    assert_round_trip("return length(\"abc\\\"def\")\n", Version::V1, Version::V2);
+}
+
+#[test]
+fn v1_to_v2_constant_division_by_zero_folds() {
+    // 1 / 0 is null at v1 but ∞ at v2+ — folded to null.
+    assert_round_trip("return 1 / 0\n", Version::V1, Version::V2);
+    assert_round_trip("return 8 / null\n", Version::V1, Version::V2);
+}
+
+// ─── v2 → v3 : keyword case ─────────────────────────────────────────
+
+#[test]
+fn v2_to_v3_is_noop_on_clean_source() {
     assert_round_trip("var x = 7\nreturn x + 1\n", Version::V2, Version::V3);
+}
+
+#[test]
+fn v2_to_v3_lowercases_keywords() {
+    // v1/v2 keywords are case-insensitive; v3+ is case-sensitive.
+    assert_round_trip("VAR x = 2\nReturn TRUE\n", Version::V2, Version::V3);
+}
+
+#[test]
+fn v2_to_v3_mis_cased_null_value() {
+    // `Null` at v2 is the null keyword; at v3 it would become a
+    // fresh (unknown) variable — silent drift without the rewrite.
+    assert_round_trip("return Null\n", Version::V2, Version::V3);
 }
 
 // ─── v3 → v4 : renames ──────────────────────────────────────────────
@@ -168,6 +218,17 @@ return f(7, 9)\n\
     assert_round_trip(src, Version::V3, Version::V4);
 }
 
+#[test]
+fn v3_to_v4_callback_param_order_swaps() {
+    // v3 passes (key, value); v4 passes (value, key). The swap keeps
+    // each body name bound to the same data.
+    assert_round_trip(
+        "return arrayMap([7, 8], (k, v) => v + k)\n",
+        Version::V3,
+        Version::V4,
+    );
+}
+
 // ─── full chain v1 → v4 ─────────────────────────────────────────────
 
 #[test]
@@ -211,6 +272,24 @@ mapRemove(m, 'a')\n\
 return m\n\
 ";
     assert_round_trip(src, Version::V4, Version::V3);
+}
+
+#[test]
+fn v4_to_v3_bool_literal_equality_strictifies() {
+    // v4's `x == true` is plain false for non-bool x; v3's `==`
+    // type-juggles (`1 == true` is true there), so the downgrade
+    // must emit `===` to stay faithful.
+    assert_round_trip("var x = 1\nreturn x == true\n", Version::V4, Version::V3);
+    assert_round_trip("var x = 1\nreturn x != false\n", Version::V4, Version::V3);
+}
+
+#[test]
+fn v4_to_v3_callback_param_order_swaps() {
+    assert_round_trip(
+        "return arrayMap([7, 8], (v, k) => v * 2 + k)\n",
+        Version::V4,
+        Version::V3,
+    );
 }
 
 #[test]
@@ -288,6 +367,21 @@ var arr = [1, 2, 3, 4, 5]\n\
 return arr\n\
 ";
     assert_round_trip(src, Version::V4, Version::V1);
+}
+
+#[test]
+fn round_trip_v3_to_v4_to_v3_callback_swap_is_involutive() {
+    // The (key, value) ↔ (value, key) swap must be its own inverse.
+    let src = "return arrayMap([7, 8], (k, v) => v + k)\n";
+    let up = migrate_text(src, id(), Version::V3, Version::V4).text;
+    let down = migrate_text(&up, id(), Version::V4, Version::V3).text;
+    assert!(
+        down.contains("(k, v) => v + k"),
+        "swap not involutive:\nup:\n{up}\ndown:\n{down}"
+    );
+    let orig_val = run(src, Version::V3);
+    let down_val = run(&down, Version::V3);
+    assert!(orig_val.loose_eq(&down_val));
 }
 
 #[test]

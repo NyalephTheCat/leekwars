@@ -1,14 +1,16 @@
 //! v2 → v3 migration.
 //!
-//! Currently a pure pragma bump: no syntactic rewrites are
-//! required. v3 introduces first-class builtins as values
-//! (`var f = cos`), but v2 sources that never used that pattern
-//! transition cleanly. Lexer-level changes between v2 and v3
-//! (the v1-only `/*/` quirk, the v1-only `function` alias, etc.)
-//! don't bite a v2 source.
+//! v1/v2 match keywords case-insensitively (`TRUE`, `Return`, `NOT`
+//! all work); v3+ is fully case-sensitive, so a non-lowercase keyword
+//! stops being a keyword after the bump — usually a compile error
+//! (`Return 1`), occasionally a silent behavior change (`Null`
+//! becomes a fresh variable that reads as null anyway, `TRUE` an
+//! unknown name). The pass lexes under v2 and lowercases every
+//! keyword token that isn't already lowercase.
 //!
-//! We keep the pass as a structured no-op so chained migrations
-//! flow through it cleanly and the pragma update fires.
+//! `class` is case-sensitive even at v2 (`LexicalParser.java:449`),
+//! so `Class` lexes as a plain identifier there and is correctly left
+//! alone.
 
 use leek_diagnostics::Diagnostic;
 use leek_rewrite::EditSet;
@@ -31,13 +33,21 @@ impl MigrationPass for V2ToV3 {
     }
     fn collect_edits(
         &self,
-        _source: &str,
-        _source_id: SourceId,
-        _edits: &mut EditSet,
+        source: &str,
+        source_id: SourceId,
+        edits: &mut EditSet,
         _diagnostics: &mut Vec<Diagnostic>,
     ) {
-        // No source-level rewrites needed today; the pragma update
-        // wrapping this pass handles `@version:2` → `@version:3`.
+        let lexed = leek_lexer::lex(source, source_id, Version::V2);
+        for tok in &lexed.tokens {
+            if !tok.kind.is_keyword() {
+                continue;
+            }
+            let text = &source[tok.span.range()];
+            if text.bytes().any(|b| b.is_ascii_uppercase()) {
+                let _ = edits.replace_span(tok.span, text.to_ascii_lowercase());
+            }
+        }
     }
 }
 
@@ -46,13 +56,42 @@ mod tests {
     use super::*;
     use crate::run_pass;
 
+    fn migrate(src: &str) -> String {
+        run_pass(&V2ToV3, src, SourceId::new(1).unwrap()).text
+    }
+
     #[test]
     fn body_unchanged_pragma_bumped() {
-        let out = run_pass(
-            &V2ToV3,
-            "// @version:2\nvar x = 1\n",
-            SourceId::new(1).unwrap(),
-        );
-        assert_eq!(out.text, "// @version:3\nvar x = 1\n");
+        let out = migrate("// @version:2\nvar x = 1\n");
+        assert_eq!(out, "// @version:3\nvar x = 1\n");
+    }
+
+    #[test]
+    fn lowercases_mis_cased_keywords() {
+        let out = migrate("Return TRUE\n");
+        assert_eq!(out, "// @version:3\nreturn true\n");
+    }
+
+    #[test]
+    fn lowercases_null_and_not() {
+        let out = migrate("VAR x = Null\nreturn NOT x\n");
+        assert_eq!(out, "// @version:3\nvar x = null\nreturn not x\n");
+    }
+
+    #[test]
+    fn leaves_identifiers_and_strings_alone() {
+        // `Class` is case-sensitive even at v2 → a plain identifier.
+        // Keyword-looking words inside strings/comments stay put.
+        let out = migrate("var Class = 1\nvar s = 'TRUE'\n// Return TRUE\nreturn Class\n");
+        assert!(out.contains("var Class = 1"), "got: {out}");
+        assert!(out.contains("'TRUE'"), "got: {out}");
+        assert!(out.contains("// Return TRUE"), "got: {out}");
+        assert!(out.contains("return Class"), "got: {out}");
+    }
+
+    #[test]
+    fn already_lowercase_is_untouched() {
+        let out = migrate("var x = true\nreturn x\n");
+        assert!(out.contains("var x = true\nreturn x\n"));
     }
 }

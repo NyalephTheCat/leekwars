@@ -20,6 +20,7 @@
 
 pub mod passes;
 mod pragma;
+mod verify;
 
 use leek_diagnostics::Diagnostic;
 use leek_rewrite::EditSet;
@@ -126,6 +127,13 @@ pub fn migrate_text(
         diagnostics.extend(pass_diags);
         here = pass.to_version();
     }
+    // Safety net: if the original compiled cleanly under `from` but
+    // the migrated text no longer compiles under `to`, surface every
+    // introduced error as a `MigrationCompileBreak` warning rather
+    // than handing back silently-broken source.
+    diagnostics.extend(verify::verify_migration(
+        source, &current, source_id, from, to,
+    ));
     MigrationOutput {
         text: current,
         diagnostics,
