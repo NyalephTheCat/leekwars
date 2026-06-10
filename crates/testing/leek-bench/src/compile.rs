@@ -48,12 +48,25 @@ pub fn compile_hir_file(
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let src_id = SourceId::new(1).unwrap();
-    let (compiled, _run) = compile_hir(Input {
+    let (compiled, run) = compile_hir(Input {
         source: src_id,
         text: text.into(),
         version_byte,
         strict,
         flags: leek_pipeline::FeatureFlags::from_env(),
     })?;
+    // The permissive pipeline still produces HIR alongside error diagnostics
+    // (error-tolerant lowering). Executing that HIR benchmarks garbage — an
+    // unsupported literal lowers to a poison value and can even fault (e.g.
+    // `% <error>` → SIGFPE in the JIT) — so treat frontend errors as a
+    // compile failure, like the JVM backends do when javac rejects a case.
+    let n_errors = run
+        .diagnostics()
+        .iter()
+        .filter(|d| matches!(d.severity, leek_diagnostics::Severity::Error))
+        .count();
+    if n_errors > 0 {
+        anyhow::bail!("{n_errors} frontend error(s)");
+    }
     Ok(compiled)
 }

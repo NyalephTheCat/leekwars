@@ -10,11 +10,11 @@
 //!   the upstream classes + their gradle-cached deps to be present.
 //!
 //! Each [`Backend`] reports a cold time (first run, includes any
-//! one-shot cost) and a warm median (runs 2..N). For the JVM
-//! backends, warm runs still spawn a fresh JVM each iteration — the
-//! "warm" label refers to amortised per-iteration cost rather than a
-//! JIT-warmed JVM. A true warm-JIT measurement would need a
-//! long-lived JVM harness; that's planned but not done here.
+//! one-shot cost) and a warm median (runs 2..N). The JVM backends
+//! loop all iterations inside a single `java` process and report
+//! per-iteration `System.nanoTime()` brackets, so warm samples are
+//! genuine JIT-warmed JVM times — JVM start-up and classloading stay
+//! out of every sample.
 //!
 //! Usage:
 //!
