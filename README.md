@@ -72,9 +72,11 @@ Global flags include `--manifest-path`, `--library leekwars` (load host
 function libraries), `--message-format {human|json|junit}`, `--color`, and
 `--verbose` (e.g. `miku build --verbose` prints per-stage pipeline timings).
 
-Other binaries in the workspace: `leekc` (single-file compiler driver),
-`leek-lsp` (language server), `leek-dap` (debug adapter), `leekbench`
-(benchmark runner).
+Other binaries in the workspace: [`leekc`](bins/leekc/) (single-file compiler
+driver), [`leek-lsp`](bins/leek-lsp/) (language server),
+[`leek-dap`](bins/leek-dap/) (debug adapter), and
+[`leekbench`](bins/leekbench/) (benchmark runner). Each directory under
+`bins/` has a README covering how to build, run, and use that binary.
 
 ## Fights — the leek-wars simulator
 
@@ -200,9 +202,21 @@ submodules (`official/`, `official-generator/`):
 git submodule update --init --recursive
 ```
 
-Editor support lives in `editors/`: **VS Code** (`editors/vscode/` — syntax,
-language server, "Debug AI in fight") and **Neovim** (`editors/nvim/` — filetype
-detection and `leek-lsp` setup).
+Editor support lives in `editors/`: **VS Code**
+([`editors/vscode/`](editors/vscode/) — syntax, language server, "Debug AI in
+fight"; its README covers building, packaging, and installing the extension)
+and **Neovim** ([`editors/nvim/`](editors/nvim/) — filetype detection and
+`leek-lsp` setup).
+
+To install the binaries on your `PATH`:
+
+```sh
+cargo install --path bins/miku       # and likewise bins/leekc, bins/leek-lsp,
+                                     # bins/leek-dap, bins/leekbench
+```
+
+`tools/check.sh` is the repo-wide quality gate (fmt + layer check + clippy +
+tests; `--full` adds the upstream corpus suite).
 
 ## License
 
