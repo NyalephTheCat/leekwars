@@ -1,7 +1,7 @@
 use leek_hir::{Expr, ExprKind, LambdaBody, LambdaExpr, NameRef, PostfixOp, Stmt, UnaryOp};
 use std::fmt::Write as _;
 
-use super::{ends_with_return, expr_op_cost};
+use super::ends_with_return;
 use crate::mangle;
 
 impl super::Emitter<'_> {
@@ -156,7 +156,8 @@ impl super::Emitter<'_> {
             LambdaBody::Expr(e) => {
                 let code = self.expr_to_string(e);
                 if self.opts.emit_ops {
-                    let cost = expr_op_cost(e);
+                    buf.push_str(&self.v1_param_box_ops(&l.params));
+                    let cost = self.emit_cost(e);
                     if cost > 0 {
                         write!(buf, "ops(1);ops({cost}); ").unwrap();
                     } else {
@@ -171,6 +172,7 @@ impl super::Emitter<'_> {
                 // Inline path — caller has already confirmed no
                 // outer captures exist.
                 if self.opts.emit_ops {
+                    buf.push_str(&self.v1_param_box_ops(&l.params));
                     buf.push_str("ops(1);");
                 }
                 buf.push_str(&self.render_block_to_string(b));
@@ -287,6 +289,7 @@ impl super::Emitter<'_> {
         }
         self.lambda_depth.set(self.lambda_depth.get() + 1);
         if self.opts.emit_ops {
+            factory_buf.push_str(&self.v1_param_box_ops(&l.params));
             factory_buf.push_str("ops(1);");
         }
         // The factory is an AI-level method, so `<u_Class>.this` is out of scope

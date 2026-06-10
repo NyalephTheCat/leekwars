@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use super::traits::EmitExpr;
 use super::{
-    Emitter, builtin_fn_wrapper, escape_string, expr_op_cost, is_div_expr, is_primitive_number,
+    Emitter, builtin_fn_wrapper, escape_string, is_div_expr, is_primitive_number,
     is_primitive_number_expr, is_string_expr, java_class_name, user_fn_wrapper,
 };
 use crate::mangle;
@@ -499,20 +499,8 @@ impl Emitter<'_> {
             BinaryOp::Le => self.write_compare(buf, l, r, "<=", "lessequals"),
             BinaryOp::Gt => self.write_compare(buf, l, r, ">", "more"),
             BinaryOp::Ge => self.write_compare(buf, l, r, ">=", "moreequals"),
-            BinaryOp::And => {
-                buf.push('(');
-                buf.push_str(&self.expr_to_bool(l));
-                buf.push_str(" && ");
-                buf.push_str(&self.expr_to_bool(r));
-                buf.push(')');
-            }
-            BinaryOp::Or => {
-                buf.push('(');
-                buf.push_str(&self.expr_to_bool(l));
-                buf.push_str(" || ");
-                buf.push_str(&self.expr_to_bool(r));
-                buf.push(')');
-            }
+            BinaryOp::And => self.write_short_circuit(buf, l, r, "&&", op),
+            BinaryOp::Or => self.write_short_circuit(buf, l, r, "||", op),
             BinaryOp::Xor => {
                 buf.push('(');
                 buf.push_str(&self.expr_to_bool(l));
@@ -1072,6 +1060,58 @@ impl Emitter<'_> {
         p.is_by_ref && matches!(self.opts.version, leek_syntax::Version::V1)
     }
 
+    /// Static op cost of an expression *as emitted* — [`expr_op_cost`] minus the
+    /// builtin per-call cost of any **shadowed** builtin calls inside it. A
+    /// reassigned builtin (`count = function(…){…}; count(…)`) is dispatched
+    /// through the `__shadows` map (a user function), so it never pays the
+    /// builtin's tabulated cost; counting it would over-charge.
+    pub(crate) fn emit_cost(&self, e: &Expr) -> u32 {
+        super::expr_op_cost(e).saturating_sub(self.shadowed_overcharge(e))
+    }
+
+    /// Emit a short-circuiting `&&` / `||`, distributing op cost into per-operand
+    /// `ops(...)` wrappers so the right side is charged only when evaluated. The
+    /// operator's own cost rides on the always-evaluated left operand — matching
+    /// the reference's `ops(l, lc + opCost) && ops(r, rc)` shape.
+    fn write_short_circuit(&self, buf: &mut String, l: &Expr, r: &Expr, java_op: &str, op: BinaryOp) {
+        buf.push('(');
+        let lb = self.expr_to_bool(l);
+        let rb = self.expr_to_bool(r);
+        if self.opts.emit_ops {
+            let lc = self.emit_cost(l) + super::binary_op_cost(op);
+            let rc = self.emit_cost(r);
+            let _ = write!(buf, "ops({lb}, {lc}) {java_op} ops({rb}, {rc})");
+        } else {
+            let _ = write!(buf, "{lb} {java_op} {rb}");
+        }
+        buf.push(')');
+    }
+
+    fn shadowed_overcharge(&self, e: &Expr) -> u32 {
+        let mut total = 0;
+        if let ExprKind::Call(c) = &e.kind
+            && let Callee::Function(NameRef::Builtin(name)) = &c.callee
+            && self.shadowed_builtins.borrow().contains(name)
+        {
+            total += super::builtin_call_cost(name);
+        }
+        leek_hir::visit::walk_expr_children(e, &mut |c| total += self.shadowed_overcharge(c));
+        total
+    }
+
+    /// At v1 every by-value parameter is bound through a `new Box(ai, …)` whose
+    /// 2-arg ctor charges 1 op — so a callable's body pays 1 op per by-value
+    /// param on entry (per call). Returns the `ops(n);` tick to emit at the body
+    /// start, or empty at v2+ (plain params) / when there are none. `@`-ref
+    /// params alias a passed box, so they're excluded.
+    pub(crate) fn v1_param_box_ops(&self, params: &[leek_hir::Param]) -> String {
+        if !matches!(self.opts.version, leek_syntax::Version::V1) {
+            return String::new();
+        }
+        let n = params.iter().filter(|p| !p.is_by_ref).count();
+        if n > 0 { format!("ops({n});") } else { String::new() }
+    }
+
     /// Whether the l-value/operand is a `@`-ref-param bound to a runtime `Box`
     /// (so reads use `.get()` and writes route through `Box` methods).
     pub(crate) fn is_ref_box(&self, e: &Expr) -> bool {
@@ -1497,8 +1537,8 @@ impl Emitter<'_> {
         // depending on which arm is taken. No outer parens.
         buf.push_str(&self.expr_to_bool(c));
         buf.push_str(" ? ");
-        let then_cost = expr_op_cost(t);
-        let else_cost = expr_op_cost(e);
+        let then_cost = self.emit_cost(t);
+        let else_cost = self.emit_cost(e);
         let branch_ops = self.opts.emit_ops && then_cost != else_cost;
         if branch_ops && then_cost > 0 {
             buf.push_str("ops(");

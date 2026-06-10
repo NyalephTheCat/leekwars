@@ -508,9 +508,29 @@ pub(crate) fn sanitize_ident(name: &str) -> String {
 /// / calls / `&&` / `||` are free; most binary operators cost 1;
 /// `*` costs `MUL_COST=2`, `/`, `%`, `\` cost `DIV_COST=MOD_COST=5`,
 /// `**` costs `POW_COST=40`.
+/// For a call's expression callee, the extra op cost of indexing into an array
+/// literal and calling the result: 2 ops per index level (`executeArrayAccess`),
+/// but only when the index chain is rooted in an array literal. `0` otherwise.
+fn array_literal_index_call_cost(callee: &Expr) -> u32 {
+    match &callee.kind {
+        ExprKind::Array(_) => 0,
+        ExprKind::Index(base, _) => match &base.kind {
+            ExprKind::Array(_) | ExprKind::Index(..) => 2 + array_literal_index_call_cost(base),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
 pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
     match &e.kind {
         ExprKind::Literal(_) | ExprKind::Name(_) => 0,
+        // `&&` / `||` short-circuit: the reference distributes the operand costs
+        // into per-operand `ops(...)` wrappers (`ops(l, lc) && ops(r, rc)`) so the
+        // right side is only charged when evaluated. The emitter does that inline
+        // (see `write_binary`), so the expression itself bubbles up *zero* cost —
+        // counting it here would double-charge (and charge a short-circuited rhs).
+        ExprKind::Binary(BinaryOp::And | BinaryOp::Or, _, _) => 0,
         ExprKind::Binary(op, l, r) => {
             let sub = expr_op_cost(l) + expr_op_cost(r);
             sub + binary_op_cost(*op)
@@ -525,8 +545,15 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
         // still bubble up either way.
         ExprKind::Call(c) => {
             let mut total: u32 = c.args.iter().map(expr_op_cost).sum();
-            if let Callee::Function(NameRef::Builtin(name)) = &c.callee {
-                total += builtin_call_cost(name);
+            match &c.callee {
+                Callee::Function(NameRef::Builtin(name)) => total += builtin_call_cost(name),
+                // `[ … ][i]…[j](args)` — indexing into an *array literal* and
+                // calling the result routes each index level through
+                // `executeArrayAccess`, which the reference charges 2 ops apiece.
+                // Restricted to a literal-rooted index chain so object / variable
+                // receivers (method calls, `obj['m']()`) keep their own cost.
+                Callee::Expr(e) => total += array_literal_index_call_cost(e),
+                _ => {}
             }
             total
         }
@@ -562,7 +589,10 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
             .iter()
             .map(|(k, v)| 2 + expr_op_cost(k) + expr_op_cost(v))
             .sum::<u32>(),
-        ExprKind::Object(fields) => fields.iter().map(|(_, v)| 2 + expr_op_cost(v)).sum::<u32>(),
+        // An object literal's per-field cost is charged by the `ObjectLeekValue`
+        // constructor at runtime (1 op/field), so the static cost is just the
+        // field *value* expressions — a per-field constant here double-counts.
+        ExprKind::Object(fields) => fields.iter().map(|(_, v)| expr_op_cost(v)).sum::<u32>(),
         ExprKind::Ternary(c, _, _) => {
             // `LeekTernaire.computeOperations`: `1 + cond_cost`.
             // Branches don't contribute — each branch's cost is
@@ -577,9 +607,9 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
                 + iv.end.as_deref().map_or(0, expr_op_cost)
                 + iv.step.as_deref().map_or(0, expr_op_cost)
         }
-        // Casts and `new` are free at the expression level; the
-        // operator's own work is in the body of the called helper.
-        ExprKind::Cast(x, _) => expr_op_cost(x),
+        // An explicit `as` cast charges 1 op (the runtime conversion), plus the
+        // operand's own cost.
+        ExprKind::Cast(x, _) => 1 + expr_op_cost(x),
         ExprKind::New(n) => n.args.iter().map(expr_op_cost).sum(),
         ExprKind::Lambda(_) => 0,
     }
@@ -1201,7 +1231,9 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
         leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| expr_writes(e, targets, out));
         leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| stmt_writes(c, targets, out));
     }
-    // The `@` param positions the callable writes (so an arg there must box).
+    // The `@` param positions the callable *writes* — only a local reaching one
+    // of those must box (mutation must propagate). Non-mutated `@` positions are
+    // left unboxed: boxing them would also catch un-boxable for-loop variables.
     fn mutated_ref_positions(params: &[Param], body: &[Stmt]) -> Vec<bool> {
         let ref_defs: HashSet<u32> =
             params.iter().filter(|p| p.is_by_ref).map(|p| p.def.0).collect();
@@ -1217,17 +1249,17 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
             .map(|p| p.is_by_ref && written.contains(&p.def.0))
             .collect()
     }
-
-    // `var f = function(@a){…}` bindings → the lambda's written-`@` positions,
-    // so a `f(b)` call resolves. Store the owned `Vec<bool>` (not a reference) so
-    // it outlives the walk.
-    let mut var_lambda_pos: HashMap<u32, Vec<bool>> = HashMap::new();
     fn lambda_stmts(l: &LambdaExpr) -> &[Stmt] {
         match &l.body {
             LambdaBody::Block(b) => &b.stmts,
             LambdaBody::Expr(_) => &[],
         }
     }
+
+    // `var f = function(@a){…}` bindings → the lambda's written-`@` positions,
+    // so a `f(b)` call resolves. Store the owned `Vec<bool>` (not a reference) so
+    // it outlives the walk.
+    let mut var_lambda_pos: HashMap<u32, Vec<bool>> = HashMap::new();
     fn collect_var_lambdas(s: &Stmt, m: &mut HashMap<u32, Vec<bool>>) {
         if let Stmt::VarDecl(v) = s
             && let Some(init) = &v.init

@@ -77,6 +77,10 @@ impl<'a> super::Emitter<'a> {
             // `writer.addCounter(1)`). Concatenated with the first body line.
             if self.opts.emit_ops {
                 self.writer.add_code("ops(1);");
+                let pb = self.v1_param_box_ops(&f.params);
+                if !pb.is_empty() {
+                    self.writer.add_code(&pb);
+                }
             }
             self.emit_stmts(&body.stmts);
             if !ends_with_return(&body.stmts, self.opts.emit_ops) {
@@ -120,7 +124,11 @@ impl<'a> super::Emitter<'a> {
                     self.sig_param_name(&p.name)
                 } else {
                     match &p.default {
-                        Some(d) => self.expr_to_string(d),
+                        // The default expression is *evaluated* when the arg is
+                        // omitted, so charge its op cost (the reference counts the
+                        // default's `getOperations()`) — `f(a = [1,2,3])` called
+                        // as `f()` pays the array's 6 ops.
+                        Some(d) => self.expr_with_ops(d, 0),
                         // Earlier params without defaults shouldn't
                         // appear past `arity` (Leek convention puts
                         // defaults at the tail). Emit `null` so the

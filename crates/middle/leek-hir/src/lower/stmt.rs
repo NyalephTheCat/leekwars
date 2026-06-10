@@ -37,6 +37,7 @@ impl LowerStmt for Lowerer {
                             cond: val.clone(),
                             then_branch: Box::new(Stmt::Return(Some(val))),
                             else_branch: None,
+                            soft: true,
                             span,
                         });
                     }
@@ -284,6 +285,7 @@ impl Lowerer {
             cond,
             then_branch,
             else_branch,
+            soft: false,
             span,
         })
     }
@@ -330,16 +332,21 @@ impl Lowerer {
         let mut seen_in = false;
         let mut seen_colon = false;
         let mut pending_var = false;
+        let mut pending_ref = false;
         for el in fe.syntax().children_with_tokens() {
             let Some(t) = el.into_token() else { continue };
             match t.kind() {
                 SyntaxKind::KwIn => seen_in = true,
                 SyntaxKind::KwVar if !seen_in => pending_var = true,
+                // `@v` reference marker — the lexer leaves `@` as a sibling token
+                // just before the iterator ident.
+                SyntaxKind::At if !seen_in => pending_ref = true,
                 SyntaxKind::Colon if !seen_in => seen_colon = true,
                 SyntaxKind::Ident if !seen_in => {
                     let nm = t.text().to_string();
                     let tspan = self.span_of_token(&t);
                     let is_new = pending_var;
+                    let is_by_ref = pending_ref;
                     let def = if is_new {
                         self.declare_local(&nm, tspan, None)
                     } else {
@@ -349,6 +356,7 @@ impl Lowerer {
                         def,
                         name: nm,
                         is_new,
+                        is_by_ref,
                         span: tspan,
                     };
                     if seen_colon {
@@ -363,6 +371,7 @@ impl Lowerer {
                         value = Some(bind);
                     }
                     pending_var = false;
+                    pending_ref = false;
                 }
                 _ => {}
             }
@@ -379,6 +388,7 @@ impl Lowerer {
                 def: DefId(0),
                 name: String::new(),
                 is_new: false,
+                is_by_ref: false,
                 span,
             }),
             iter,

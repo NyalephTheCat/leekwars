@@ -256,6 +256,10 @@ pub struct IfStmt {
     pub cond: Expr,
     pub then_branch: Box<Stmt>,
     pub else_branch: Option<Box<Stmt>>,
+    /// `true` when this `if` is the lowering of a soft return (`return? x` →
+    /// `if (x) return x`). The reference compiles a soft return without the
+    /// per-`if` op tick on the condition, so backends skip it.
+    pub soft: bool,
     pub span: Span,
 }
 
@@ -302,6 +306,10 @@ pub struct ForeachBind {
     pub def: DefId,
     pub name: String,
     pub is_new: bool,
+    /// `@`-by-reference iterator (`for (var @v in arr)`). At v1 a by-ref value
+    /// binding is set through a runtime `Box` and costs one op per iteration,
+    /// where a by-value declaration costs two.
+    pub is_by_ref: bool,
     pub span: Span,
 }
 

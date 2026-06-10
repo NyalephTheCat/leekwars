@@ -47,6 +47,7 @@ builtins:
 - name: atan2
   java_class: NumberClass
   return: double
+  op_cost: 35
 - name: binString
   java_class: NumberClass
   return: long
@@ -264,9 +265,11 @@ builtins:
 - name: log10
   java_class: NumberClass
   return: double
+  op_cost: 23
 - name: log2
   java_class: NumberClass
   return: double
+  op_cost: 23
 - name: mapClear
   op_cost: 1
 - name: mapContainsKey

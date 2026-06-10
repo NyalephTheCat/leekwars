@@ -5,7 +5,7 @@ use leek_hir::{
 
 use super::traits::EmitStmt;
 use super::{
-    Emitter, JavaWriter, expr_op_cost, is_pure_value_expr, is_terminator, is_valid_statement_expr,
+    Emitter, JavaWriter, is_pure_value_expr, is_terminator, is_valid_statement_expr,
 };
 use crate::mangle;
 
@@ -37,7 +37,7 @@ impl EmitStmt for Emitter<'_> {
                 let line = self.line_of(e.span);
                 let code = self.expr_to_string(e);
                 let cost = if self.opts.emit_ops {
-                    expr_op_cost(e)
+                    self.emit_cost(e)
                 } else {
                     0
                 };
@@ -60,15 +60,22 @@ impl EmitStmt for Emitter<'_> {
                 // tick `ops(1);` is emitted separately by the
                 // surrounding block-entry path (`emit_body`) — not
                 // by the return itself.
-                // At v1 the reference compiles the return value with `compileL`
-                // (value semantics): a returned variable / field / index load is
-                // deep-copied, so `function(){ return r }` hands back a copy the
-                // caller can't alias-mutate. `v1_clone` is that copy (a no-op at
-                // v2+ and for non-load expressions).
-                let code = self.v1_clone(e);
+                // At v1 a returned variable / field / index load from *inside a
+                // function or lambda* is deep-copied (`function(){ return r }`
+                // hands back a copy the caller can't alias-mutate — `v1_clone`,
+                // a no-op at v2+ and for non-load exprs). The main block's return
+                // is the program result with no caller to alias it, and the
+                // reference returns the boxed local directly (`return u_s`, no
+                // copy), so it isn't cloned — cloning there only over-charges ops.
+                let in_callable = self.in_function || self.lambda_depth.get() > 0;
+                let code = if in_callable {
+                    self.v1_clone(e)
+                } else {
+                    self.expr_to_string(e)
+                };
                 let line = self.line_of(e.span);
                 if self.opts.emit_ops {
-                    let cost = expr_op_cost(e);
+                    let cost = self.emit_cost(e);
                     if cost > 0 {
                         self.writer
                             .add_line_at(&format!("ops({cost}); return {code};"), line);
@@ -268,7 +275,7 @@ impl Emitter<'_> {
         if !self.opts.emit_ops {
             return inner;
         }
-        format!("ops({inner}, {})", base_cost + expr_op_cost(e))
+        format!("ops({inner}, {})", base_cost + self.emit_cost(e))
     }
 
     /// Wrap an expression in the `ops(value, n)` overload when we're
@@ -281,7 +288,7 @@ impl Emitter<'_> {
         if !self.opts.emit_ops {
             return inner;
         }
-        let n = base_cost + expr_op_cost(e);
+        let n = base_cost + self.emit_cost(e);
         format!("ops({inner}, {n})")
     }
     pub(crate) fn emit_if(&mut self, i: &IfStmt) {
@@ -289,7 +296,14 @@ impl Emitter<'_> {
         // is the if-statement's per-stmt baseline (added by
         // `ConditionalBloc.analyze`'s `mCondition.operations++`).
         // Body is flush-left; `else` lives on its own line.
-        let cond = self.if_cond_string(&i.cond);
+        // A soft return (`return? x`) compiles its truthiness check without the
+        // per-`if` op tick (the reference uses a bare `if (bool(r)) return r;`),
+        // so the condition is emitted unwrapped.
+        let cond = if i.soft {
+            self.expr_to_bool(&i.cond)
+        } else {
+            self.if_cond_string(&i.cond)
+        };
         self.writer.add_line(&format!("if ({cond}) {{"));
         if self.opts.is_clean() {
             self.writer.push_indent();
@@ -332,7 +346,7 @@ impl Emitter<'_> {
             return bool_form;
         }
         // Add 1 for the branch entry on top of the condition cost.
-        let n = 1 + expr_op_cost(cond);
+        let n = 1 + self.emit_cost(cond);
         format!("ops({bool_form}, {n})")
     }
 
@@ -378,7 +392,7 @@ impl Emitter<'_> {
         } else {
             inner
         };
-        let cost = expr_op_cost(c);
+        let cost = self.emit_cost(c);
         format!("ops({inner}, {cost})")
     }
 
@@ -404,7 +418,7 @@ impl Emitter<'_> {
                     // `ForBlock.writeJavaCode` always wraps the step
                     // in `ops(STEP, step.getOperations())` — same as
                     // the cond, no extra per-statement baseline.
-                    let n = expr_op_cost(s);
+                    let n = self.emit_cost(s);
                     format!("ops({raw}, {n})")
                 } else {
                     raw
@@ -452,7 +466,11 @@ impl Emitter<'_> {
                     format!("Object {name} = {init_str}")
                 }
             }
-            Some(Stmt::Expr(e)) => self.expr_with_ops(e, 1),
+            // A reused-variable init (`for (i = 0; …)`) is a bare expression: the
+            // reference's for-header charges only its `getOperations()` (the
+            // assignment's own cost), with no per-statement baseline — unlike the
+            // `var i = …` declaration init above, which keeps the +1 decl tick.
+            Some(Stmt::Expr(e)) => self.expr_with_ops(e, 0),
             _ => String::new(),
         }
     }
@@ -476,7 +494,7 @@ impl Emitter<'_> {
         // `__ar` suffixes since the reference's `ar0`/`i0`/`v0`
         // numbering tracks block-nesting state we don't reproduce.
         let iter_code = self.expr_to_string(&fe.iter);
-        let iter_cost = expr_op_cost(&fe.iter);
+        let iter_cost = self.emit_cost(&fe.iter);
         let value = mangle::local(self.opts, &fe.value.name);
         let key_decl = fe.key.as_ref().map(|k| mangle::local(self.opts, &k.name));
         let suffix = self.next_iter_id();
@@ -508,6 +526,21 @@ impl Emitter<'_> {
         }
         if self.opts.emit_ops {
             self.writer.add_code("ops(1);");
+            // A key:value foreach declares a *second* iterator var, charged for
+            // in setup beyond the value-only form. v1 boxes each *newly declared*
+            // var (`new Box(ai, null)`, 1 op apiece — so 2 for `var k : var x`,
+            // 1 when one slot is reused); v2+ adds a single `addCounter(1)` for
+            // the key declaration.
+            if fe.key.is_some() {
+                let n = if matches!(self.opts.version, leek_syntax::Version::V1) {
+                    u32::from(fe.key.as_ref().is_some_and(|k| k.is_new)) + u32::from(fe.value.is_new)
+                } else {
+                    1
+                };
+                if n > 0 {
+                    self.writer.add_code(&format!("ops({n});"));
+                }
+            }
         }
         self.writer.add_line(&format!("var {it} = iterator({ar});"));
         self.writer.add_line(&format!("while ({it}.hasNext()) {{"));
@@ -518,9 +551,16 @@ impl Emitter<'_> {
         }
         self.writer
             .add_line(&format!("{value} = (Object) {entry}.getValue();"));
-        // Per-iteration tick (upstream's `addCounter(1)` at line 190).
+        // Per-iteration tick (upstream's `addCounter(1)` at line 190). At v1 a
+        // by-value declaration also pays a second counter alongside the
+        // `iterator.set(...)` (ForeachBlock line 187); a `@`-by-ref iterator is
+        // set through its `Box` and pays only the single counter.
         if self.opts.emit_ops {
-            self.writer.add_code("ops(1);");
+            if matches!(self.opts.version, leek_syntax::Version::V1) && !fe.value.is_by_ref {
+                self.writer.add_code("ops(1);ops(1);");
+            } else {
+                self.writer.add_code("ops(1);");
+            }
         }
         self.emit_stmt_or_block(&fe.body);
         self.writer.add_line("}");
