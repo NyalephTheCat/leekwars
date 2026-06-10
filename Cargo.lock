@@ -1148,6 +1148,7 @@ name = "leek-game-runtime"
 version = "0.0.1"
 dependencies = [
  "leek-runtime",
+ "serde_json",
 ]
 
 [[package]]
@@ -1161,6 +1162,7 @@ dependencies = [
  "leek-runtime",
  "leek-span",
  "leek-syntax",
+ "serde_json",
 ]
 
 [[package]]

@@ -15,12 +15,19 @@
 //! `getCellDistance` is written once, independent of how the world stores the
 //! map — exactly the `leek-runtime` / backend split, one layer up.
 
+pub mod actions;
 pub mod builtins;
 pub mod chips;
 pub mod effect;
 pub mod entity;
 pub mod fight;
 pub mod host;
+pub mod map;
+pub mod official_builtins;
+pub mod order;
+pub mod outcome;
+pub mod rng;
+pub mod state;
 pub mod weapons;
 
 pub use builtins::{
@@ -32,3 +39,4 @@ pub use effect::{ActiveEffect, Effect, EffectKind, Stat};
 pub use entity::Entity;
 pub use fight::{Fight, FightRef, shared};
 pub use host::GameHost;
+pub use rng::OfficialRng;

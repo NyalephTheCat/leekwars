@@ -8,7 +8,11 @@ use std::rc::Rc;
 
 use leek_runtime::Value;
 
-use crate::{Effect, EffectKind, GameHost, chips, weapons};
+use crate::effect::{
+    MODIFIER_MULTIPLIED_BY_TARGETS, MODIFIER_NOT_REPLACEABLE, MODIFIER_ON_CASTER, TARGET_ALLIES,
+    TARGET_CASTER, TARGET_ENEMIES, TARGET_NON_SUMMONS,
+};
+use crate::{ActiveEffect, Effect, EffectKind, GameHost, chips, weapons};
 
 /// Return codes for action functions (`useWeapon`, `useChip`), mirroring the
 /// leek-wars `USE_*` constants.
@@ -134,10 +138,9 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         "moveAwayFrom" => move_to_entity(host, current, entity_arg(0), mp_arg(args, 1), true),
 
         // ---- Combat (mutating) ----
-        // `useWeapon` applies the real leek-wars damage formula against the
-        // equipped weapon's catalog stats (range, TP cost, strength scaling,
-        // shields). `useChip` is still a flat placeholder pending a chip
-        // catalog.
+        // Both apply the generated upstream catalogs: use rules (range, line
+        // of sight, TP, cooldowns) then each effect in order with the real
+        // leek-wars formulas.
         "useWeapon" => use_weapon(host, current, int_arg(0)),
         "useChip" => use_chip(host, current, int_arg(0), int_arg(1)),
 
@@ -333,12 +336,7 @@ fn use_weapon(host: &mut dyn GameHost, attacker: i64, target: i64) -> Value {
     let Some(weapon) = weapons::lookup(item) else {
         return Value::Int(USE_FAILED); // weapon not modeled
     };
-    let effects: Vec<Effect> = weapon
-        .damages
-        .iter()
-        .map(|&(v1, v2)| Effect::new(EffectKind::Damage, v1, v2, 0))
-        .collect();
-    use_effects(host, attacker, target, weapon, &effects)
+    use_effects(host, attacker, target, weapon, weapon.effects)
 }
 
 /// `useChip(chip, target)`: cast a chip from the catalog onto the target.
@@ -356,6 +354,7 @@ struct UseSpec {
     min_range: i64,
     max_range: i64,
     area: i64,
+    los: bool,
     cooldown: i64,
     max_uses: i64,
 }
@@ -368,6 +367,7 @@ impl From<&weapons::Weapon> for UseSpec {
             min_range: w.min_range,
             max_range: w.max_range,
             area: w.area,
+            los: w.los,
             cooldown: w.cooldown,
             max_uses: w.max_uses,
         }
@@ -381,6 +381,7 @@ impl From<&chips::Chip> for UseSpec {
             min_range: c.min_range,
             max_range: c.max_range,
             area: c.area,
+            los: c.los,
             cooldown: c.cooldown,
             max_uses: c.max_uses,
         }
@@ -410,7 +411,7 @@ fn use_effects(
         }
         None => return Value::Int(USE_INVALID_TARGET),
     }
-    if !line_of_sight(host, cc, tc) {
+    if spec.los && !line_of_sight(host, cc, tc) {
         return Value::Int(USE_INVALID_POSITION);
     }
     // Cooldown / per-turn use limits.
@@ -422,7 +423,13 @@ fn use_effects(
     if !host.spend_tp(caster, spec.cost) {
         return Value::Int(USE_NOT_ENOUGH_TP);
     }
-    host.register_use(caster, spec.item, spec.cooldown);
+    // Cooldown -1 = once per fight: a cooldown no fight outlasts.
+    let cooldown = if spec.cooldown < 0 {
+        i64::MAX / 2
+    } else {
+        spec.cooldown
+    };
+    host.register_use(caster, spec.item, cooldown);
 
     // One critical roll per use (chance = caster agility / 1000), applied to
     // every effect and every entity in the area.
@@ -440,12 +447,84 @@ fn use_effects(
             }
         }
     }
-    for entity in affected {
-        for effect in effects {
-            apply_effect(host, caster, entity, effect, critical);
+    // Effects apply in catalog order, each to every affected entity, so a
+    // later effect can consume the previous one's total applied value
+    // (StealAbsoluteShield). ON_CASTER effects hit the caster once instead
+    // and reset that chain (as upstream does).
+    let mut previous_total = 0;
+    for effect in effects {
+        if let EffectKind::Unsupported(id) = effect.kind {
+            // Skipped, with a once-per-fight warning in the log (upstream's
+            // value chain sees it as a zero-value effect).
+            host.warn_unsupported(caster, spec.item, id);
+            previous_total = 0;
+            continue;
+        }
+        // MULTIPLIED_BY_TARGETS scales the value by how many area entities
+        // the effect targets (counted even when it then applies ON_CASTER).
+        let target_count = if effect.modifiers & MODIFIER_MULTIPLIED_BY_TARGETS == 0 {
+            1
+        } else {
+            count(
+                affected
+                    .iter()
+                    .filter(|&&e| target_allowed(host, effect.targets, caster, e))
+                    .count(),
+            )
+            .max(1)
+        };
+        if effect.modifiers & MODIFIER_ON_CASTER != 0 {
+            apply_effect(
+                host,
+                caster,
+                caster,
+                effect,
+                spec.item,
+                critical,
+                previous_total,
+                target_count,
+            );
+            previous_total = 0;
+        } else {
+            let mut total = 0;
+            for &entity in &affected {
+                if !target_allowed(host, effect.targets, caster, entity) {
+                    continue;
+                }
+                // NOT_REPLACEABLE: skip targets already carrying an effect
+                // from this item.
+                if effect.modifiers & MODIFIER_NOT_REPLACEABLE != 0
+                    && host.has_item_effect(entity, spec.item)
+                {
+                    continue;
+                }
+                total += apply_effect(
+                    host,
+                    caster,
+                    entity,
+                    effect,
+                    spec.item,
+                    critical,
+                    previous_total,
+                    target_count,
+                );
+            }
+            previous_total = total;
         }
     }
     Value::Int(if critical { USE_CRITICAL } else { USE_SUCCESS })
+}
+
+/// Whether an effect with this target mask touches `target` (upstream
+/// `Attack.filterTarget`): enemy/ally by team relative to the caster, the
+/// caster needing both its own bit and the ally bit, and every entity
+/// counting as a non-summon (summons aren't modeled).
+fn target_allowed(host: &dyn GameHost, targets: u8, caster: i64, target: i64) -> bool {
+    let same_team = host.team(caster) == host.team(target);
+    (targets & TARGET_ENEMIES != 0 || same_team)
+        && (targets & TARGET_ALLIES != 0 || !same_team)
+        && (targets & TARGET_CASTER != 0 || caster != target)
+        && targets & TARGET_NON_SUMMONS != 0
 }
 
 /// Living entities on the same team as `current` (`allies`) or a different
@@ -492,25 +571,47 @@ const EROSION_CRITICAL_BONUS: f64 = 0.10;
 /// formulas: each kind rolls `value1 + jet·value2`, scaled by the relevant
 /// caster stat and the critical multiplier. Instant kinds (damage / heal) act
 /// now; lasting kinds (shields / buffs / poison) last `turns` turns.
+///
+/// Returns the effect's applied value (damage dealt, points buffed, …);
+/// `use_effects` sums it across targets so the next effect in the item's list
+/// can consume it as `previous_total` (upstream `previousEffectTotalValue`).
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(clippy::too_many_arguments)]
 fn apply_effect(
     host: &mut dyn GameHost,
     caster: i64,
     target: i64,
     effect: &Effect,
+    item: i64,
     critical: bool,
-) {
+    previous_total: i64,
+    target_count: i64,
+) -> i64 {
     let jet = host.roll_jet();
-    let base = effect.value1 as f64 + jet * effect.value2 as f64;
+    // MULTIPLIED_BY_TARGETS (`target_count` > 1) scales the roll for the
+    // kinds whose upstream formulas consume `targetCount`: damage, heals,
+    // raw MP/TP buffs, and debuffs.
+    let tc = target_count as f64;
+    let base = effect.value1 + jet * effect.value2;
     let crit_power = if critical { CRITICAL_FACTOR } else { 1.0 };
     let scale = |s: i64| 1.0 + f64::from(i32::try_from(s.max(0)).unwrap_or(i32::MAX)) / 100.0;
     let as_f = |v: i64| f64::from(i32::try_from(v).unwrap_or(0));
     let rounded = |v: f64| v.max(0.0).round() as i64;
+    // A lasting effect, tagged with where it came from (stack/replace and
+    // debuff rules key on the item, caster, and modifiers).
+    let mk = |kind: EffectKind, value: i64, turns: i64| ActiveEffect {
+        kind,
+        value,
+        turns,
+        item,
+        caster,
+        modifiers: effect.modifiers,
+    };
 
     match effect.kind {
         EffectKind::Damage => {
             let power = scale(stat(host.power(caster)));
-            let mut d = base * scale(stat(host.strength(caster))) * crit_power * power;
+            let mut d = base * scale(stat(host.strength(caster))) * crit_power * power * tc;
             // Damage return (computed pre-shield, reflected to the caster).
             let return_dmg = if caster == target {
                 0
@@ -539,30 +640,124 @@ fn apply_effect(
                 let dealt_back = host.deal_damage(caster, return_dmg);
                 host.reduce_max_life(caster, rounded(as_f(dealt_back) * erosion_rate));
             }
+            dealt
         }
+        EffectKind::LifeDamage => {
+            // `value%` of the caster's life, power-scaled (not strength).
+            // Shields and damage-return apply; no life steal.
+            let mut d = base / 100.0
+                * as_f(stat(host.life(caster)))
+                * crit_power
+                * scale(stat(host.power(caster)));
+            let return_dmg = if caster == target {
+                0
+            } else {
+                rounded(d * as_f(stat(host.damage_return(target))) / 100.0)
+            };
+            d -= d * (as_f(host.relative_shield(target)) / 100.0)
+                + as_f(host.absolute_shield(target));
+            let dealt = host.deal_damage(target, rounded(d));
+            let erosion_rate = EROSION_DAMAGE
+                + if critical {
+                    EROSION_CRITICAL_BONUS
+                } else {
+                    0.0
+                };
+            host.reduce_max_life(target, rounded(as_f(dealt) * erosion_rate));
+            if return_dmg > 0 {
+                let dealt_back = host.deal_damage(caster, return_dmg);
+                host.reduce_max_life(caster, rounded(as_f(dealt_back) * erosion_rate));
+            }
+            dealt
+        }
+        EffectKind::Kill => host.deal_damage(target, stat(host.life(target))),
         EffectKind::Heal => {
-            let v = rounded(base * scale(stat(host.wisdom(caster))) * crit_power);
-            host.heal(target, v);
+            let v = rounded(base * scale(stat(host.wisdom(caster))) * crit_power * tc);
+            if effect.turns > 0 {
+                // Heal-over-time (upstream TYPE_HEAL with `turns > 0`): the
+                // wisdom-scaled value, fixed at cast, heals each turn.
+                host.add_effect(target, mk(EffectKind::Regeneration, v, effect.turns));
+            } else {
+                host.heal(target, v);
+            }
+            v
         }
         EffectKind::AbsoluteShield => {
             let v = rounded(base * scale(stat(host.resistance(caster))) * crit_power);
-            host.add_effect(target, EffectKind::AbsoluteShield, v, effect.turns);
+            host.add_effect(target, mk(EffectKind::AbsoluteShield, v, effect.turns));
+            v
         }
         EffectKind::RelativeShield => {
             let v = rounded(base * scale(stat(host.resistance(caster))) * crit_power);
-            host.add_effect(target, EffectKind::RelativeShield, v, effect.turns);
+            host.add_effect(target, mk(EffectKind::RelativeShield, v, effect.turns));
+            v
+        }
+        EffectKind::StealAbsoluteShield => {
+            // Absolute shield equal to the previous effect's total applied
+            // value (the rolled value is ignored).
+            if previous_total > 0 {
+                host.add_effect(
+                    target,
+                    mk(EffectKind::AbsoluteShield, previous_total, effect.turns),
+                );
+            }
+            previous_total.max(0)
         }
         EffectKind::Buff(s) => {
             let v = rounded(base * scale(stat(host.science(caster))) * crit_power);
-            host.add_effect(target, EffectKind::Buff(s), v, effect.turns);
+            host.add_effect(target, mk(EffectKind::Buff(s), v, effect.turns));
+            v
+        }
+        EffectKind::RawBuff(s) => {
+            // Like Buff, but unscaled by science. Upstream's raw MP/TP buffs
+            // consume targetCount; the other raw stat buffs don't.
+            let raw_tc = if matches!(s, crate::Stat::Mp | crate::Stat::Tp) {
+                tc
+            } else {
+                1.0
+            };
+            let v = rounded(base * crit_power * raw_tc);
+            host.add_effect(target, mk(EffectKind::Buff(s), v, effect.turns));
+            v
+        }
+        EffectKind::RawAbsoluteShield => {
+            // Like AbsoluteShield, but unscaled by resistance.
+            let v = rounded(base * crit_power);
+            host.add_effect(target, mk(EffectKind::AbsoluteShield, v, effect.turns));
+            v
+        }
+        EffectKind::RawRelativeShield => {
+            let v = rounded(base * crit_power);
+            host.add_effect(target, mk(EffectKind::RelativeShield, v, effect.turns));
+            v
+        }
+        EffectKind::RawHeal => {
+            // Like Heal, but unscaled by wisdom (same heal-over-time rule).
+            let v = rounded(base * crit_power * tc);
+            if effect.turns > 0 {
+                host.add_effect(target, mk(EffectKind::Regeneration, v, effect.turns));
+            } else {
+                host.heal(target, v);
+            }
+            v
+        }
+        EffectKind::DamageReturn => {
+            // Agility-scaled damage-return buff.
+            let v = rounded(base * scale(stat(host.agility(caster))) * crit_power);
+            if v > 0 {
+                host.add_effect(target, mk(EffectKind::DamageReturn, v, effect.turns));
+            }
+            v
         }
         EffectKind::Poison => {
             let v = rounded(base * scale(stat(host.magic(caster))) * crit_power);
-            host.add_effect(target, EffectKind::Poison, v, effect.turns);
+            host.add_effect(target, mk(EffectKind::Poison, v, effect.turns));
+            v
         }
         EffectKind::Regeneration => {
             let v = rounded(base * scale(stat(host.wisdom(caster))) * crit_power);
-            host.add_effect(target, EffectKind::Regeneration, v, effect.turns);
+            host.add_effect(target, mk(EffectKind::Regeneration, v, effect.turns));
+            v
         }
         EffectKind::Nova => {
             // Science-scaled max-life damage, capped so it can't drop max
@@ -572,12 +767,21 @@ fn apply_effect(
                 * crit_power
                 * scale(stat(host.power(caster)));
             let headroom = (stat(host.max_life(target)) - stat(host.life(target))).max(0);
-            host.reduce_max_life(target, rounded(d).min(headroom));
+            let v = rounded(d).min(headroom);
+            host.reduce_max_life(target, v);
+            v
+        }
+        EffectKind::NovaVitality => {
+            // Science-scaled max-life raise — no heal (unlike Vitality).
+            let v = rounded(base * scale(stat(host.science(caster))) * crit_power);
+            host.raise_max_life(target, v);
+            v
         }
         EffectKind::Shackle(s) => {
             // Magic-scaled stat debuff: a negative buff.
             let v = rounded(base * scale(stat(host.magic(caster))) * crit_power);
-            host.add_effect(target, EffectKind::Buff(s), -v, effect.turns);
+            host.add_effect(target, mk(EffectKind::Buff(s), -v, effect.turns));
+            v
         }
         EffectKind::Vulnerability { absolute } => {
             // A negative shield (increases damage taken). Not stat-scaled.
@@ -587,19 +791,47 @@ fn apply_effect(
             } else {
                 EffectKind::RelativeShield
             };
-            host.add_effect(target, kind, -v, effect.turns);
+            host.add_effect(target, mk(kind, -v, effect.turns));
+            v
         }
         EffectKind::Vitality => {
             let v = rounded(base * scale(stat(host.wisdom(caster))) * crit_power);
             host.grant_vitality(target, v);
+            v
+        }
+        EffectKind::Debuff => {
+            // Shrink every effect on the target by the rolled percent
+            // (truncated like upstream's int cast). Not stat-scaled.
+            // Irreductible effects are spared.
+            let v = (base * crit_power * tc) as i64;
+            host.reduce_effects(target, as_f(v) / 100.0, false);
+            v
+        }
+        EffectKind::TotalDebuff => {
+            // Like Debuff, but reduces irreductible effects too.
+            let v = (base * crit_power * tc) as i64;
+            host.reduce_effects(target, as_f(v) / 100.0, true);
+            v
+        }
+        EffectKind::RemoveShackles => {
+            host.remove_shackles(target);
+            0
         }
         EffectKind::Antidote => {
             host.remove_effects(target, EffectKind::Poison);
+            0
         }
         EffectKind::Resurrect => {
-            let v = rounded(base * scale(stat(host.wisdom(caster))) * crit_power);
-            host.revive(target, v);
+            // The target's max life is halved (×1.3 on crit, min 10) and it
+            // revives at half the new max.
+            let max = stat(host.max_life(target));
+            let new_max = rounded(as_f(max) * 0.5 * crit_power).max(10);
+            host.reduce_max_life(target, max - new_max);
+            host.revive(target, new_max / 2);
+            0
         }
+        // Effect types the engine doesn't model yet are skipped.
+        EffectKind::Unsupported(_) => 0,
     }
 }
 

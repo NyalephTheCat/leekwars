@@ -62,6 +62,9 @@ pub fn build_world(scn: &Scenario) -> Result<World> {
         fight = fight.with_obstacle(cell);
     }
     for spec in &scn.entities {
+        if strict {
+            check_items_supported(spec)?;
+        }
         fight = fight.with_entity(build_entity(spec)?);
     }
     Ok(World {
@@ -115,6 +118,37 @@ pub fn build_fight_with_cache(
         version: world.version,
         strict: world.strict,
     })
+}
+
+/// Strict mode: reject entities equipped with items the engine can't fully
+/// simulate — an item missing from the catalogs, or one carrying upstream
+/// effect types the engine doesn't model yet (which a normal run would skip
+/// with a fight-log warning).
+fn check_items_supported(spec: &EntitySpec) -> Result<()> {
+    let id = spec.id.unwrap_or(0);
+    let check = |kind: &str, item: i64, unsupported: Option<Vec<u8>>| match unsupported {
+        None => bail!("entity {id}: {kind} {item} is not in the engine catalog (strict mode)"),
+        Some(ids) if !ids.is_empty() => bail!(
+            "entity {id}: {kind} {item} uses upstream effect type(s) {ids:?} \
+             the engine doesn't model (strict mode)"
+        ),
+        Some(_) => Ok(()),
+    };
+    for &item in &spec.weapons {
+        check(
+            "weapon",
+            item,
+            leek_generator::weapons::unsupported_effects(item),
+        )?;
+    }
+    for &item in &spec.chips {
+        check(
+            "chip",
+            item,
+            leek_generator::chips::unsupported_effects(item),
+        )?;
+    }
+    Ok(())
 }
 
 /// Construct a generator [`Entity`] from a spec, applying the present stats via

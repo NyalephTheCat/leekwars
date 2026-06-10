@@ -47,6 +47,41 @@ fn toml_flat_entities_roundtrip() {
 }
 
 #[test]
+fn strict_mode_rejects_unsupported_items() {
+    // boxing_glove (163) carries upstream effect type 51 (push), which the
+    // engine doesn't model: strict mode refuses it at load, lax mode doesn't.
+    let toml = |strict: &str| {
+        format!(
+            "{strict}
+            [map]
+            width = 10
+            height = 10
+
+            [[entities]]
+            id = 1
+            cell = 0
+            chips = [163]
+            "
+        )
+    };
+    let scn = Scenario::from_toml_str(&toml("strict = true")).expect("parse toml");
+    let err = match leek_scenario::build_world(&scn) {
+        Ok(_) => panic!("strict load must fail"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("chip 163") && err.contains("51"),
+        "error should name the chip and effect type, got: {err}"
+    );
+
+    let scn = Scenario::from_toml_str(&toml("")).expect("parse toml");
+    assert!(
+        leek_scenario::build_world(&scn).is_ok(),
+        "lax load must accept the same scenario"
+    );
+}
+
+#[test]
 fn json_nested_entities_flatten_with_team_from_index() {
     // The official generator's shape: `entities` is a list-of-teams and the
     // seed key is `random_seed`.

@@ -168,6 +168,19 @@ where
     Ok(composite)
 }
 
+/// Opt in to folding the leek-wars constants (`WEAPON_PISTOL` → `37`) during
+/// HIR lowering — what `leekc --fold-constants` does. The official-parity
+/// fight runners need this: the goldens are generated from AIs compiled with
+/// folding on, and the native backend has no runtime lookup for environment
+/// constants.
+pub fn activate_leekwars_constant_folding() {
+    leek_prelude::activate_fold_constants(
+        leek_environment::leekwars_constant_values()
+            .into_iter()
+            .map(|(n, v)| (n.to_string(), v.to_string())),
+    );
+}
+
 /// Register the leek-wars game library from its typed signature header:
 /// function names + arities (parsed from the header), the fight constants,
 /// and activation of the header so HIR lowering merges its signatures +

@@ -1,6 +1,7 @@
 //! The [`GameHost`] seam the game builtins operate through.
 
 use crate::EffectKind;
+use crate::effect::ActiveEffect;
 
 /// The world-access seam the game builtins operate through. The generator
 /// (which owns the fight state) implements it. Analogous to
@@ -82,16 +83,37 @@ pub trait GameHost {
     /// current life to the new max.
     fn reduce_max_life(&mut self, entity: i64, amount: i64);
     /// Apply a lasting effect (shield / buff / poison / regeneration) to
-    /// `entity` for `turns` turns. `value` is the already-scaled per-effect
-    /// amount (negative for shackles / vulnerabilities).
-    fn add_effect(&mut self, entity: i64, kind: EffectKind, value: i64, turns: i64);
+    /// `entity`. `effect.value` is the already-scaled per-effect amount
+    /// (negative for shackles / vulnerabilities). Follows upstream
+    /// `createEffect` semantics: a non-stackable effect first replaces the
+    /// previous effect with the same (kind, item) on the entity, then any
+    /// cast merges into an existing (kind, item, turns, caster) entry instead
+    /// of adding a second one. Zero-value effects are dropped.
+    fn add_effect(&mut self, entity: i64, effect: ActiveEffect);
     /// Raise `entity`'s max life by `amount` and heal it the same (vitality).
     fn grant_vitality(&mut self, entity: i64, amount: i64);
+    /// Raise `entity`'s max life by `amount` without healing (nova vitality).
+    fn raise_max_life(&mut self, entity: i64, amount: i64);
     /// Remove all active effects of `kind` from `entity` (e.g. antidote
     /// clears [`EffectKind::Poison`]).
     fn remove_effects(&mut self, entity: i64, kind: EffectKind);
+    /// Shrink every active effect on `entity` by `percent ∈ [0, 1]` (debuff),
+    /// dropping the ones that reach 0. Effects carrying
+    /// [`crate::effect::MODIFIER_IRREDUCTIBLE`] are spared unless `total`
+    /// (upstream TOTAL_DEBUFF).
+    fn reduce_effects(&mut self, entity: i64, percent: f64, total: bool);
+    /// Whether `entity` carries any active effect applied by `item`
+    /// (upstream `hasEffect`, used by the NOT_REPLACEABLE modifier).
+    fn has_item_effect(&self, entity: i64, item: i64) -> bool;
+    /// Remove all shackles — negative stat buffs — from `entity`.
+    fn remove_shackles(&mut self, entity: i64);
     /// Revive a dead `entity` to `life` (no-op if it's alive).
     fn revive(&mut self, entity: i64, life: i64);
+
+    /// Record that `item` carries an effect type the engine doesn't model
+    /// (`effect_id` = the upstream `Effect.TYPE_*` id): surface a warning in
+    /// the fight log, once per (item, effect) pair. The effect is skipped.
+    fn warn_unsupported(&mut self, entity: i64, item: i64, effect_id: u8);
 
     /// Remaining cooldown turns for `entity`'s `item` (0 = ready).
     fn cooldown(&self, entity: i64, item: i64) -> i64;

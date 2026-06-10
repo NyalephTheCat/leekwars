@@ -8,6 +8,7 @@ description = "Leek-wars fight engine: the fight builtins (getCell, getLife, …
 
 [dependencies]
 leek-runtime = { workspace = true }
+serde_json   = { workspace = true }
 
 [lints]
 workspace = true

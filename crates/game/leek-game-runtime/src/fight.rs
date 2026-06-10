@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::effect::{MODIFIER_IRREDUCTIBLE, MODIFIER_STACKABLE};
 use crate::{ActiveEffect, EffectKind, Entity, GameHost, Stat};
 
 /// The fight world model — entities on a `width × height` grid.
@@ -29,6 +30,9 @@ pub struct Fight {
     obstacles: HashSet<i64>,
     /// `say` output, as `(entity, message)`.
     log: Vec<(i64, String)>,
+    /// `(item, effect_id)` pairs already warned about, so each unsupported
+    /// effect surfaces in the log once per fight.
+    warned: HashSet<(i64, u8)>,
     /// Combat RNG state (xorshift64) — seeded so fights are reproducible.
     rng: u64,
 }
@@ -45,6 +49,7 @@ impl Fight {
             turn: 0,
             obstacles: HashSet::new(),
             log: Vec::new(),
+            warned: HashSet::new(),
             rng: 0x2545_f491_4f6c_dd1d, // default non-zero seed
         }
     }
@@ -79,11 +84,12 @@ impl Fight {
         self.turn = turn;
     }
 
-    /// Reset an entity's MP/TP to their maxima (start-of-turn regen).
+    /// Reset an entity's MP/TP to their (buff-adjusted) maxima
+    /// (start-of-turn regen).
     pub fn regen(&mut self, entity: i64) {
         if let Some(e) = self.entity_mut(entity) {
-            e.mp = e.max_mp;
-            e.tp = e.max_tp;
+            e.mp = (e.max_mp + e.buff_sum(Stat::Mp)).max(0);
+            e.tp = (e.max_tp + e.buff_sum(Stat::Tp)).max(0);
             // Reset per-turn use counts; tick item cooldowns down.
             e.item_uses.clear();
             e.item_cooldowns.retain(|_, cd| {
@@ -219,7 +225,8 @@ impl GameHost for Fight {
         self.get(entity).map(|e| e.level)
     }
     fn damage_return(&self, entity: i64) -> Option<i64> {
-        self.get(entity).map(|e| e.damage_return)
+        self.get(entity)
+            .map(|e| e.damage_return + e.effect_sum(EffectKind::DamageReturn))
     }
 
     fn cell_x(&self, cell: i64) -> Option<i64> {
@@ -371,10 +378,53 @@ impl GameHost for Fight {
         }
     }
 
-    fn add_effect(&mut self, entity: i64, kind: EffectKind, value: i64, turns: i64) {
-        if let Some(e) = self.entity_mut(entity) {
-            e.effects.push(ActiveEffect { kind, value, turns });
+    fn add_effect(&mut self, entity: i64, effect: ActiveEffect) {
+        let Some(e) = self.entity_mut(entity) else {
+            return;
+        };
+        // MP/TP pool delta accumulated across replace/add, applied once.
+        let mut d_mp = 0;
+        let mut d_tp = 0;
+        // Non-stackable lasting effects replace the previous effect with the
+        // same (kind, item) — the first match, as upstream `createEffect`.
+        if effect.turns != 0
+            && effect.modifiers & MODIFIER_STACKABLE == 0
+            && let Some(i) = e
+                .effects
+                .iter()
+                .position(|x| x.kind == effect.kind && x.item == effect.item)
+        {
+            let old = e.effects.remove(i);
+            match old.kind {
+                EffectKind::Buff(Stat::Mp) => d_mp -= old.value,
+                EffectKind::Buff(Stat::Tp) => d_tp -= old.value,
+                _ => {}
+            }
         }
+        // Zero-value effects are dropped (upstream only stores `value > 0`).
+        if effect.turns != 0 && effect.value != 0 {
+            // MP/TP buffs grant (or shackles remove) the points immediately;
+            // regen() folds the buff totals back in each turn.
+            match effect.kind {
+                EffectKind::Buff(Stat::Mp) => d_mp += effect.value,
+                EffectKind::Buff(Stat::Tp) => d_tp += effect.value,
+                _ => {}
+            }
+            // A cast with the same identity merges into the existing entry
+            // instead of adding a second one.
+            if let Some(x) = e.effects.iter_mut().find(|x| {
+                x.kind == effect.kind
+                    && x.item == effect.item
+                    && x.turns == effect.turns
+                    && x.caster == effect.caster
+            }) {
+                x.value += effect.value;
+            } else {
+                e.effects.push(effect);
+            }
+        }
+        e.mp = (e.mp + d_mp).max(0);
+        e.tp = (e.tp + d_tp).max(0);
     }
 
     fn grant_vitality(&mut self, entity: i64, amount: i64) {
@@ -385,10 +435,82 @@ impl GameHost for Fight {
         }
     }
 
+    fn raise_max_life(&mut self, entity: i64, amount: i64) {
+        if let Some(e) = self.entity_mut(entity) {
+            e.max_life += amount.max(0);
+        }
+    }
+
     fn remove_effects(&mut self, entity: i64, kind: EffectKind) {
         if let Some(e) = self.entity_mut(entity) {
             e.effects.retain(|eff| eff.kind != kind);
         }
+    }
+
+    fn reduce_effects(&mut self, entity: i64, percent: f64, total: bool) {
+        let Some(e) = self.entity_mut(entity) else {
+            return;
+        };
+        let reduction = (1.0 - percent).max(0.0);
+        // MP/TP buff values changing mid-turn adjust the pools by the delta.
+        let (mut d_mp, mut d_tp) = (0, 0);
+        e.effects.retain_mut(|eff| {
+            // Irreductible effects survive a normal debuff (but not a
+            // TOTAL_DEBUFF).
+            if !total && eff.modifiers & MODIFIER_IRREDUCTIBLE != 0 {
+                return true;
+            }
+            // Sign-safe rounding (Java rounds the magnitude, keeps the sign).
+            #[allow(clippy::cast_possible_truncation)]
+            let new = (f64::from(i32::try_from(eff.value.abs()).unwrap_or(0)) * reduction).round()
+                as i64
+                * eff.value.signum();
+            match eff.kind {
+                EffectKind::Buff(Stat::Mp) => d_mp += new - eff.value,
+                EffectKind::Buff(Stat::Tp) => d_tp += new - eff.value,
+                _ => {}
+            }
+            eff.value = new;
+            new != 0
+        });
+        e.mp = (e.mp + d_mp).max(0);
+        e.tp = (e.tp + d_tp).max(0);
+    }
+
+    fn has_item_effect(&self, entity: i64, item: i64) -> bool {
+        self.get(entity)
+            .is_some_and(|e| e.effects.iter().any(|eff| eff.item == item))
+    }
+
+    fn warn_unsupported(&mut self, entity: i64, item: i64, effect_id: u8) {
+        if self.warned.insert((item, effect_id)) {
+            self.log.push((
+                entity,
+                format!("[engine] item {item}: effect type {effect_id} not modeled — skipped"),
+            ));
+        }
+    }
+
+    fn remove_shackles(&mut self, entity: i64) {
+        let Some(e) = self.entity_mut(entity) else {
+            return;
+        };
+        // Shackles are stored as negative stat buffs. Removing an MP/TP
+        // shackle gives the points back immediately.
+        let (mut d_mp, mut d_tp) = (0, 0);
+        e.effects.retain(|eff| {
+            let shackle = matches!(eff.kind, EffectKind::Buff(_)) && eff.value < 0;
+            if shackle {
+                match eff.kind {
+                    EffectKind::Buff(Stat::Mp) => d_mp -= eff.value,
+                    EffectKind::Buff(Stat::Tp) => d_tp -= eff.value,
+                    _ => {}
+                }
+            }
+            !shackle
+        });
+        e.mp = (e.mp + d_mp).max(0);
+        e.tp = (e.tp + d_tp).max(0);
     }
 
     fn revive(&mut self, entity: i64, life: i64) {

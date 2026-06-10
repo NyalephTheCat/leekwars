@@ -14,17 +14,22 @@
 //! once per turn, regenerating MP/TP and ticking effects, until one team
 //! remains or `max_turns` elapses.
 
+pub mod official;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use leek_backend_native::{NativeError, NativeOptions};
 use leek_game_runtime::{GameHost, call_game_builtin};
 use leek_hir::HirFile;
 use leek_runtime::Value;
 
 // The world model lives in `leek_game_runtime`; re-export it so fight setup
 // (`Fight::new(…).with_entity(…)`) and orchestration come from one place.
-pub use leek_game_runtime::{ActiveEffect, Entity, Fight, FightRef, shared};
+// The item catalogs ride along for scenario validation, and the backend's
+// run-options type so callers can configure launches without a direct
+// `leek-backend-native` edge.
+pub use leek_backend_native::{NativeError, NativeOptions};
+pub use leek_game_runtime::{ActiveEffect, Entity, Fight, FightRef, chips, shared, weapons};
 
 /// Bridges the native backend's game-runtime hook to the fight functions,
 /// dispatching against the shared [`Fight`] as the
