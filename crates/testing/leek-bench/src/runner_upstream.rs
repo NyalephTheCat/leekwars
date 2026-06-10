@@ -202,9 +202,14 @@ fn which(prog: &str) -> Option<PathBuf> {
 fn detect_classpath() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     for ancestor in cwd.ancestors() {
-        let p = ancestor.join("official-generator/leek-wars-generator/leekscript/build/classes");
-        if p.is_dir() {
-            return Some(p);
+        let root = ancestor.join("official-generator/leek-wars-generator/leekscript/build/classes");
+        // Modern gradle nests compiled classes under <lang>/<sourceSet>.
+        let nested = root.join("java/main");
+        if nested.is_dir() {
+            return Some(nested);
+        }
+        if root.is_dir() {
+            return Some(root);
         }
     }
     None

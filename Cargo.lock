@@ -1017,6 +1017,7 @@ dependencies = [
  "anyhow",
  "leek-backend-java",
  "leek-backend-native",
+ "leek-diagnostics",
  "leek-hir",
  "leek-pipeline",
  "leek-recipes",

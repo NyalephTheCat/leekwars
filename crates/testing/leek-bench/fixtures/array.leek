@@ -1,0 +1,10 @@
+// @version: 4
+var a = []
+for (var i = 0; i < 100000; i++) {
+    push(a, i * 2)
+}
+var total = 0
+for (var v in a) {
+    total += v
+}
+total
