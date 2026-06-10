@@ -96,7 +96,10 @@ impl MigrationPass for V2ToV1 {
                     let rhs_text = rhs.syntax().text().to_string();
 
                     if lhs_has_call(lhs.syntax()) {
-                        diagnostics.push(diag_call_in_lhs(leek_syntax::node_span(bin.syntax(), source_id)));
+                        diagnostics.push(diag_call_in_lhs(leek_syntax::node_span(
+                            bin.syntax(),
+                            source_id,
+                        )));
                         continue;
                     }
 
@@ -115,7 +118,6 @@ impl MigrationPass for V2ToV1 {
 fn lhs_has_call(node: &SyntaxNode) -> bool {
     node.descendants().any(|n| n.kind() == SyntaxKind::CallExpr)
 }
-
 
 fn diag_call_in_lhs(span: Span) -> Diagnostic {
     Diagnostic::warning(

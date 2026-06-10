@@ -180,9 +180,10 @@ fn emit_item(
     // rustdoc convention: doc comment sticks to the following decl.
     let mut effective_newlines = newlines_before_item;
     if let Some(last) = leading.last()
-        && last.2 {
-            effective_newlines = 1; // force tight attachment
-        }
+        && last.2
+    {
+        effective_newlines = 1; // force tight attachment
+    }
 
     // Separator before the leading-comment block (or before the
     // item if there are no leading comments). For the very first

@@ -8,8 +8,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{BuiltinFlow, BuiltinHost};
 use crate::value::{MapData, Value};
+use crate::{BuiltinFlow, BuiltinHost};
 
 use super::array::{min_max_array, stash_promotion, sum_array};
 
@@ -222,7 +222,6 @@ pub(crate) fn dispatch_map(
                 let canon = crate::value::key_repr(&args[1]);
                 let mut mm = m.borrow_mut();
                 if let Some(&idx) = mm.index.get(&canon) {
-                    
                     std::mem::replace(&mut mm.entries[idx].1, args[2].clone())
                 } else {
                     Value::Null
@@ -282,53 +281,54 @@ pub(crate) fn dispatch_map(
             // `ApplyPromotion` writes the morphed map back to the
             // caller's slot.
             if let Value::Array(a) = &args[0]
-                && host.version() <= 3 {
-                    let snap: Vec<Value> = a.borrow().clone();
-                    let mut indexed: Vec<(i64, Value)> = snap
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, v)| (crate::len_as_int(i), v))
-                        .collect();
-                    let null_greater = host.version() <= 1;
-                    indexed.sort_by(|a, b| {
-                        let oa = if by_keys {
-                            // keys are i64 indices; never null
-                            a.0.cmp(&b.0)
-                        } else {
-                            let la = &a.1;
-                            let lb = &b.1;
-                            let la_null = matches!(la, Value::Null);
-                            let lb_null = matches!(lb, Value::Null);
-                            match (la_null, lb_null) {
-                                (true, true) => std::cmp::Ordering::Equal,
-                                (true, false) => {
-                                    if null_greater {
-                                        std::cmp::Ordering::Greater
-                                    } else {
-                                        std::cmp::Ordering::Less
-                                    }
+                && host.version() <= 3
+            {
+                let snap: Vec<Value> = a.borrow().clone();
+                let mut indexed: Vec<(i64, Value)> = snap
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (crate::len_as_int(i), v))
+                    .collect();
+                let null_greater = host.version() <= 1;
+                indexed.sort_by(|a, b| {
+                    let oa = if by_keys {
+                        // keys are i64 indices; never null
+                        a.0.cmp(&b.0)
+                    } else {
+                        let la = &a.1;
+                        let lb = &b.1;
+                        let la_null = matches!(la, Value::Null);
+                        let lb_null = matches!(lb, Value::Null);
+                        match (la_null, lb_null) {
+                            (true, true) => std::cmp::Ordering::Equal,
+                            (true, false) => {
+                                if null_greater {
+                                    std::cmp::Ordering::Greater
+                                } else {
+                                    std::cmp::Ordering::Less
                                 }
-                                (false, true) => {
-                                    if null_greater {
-                                        std::cmp::Ordering::Less
-                                    } else {
-                                        std::cmp::Ordering::Greater
-                                    }
-                                }
-                                _ => la.cmp_partial(lb).unwrap_or(std::cmp::Ordering::Equal),
                             }
-                        };
-                        if desc { oa.reverse() } else { oa }
-                    });
-                    let mut map = MapData::new();
-                    for (k, v) in indexed {
-                        let key = Value::Int(k);
-                        let ck = crate::value::key_repr(&key);
-                        map.insert_canonical(ck, key, v);
-                    }
-                    stash_promotion(Value::Map(Rc::new(RefCell::new(map))));
-                    return Ok(Some(Value::Null));
+                            (false, true) => {
+                                if null_greater {
+                                    std::cmp::Ordering::Less
+                                } else {
+                                    std::cmp::Ordering::Greater
+                                }
+                            }
+                            _ => la.cmp_partial(lb).unwrap_or(std::cmp::Ordering::Equal),
+                        }
+                    };
+                    if desc { oa.reverse() } else { oa }
+                });
+                let mut map = MapData::new();
+                for (k, v) in indexed {
+                    let key = Value::Int(k);
+                    let ck = crate::value::key_repr(&key);
+                    map.insert_canonical(ck, key, v);
                 }
+                stash_promotion(Value::Map(Rc::new(RefCell::new(map))));
+                return Ok(Some(Value::Null));
+            }
             if let Value::Map(m) = &args[0] {
                 let mut mm = m.borrow_mut();
                 // Stable sort with version-aware null placement —
@@ -457,7 +457,12 @@ pub(crate) fn dispatch_map(
 /// Build the call arg list for a map-callback. 1-arg gets the
 /// value alone; 2+-arg gets `(value, key)` — matches upstream's
 /// `mapMap` / `mapFilter` / `mapIter` arity dispatch.
-pub(crate) fn map_call_args(host: &dyn BuiltinHost, fun: &Value, k: &Value, v: &Value) -> Vec<Value> {
+pub(crate) fn map_call_args(
+    host: &dyn BuiltinHost,
+    fun: &Value,
+    k: &Value,
+    v: &Value,
+) -> Vec<Value> {
     match host.callback_arity(fun) {
         Some(0) => vec![],
         None | Some(1) => vec![v.clone()],
@@ -465,7 +470,11 @@ pub(crate) fn map_call_args(host: &dyn BuiltinHost, fun: &Value, k: &Value, v: &
     }
 }
 
-pub(crate) fn map_map(host: &mut dyn BuiltinHost, m: &Value, fun: &Value) -> Result<Value, BuiltinFlow> {
+pub(crate) fn map_map(
+    host: &mut dyn BuiltinHost,
+    m: &Value,
+    fun: &Value,
+) -> Result<Value, BuiltinFlow> {
     let items = match m {
         Value::Map(mm) => mm.borrow().entries.clone(),
         _ => return Ok(Value::Null),
@@ -499,7 +508,11 @@ pub(crate) fn map_filter(
     Ok(Value::Map(Rc::new(RefCell::new(out))))
 }
 
-pub(crate) fn map_iter(host: &mut dyn BuiltinHost, m: &Value, fun: &Value) -> Result<Value, BuiltinFlow> {
+pub(crate) fn map_iter(
+    host: &mut dyn BuiltinHost,
+    m: &Value,
+    fun: &Value,
+) -> Result<Value, BuiltinFlow> {
     let items = match m {
         Value::Map(mm) => mm.borrow().entries.clone(),
         _ => return Ok(Value::Null),

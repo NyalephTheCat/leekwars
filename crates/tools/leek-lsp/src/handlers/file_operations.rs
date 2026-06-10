@@ -157,7 +157,9 @@ fn parse_leek_uri(uri: &str) -> Option<std::path::PathBuf> {
 }
 
 fn file_stem(path: &Path) -> Option<String> {
-    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -175,10 +177,7 @@ mod tests {
     }
 
     fn rename(old: &str, new: &str) -> (String, String) {
-        (
-            format!("file:///proj/{old}"),
-            format!("file:///proj/{new}"),
-        )
+        (format!("file:///proj/{old}"), format!("file:///proj/{new}"))
     }
 
     #[test]

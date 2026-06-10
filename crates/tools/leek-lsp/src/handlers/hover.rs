@@ -91,9 +91,9 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
             }
         } else {
             if let Some(decl_node) = &decl_node {
-                if let Some(sig) = signature_for_with(decl_node, &|n| {
-                    infer_decl_type(&type_art.signatures, n)
-                }) {
+                if let Some(sig) =
+                    signature_for_with(decl_node, &|n| infer_decl_type(&type_art.signatures, n))
+                {
                     sections.push(format!("```leekscript\n{sig}\n```"));
                 } else {
                     sections.push(format!(
@@ -142,9 +142,10 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
         // the lowered HIR. Constant-time functions get a trivial line
         // but it's still useful next to a multi-line body.
         if is_top_level_fn
-            && let Some(complexity_md) = complexity_section(run.get::<HirArtifact>(), &sym.name) {
-                sections.push(complexity_md);
-            }
+            && let Some(complexity_md) = complexity_section(run.get::<HirArtifact>(), &sym.name)
+        {
+            sections.push(complexity_md);
+        }
         span_for_range = ref_span.or(Some(sym.def_span));
     }
 
@@ -313,7 +314,9 @@ fn cross_file_sections(
     append_doc_sections(text, decl_start, &mut sections);
 
     let is_top_level_fn = sym.kind == leek_resolver::SymbolKind::Function
-        && decl_node.as_ref().is_some_and(|n| n.kind() == SyntaxKind::FnDecl);
+        && decl_node
+            .as_ref()
+            .is_some_and(|n| n.kind() == SyntaxKind::FnDecl);
     if is_top_level_fn {
         if let Some(t) = function_type_string(&type_art.signatures, &sym.name) {
             sections.push(format!("*type:* `{t}`"));
@@ -462,7 +465,10 @@ fn format_type(ty: &Type) -> String {
 /// `decl_start`. In normal code the directives are inert and stay as
 /// plain prose.
 fn append_doc_sections(text: &str, decl_start: u32, sections: &mut Vec<String>) {
-    if directives_enabled(text, leek_span::FeatureFlags::from_env().function_signatures) {
+    if directives_enabled(
+        text,
+        leek_span::FeatureFlags::from_env().function_signatures,
+    ) {
         if let Some((doc_text, directives)) = doc_and_directives_before(text, decl_start) {
             if !doc_text.trim().is_empty() {
                 sections.push(doc_text);
@@ -537,7 +543,10 @@ fn builtin_name_at(root: &SyntaxNode, offset: u32) -> Option<(String, Span)> {
             // A `NameRef` parent means a bare name or call callee; field
             // names hang directly off a `FieldExpr`, declarations off
             // FnDecl/Param/etc., so this cleanly excludes them.
-            if tok.parent().is_some_and(|p| p.kind() == SyntaxKind::NameRef) {
+            if tok
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::NameRef)
+            {
                 let span = Span::new(
                     leek_span::SourceId::new(1).unwrap(),
                     u32::from(r.start()),
@@ -584,7 +593,7 @@ fn function_type_string(sigs: &InferredSignatures, name: &str) -> Option<String>
 }
 
 fn symbol_kind_label(kind: leek_resolver::SymbolKind) -> &'static str {
-    use leek_resolver::SymbolKind::{Global, Function, Class, Param, Local, Field, Builtin};
+    use leek_resolver::SymbolKind::{Builtin, Class, Field, Function, Global, Local, Param};
     match kind {
         Global => "global",
         Function => "function",
@@ -678,9 +687,10 @@ fn base_class_name(
 ) -> Option<String> {
     let start = u32::from(base.syntax().text_range().start());
     if let Some(entry) = table.smallest_at(start)
-        && let Some(name) = class_name_of_type(&entry.ty) {
-            return Some(name);
-        }
+        && let Some(name) = class_name_of_type(&entry.ty)
+    {
+        return Some(name);
+    }
     // A plain `var c = new Cat()` isn't recorded with a type at its use
     // sites in non-strict mode, but its initializer *is* typed. Resolve
     // the receiver to its declaration and read the init type.
@@ -777,9 +787,7 @@ fn class_parent_name_of(cls: &SyntaxNode) -> Option<String> {
 /// Find the class member (method / field / constructor) whose declared
 /// name is `name` within `cls`'s body.
 fn class_member_named(cls: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
-    let body = cls
-        .children()
-        .find(|c| c.kind() == SyntaxKind::ClassBody)?;
+    let body = cls.children().find(|c| c.kind() == SyntaxKind::ClassBody)?;
     body.children().find(|member| match member.kind() {
         SyntaxKind::ClassConstructor => name == "constructor",
         SyntaxKind::ClassMethod | SyntaxKind::ClassField => {

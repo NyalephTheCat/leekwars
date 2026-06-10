@@ -47,32 +47,35 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
         };
 
     match cli.command {
-        Command::New(args) => new::new(args, quiet).map(to_exit),
+        Command::New(args) => new::new(&args, quiet).map(to_exit),
         Command::Init(args) => new::init(args, quiet).map(to_exit),
         Command::Build(args) => build::run(
-            args,
+            &args,
             manifest_path.as_deref(),
             color,
             format,
             quiet,
             verbose,
-            environment,
+            environment.as_ref(),
         ),
-        Command::Run(args) => run::run(args, manifest_path.as_deref(), color, format, quiet),
-        Command::Fight(args) => fight::run(args, quiet),
+        Command::Run(args) => run::run(&args, manifest_path.as_deref(), color, format, quiet),
+        Command::Fight(args) => fight::run(&args, quiet),
         Command::Check => check::run(manifest_path.as_deref(), color, format, quiet),
-        Command::Test(args) => test::run(args, manifest_path.as_deref(), color, format, quiet),
-        Command::Fmt(args) => fmt::run(args, manifest_path.as_deref(), quiet),
+        Command::Test(args) => test::run(&args, manifest_path.as_deref(), color, format, quiet),
+        Command::Fmt(args) => fmt::run(&args, manifest_path.as_deref(), quiet),
         Command::Lint => lint::run(manifest_path.as_deref(), color, format, quiet),
         Command::Explain(args) => Ok(explain::run(&args)),
-        Command::Fix(args) => fix::run(args, manifest_path.as_deref(), quiet),
-        Command::Lsp => lsp::run(),
+        Command::Fix(args) => fix::run(&args, manifest_path.as_deref(), quiet),
+        Command::Lsp => Ok(lsp::run()),
         Command::Clean => clean::run(manifest_path.as_deref(), quiet).map(to_exit),
-        Command::Completions(args) => completions::run(args).map(to_exit),
-        Command::Migrate(args) => migrate::run(args, manifest_path.as_deref(), quiet),
+        Command::Completions(args) => {
+            completions::run(&args);
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Migrate(args) => migrate::run(&args, manifest_path.as_deref(), quiet),
         Command::Analyze(args) => analyze::run(args, manifest_path.as_deref(), quiet),
         Command::Profile(args) => profile::run(args, manifest_path.as_deref(), quiet),
-        Command::Doc(args) => doc::run(args, manifest_path.as_deref(), quiet),
+        Command::Doc(args) => doc::run(&args, manifest_path.as_deref(), quiet),
         Command::Dev(args) => dev::run(args, quiet),
     }
 }

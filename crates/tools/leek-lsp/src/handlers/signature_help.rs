@@ -76,16 +76,17 @@ fn enclosing_call_with_cursor_in_args(root: &SyntaxNode, offset: u32) -> Option<
     let mut node: Option<SyntaxNode> = token.parent();
     while let Some(n) = node {
         if n.kind() == SyntaxKind::CallExpr
-            && let Some(args) = n.children().find(|c| c.kind() == SyntaxKind::ArgList) {
-                let r = args.text_range();
-                let start = u32::from(r.start());
-                let end = u32::from(r.end());
-                // Cursor inside the parens (allow positions equal
-                // to `start` so a cursor *just after* the `(` qualifies).
-                if start < offset && offset <= end {
-                    return Some(n);
-                }
+            && let Some(args) = n.children().find(|c| c.kind() == SyntaxKind::ArgList)
+        {
+            let r = args.text_range();
+            let start = u32::from(r.start());
+            let end = u32::from(r.end());
+            // Cursor inside the parens (allow positions equal
+            // to `start` so a cursor *just after* the `(` qualifies).
+            if start < offset && offset <= end {
+                return Some(n);
             }
+        }
         node = n.parent();
     }
     None
@@ -274,13 +275,13 @@ add(1, 2)\n";
         let (ws, uri) = ws_with(src);
         // After the first comma — should be on param 1.
         let after_first = "f(10, ";
-        let col = after_first.len() as u32;
+        let col = u32::try_from(after_first.len()).unwrap();
         let help = handle(&ws, &uri, pos(1, col)).expect("signature");
         assert_eq!(help.active_parameter, Some(1));
 
         // After the second comma — should be on param 2.
         let after_second = "f(10, 20, ";
-        let col = after_second.len() as u32;
+        let col = u32::try_from(after_second.len()).unwrap();
         let help = handle(&ws, &uri, pos(1, col)).expect("signature");
         assert_eq!(help.active_parameter, Some(2));
     }
@@ -293,7 +294,7 @@ add(1, 2)\n";
         let src = "function f(integer a, integer b) { return a }\nf(g(1, 2), 9)\n";
         let (ws, uri) = ws_with(src);
         let after_inner = "f(g(1, 2), ";
-        let col = after_inner.len() as u32;
+        let col = u32::try_from(after_inner.len()).unwrap();
         let help = handle(&ws, &uri, pos(1, col)).expect("signature");
         assert_eq!(help.active_parameter, Some(1));
     }
@@ -304,7 +305,7 @@ add(1, 2)\n";
         let src = "var x = sqrt()\n";
         let (ws, uri) = ws_with(src);
         // Cursor inside the parens.
-        let col = "var x = sqrt(".len() as u32;
+        let col = u32::try_from("var x = sqrt(".len()).unwrap();
         let help = handle(&ws, &uri, pos(0, col)).expect("signature");
         assert!(help.signatures[0].label.contains("builtin sqrt"));
         assert_eq!(help.signatures[0].parameters.as_ref().unwrap().len(), 1);
@@ -314,7 +315,7 @@ add(1, 2)\n";
     fn unknown_callee_still_returns_a_placeholder() {
         let src = "noSuchFunction(1, 2)\n";
         let (ws, uri) = ws_with(src);
-        let col = "noSuchFunction(".len() as u32;
+        let col = u32::try_from("noSuchFunction(".len()).unwrap();
         let help = handle(&ws, &uri, pos(0, col)).expect("signature");
         assert!(help.signatures[0].label.contains("noSuchFunction"));
         assert_eq!(help.signatures[0].parameters.as_ref().unwrap().len(), 0);

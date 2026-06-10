@@ -80,8 +80,7 @@ impl Code {
 
     /// Default severity. Falls back to `Error` if not in the catalog.
     pub fn default_severity(&self) -> Severity {
-        self.meta()
-            .map_or(Severity::Error, |m| m.default_severity)
+        self.meta().map_or(Severity::Error, |m| m.default_severity)
     }
 
     /// Extended explanation (the `explain/<ID>.md` write-up) shown by

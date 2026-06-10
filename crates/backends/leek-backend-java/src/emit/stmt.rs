@@ -4,9 +4,7 @@ use leek_hir::{
 };
 
 use super::traits::EmitStmt;
-use super::{
-    Emitter, JavaWriter, is_pure_value_expr, is_terminator, is_valid_statement_expr,
-};
+use super::{Emitter, JavaWriter, is_pure_value_expr, is_terminator, is_valid_statement_expr};
 use crate::mangle;
 
 impl EmitStmt for Emitter<'_> {
@@ -141,7 +139,9 @@ impl Emitter<'_> {
         let cutoff = if self.opts.dead_code_elim {
             stmts
                 .iter()
-                .position(|s| is_terminator(s) || super::stmt_definitely_returns(s, self.opts.emit_ops))
+                .position(|s| {
+                    is_terminator(s) || super::stmt_definitely_returns(s, self.opts.emit_ops)
+                })
                 .map_or(stmts.len(), |p| p + 1)
         } else {
             stmts.len()
@@ -159,28 +159,25 @@ impl Emitter<'_> {
         // `__anon_N(u_fact)` where `u_fact` is not yet initialized
         // and javac rejects with "might not have been initialized".
         let prev = self.initializing_def.replace(Some(v.def));
-        let init = match &v.init {
-            Some(e) => {
-                let raw = self.v1_clone_with_ops(e, 1);
-                // A statically-typed scalar local coerces its initializer to the
-                // declared type, mirroring upstream `compileConvert`: the runtime
-                // is type-erased, so `integer b = a[1]` (real array) must store an
-                // integer and `real b = 5` a double. `longint`/`real`/`bool` all
-                // take `Object`, so the untyped HIR value drops straight in.
-                self.coerce_decl(v.ty.as_ref(), raw)
-            }
+        let init = if let Some(e) = &v.init {
+            let raw = self.v1_clone_with_ops(e, 1);
+            // A statically-typed scalar local coerces its initializer to the
+            // declared type, mirroring upstream `compileConvert`: the runtime
+            // is type-erased, so `integer b = a[1]` (real array) must store an
+            // integer and `real b = 5` a double. `longint`/`real`/`bool` all
+            // take `Object`, so the untyped HIR value drops straight in.
+            Self::coerce_decl(v.ty.as_ref(), raw)
+        } else {
             // Uninitialized decl still costs 1 op upstream — match
             // the `LeekVariableDeclarationInstruction.writeJavaCode`
             // baseline tick. A typed scalar defaults to its zero value
             // (`0l`/`0.0`/`false`) rather than `null` — upstream never
             // leaves a declared `integer` holding null.
-            None => {
-                let base = self.decl_default(v.ty.as_ref());
-                if self.opts.emit_ops {
-                    format!("ops({base}, 1)")
-                } else {
-                    base
-                }
+            let base = Self::decl_default(v.ty.as_ref());
+            if self.opts.emit_ops {
+                format!("ops({base}, 1)")
+            } else {
+                base
             }
         };
         self.initializing_def.set(prev);
@@ -222,7 +219,7 @@ impl Emitter<'_> {
     /// (`integer`/`real`/`boolean`) via `longint`/`real`/`bool`. Composite
     /// declared types (`Array<…>`, `Map<…>`, `Object`, untyped) pass through —
     /// their element coercion happens at the store site, not here.
-    pub(crate) fn coerce_decl(&self, ty: Option<&leek_hir::Type>, inner: String) -> String {
+    pub(crate) fn coerce_decl(ty: Option<&leek_hir::Type>, inner: String) -> String {
         use leek_hir::Type;
         match ty {
             Some(Type::Integer | Type::Real | Type::Boolean) => {
@@ -242,7 +239,7 @@ impl Emitter<'_> {
 
     /// Default Java value for an uninitialized declared local: the zero of a
     /// scalar type, else `null`.
-    fn decl_default(&self, ty: Option<&leek_hir::Type>) -> String {
+    fn decl_default(ty: Option<&leek_hir::Type>) -> String {
         use leek_hir::Type;
         match ty {
             Some(Type::Integer) => "0l".into(),
@@ -533,7 +530,8 @@ impl Emitter<'_> {
             // the key declaration.
             if fe.key.is_some() {
                 let n = if matches!(self.opts.version, leek_syntax::Version::V1) {
-                    u32::from(fe.key.as_ref().is_some_and(|k| k.is_new)) + u32::from(fe.value.is_new)
+                    u32::from(fe.key.as_ref().is_some_and(|k| k.is_new))
+                        + u32::from(fe.value.is_new)
                 } else {
                     1
                 };

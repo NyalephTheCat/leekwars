@@ -156,10 +156,12 @@ pub fn handle_range(
         .filter(|&(start, len, _, _)| start < to && start + len > from)
         .collect();
     let data = encode(doc.pos_map(), &in_range);
-    Some(lsp::SemanticTokensRangeResult::Tokens(lsp::SemanticTokens {
-        result_id: None,
-        data,
-    }))
+    Some(lsp::SemanticTokensRangeResult::Tokens(
+        lsp::SemanticTokens {
+            result_id: None,
+            data,
+        },
+    ))
 }
 
 /// `textDocument/semanticTokens/full/delta`. Diffs the current tokens
@@ -296,14 +298,16 @@ mod tests {
     fn delta_against_baseline_is_minimal() {
         let (mut ws, uri) = ws_with("var apple = 5\nvar n = apple\n");
         // First full request establishes a baseline.
-        let lsp::SemanticTokensResult::Tokens(first) = super::handle(&mut ws, &uri).unwrap()
-        else {
+        let lsp::SemanticTokensResult::Tokens(first) = super::handle(&mut ws, &uri).unwrap() else {
             panic!("tokens");
         };
         let id = first.result_id.unwrap();
 
         // Edit: append a third statement that adds one new token.
-        ws.update(&uri, "var apple = 5\nvar n = apple\nvar z = n\n".to_string());
+        ws.update(
+            &uri,
+            "var apple = 5\nvar n = apple\nvar z = n\n".to_string(),
+        );
 
         let delta = super::handle_delta(&mut ws, &uri, &id).unwrap();
         let lsp::SemanticTokensFullDeltaResult::TokensDelta(d) = delta else {
@@ -353,8 +357,7 @@ mod tests {
     #[test]
     fn delta_for_identical_content_has_no_edits() {
         let (mut ws, uri) = ws_with("var apple = 5\nvar n = apple\n");
-        let lsp::SemanticTokensResult::Tokens(first) = super::handle(&mut ws, &uri).unwrap()
-        else {
+        let lsp::SemanticTokensResult::Tokens(first) = super::handle(&mut ws, &uri).unwrap() else {
             panic!("tokens");
         };
         let id = first.result_id.unwrap();
@@ -363,6 +366,10 @@ mod tests {
         let lsp::SemanticTokensFullDeltaResult::TokensDelta(d) = delta else {
             panic!("expected delta");
         };
-        assert!(d.edits.is_empty(), "unchanged file → no edits: {:?}", d.edits);
+        assert!(
+            d.edits.is_empty(),
+            "unchanged file → no edits: {:?}",
+            d.edits
+        );
     }
 }

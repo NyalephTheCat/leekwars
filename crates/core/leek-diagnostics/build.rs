@@ -198,7 +198,7 @@ mod tests {{
     #[test]
     fn catalog_ids_unique() {{
         let mut ids: Vec<_> = CATALOG.iter().map(|m| m.id).collect();
-        ids.sort();
+        ids.sort_unstable();
         for w in ids.windows(2) {{
             assert_ne!(w[0], w[1], "duplicate code id {{}}", w[0]);
         }}
@@ -207,7 +207,7 @@ mod tests {{
     #[test]
     fn catalog_names_unique() {{
         let mut names: Vec<_> = CATALOG.iter().map(|m| m.name).collect();
-        names.sort();
+        names.sort_unstable();
         for w in names.windows(2) {{
             assert_ne!(w[0], w[1], "duplicate code name {{}}", w[0]);
         }}

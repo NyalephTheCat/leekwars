@@ -37,9 +37,10 @@ pub fn handle(
         // Refuse to rename through a Builtin target — those are
         // language-defined names, renaming makes no sense.
         if let Some(target) = table.symbol(r.target)
-            && target.kind == SymbolKind::Builtin {
-                return None;
-            }
+            && target.kind == SymbolKind::Builtin
+        {
+            return None;
+        }
         return Some(lsp::PrepareRenameResponse::Range(span_to_range(
             doc.pos_map(),
             span,

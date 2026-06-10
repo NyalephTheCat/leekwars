@@ -163,10 +163,14 @@ impl<'a> Emitter<'a> {
         // aliases and mutates it (`function f(@a){ -> { a += 2 } } var x = 10;
         // f(x)(); return x` → 12). Seeds `ref_boxes` (the read/write routing) and
         // `var_ref_positions` (local-callee dispatch). No-op at v2+.
-        let (caller_boxes, var_ref_positions) = if matches!(opts.version, leek_syntax::Version::V1) {
+        let (caller_boxes, var_ref_positions) = if matches!(opts.version, leek_syntax::Version::V1)
+        {
             caller_box_locals(hir)
         } else {
-            (std::collections::HashSet::new(), std::collections::HashMap::new())
+            (
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
+            )
         };
         Self {
             opts,
@@ -1235,8 +1239,11 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
     // of those must box (mutation must propagate). Non-mutated `@` positions are
     // left unboxed: boxing them would also catch un-boxable for-loop variables.
     fn mutated_ref_positions(params: &[Param], body: &[Stmt]) -> Vec<bool> {
-        let ref_defs: HashSet<u32> =
-            params.iter().filter(|p| p.is_by_ref).map(|p| p.def.0).collect();
+        let ref_defs: HashSet<u32> = params
+            .iter()
+            .filter(|p| p.is_by_ref)
+            .map(|p| p.def.0)
+            .collect();
         if ref_defs.is_empty() {
             return vec![false; params.len()];
         }
@@ -1355,7 +1362,9 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
 }
 
 pub(crate) fn ends_with_return(stmts: &[Stmt], emit_ops: bool) -> bool {
-    stmts.last().is_some_and(|s| stmt_definitely_returns(s, emit_ops))
+    stmts
+        .last()
+        .is_some_and(|s| stmt_definitely_returns(s, emit_ops))
 }
 
 /// True when control flow can't fall off the end of this statement —
@@ -1384,7 +1393,8 @@ pub(crate) fn stmt_definitely_returns(s: &Stmt, emit_ops: bool) -> bool {
         // `return null;` after the loop as unreachable. An infinite
         // `do … while (true)` likewise never falls through.
         Stmt::DoWhile(d) => {
-            stmt_definitely_returns(&d.body, emit_ops) || is_infinite_loop(&d.cond, &d.body, emit_ops)
+            stmt_definitely_returns(&d.body, emit_ops)
+                || is_infinite_loop(&d.cond, &d.body, emit_ops)
         }
         // `while (true) { … }` with no `break` escaping the loop never
         // completes normally — code after it is unreachable, so suppress

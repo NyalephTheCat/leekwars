@@ -126,9 +126,10 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     });
     for def in &hir.defs {
         if let Def::Function(f) = def
-            && let Some(c) = registry.get(&f.name) {
-                out.push(c.clone());
-            }
+            && let Some(c) = registry.get(&f.name)
+        {
+            out.push(c.clone());
+        }
     }
     out
 }
@@ -209,7 +210,10 @@ impl ParamMap {
         for (i, p) in params.iter().enumerate() {
             inner.insert(
                 p.def,
-                (u32::try_from(i).expect("more than u32::MAX params"), p.name.clone()),
+                (
+                    u32::try_from(i).expect("more than u32::MAX params"),
+                    p.name.clone(),
+                ),
             );
         }
         Self { inner }
@@ -259,8 +263,7 @@ impl Walker<'_> {
                 .map_or(CostExpr::zero(), |e| self.walk_expr(e)),
             Stmt::Return(e) => CostExpr::sum(vec![
                 CostExpr::Const(RETURN),
-                e.as_ref()
-                    .map_or(CostExpr::zero(), |x| self.walk_expr(x)),
+                e.as_ref().map_or(CostExpr::zero(), |x| self.walk_expr(x)),
             ]),
             Stmt::If(i) => {
                 let cond = self.walk_expr(&i.cond);
@@ -416,9 +419,7 @@ impl Walker<'_> {
         // Recursion guard: if either the callee or the function
         // we're analysing is recursive, don't substitute.
         let callee_recursive = self.recursive.contains(callee_name);
-        let we_are_recursive = self
-            .analysing
-            .is_some_and(|n| self.recursive.contains(n));
+        let we_are_recursive = self.analysing.is_some_and(|n| self.recursive.contains(n));
         if callee_recursive || (we_are_recursive && self.analysing == Some(callee_name)) {
             return CostExpr::Unknown("recursive call");
         }
@@ -447,9 +448,9 @@ impl Walker<'_> {
                 let (idx, name) = self.ctx.params.lookup(*id)?;
                 Some(CostExpr::Size(SizeVar::new(idx, name)))
             }
-            ExprKind::Literal(leek_hir::Literal::Int(v)) if *v >= 0 => {
-                Some(CostExpr::Const(u64::try_from(*v).expect("non-negative by guard")))
-            }
+            ExprKind::Literal(leek_hir::Literal::Int(v)) if *v >= 0 => Some(CostExpr::Const(
+                u64::try_from(*v).expect("non-negative by guard"),
+            )),
             // Array / map / set literals contribute their literal
             // length as a constant. Useful for the empirical
             // harness where main passes `[1, 2, ..., n]` to a

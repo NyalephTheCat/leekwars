@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 use crate::value::{Instance, IntervalValue, MapData, ObjectData, SetData};
-use crate::{key_repr, Value};
+use crate::{Value, key_repr};
 
 // ---- slicing (`a[start:end:step]`) ----
 
@@ -29,7 +29,9 @@ pub fn slice(base: &Value, start: Option<i64>, end: Option<i64>, step: Option<f6
         Value::Array(a) => {
             let arr = a.borrow();
             let len = crate::len_as_int(arr.len());
-            Value::Array(Rc::new(RefCell::new(slice_seq(&arr, len, start, end, int_step))))
+            Value::Array(Rc::new(RefCell::new(slice_seq(
+                &arr, len, start, end, int_step,
+            ))))
         }
         Value::String(s) => {
             let bytes = s.as_bytes();
@@ -75,7 +77,13 @@ fn slice_interval(
     Value::Array(Rc::new(RefCell::new(out)))
 }
 
-fn slice_seq<T: Clone>(items: &[T], len: i64, s: Option<i64>, e: Option<i64>, st: Option<i64>) -> Vec<T> {
+fn slice_seq<T: Clone>(
+    items: &[T],
+    len: i64,
+    s: Option<i64>,
+    e: Option<i64>,
+    st: Option<i64>,
+) -> Vec<T> {
     let step = st.unwrap_or(1);
     if step == 0 {
         return Vec::new();
@@ -136,12 +144,20 @@ pub fn make_foreach_iter(v: &Value) -> Value {
         }
         Value::Object(o) => {
             for (name, val) in o.borrow().iter() {
-                push_pair(&mut pairs, Value::String(Rc::new(name.clone())), val.clone());
+                push_pair(
+                    &mut pairs,
+                    Value::String(Rc::new(name.clone())),
+                    val.clone(),
+                );
             }
         }
         Value::Instance(inst) => {
             for (name, val) in &inst.borrow().fields {
-                push_pair(&mut pairs, Value::String(Rc::new(name.clone())), val.clone());
+                push_pair(
+                    &mut pairs,
+                    Value::String(Rc::new(name.clone())),
+                    val.clone(),
+                );
             }
         }
         Value::String(s) => {
@@ -157,7 +173,11 @@ pub fn make_foreach_iter(v: &Value) -> Value {
             let (Some(start), Some(end)) = (iv.start, iv.end) else {
                 return Value::Array(Rc::new(RefCell::new(pairs)));
             };
-            let lo = if iv.start_inclusive { start } else { start + 1.0 };
+            let lo = if iv.start_inclusive {
+                start
+            } else {
+                start + 1.0
+            };
             let hi = if iv.end_inclusive { end } else { end - 1.0 };
             let mut x = lo;
             let mut i = 0i64;
@@ -182,7 +202,12 @@ pub fn make_foreach_iter(v: &Value) -> Value {
 pub fn read_field(base: &Value, name: &str) -> Value {
     match base {
         Value::Object(o) => o.borrow().get(name).cloned().unwrap_or(Value::Null),
-        Value::Instance(inst) => inst.borrow().fields.get(name).cloned().unwrap_or(Value::Null),
+        Value::Instance(inst) => inst
+            .borrow()
+            .fields
+            .get(name)
+            .cloned()
+            .unwrap_or(Value::Null),
         // A builtin class's members: a static field (`Integer.MAX_VALUE`),
         // its `name`, or reflection arrays (`Array.fields`/`.methods`/… are
         // empty for builtins).
@@ -285,14 +310,25 @@ pub fn construct_builtin_class(name: &str, args: Vec<Value>) -> Value {
         "Map" => Value::Map(Rc::new(RefCell::new(MapData::new()))),
         "Set" => Value::Set(Rc::new(RefCell::new(args.into_iter().collect::<SetData>()))),
         "Object" => Value::Object(Rc::new(RefCell::new(ObjectData::new()))),
-        "Integer" => Value::Int(args.first().and_then(super::value::types::Value::as_int).unwrap_or(0)),
-        "Number" | "Real" | "Float" => {
-            Value::Real(args.first().and_then(super::value::types::Value::as_real).unwrap_or(0.0))
-        }
+        "Integer" => Value::Int(
+            args.first()
+                .and_then(super::value::types::Value::as_int)
+                .unwrap_or(0),
+        ),
+        "Number" | "Real" | "Float" => Value::Real(
+            args.first()
+                .and_then(super::value::types::Value::as_real)
+                .unwrap_or(0.0),
+        ),
         "String" => Value::String(Rc::new(
-            args.first().map(std::string::ToString::to_string).unwrap_or_default(),
+            args.first()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default(),
         )),
-        "Boolean" => Value::Bool(args.first().is_some_and(super::value::types::Value::is_truthy)),
+        "Boolean" => Value::Bool(
+            args.first()
+                .is_some_and(super::value::types::Value::is_truthy),
+        ),
         "Interval" => Value::Interval(Rc::new(IntervalValue {
             start: None,
             end: None,
@@ -561,7 +597,10 @@ pub fn eq_for_version(l: &Value, r: &Value, version: u8) -> bool {
     if version >= 4 {
         let same_family = matches!(
             (l, r),
-            (Value::Int(_) | Value::Real(_), Value::Int(_) | Value::Real(_))
+            (
+                Value::Int(_) | Value::Real(_),
+                Value::Int(_) | Value::Real(_)
+            )
         ) || std::mem::discriminant(l) == std::mem::discriminant(r);
         if !same_family {
             return false;
@@ -622,7 +661,8 @@ fn eq_legacy(l: &Value, r: &Value) -> bool {
             "false" | "0" | "" => *i == 0,
             other => other.parse::<i64>().ok() == Some(*i),
         },
-        (Value::String(s), Value::Real(r)) | (Value::Real(r), Value::String(s)) => match s.as_str() {
+        (Value::String(s), Value::Real(r)) | (Value::Real(r), Value::String(s)) => match s.as_str()
+        {
             "true" => *r != 0.0,
             "false" | "0" | "" => *r == 0.0,
             other => other.parse::<f64>().ok().is_some_and(|f| f == *r),
@@ -636,14 +676,18 @@ pub fn value_instanceof(value: &Value, class: &Value) -> bool {
         Value::ClassRef(id, _) => matches!(value, Value::Instance(i) if i.borrow().class == *id),
         Value::BuiltinClass(name) => matches!(
             (*name, value),
-            ("Array", Value::Array(_)) | ("Map", Value::Map(_)) | ("Set", Value::Set(_)) |
-("Object", Value::Object(_) | Value::Instance(_)) |
-("String", Value::String(_)) | ("Boolean", Value::Bool(_)) |
-("Null", Value::Null) | ("Function", Value::Function(_)) |
-("Interval", Value::Interval(_)) |
-("Integer" | "Real" | "Float" | "Number", Value::Int(_)) |
-("Real" | "Float" | "Number", Value::Real(_)) |
-("Class", Value::ClassRef(_, _) | Value::BuiltinClass(_))
+            ("Array", Value::Array(_))
+                | ("Map", Value::Map(_))
+                | ("Set", Value::Set(_))
+                | ("Object", Value::Object(_) | Value::Instance(_))
+                | ("String", Value::String(_))
+                | ("Boolean", Value::Bool(_))
+                | ("Null", Value::Null)
+                | ("Function", Value::Function(_))
+                | ("Interval", Value::Interval(_))
+                | ("Integer" | "Real" | "Float" | "Number", Value::Int(_))
+                | ("Real" | "Float" | "Number", Value::Real(_))
+                | ("Class", Value::ClassRef(_, _) | Value::BuiltinClass(_))
         ),
         _ => false,
     }
@@ -688,8 +732,12 @@ pub fn contains_value(haystack: &Value, needle: &Value) -> bool {
 
 pub fn add(l: &Value, r: &Value) -> Value {
     match (l, r) {
-        (Value::String(a), b) => Value::String(Rc::new(format!("{a}{}", value_as_concat_string(b)))),
-        (a, Value::String(b)) => Value::String(Rc::new(format!("{}{b}", value_as_concat_string(a)))),
+        (Value::String(a), b) => {
+            Value::String(Rc::new(format!("{a}{}", value_as_concat_string(b))))
+        }
+        (a, Value::String(b)) => {
+            Value::String(Rc::new(format!("{}{b}", value_as_concat_string(a))))
+        }
         (Value::Array(a), Value::Array(b)) => {
             let mut out = a.borrow().clone();
             out.extend(b.borrow().iter().cloned());
@@ -771,7 +819,10 @@ pub fn pow(l: &Value, r: &Value) -> Value {
         let a = l.to_long();
         let b = r.to_long();
         if (0..64).contains(&b) {
-            Value::Int(a.checked_pow(u32::try_from(b).unwrap_or(u32::MAX)).unwrap_or(i64::MAX))
+            Value::Int(
+                a.checked_pow(u32::try_from(b).unwrap_or(u32::MAX))
+                    .unwrap_or(i64::MAX),
+            )
         } else {
             Value::Real(crate::int_to_real(a).powf(crate::int_to_real(b)))
         }

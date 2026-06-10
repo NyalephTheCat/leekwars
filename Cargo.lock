@@ -1392,7 +1392,6 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "leek-diagnostics",
- "leek-game-runtime",
  "leek-generator",
  "leek-hir",
  "leek-pipeline",

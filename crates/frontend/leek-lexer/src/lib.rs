@@ -230,7 +230,11 @@ impl<'a> Lexer<'a> {
     }
 
     pub(crate) fn span(&self, start: usize, end: usize) -> Span {
-        Span::new(self.source, leek_span::offset(start), leek_span::offset(end))
+        Span::new(
+            self.source,
+            leek_span::offset(start),
+            leek_span::offset(end),
+        )
     }
 
     /// Emit a single-byte token and advance one byte.

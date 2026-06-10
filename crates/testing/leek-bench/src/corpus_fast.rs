@@ -80,7 +80,10 @@ fn version_of(v: u8) -> Version {
 
 /// Run a batch correctness sweep over `cases`. `version_override` (from
 /// `--corpus-lang-version`) forces every case to that version when `Some`.
-pub fn run_fast_java_corpus(cases: &[FastCase], version_override: Option<u8>) -> Result<FastReport> {
+pub fn run_fast_java_corpus(
+    cases: &[FastCase],
+    version_override: Option<u8>,
+) -> Result<FastReport> {
     let start = Instant::now();
     let upstream = detect_upstream_classpath()
         .context("upstream classpath not found (build the official generator's `build/classes`)")?;
@@ -105,7 +108,10 @@ pub fn run_fast_java_corpus(cases: &[FastCase], version_override: Option<u8>) ->
         let hir = match compile_hir_file(&leek_path, version, case.strict) {
             Ok(c) => c.hir,
             Err(e) => {
-                failures.push((case.id.clone(), FastOutcome::EmitError(short(&e.to_string()))));
+                failures.push((
+                    case.id.clone(),
+                    FastOutcome::EmitError(short(&e.to_string())),
+                ));
                 continue;
             }
         };
@@ -188,7 +194,10 @@ pub fn run_fast_java_corpus(cases: &[FastCase], version_override: Option<u8>) ->
         ids.sort_unstable();
         std::fs::write(
             &ids_file,
-            ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("\n"),
+            ids.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
         )?;
         let run_cp = format!("{}:{}", work.display(), cp);
         let out = Command::new("java")
@@ -301,7 +310,7 @@ fn parse_failed_ids(stderr: &str) -> HashSet<usize> {
         // `…/AI_<n>.java:<line>: error: …`
         if let Some(start) = line.find("AI_") {
             let rest = &line[start + 3..];
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
             if rest[digits.len()..].starts_with(".java")
                 && let Ok(n) = digits.parse::<usize>()
             {

@@ -2,7 +2,7 @@
 //! native verifying `.ops(N)` / `.equalsOps` corpus cases). These pin the
 //! per-construct charges so the model can't silently drift.
 
-use leek_backend_native::{ops_used, run, NativeOptions};
+use leek_backend_native::{NativeOptions, ops_used, run};
 use leek_parser::{ast::AstNode, parse};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
@@ -48,7 +48,12 @@ fn op_budget_stops_a_runaway_loop() {
     let p = parse(src, s, Version::V4);
     let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).unwrap();
     let (h, _) = leek_hir::lower_file_versioned(&sf, s, 4);
-    let out = run(&h, &NativeOptions::release().with_lang(4, false).with_op_limit(10_000));
+    let out = run(
+        &h,
+        &NativeOptions::release()
+            .with_lang(4, false)
+            .with_op_limit(10_000),
+    );
     match out {
         Err(leek_backend_native::NativeError::Runtime(c)) => {
             assert_eq!(c, "TOO_MUCH_OPERATIONS");

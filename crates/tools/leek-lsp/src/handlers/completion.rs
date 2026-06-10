@@ -55,13 +55,16 @@ pub fn handle(
 
     // Member mode: did the user just type `.`?
     if let Some((receiver, receiver_start)) = member_receiver(&doc.text, offset)
-        && let Some(items) = member_items(&run, &root, receiver, receiver_start) {
-            return Some(lsp::CompletionResponse::Array(items));
-        }
-        // Fall through to global suggestions if we can't resolve
-        // the receiver — better than offering nothing.
+        && let Some(items) = member_items(&run, &root, receiver, receiver_start)
+    {
+        return Some(lsp::CompletionResponse::Array(items));
+    }
+    // Fall through to global suggestions if we can't resolve
+    // the receiver — better than offering nothing.
 
-    Some(lsp::CompletionResponse::Array(global_items(&run, &root, uri)))
+    Some(lsp::CompletionResponse::Array(global_items(
+        &run, &root, uri,
+    )))
 }
 
 // ─── completionItem/resolve ─────────────────────────────────────────
@@ -216,17 +219,19 @@ fn member_items(
     //     case that v0.2's completion missed.
     if let Some(art) = run.get::<leek_types::pipeline::TypeCheckArtifact>()
         && let Some(entry) = art.table.smallest_at(receiver_start)
-            && let Some(class_name) = class_name_of_type(&entry.ty)
-                && class_name != receiver
-                    && let Some(cls_node) = find_class_decl_by_name(root, &class_name) {
-                        push_class_members(&cls_node, &mut items);
-                    }
+        && let Some(class_name) = class_name_of_type(&entry.ty)
+        && class_name != receiver
+        && let Some(cls_node) = find_class_decl_by_name(root, &class_name)
+    {
+        push_class_members(&cls_node, &mut items);
+    }
 
     // 2) `this.` — list members of the enclosing ClassDecl.
     if receiver == "this"
-        && let Some(cls) = enclosing_class(root) {
-            push_class_members(&cls, &mut items);
-        }
+        && let Some(cls) = enclosing_class(root)
+    {
+        push_class_members(&cls, &mut items);
+    }
 
     // 3) Receiver names a user-declared class → list its members.
     // Use the CST directly: in salsa mode the type-check step does not
@@ -687,7 +692,7 @@ mod tests {
         let (ws, uri) = ws_with(src);
         // Cursor right after `this.` on line 4. The source line is
         // "        this." — 8 spaces of indent + "this.".
-        let col = "        this.".len() as u32;
+        let col = u32::try_from("        this.".len()).unwrap();
         let resp = handle(&ws, &uri, pos(4, col)).unwrap();
         let items = array_items(resp);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -700,7 +705,7 @@ mod tests {
     fn class_name_dot_lists_static_builtin_fields() {
         let src = "var v = Integer.\n";
         let (ws, uri) = ws_with(src);
-        let col = "var v = Integer.".len() as u32;
+        let col = u32::try_from("var v = Integer.".len()).unwrap();
         let resp = handle(&ws, &uri, pos(0, col)).unwrap();
         let items = array_items(resp);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -720,8 +725,13 @@ mod tests {
         // Append a `var x = Dog.` line and complete after the dot.
         let src2 = format!("{src}var x = Dog.\n");
         let (ws2, uri2) = ws_with(&src2);
-        let line = src2.lines().count() as u32 - 1; // line containing `Dog.`
-        let resp = handle(&ws2, &uri2, pos(line, "var x = Dog.".len() as u32)).unwrap();
+        let line = u32::try_from(src2.lines().count()).unwrap() - 1; // line containing `Dog.`
+        let resp = handle(
+            &ws2,
+            &uri2,
+            pos(line, u32::try_from("var x = Dog.".len()).unwrap()),
+        )
+        .unwrap();
         let items = array_items(resp);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"age"), "labels: {labels:?}");

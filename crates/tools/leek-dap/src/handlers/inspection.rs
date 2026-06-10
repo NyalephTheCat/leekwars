@@ -11,8 +11,7 @@ use dap::responses::{ScopesResponse, StackTraceResponse, ThreadsResponse, Variab
 use dap::types::{Scope, Source, StackFrame, Thread, Variable};
 
 use crate::handlers::Flow;
-use crate::session::{Session, MAIN_THREAD_ID};
-
+use crate::session::{MAIN_THREAD_ID, Session};
 
 /// `threads`: the single synthetic main thread.
 pub(crate) fn threads<R: Read, W: Write>(

@@ -9,7 +9,7 @@
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{offset_to_position, PosMap};
+use crate::util::position::{PosMap, offset_to_position};
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<lsp::DocumentSymbolResponse> {
@@ -44,21 +44,11 @@ fn symbol_for(node: &SyntaxNode, pm: PosMap<'_>) -> Option<lsp::DocumentSymbol> 
                     }
                 }
             }
-            Some(build_symbol(
-                node,
-                pm,
-                lsp::SymbolKind::CLASS,
-                &children,
-            ))
+            Some(build_symbol(node, pm, lsp::SymbolKind::CLASS, &children))
         }
         SyntaxKind::VarDeclStmt => {
             // Top-level var/global as a variable symbol.
-            Some(build_symbol(
-                node,
-                pm,
-                lsp::SymbolKind::VARIABLE,
-                &[],
-            ))
+            Some(build_symbol(node, pm, lsp::SymbolKind::VARIABLE, &[]))
         }
         _ => None,
     }

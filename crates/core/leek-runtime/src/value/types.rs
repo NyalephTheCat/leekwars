@@ -164,7 +164,9 @@ impl MapData {
     /// Insert when the caller already has the canonical key. The
     /// no-canonical path (e.g. for literals) is [`insert`].
     pub fn insert_canonical(&mut self, canonical: String, key: Value, value: Value) {
-        if let Some(&i) = self.index.get(&canonical) { self.entries[i].1 = value } else {
+        if let Some(&i) = self.index.get(&canonical) {
+            self.entries[i].1 = value;
+        } else {
             let i = self.entries.len();
             self.entries.push((key, value));
             self.index.insert(canonical, i);
@@ -215,7 +217,9 @@ impl ObjectData {
     /// Set a field. Preserves insertion order on first set; later
     /// writes update in place.
     pub fn set(&mut self, name: &str, value: Value) {
-        if let Some(&i) = self.index.get(name) { self.fields[i].1 = value } else {
+        if let Some(&i) = self.index.get(name) {
+            self.fields[i].1 = value;
+        } else {
             let i = self.fields.len();
             self.fields.push((name.to_string(), value));
             self.index.insert(name.to_string(), i);

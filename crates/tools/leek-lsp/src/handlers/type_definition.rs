@@ -57,9 +57,10 @@ pub fn handle(
             let sym = crate::handlers::resolve_symbol(table, offset).cloned()?;
             // Try the HIR-declared type first.
             if let Some(ty) = type_of_symbol(&hir.0, &sym.name, sym.kind)
-                && let Some(name) = class_name_of_type(&ty) {
-                    return Some(name);
-                }
+                && let Some(name) = class_name_of_type(&ty)
+            {
+                return Some(name);
+            }
             // Fallback: walk the CST up from `sym.def_span.start`
             // to its enclosing `VarDeclStmt` (or method-param),
             // then look at the largest non-Any type entry inside

@@ -1,7 +1,7 @@
 //! Bitwise / shift operators on `real` operands truncate to integer and
 //! yield an integer (matching the interpreter), rather than skipping.
 
-use leek_backend_native::{run, NativeOptions};
+use leek_backend_native::{NativeOptions, run};
 use leek_hir::lower_file_versioned;
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::SourceId;

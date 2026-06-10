@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use leek_backend_native::NativeOptions;
 use leek_diagnostics::Severity;
-use leek_hir::pipeline::HirArtifact;
 use leek_hir::HirFile;
+use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::Input;
 use leek_recipes::Target;
 use leek_span::SourceId;
@@ -45,7 +45,12 @@ impl NativeTarget {
         let path = &self.config.program;
         let source = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(e) => return Err(RunOutcome::failed(format!("cannot read {}: {e}", path.display()))),
+            Err(e) => {
+                return Err(RunOutcome::failed(format!(
+                    "cannot read {}: {e}",
+                    path.display()
+                )));
+            }
         };
 
         let version = self.config.version.unwrap_or(DEFAULT_VERSION);

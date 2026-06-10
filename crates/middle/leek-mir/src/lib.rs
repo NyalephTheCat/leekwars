@@ -27,4 +27,4 @@ pub mod verify;
 pub use ir::*;
 pub use lower::lower_file;
 pub use opt::{optimize_function, optimize_program};
-pub use verify::{verify_function, verify_program, MirError};
+pub use verify::{MirError, verify_function, verify_program};

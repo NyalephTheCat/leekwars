@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use leek_generator::Outcome;
 use leek_hir::HirFile;
 
@@ -72,7 +72,13 @@ impl TestReport {
         }
     }
 
-    fn record(&mut self, label: String, seed: u64, outcome: &Outcome, hero_team: i64) -> FightResult {
+    fn record(
+        &mut self,
+        label: String,
+        seed: u64,
+        outcome: &Outcome,
+        hero_team: i64,
+    ) -> FightResult {
         let result = classify(outcome.winner_team, hero_team);
         match result {
             FightResult::Win => self.wins += 1,
@@ -161,7 +167,11 @@ fn team_ids(scn: &Scenario) -> Vec<i64> {
 
 /// Point the lead (first) entity of `team` at a different AI file.
 fn set_team_lead_ai(scn: &mut Scenario, team: i64, ai: &Path) {
-    if let Some(e) = scn.entities.iter_mut().find(|e| e.team.unwrap_or(0) == team) {
+    if let Some(e) = scn
+        .entities
+        .iter_mut()
+        .find(|e| e.team.unwrap_or(0) == team)
+    {
         e.ai = Some(ai.to_path_buf());
     }
 }
@@ -277,7 +287,16 @@ pub fn run_tournament(
     let mut report = TestReport::new("tournament");
     let mut standings: HashMap<String, Standing> = HashMap::new();
     for e in &spec.entrants {
-        standings.insert(label_of(e), Standing { label: label_of(e), wins: 0, losses: 0, draws: 0, points: 0 });
+        standings.insert(
+            label_of(e),
+            Standing {
+                label: label_of(e),
+                wins: 0,
+                losses: 0,
+                draws: 0,
+                points: 0,
+            },
+        );
     }
 
     // Play A (team_a) vs B (team_b) over the seeds; returns (a_wins, b_wins, draws).
@@ -350,7 +369,12 @@ pub fn run_tournament(
     }
 
     let mut rows: Vec<Standing> = standings.into_values().collect();
-    rows.sort_by(|a, b| b.points.cmp(&a.points).then(b.wins.cmp(&a.wins)).then(a.label.cmp(&b.label)));
+    rows.sort_by(|a, b| {
+        b.points
+            .cmp(&a.points)
+            .then(b.wins.cmp(&a.wins))
+            .then(a.label.cmp(&b.label))
+    });
     report.standings = rows;
     Ok(report)
 }

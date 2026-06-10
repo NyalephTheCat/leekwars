@@ -321,7 +321,9 @@ pub(crate) fn find_top_level_decl(
         };
         let root = SyntaxNode::new_root(green.0.clone());
         if let Some(sym) = art.table.symbols.iter().find(|s| {
-            s.name == name && is_workspace_global(s.kind) && !offset_in_class(&root, s.def_span.start)
+            s.name == name
+                && is_workspace_global(s.kind)
+                && !offset_in_class(&root, s.def_span.start)
         }) {
             return Some((file, sym.clone()));
         }

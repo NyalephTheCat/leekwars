@@ -122,9 +122,9 @@ fn remove_unreachable_blocks(f: &mut MirFunction) -> usize {
     // their original relative order for deterministic output.
     let mut remap: HashMap<u32, u32> = HashMap::new();
     let mut next = 0u32;
-    for (i, &keep) in reachable.iter().enumerate() {
+    for (i, &keep) in (0u32..).zip(&reachable) {
         if keep {
-            remap.insert(i as u32, next);
+            remap.insert(i, next);
             next += 1;
         }
     }
@@ -133,11 +133,11 @@ fn remove_unreachable_blocks(f: &mut MirFunction) -> usize {
 
     // Rebuild the block list with remapped ids + terminator targets.
     let old_blocks = std::mem::take(&mut f.blocks);
-    for (i, mut block) in old_blocks.into_iter().enumerate() {
-        if !reachable[i] {
+    for (i, mut block) in (0u32..).zip(old_blocks) {
+        if !reachable[i as usize] {
             continue;
         }
-        block.id = BlockId(remap[&(i as u32)]);
+        block.id = BlockId(remap[&i]);
         block.terminator = remap_terminator(block.terminator, &remap);
         f.blocks.push(block);
     }

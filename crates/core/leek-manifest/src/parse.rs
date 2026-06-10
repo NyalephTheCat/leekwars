@@ -327,7 +327,9 @@ fn parse_backend_settings(
     if let Some(v) = tbl.get("java_version") {
         let n = int_val(v, &format!("{scope}.java_version"))?;
         out.java_version = Some(u32::try_from(n).map_err(|_| {
-            ManifestError::new(format!("Miku.toml: {scope}.java_version must be non-negative"))
+            ManifestError::new(format!(
+                "Miku.toml: {scope}.java_version must be non-negative"
+            ))
         })?);
     }
     if let Some(v) = tbl.get("emit_lines") {

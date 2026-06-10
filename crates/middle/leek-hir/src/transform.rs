@@ -217,21 +217,21 @@ impl ExprFolder {
         self.try_fold(e);
     }
 
-    /// Attempt to rewrite `e` itself, assuming its children are already
+    /// Attempt to rewrite `expr` itself, assuming its children are already
     /// folded. The expression's [`Type`](leek_types::Type) is preserved: a
     /// folded result has the same type the type checker assigned the node.
-    fn try_fold(&mut self, e: &mut Expr) {
+    fn try_fold(&mut self, expr: &mut Expr) {
         // Collapse `const_bool ? a : b` to the taken branch.
-        if let ExprKind::Ternary(cond, then_e, else_e) = &mut e.kind {
+        if let ExprKind::Ternary(cond, then_e, else_e) = &mut expr.kind {
             if let ExprKind::Literal(Literal::Bool(b)) = cond.kind {
                 let taken = if b { then_e } else { else_e };
                 let chosen = std::mem::replace(taken, Box::new(placeholder()));
-                *e = *chosen;
+                *expr = *chosen;
                 self.count += 1;
             }
             return;
         }
-        let folded = match &e.kind {
+        let folded = match &expr.kind {
             ExprKind::Binary(op, l, r) => match (&l.kind, &r.kind) {
                 (ExprKind::Literal(a), ExprKind::Literal(b)) => fold_binary(*op, a, b),
                 _ => None,
@@ -251,7 +251,7 @@ impl ExprFolder {
             _ => None,
         };
         if let Some(lit) = folded {
-            e.kind = ExprKind::Literal(lit);
+            expr.kind = ExprKind::Literal(lit);
             self.count += 1;
         }
     }
@@ -349,16 +349,16 @@ fn prim_eq(a: &Literal, b: &Literal) -> Option<bool> {
     }
 }
 
-fn bool_pair(a: &Literal, b: &Literal, f: impl Fn(bool, bool) -> bool) -> Option<Literal> {
+fn bool_pair(a: &Literal, b: &Literal, op: impl Fn(bool, bool) -> bool) -> Option<Literal> {
     match (a, b) {
-        (Literal::Bool(x), Literal::Bool(y)) => Some(Literal::Bool(f(*x, *y))),
+        (Literal::Bool(x), Literal::Bool(y)) => Some(Literal::Bool(op(*x, *y))),
         _ => None,
     }
 }
 
-fn int_pair(a: &Literal, b: &Literal, f: impl Fn(i64, i64) -> i64) -> Option<Literal> {
+fn int_pair(a: &Literal, b: &Literal, op: impl Fn(i64, i64) -> i64) -> Option<Literal> {
     match (a, b) {
-        (Literal::Int(x), Literal::Int(y)) => Some(Literal::Int(f(*x, *y))),
+        (Literal::Int(x), Literal::Int(y)) => Some(Literal::Int(op(*x, *y))),
         _ => None,
     }
 }
@@ -522,7 +522,7 @@ fn propagate_in_body(stmts: &mut Vec<Stmt>) -> usize {
 /// or `Any` declaration stores the literal as-is; an explicit primitive type
 /// must match the literal's kind exactly (notably `real x = 5` coerces, so the
 /// integer literal does *not* match).
-fn literal_matches_decl(lit: &Literal, ty: &Option<Type>) -> bool {
+fn literal_matches_decl(lit: &Literal, ty: Option<&Type>) -> bool {
     match ty {
         None | Some(Type::Any) => true,
         Some(Type::Integer) => matches!(lit, Literal::Int(_)),
@@ -541,11 +541,13 @@ fn collect_const_decls(stmts: &[Stmt], map: &mut HashMap<DefId, Literal>) {
             && !v.is_global
             && let Some(init) = &v.init
             && let ExprKind::Literal(lit) = &init.kind
-            && literal_matches_decl(lit, &v.ty)
+            && literal_matches_decl(lit, v.ty.as_ref())
         {
             map.insert(v.def, lit.clone());
         }
-        walk_stmt_child_stmts(s, &mut |c| collect_const_decls(std::slice::from_ref(c), map));
+        walk_stmt_child_stmts(s, &mut |c| {
+            collect_const_decls(std::slice::from_ref(c), map);
+        });
     }
 }
 
@@ -748,7 +750,8 @@ fn const_bool(e: &Expr) -> Option<bool> {
 fn is_pure_discardable(e: &Expr) -> bool {
     matches!(
         &e.kind,
-        ExprKind::Literal(_) | ExprKind::Name(NameRef::Local(_) | NameRef::Global(_) | NameRef::This)
+        ExprKind::Literal(_)
+            | ExprKind::Name(NameRef::Local(_) | NameRef::Global(_) | NameRef::This)
     )
 }
 
@@ -783,7 +786,8 @@ fn eliminate_in_stmts(stmts: &mut Vec<Stmt>, count: &mut usize) {
                     stmts.push(*i.then_branch);
                 }
                 Some(false)
-                    if !(is_last && matches!(i.else_branch.as_deref(), Some(Stmt::Expr(_)) | None)) =>
+                    if !(is_last
+                        && matches!(i.else_branch.as_deref(), Some(Stmt::Expr(_)) | None)) =>
                 {
                     *count += 1;
                     if let Some(e) = i.else_branch {
@@ -860,7 +864,7 @@ pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
             }
             if let Some(init) = &v.init
                 && let ExprKind::Literal(lit) = &init.kind
-                && literal_matches_decl(lit, &v.ty)
+                && literal_matches_decl(lit, v.ty.as_ref())
             {
                 candidates.insert(v.def, lit.clone());
             }
@@ -889,8 +893,9 @@ pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
             count += 1;
         }
     });
-    hir.main
-        .retain(|s| !matches!(s, Stmt::VarDecl(v) if v.is_global && candidates.contains_key(&v.def)));
+    hir.main.retain(
+        |s| !matches!(s, Stmt::VarDecl(v) if v.is_global && candidates.contains_key(&v.def)),
+    );
     count
 }
 
@@ -1089,7 +1094,9 @@ fn collect_inlinable(hir: &HirFile) -> HashMap<DefId, (Vec<DefId>, Expr)> {
         // `12.0`, and `=> integer` truncates). Inlining substitutes the raw
         // argument / body, bypassing that coercion, so only inline functions
         // whose params and return type impose no value coercion.
-        if f.params.iter().any(|p| p.ty.as_ref().is_some_and(type_coerces))
+        if f.params
+            .iter()
+            .any(|p| p.ty.as_ref().is_some_and(type_coerces))
             || f.return_type.as_ref().is_some_and(type_coerces)
         {
             continue;
@@ -1131,11 +1138,11 @@ fn is_trivial_arg(e: &Expr) -> bool {
 
 /// Replace each `Name(Local(d))` for `d` in `map` with the bound argument.
 fn substitute_params(e: &mut Expr, map: &HashMap<DefId, Expr>) {
-    if let ExprKind::Name(NameRef::Local(d)) = &e.kind {
-        if let Some(arg) = map.get(d) {
-            *e = arg.clone();
-            return;
-        }
+    if let ExprKind::Name(NameRef::Local(d)) = &e.kind
+        && let Some(arg) = map.get(d)
+    {
+        *e = arg.clone();
+        return;
     }
     walk_expr_children_mut(e, &mut |c| substitute_params(c, map));
 }
@@ -1144,10 +1151,10 @@ fn substitute_params(e: &mut Expr, map: &HashMap<DefId, Expr>) {
 fn expr_calls_fn(e: &Expr, target: DefId) -> bool {
     let mut found = false;
     visit_expr_all(e, &mut |x| {
-        if let ExprKind::Call(c) = &x.kind {
-            if matches!(&c.callee, Callee::Function(NameRef::Function(d)) if *d == target) {
-                found = true;
-            }
+        if let ExprKind::Call(c) = &x.kind
+            && matches!(&c.callee, Callee::Function(NameRef::Function(d)) if *d == target)
+        {
+            found = true;
         }
     });
     found
@@ -1209,8 +1216,8 @@ fn for_each_file_expr_mut(hir: &mut HirFile, f: &mut impl FnMut(&mut Expr)) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Callee, Stmt};
     use crate::ir::Literal::{Bool, Int, Real};
+    use crate::ir::{Callee, Stmt};
     use leek_span::Span;
 
     fn span() -> Span {
@@ -1327,7 +1334,10 @@ mod tests {
     #[test]
     fn collapses_constant_ternary_to_taken_branch() {
         // true ? 1 : 2  →  1
-        assert_eq!(fold_init("var x = true ? 1 : 2\n"), ExprKind::Literal(Int(1)));
+        assert_eq!(
+            fold_init("var x = true ? 1 : 2\n"),
+            ExprKind::Literal(Int(1))
+        );
         // false ? 1 : 2  →  2
         assert_eq!(
             fold_init("var x = false ? 1 : 2\n"),
@@ -1364,9 +1374,10 @@ mod tests {
         assert_eq!(n, 0, "no constant subexpression to fold");
     }
 
-    /// Folding collapses a constant expression tree to a single literal, which
-    /// is exactly what shrinks the program's op budget: the `leek-charge` pass
-    /// charges per expression node, so fewer nodes means fewer ops.
+    // Folding collapses a constant expression tree to a single literal, which
+    // is exactly what shrinks the program's op budget: the `leek-charge` pass
+    // charges per expression node, so fewer nodes means fewer ops.
+
     // ----- propagate_const_locals -----
 
     /// Lower, propagate, fold, and return the main block's statements.
@@ -1435,9 +1446,7 @@ mod tests {
         // `var DEBUG = false; ...` propagates so a later `DEBUG ? a : b` folds.
         let main = prop_and_fold("var DEBUG = false\nvar y = DEBUG ? 1 : 2\n");
         assert_eq!(main.len(), 1, "DEBUG decl dropped");
-        let Stmt::VarDecl(v) = &main[0] else {
-            panic!()
-        };
+        let Stmt::VarDecl(v) = &main[0] else { panic!() };
         assert_eq!(v.init.as_ref().unwrap().kind, ExprKind::Literal(Int(2)));
     }
 
@@ -1619,12 +1628,18 @@ mod tests {
     fn folds_abs_min_max_on_constants() {
         assert_eq!(fold_init("var x = abs(-5)\n"), ExprKind::Literal(Int(5)));
         assert_eq!(fold_init("var x = min(5, 12)\n"), ExprKind::Literal(Int(5)));
-        assert_eq!(fold_init("var x = max(5, 12)\n"), ExprKind::Literal(Int(12)));
+        assert_eq!(
+            fold_init("var x = max(5, 12)\n"),
+            ExprKind::Literal(Int(12))
+        );
     }
 
     #[test]
     fn folds_abs_real_and_min_promotes_to_real() {
-        assert_eq!(fold_init("var x = abs(-2.5)\n"), ExprKind::Literal(Real(2.5)));
+        assert_eq!(
+            fold_init("var x = abs(-2.5)\n"),
+            ExprKind::Literal(Real(2.5))
+        );
         // mixed int/real → real result
         assert_eq!(
             fold_init("var x = min(5, 2.5)\n"),
@@ -1636,16 +1651,16 @@ mod tests {
     fn folds_floor_ceil_and_sqrt() {
         assert_eq!(fold_init("var x = floor(3.7)\n"), ExprKind::Literal(Int(3)));
         assert_eq!(fold_init("var x = ceil(3.2)\n"), ExprKind::Literal(Int(4)));
-        assert_eq!(fold_init("var x = sqrt(4.0)\n"), ExprKind::Literal(Real(2.0)));
+        assert_eq!(
+            fold_init("var x = sqrt(4.0)\n"),
+            ExprKind::Literal(Real(2.0))
+        );
     }
 
     #[test]
     fn folds_builtin_call_with_nested_constant_arg() {
         // The argument folds first (post-order), then the call.
-        assert_eq!(
-            fold_init("var x = abs(2 - 7)\n"),
-            ExprKind::Literal(Int(5))
-        );
+        assert_eq!(fold_init("var x = abs(2 - 7)\n"), ExprKind::Literal(Int(5)));
     }
 
     #[test]
@@ -1666,10 +1681,7 @@ mod tests {
         let Stmt::VarDecl(v) = &hir.main[1] else {
             panic!("expected var x")
         };
-        assert!(matches!(
-            v.init.as_ref().unwrap().kind,
-            ExprKind::Call(_)
-        ));
+        assert!(matches!(v.init.as_ref().unwrap().kind, ExprKind::Call(_)));
     }
 
     #[test]
@@ -1694,4 +1706,3 @@ mod tests {
         assert_eq!(after, 1, "folds to the single literal 3");
     }
 }
-

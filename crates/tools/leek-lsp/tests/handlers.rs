@@ -5,9 +5,9 @@
 use leek_lsp::handlers::{
     call_hierarchy, code_action, code_lens, completion, definition, document_color,
     document_highlight, document_link, execute_command, file_operations, folding, formatting,
-    hover, implementation, inlay_hints, inline_values,
-    linked_editing, on_type_formatting, prepare_rename, pull_diagnostics, references, rename,
-    selection_range, semantic_tokens, symbols, type_definition, type_hierarchy, workspace_symbols,
+    hover, implementation, inlay_hints, inline_values, linked_editing, on_type_formatting,
+    prepare_rename, pull_diagnostics, references, rename, selection_range, semantic_tokens,
+    symbols, type_definition, type_hierarchy, workspace_symbols,
 };
 use leek_lsp::workspace::Workspace;
 use tower_lsp::lsp_types as lsp;
@@ -598,7 +598,11 @@ fn code_lens_emits_reference_count_and_cost() {
     });
     let cost = lenses
         .iter()
-        .find_map(|l| l.command.as_ref().filter(|c| c.command == "leek.showComplexity"))
+        .find_map(|l| {
+            l.command
+                .as_ref()
+                .filter(|c| c.command == "leek.showComplexity")
+        })
         .expect("a complexity-derived lens");
     assert!(has_ref_lens, "no reference lens: {lenses:?}");
     assert!(
@@ -610,12 +614,17 @@ fn code_lens_emits_reference_count_and_cost() {
 
 #[test]
 fn code_lens_shows_big_o_for_non_constant() {
-    let text = "function sum(arr) {\n  var t = 0\n  for (var x in arr) { t = t + x }\n  return t\n}\n";
+    let text =
+        "function sum(arr) {\n  var t = 0\n  for (var x in arr) { t = t + x }\n  return t\n}\n";
     let ws = open(text);
     let lenses = code_lens::handle(&ws, &url()).expect("lenses");
     let lens = lenses
         .iter()
-        .find_map(|l| l.command.as_ref().filter(|c| c.command == "leek.showComplexity"))
+        .find_map(|l| {
+            l.command
+                .as_ref()
+                .filter(|c| c.command == "leek.showComplexity")
+        })
         .expect("complexity lens");
     assert!(
         lens.title.contains("Complexity:") && lens.title.contains("O(arr)"),
@@ -1017,10 +1026,7 @@ fn rename_does_not_touch_local_shadow_in_other_file() {
     // named `help`. Renaming the top-level function must not edit b.leek.
     let ws = open_files(&[
         ("a.leek", "function help() { return 1 }\n"),
-        (
-            "b.leek",
-            "function other() { var help = 2\nreturn help }\n",
-        ),
+        ("b.leek", "function other() { var help = 2\nreturn help }\n"),
     ]);
     let edit = rename::handle(
         &ws,
@@ -1072,7 +1078,10 @@ fn rename_does_not_touch_member_access_in_other_file() {
 fn references_for_top_level_symbol_span_files() {
     let ws = open_files(&[
         ("util.leek", "function help() { return 1 }\n"),
-        ("main.leek", "include(\"util\")\nvar n = help()\nvar m = help()\n"),
+        (
+            "main.leek",
+            "include(\"util\")\nvar n = help()\nvar m = help()\n",
+        ),
     ]);
     let locs = references::handle(
         &ws,
@@ -1145,14 +1154,18 @@ fn code_action_offers_redundant_boolean_autofix() {
         }
         lsp::CodeActionOrCommand::Command(_) => false,
     });
-    assert!(has_fix, "expected a quick-fix code action, got: {actions:#?}");
+    assert!(
+        has_fix,
+        "expected a quick-fix code action, got: {actions:#?}"
+    );
 }
 
 #[test]
 fn code_action_offers_fix_all_source_action() {
     // Two independent machine-applicable fixes in one file should be
     // bundled into a single `source.fixAll` action covering both.
-    let ws = open("function f(boolean b, boolean c) {\n  var x = b == true\n  return c == true\n}\n");
+    let ws =
+        open("function f(boolean b, boolean c) {\n  var x = b == true\n  return c == true\n}\n");
     let whole = lsp::Range {
         start: lsp::Position {
             line: 0,
@@ -1264,8 +1277,14 @@ fn impl_locs(resp: lsp::request::GotoImplementationResponse) -> Vec<lsp::Locatio
 fn implementation_lists_subclasses_across_include() {
     let ws = open_files(&[
         ("animal.leek", "class Animal {}\n"),
-        ("cat.leek", "include(\"animal\")\nclass Cat extends Animal {}\n"),
-        ("dog.leek", "include(\"animal\")\nclass Dog extends Animal {}\n"),
+        (
+            "cat.leek",
+            "include(\"animal\")\nclass Cat extends Animal {}\n",
+        ),
+        (
+            "dog.leek",
+            "include(\"animal\")\nclass Dog extends Animal {}\n",
+        ),
     ]);
     // Cursor on `Animal` in animal.leek.
     let resp = implementation::handle(
@@ -1346,7 +1365,10 @@ fn implementation_does_not_cross_into_independent_program() {
 fn call_hierarchy_incoming_crosses_include() {
     let ws = open_files(&[
         ("util.leek", "function helper() { return 1 }\n"),
-        ("main.leek", "include(\"util\")\nfunction caller() { return helper() }\n"),
+        (
+            "main.leek",
+            "include(\"util\")\nfunction caller() { return helper() }\n",
+        ),
     ]);
     // Prepare on the `helper` declaration in util.
     let items = call_hierarchy::prepare(
@@ -1371,7 +1393,10 @@ fn call_hierarchy_incoming_crosses_include() {
 fn call_hierarchy_outgoing_crosses_include() {
     let ws = open_files(&[
         ("util.leek", "function helper() { return 1 }\n"),
-        ("main.leek", "include(\"util\")\nfunction runner() { return helper() }\n"),
+        (
+            "main.leek",
+            "include(\"util\")\nfunction runner() { return helper() }\n",
+        ),
     ]);
     // Prepare on `runner` in main.
     let items = call_hierarchy::prepare(
@@ -1395,7 +1420,10 @@ fn call_hierarchy_outgoing_crosses_include() {
 fn type_hierarchy_supertypes_cross_include() {
     let ws = open_files(&[
         ("animal.leek", "class Animal {}\n"),
-        ("cat.leek", "include(\"animal\")\nclass Cat extends Animal {}\n"),
+        (
+            "cat.leek",
+            "include(\"animal\")\nclass Cat extends Animal {}\n",
+        ),
     ]);
     // Prepare on `Cat` in cat.leek.
     let items = type_hierarchy::prepare(
@@ -1412,14 +1440,21 @@ fn type_hierarchy_supertypes_cross_include() {
         .iter()
         .find(|s| s.name == "Animal")
         .expect("parent across include");
-    assert_eq!(animal.uri, proj("animal.leek"), "parent lives in animal.leek");
+    assert_eq!(
+        animal.uri,
+        proj("animal.leek"),
+        "parent lives in animal.leek"
+    );
 }
 
 #[test]
 fn type_hierarchy_subtypes_cross_include() {
     let ws = open_files(&[
         ("animal.leek", "class Animal {}\n"),
-        ("cat.leek", "include(\"animal\")\nclass Cat extends Animal {}\n"),
+        (
+            "cat.leek",
+            "include(\"animal\")\nclass Cat extends Animal {}\n",
+        ),
     ]);
     // Prepare on `Animal` in animal.leek; the subclass lives in cat.leek
     // (which includes animal, so it's in animal's program).
@@ -1472,7 +1507,10 @@ fn cross_program_hierarchy_stays_separate() {
 fn document_highlight_highlights_cross_file_use_sites() {
     let ws = open_files(&[
         ("util.leek", "function helper() { return 1 }\n"),
-        ("main.leek", "include(\"util\")\nvar n = helper()\nvar m = helper()\n"),
+        (
+            "main.leek",
+            "include(\"util\")\nvar n = helper()\nvar m = helper()\n",
+        ),
     ]);
     // Cursor on a `helper` use in main (unresolved locally).
     let hls = document_highlight::handle(
@@ -1506,7 +1544,7 @@ fn document_highlight_ignores_unknown_identifier() {
             character: 9,
         },
     );
-    assert!(hls.map(|h| h.is_empty()).unwrap_or(true), "no highlights");
+    assert!(hls.is_none_or(|h| h.is_empty()), "no highlights");
 }
 
 #[test]
@@ -1534,7 +1572,10 @@ fn document_highlight_still_works_single_file() {
 
 #[test]
 fn workspace_symbol_sets_container_for_class_members() {
-    let ws = open_files(&[("a.leek", "class Cat {\n    integer age\n    meow() { return 1 }\n}\n")]);
+    let ws = open_files(&[(
+        "a.leek",
+        "class Cat {\n    integer age\n    meow() { return 1 }\n}\n",
+    )]);
     let syms = workspace_symbols::handle(&ws, "meow").expect("symbols");
     let meow = syms.iter().find(|s| s.name == "meow").expect("meow");
     assert_eq!(
@@ -1628,7 +1669,10 @@ fn references_from_a_cross_file_use_site() {
     // locally), not on the declaration in util.
     let ws = open_files(&[
         ("util.leek", "function helper() { return 1 }\n"),
-        ("main.leek", "include(\"util\")\nvar n = helper()\nvar m = helper()\n"),
+        (
+            "main.leek",
+            "include(\"util\")\nvar n = helper()\nvar m = helper()\n",
+        ),
     ]);
     let locs = references::handle(
         &ws,
@@ -1987,9 +2031,9 @@ fn hover_text(src: &str, needle: &str, occ: usize) -> String {
         idx = found + needle.len();
     }
     let prefix = &src[..=start];
-    let line = prefix.matches('\n').count() as u32;
+    let line = u32::try_from(prefix.matches('\n').count()).unwrap();
     let line_start = prefix.rfind('\n').map_or(0, |p| p + 1);
-    let character = (start - line_start) as u32;
+    let character = u32::try_from(start - line_start).unwrap();
     match hover::handle(&open(src), &url(), lsp::Position { line, character }) {
         Some(h) => match h.contents {
             lsp::HoverContents::Markup(m) => m.value,
@@ -2603,8 +2647,6 @@ fn hover_constant_function_shows_operation_cost_not_o1() {
         "constant fn should show its operation cost, got: {v}"
     );
 }
-
-
 
 #[test]
 fn hover_var_inference_flows_into_return_expression() {

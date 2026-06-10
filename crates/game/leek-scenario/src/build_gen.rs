@@ -50,8 +50,15 @@ pub fn gen_build(
     let n = i64::try_from(stats.len()).unwrap_or(1);
     let remaining = (capital - min_per_stat * n).max(0);
 
-    let mut rng = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
-    let weights: Vec<u64> = stats.iter().map(|_| (xorshift(&mut rng) % 1000) + 1).collect();
+    let mut rng = if seed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
+    };
+    let weights: Vec<u64> = stats
+        .iter()
+        .map(|_| (xorshift(&mut rng) % 1000) + 1)
+        .collect();
     let total: u128 = weights.iter().map(|&w| u128::from(w)).sum();
 
     let rem = u128::from(u64::try_from(remaining).unwrap_or(0));

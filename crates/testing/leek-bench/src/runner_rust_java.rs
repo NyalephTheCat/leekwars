@@ -258,11 +258,13 @@ fn collect_jars(root: &Path, out: &mut Vec<String>) {
         if path.is_dir() {
             collect_jars(&path, out);
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jar"))
-                && !name.ends_with("-sources.jar")
-                && !name.ends_with("-javadoc.jar")
-            {
-                out.push(path.display().to_string());
-            }
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("jar"))
+            && !name.ends_with("-sources.jar")
+            && !name.ends_with("-javadoc.jar")
+        {
+            out.push(path.display().to_string());
+        }
     }
 }

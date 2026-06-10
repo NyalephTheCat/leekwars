@@ -202,9 +202,16 @@ impl FileCatalog {
                 }
                 continue;
             }
-            let f: Vec<&str> = line.split('\t').map(str::trim).filter(|s| !s.is_empty()).collect();
+            let f: Vec<&str> = line
+                .split('\t')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
             if f.len() < 2 {
-                return Err(format!("line {}: expected `name<TAB>class[...]`", lineno + 1));
+                return Err(format!(
+                    "line {}: expected `name<TAB>class[...]`",
+                    lineno + 1
+                ));
             }
             let is_static = f.get(2).is_none_or(|s| *s != "receiver");
             // A *present but non-numeric* arity/cost field means a malformed
@@ -260,7 +267,10 @@ impl EnvironmentCatalog for FileCatalog {
         self.table.iter().map(|(k, v)| (k.as_str(), v)).collect()
     }
     fn constants(&self) -> Vec<(&str, &str)> {
-        self.consts.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect()
+        self.consts
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect()
     }
 }
 
@@ -300,10 +310,16 @@ impl EnvironmentCatalog for CompositeCatalog {
         self.libraries.iter().find_map(|lib| lib.lookup(name))
     }
     fn entries(&self) -> Vec<(&str, &EnvBuiltin)> {
-        self.libraries.iter().flat_map(|lib| lib.entries()).collect()
+        self.libraries
+            .iter()
+            .flat_map(|lib| lib.entries())
+            .collect()
     }
     fn constants(&self) -> Vec<(&str, &str)> {
-        self.libraries.iter().flat_map(|lib| lib.constants()).collect()
+        self.libraries
+            .iter()
+            .flat_map(|lib| lib.constants())
+            .collect()
     }
 }
 
@@ -348,7 +364,11 @@ mod tests {
         let cat = LeekWarsCatalog;
         let consts = cat.constants();
         assert!(consts.len() >= 300, "got {}", consts.len());
-        assert!(consts.iter().any(|(n, t)| *n == "CELL_EMPTY" && *t == "integer"));
+        assert!(
+            consts
+                .iter()
+                .any(|(n, t)| *n == "CELL_EMPTY" && *t == "integer")
+        );
         assert!(consts.iter().any(|(n, _)| *n == "WEAPON_PISTOL"));
         // The free accessor used by leek-recipes matches.
         assert_eq!(leekwars_constants().len(), consts.len());

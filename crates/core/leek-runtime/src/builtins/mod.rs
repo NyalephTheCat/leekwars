@@ -43,27 +43,25 @@ pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
         if version <= 3 && matches!(name, "intervalToArray" | "intervalToSet" | "fill") {
             mult = 5;
         }
-        let first_n = args
-            .first()
-            .map_or(0, |v| match v {
-                Value::Array(a) => a.borrow().len() as u64,
-                Value::Map(m) => m.borrow().len() as u64,
-                Value::String(s) => s.len() as u64,
-                Value::Interval(iv) => {
-                    match (iv.start, iv.end) {
-                        (Some(s), Some(e)) if !iv.is_empty() => {
-                            let lo = if iv.start_inclusive { s } else { s + 1.0 };
-                            let hi = if iv.end_inclusive { e } else { e - 1.0 };
-                            // Saturating `+1` so a very wide interval can't
-                            // overflow before the `.max(0)` clamp.
-                            u64::try_from(crate::real_to_int(hi - lo).saturating_add(1).max(0))
-                                .unwrap_or(0)
-                        }
-                        _ => 0,
+        let first_n = args.first().map_or(0, |v| match v {
+            Value::Array(a) => a.borrow().len() as u64,
+            Value::Map(m) => m.borrow().len() as u64,
+            Value::String(s) => s.len() as u64,
+            Value::Interval(iv) => {
+                match (iv.start, iv.end) {
+                    (Some(s), Some(e)) if !iv.is_empty() => {
+                        let lo = if iv.start_inclusive { s } else { s + 1.0 };
+                        let hi = if iv.end_inclusive { e } else { e - 1.0 };
+                        // Saturating `+1` so a very wide interval can't
+                        // overflow before the `.max(0)` clamp.
+                        u64::try_from(crate::real_to_int(hi - lo).saturating_add(1).max(0))
+                            .unwrap_or(0)
                     }
+                    _ => 0,
                 }
-                _ => 0,
-            });
+            }
+            _ => 0,
+        });
         // `fill(arr, value, n)` allocates `n` slots; the relevant
         // size is the last numeric arg, not the (often empty) input.
         let n_arg = if name == "fill" {
@@ -136,7 +134,6 @@ fn batch_op_multiplier(name: &str) -> Option<u64> {
 pub(crate) fn builtin_cost(name: &str) -> u64 {
     leek_builtins::op_cost_u64(name)
 }
-
 
 // ---- Constants ----
 

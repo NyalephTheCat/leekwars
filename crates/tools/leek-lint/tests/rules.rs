@@ -230,7 +230,9 @@ fn division_by_zero_fires_end_to_end() {
 
 #[test]
 fn duplicate_condition_fires_end_to_end() {
-    let diags = lint_src("function f(x) { if (x > 0) { return 1; } else if (x > 0) { return 2; } return 0; }\n");
+    let diags = lint_src(
+        "function f(x) { if (x > 0) { return 1; } else if (x > 0) { return 2; } return 0; }\n",
+    );
     assert_eq!(has_code(&diags, codes::DUPLICATE_CONDITION), 1);
 }
 

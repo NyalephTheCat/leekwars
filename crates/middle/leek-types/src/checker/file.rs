@@ -36,7 +36,7 @@ static SEEDED_SIG_CACHE: LazyLock<Mutex<HashMap<Version, SeededSigs>>> =
 /// Parse a static prelude header once per `(tag, version)` and return a clone
 /// of the cached green tree.
 fn cached_prelude_parse(tag: u8, version: Version, src: &str) -> GreenNode {
-    use leek_parser::{parse_with_features, ParseFeatures};
+    use leek_parser::{ParseFeatures, parse_with_features};
     let key = (tag, version);
     if let Some(g) = PRELUDE_PARSE_CACHE
         .lock()
@@ -238,11 +238,16 @@ impl Checker {
                     let gt = p
                         .children()
                         .find(|n| n.kind() == SyntaxKind::TypeRef)
-                        .map_or(GType::Concrete(Type::Any), |n| crate::ty::gtype_from_node(&n, &typarams));
+                        .map_or(GType::Concrete(Type::Any), |n| {
+                            crate::ty::gtype_from_node(&n, &typarams)
+                        });
                     gparams.push(gt);
                 }
             }
-            let gret = crate::ty::fn_return_type_node(decl.syntax()).map_or_else(|| GType::Concrete(ret.clone()), |n| crate::ty::gtype_from_node(&n, &typarams));
+            let gret = crate::ty::fn_return_type_node(decl.syntax()).map_or_else(
+                || GType::Concrete(ret.clone()),
+                |n| crate::ty::gtype_from_node(&n, &typarams),
+            );
             self.user_fn_generic.insert(
                 name.text().to_string(),
                 GenericSig {
@@ -316,7 +321,7 @@ impl Checker {
         // member access on untyped fields resolve. Gated so the
         // corpus/driver baseline is unchanged.
         if self.opts.seed_library {
-            self.infer_fields_from_ctor(&body, &mut fields);
+            Self::infer_fields_from_ctor(&body, &mut fields);
         }
         self.class_field_types.insert(class.to_string(), fields);
         self.class_method_returns.insert(class.to_string(), methods);
@@ -328,7 +333,6 @@ impl Checker {
     /// type. Never overrides an explicit annotation. Best-effort: only
     /// direct `this.field = name/literal` forms are recognized.
     fn infer_fields_from_ctor(
-        &self,
         body: &SyntaxNode,
         fields: &mut std::collections::HashMap<String, Type>,
     ) {
@@ -340,10 +344,7 @@ impl Checker {
         };
         // Constructor parameter name → declared type.
         let mut params: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
-        if let Some(pl) = ctor
-            .children()
-            .find(|n| n.kind() == SyntaxKind::ParamList)
-        {
+        if let Some(pl) = ctor.children().find(|n| n.kind() == SyntaxKind::ParamList) {
             for p in pl.children().filter(|n| n.kind() == SyntaxKind::Param) {
                 let ty = p
                     .children()
@@ -375,9 +376,7 @@ impl Checker {
                 continue;
             }
             let ty = match bin.rhs() {
-                Some(Expr::Name(nr)) => nr
-                    .ident()
-                    .and_then(|id| params.get(id.text()).cloned()),
+                Some(Expr::Name(nr)) => nr.ident().and_then(|id| params.get(id.text()).cloned()),
                 Some(Expr::Literal(lit)) => literal_type(&lit),
                 _ => None,
             };
@@ -414,13 +413,14 @@ impl Checker {
             return;
         };
         // Build a GType pattern from a member's TypeRef over `vars`.
-        let pat = |node: &leek_syntax::SyntaxNode,
-                   vars: &std::collections::HashSet<String>|
-         -> GType {
-            node.children()
-                .find(|n| n.kind() == SyntaxKind::TypeRef)
-                .map_or(GType::Concrete(Type::Any), |n| crate::ty::gtype_from_node(&n, vars))
-        };
+        let pat =
+            |node: &leek_syntax::SyntaxNode, vars: &std::collections::HashSet<String>| -> GType {
+                node.children()
+                    .find(|n| n.kind() == SyntaxKind::TypeRef)
+                    .map_or(GType::Concrete(Type::Any), |n| {
+                        crate::ty::gtype_from_node(&n, vars)
+                    })
+            };
         let mut info = super::GenericClassInfo {
             type_params: crate::ty::type_param_list_names(decl.syntax()),
             parent,
@@ -456,7 +456,9 @@ impl Checker {
                         .children()
                         .find(|n| n.kind() == SyntaxKind::TypeRef)
                         .or_else(|| crate::ty::fn_return_type_node(&member))
-                        .map_or(GType::Concrete(Type::Any), |n| crate::ty::gtype_from_node(&n, &vars));
+                        .map_or(GType::Concrete(Type::Any), |n| {
+                            crate::ty::gtype_from_node(&n, &vars)
+                        });
                     info.methods.insert(name, GenericSig { params, ret });
                 }
                 SyntaxKind::ClassConstructor => {

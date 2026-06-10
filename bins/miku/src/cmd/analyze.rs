@@ -31,7 +31,9 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
         eprintln!("warning: {w}");
     }
 
-    let files = if let Some(p) = args.path { vec![resolve_path(&p)?] } else {
+    let files = if let Some(p) = args.path {
+        vec![resolve_path(&p)?]
+    } else {
         let mut all = project.walk_sources();
         if all.is_empty() {
             all.push(project.entry_path());
@@ -72,7 +74,8 @@ fn resolve_path(p: &Path) -> Result<PathBuf> {
 }
 
 fn display_relative(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root).map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
+    p.strip_prefix(root)
+        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 fn print_report(root: &Path, path: &Path, report: &[Complexity], show_formula: bool, quiet: bool) {

@@ -18,7 +18,9 @@ fn fmt_range(src: &str, start: u32, end: u32) -> Option<(std::ops::Range<u32>, S
 /// found — keeps tests terse.
 fn span_of(haystack: &str, needle: &str) -> (u32, u32) {
     let start = haystack.find(needle).expect("substring not found");
-    (start as u32, (start + needle.len()) as u32)
+    let s = u32::try_from(start).unwrap();
+    let e = u32::try_from(start + needle.len()).unwrap();
+    (s, e)
 }
 
 #[test]
@@ -74,7 +76,7 @@ fn returns_none_if_range_covers_whole_source_file() {
     // should use `format` instead. We return None so the caller can
     // detect and fall back.
     let src = "var x = 1;\n";
-    let out = fmt_range(src, 0, src.len() as u32);
+    let out = fmt_range(src, 0, u32::try_from(src.len()).unwrap());
     assert!(out.is_none());
 }
 

@@ -13,9 +13,9 @@ use crate::capabilities::capabilities;
 use crate::debug::{NativeDebugSession, StopInfo, StopReason};
 use crate::event;
 use crate::handlers::Flow;
-use crate::session::{Session, MAIN_THREAD_ID};
-use crate::target::native::{run_compiled, NativeTarget};
+use crate::session::{MAIN_THREAD_ID, Session};
 use crate::target::LaunchConfig;
+use crate::target::native::{NativeTarget, run_compiled};
 
 /// `initialize`: advertise capabilities, then announce readiness.
 pub(crate) fn initialize<R: Read, W: Write>(
@@ -44,7 +44,9 @@ pub(crate) fn launch<R: Read, W: Write>(
         match &args.additional_data {
             Some(value) => serde_json::from_value::<LaunchConfig>(value.clone())
                 .map_err(|e| format!("invalid launch configuration: {e}")),
-            None => Err("launch request is missing a `program` (set it in launch.json)".to_string()),
+            None => {
+                Err("launch request is missing a `program` (set it in launch.json)".to_string())
+            }
         }
     };
 
@@ -180,7 +182,10 @@ fn emit_terminated<R: Read, W: Write>(
     } else {
         OutputEventCategory::Stderr
     };
-    server.send_event(Event::Output(event::output(category, outcome.output.clone())))?;
+    server.send_event(Event::Output(event::output(
+        category,
+        outcome.output.clone(),
+    )))?;
     server.send_event(Event::Exited(event::exited(outcome.exit_code)))?;
     server.send_event(Event::Terminated(None))?;
     Ok(())

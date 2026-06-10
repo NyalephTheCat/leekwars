@@ -3,7 +3,7 @@
 //! tend to differ between languages: integer overflow, real formatting per
 //! language version, and NaN / signed-zero as map keys.
 
-use leek_runtime::{add, key_repr, mul, neg, sub, Value, DISPLAY_VERSION};
+use leek_runtime::{DISPLAY_VERSION, Value, add, key_repr, mul, neg, sub};
 
 fn int(v: &Value) -> i64 {
     match v {
@@ -42,10 +42,17 @@ fn real_formatting_is_version_specific() {
 fn nan_and_signed_zero_map_keys() {
     // Two NaNs canonicalize to the same map key (so `m[NaN]` is addressable and
     // a second write to it overwrites rather than duplicating).
-    assert_eq!(key_repr(&Value::Real(f64::NAN)), key_repr(&Value::Real(f64::NAN)));
+    assert_eq!(
+        key_repr(&Value::Real(f64::NAN)),
+        key_repr(&Value::Real(f64::NAN))
+    );
     // Signed zero: `0.0` and `-0.0` are numerically equal but format
     // distinctly, so they are *distinct* map keys (pinned behavior).
-    assert_eq!(0.0_f64, -0.0_f64);
+    // Exact float equality is the point here: IEEE 754 defines 0.0 == -0.0.
+    #[allow(clippy::float_cmp)]
+    {
+        assert_eq!(0.0_f64, -0.0_f64);
+    }
     assert_ne!(key_repr(&Value::Real(0.0)), key_repr(&Value::Real(-0.0)));
     // An integer key and a real key with the same magnitude don't collide
     // (the key is type-tagged).

@@ -217,7 +217,10 @@ mod tests {
         let code: crate::Code = serde_json::from_str(json).unwrap();
         assert_eq!(code.id(), "E0250");
         assert_eq!(code.name(), codes::ASSIGNMENT_INCOMPATIBLE_TYPE.name());
-        assert!(code.meta().is_some(), "a catalog code must resolve its metadata");
+        assert!(
+            code.meta().is_some(),
+            "a catalog code must resolve its metadata"
+        );
     }
 
     #[test]

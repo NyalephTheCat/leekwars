@@ -1,12 +1,12 @@
 //! `leekbench` — compare backend execution speed.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Row, Table, presets};
-use leek_bench::{BenchOptions, BenchSummary, RustNative, RustJavaEmit, UpstreamJava, bench};
+use leek_bench::{BenchOptions, BenchSummary, RustJavaEmit, RustNative, UpstreamJava, bench};
 use leek_test_corpus::cases::{Expectation, Manifest, TestCase};
 use leek_test_corpus::embedded_manifest;
 mod cli;
@@ -25,7 +25,8 @@ fn main() -> Result<()> {
             .input
             .clone()
             .ok_or_else(|| anyhow::anyhow!("missing input file (or pass --corpus)"))?;
-        run_single(&cli, &input)
+        run_single(&cli, &input);
+        Ok(())
     }
 }
 
@@ -33,7 +34,7 @@ fn main() -> Result<()> {
 // Single-file mode
 // ---------------------------------------------------------------------
 
-fn run_single(cli: &Cli, input: &PathBuf) -> Result<()> {
+fn run_single(cli: &Cli, input: &Path) {
     let opts = BenchOptions {
         runs: cli.runs.max(1),
         version: cli.lang_version,
@@ -120,7 +121,6 @@ fn run_single(cli: &Cli, input: &PathBuf) -> Result<()> {
     {
         println!("(pass --detail to see per-step prepare timings)");
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -275,8 +275,8 @@ fn run_corpus(cli: &Cli) -> Result<()> {
             t.add_row(Row::from(vec![
                 Cell::new(truncate(&case.id, 60)),
                 right(or_dash(&r1)),
-                right(or_dash_opt(&r2)),
-                right(or_dash_opt(&r3)),
+                right(or_dash_opt(r2.as_ref())),
+                right(or_dash_opt(r3.as_ref())),
                 Cell::new(agree),
             ]));
         }
@@ -348,11 +348,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
     }
     println!("{table}");
     println!("bench wall-clock: {}", fmt(bench_total));
-    if !cli.detail
-        && [&nat, &rj, &up]
-            .iter()
-            .any(|a| !a.step_samples.is_empty())
-    {
+    if !cli.detail && [&nat, &rj, &up].iter().any(|a| !a.step_samples.is_empty()) {
         println!("(pass --detail to see per-step prepare timings)");
     }
     Ok(())
@@ -449,12 +445,13 @@ fn push_step_rows_corpus(table: &mut Table, steps: &[(String, Duration)]) {
 
 fn or_dash(r: &Result<BenchSummary>) -> String {
     r.as_ref()
-        .ok().map_or_else(|| "-".into(), |s| fmt(s.warm_median))
+        .ok()
+        .map_or_else(|| "-".into(), |s| fmt(s.warm_median))
 }
 
-fn or_dash_opt(r: &Option<Result<BenchSummary>>) -> String {
-    r.as_ref()
-        .and_then(|x| x.as_ref().ok()).map_or_else(|| "-".into(), |s| fmt(s.warm_median))
+fn or_dash_opt(r: Option<&Result<BenchSummary>>) -> String {
+    r.and_then(|x| x.as_ref().ok())
+        .map_or_else(|| "-".into(), |s| fmt(s.warm_median))
 }
 
 // ---------------------------------------------------------------------

@@ -56,11 +56,19 @@ pub(crate) struct FrameSnapshot {
 enum Step {
     None,
     /// Stop at the next statement, even in a callee (step into).
-    Into { line: u32, depth: usize },
+    Into {
+        line: u32,
+        depth: usize,
+    },
     /// Stop at the next statement in this frame or a caller (step over).
-    Over { line: u32, depth: usize },
+    Over {
+        line: u32,
+        depth: usize,
+    },
     /// Stop when this frame returns (step out).
-    Out { depth: usize },
+    Out {
+        depth: usize,
+    },
 }
 
 struct Wait {
@@ -116,7 +124,10 @@ impl NativeDebugSession {
 
     /// Frames captured at the most recent stop, top-first.
     pub(crate) fn frames(&self) -> Vec<FrameSnapshot> {
-        self.snapshot.lock().expect("snapshot lock poisoned").clone()
+        self.snapshot
+            .lock()
+            .expect("snapshot lock poisoned")
+            .clone()
     }
 
     /// Release a parked debuggee so it continues running.
@@ -169,7 +180,11 @@ impl NativeDebugSession {
         // Clone the frame pointers out under the lock, then render outside it.
         let frames: Vec<(usize, usize, u32)> = {
             let stack = self.stack.lock().expect("stack lock poisoned");
-            stack.iter().rev().map(|f| (f.desc, f.values, f.line)).collect()
+            stack
+                .iter()
+                .rev()
+                .map(|f| (f.desc, f.values, f.line))
+                .collect()
         };
         let snapshot = frames
             .into_iter()
@@ -245,7 +260,10 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
         if let Step::Out { depth } = step
             && len < depth
         {
-            *self.step.lock().expect("step lock poisoned") = Step::Into { line: 0, depth: len };
+            *self.step.lock().expect("step lock poisoned") = Step::Into {
+                line: 0,
+                depth: len,
+            };
         }
     }
 }

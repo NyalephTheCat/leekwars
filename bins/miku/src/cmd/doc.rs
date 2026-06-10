@@ -18,6 +18,7 @@
 //! for each source. A small inline stylesheet keeps the bundle
 //! standalone.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -34,7 +35,7 @@ use leek_syntax::{SyntaxKind, SyntaxNode};
 use crate::cli::Doc;
 use leek_project::Project;
 
-pub fn run(args: Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
+pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
     for w in &project.warnings {
         eprintln!("warning: {w}");
@@ -111,9 +112,10 @@ pub fn run(args: Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitC
     }
 
     if args.open
-        && let Err(e) = open_in_browser(&index_path) {
-            eprintln!("miku doc: failed to open browser: {e}");
-        }
+        && let Err(e) = open_in_browser(&index_path)
+    {
+        eprintln!("miku doc: failed to open browser: {e}");
+    }
 
     Ok(ExitCode::SUCCESS)
 }
@@ -171,7 +173,10 @@ fn collect_items(root: &SyntaxNode, source: &str, complexities: &[Complexity]) -
         let start = u32::from(node.text_range().start());
         // In a signature file, strip `@<backend>-backend:` directives
         // from the prose; in normal code they're inert and kept as-is.
-        let doc = if directives_enabled(source, leek_span::FeatureFlags::from_env().function_signatures) {
+        let doc = if directives_enabled(
+            source,
+            leek_span::FeatureFlags::from_env().function_signatures,
+        ) {
             doc_and_directives_before(source, start)
                 .map(|(visible, _)| visible)
                 .filter(|v| !v.trim().is_empty())
@@ -183,7 +188,7 @@ fn collect_items(root: &SyntaxNode, source: &str, complexities: &[Complexity]) -
         } else {
             None
         };
-        let line = source[..start as usize].matches('\n').count() as u32 + 1;
+        let line = u32::try_from(source[..start as usize].matches('\n').count()).unwrap() + 1;
         out.push(Item {
             name,
             kind,
@@ -235,27 +240,29 @@ h1, h2 { border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
 fn render_index(pages: &[Page], project_name: &str) -> String {
     let mut out = String::new();
     out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "<title>{} – miku doc</title>",
         html_escape(project_name)
-    ));
+    );
     out.push_str("<style>");
     out.push_str(CSS);
     out.push_str("</style></head><body>");
-    out.push_str(&format!("<h1>{}</h1>", html_escape(project_name)));
+    let _ = write!(out, "<h1>{}</h1>", html_escape(project_name));
     out.push_str("<p class=\"crumbs\">miku doc – API reference</p>");
 
     out.push_str("<h2>Files</h2>");
     out.push_str("<ul class=\"file-list\">");
     for page in pages {
         let total = page.items.len();
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "<li><a href=\"{href}\">{name}</a><span class=\"count\">{total} item{plural}</span></li>",
             href = html_escape(&page.html_name),
             name = html_escape(&page.rel_source.display().to_string()),
             total = total,
             plural = if total == 1 { "" } else { "s" },
-        ));
+        );
     }
     out.push_str("</ul>");
     out.push_str("</body></html>");
@@ -265,23 +272,26 @@ fn render_index(pages: &[Page], project_name: &str) -> String {
 fn render_page(page: &Page, project_name: &str) -> String {
     let mut out = String::new();
     out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "<title>{} – {}</title>",
         html_escape(&page.rel_source.display().to_string()),
         html_escape(project_name),
-    ));
+    );
     out.push_str("<style>");
     out.push_str(CSS);
     out.push_str("</style></head><body>");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "<p class=\"crumbs\"><a href=\"index.html\">{}</a> &raquo; {}</p>",
         html_escape(project_name),
         html_escape(&page.rel_source.display().to_string()),
-    ));
-    out.push_str(&format!(
+    );
+    let _ = write!(
+        out,
         "<h1>{}</h1>",
         html_escape(&page.rel_source.display().to_string()),
-    ));
+    );
 
     if page.items.is_empty() {
         out.push_str("<p class=\"empty\">No top-level declarations.</p>");
@@ -297,7 +307,8 @@ fn render_page(page: &Page, project_name: &str) -> String {
 fn render_item(item: &Item) -> String {
     let mut out = String::new();
     out.push_str("<div class=\"item\">");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "<h3><span class=\"kind\">{}</span>{}</h3>",
         match item.kind {
             ItemKind::Function => "function",
@@ -305,22 +316,24 @@ fn render_item(item: &Item) -> String {
             ItemKind::Global => "global",
         },
         html_escape(&item.name),
-    ));
-    out.push_str(&format!(
+    );
+    let _ = write!(
+        out,
         "<code class=\"sig\">{}</code>",
         html_escape(&item.signature),
-    ));
+    );
     if let Some(doc) = &item.doc {
-        out.push_str(&format!("<div class=\"doc\">{}</div>", html_escape(doc),));
+        let _ = write!(out, "<div class=\"doc\">{}</div>", html_escape(doc),);
     }
     if let Some(c) = &item.complexity {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "<div class=\"complexity\"><strong>Complexity:</strong> {} &nbsp; <code>{}</code></div>",
             html_escape(&c.big_o.render()),
             html_escape(&c.formula.render()),
-        ));
+        );
     }
-    out.push_str(&format!("<div class=\"line\">line {}</div>", item.line,));
+    let _ = write!(out, "<div class=\"line\">line {}</div>", item.line,);
     out.push_str("</div>");
     out
 }
@@ -351,7 +364,8 @@ fn file_html_name(rel_path: &Path) -> String {
 }
 
 fn rel(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root).map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
+    p.strip_prefix(root)
+        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 fn open_in_browser(path: &Path) -> Result<()> {

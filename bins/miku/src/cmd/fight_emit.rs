@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use leek_scenario::Scenario;
 
 /// Absolute path to this workspace's root, derived from miku's manifest dir.
@@ -73,8 +73,7 @@ pub fn emit(scn: &Scenario, base_dir: &Path, out: &Path, quiet: bool) -> Result<
             let _ = writeln!(ai_entries, "    ({id}, {source:?}),");
         }
     }
-    let scenario_json =
-        serde_json::to_string(scn).context("serializing the resolved scenario")?;
+    let scenario_json = serde_json::to_string(scn).context("serializing the resolved scenario")?;
 
     let main_rs = MAIN_TEMPLATE
         .replace("/*SCENARIO*/", &format!("{scenario_json:?}"))
@@ -119,7 +118,11 @@ anyhow = "1"
         .arg("--manifest-path")
         .arg(proj.join("Cargo.toml"))
         .stdin(Stdio::null())
-        .stdout(if quiet { Stdio::null() } else { Stdio::inherit() })
+        .stdout(if quiet {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        })
         .stderr(Stdio::inherit())
         .status()
         .context("running `cargo build` (is cargo on PATH?)")?;

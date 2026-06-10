@@ -71,7 +71,10 @@ pub(crate) fn program_scope(ws: &Workspace, home_uri: &Url) -> Vec<ScopeFile> {
     // Forward include edges: path → the paths it directly includes.
     let mut edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for (path, sf) in &by_path {
-        edges.insert(path.clone(), include_targets(ws, sf.source_file, path, &by_path));
+        edges.insert(
+            path.clone(),
+            include_targets(ws, sf.source_file, path, &by_path),
+        );
     }
 
     // Union every forward closure that contains the home file.
@@ -127,10 +130,7 @@ fn include_targets(
         return Vec::new();
     };
     let root = SyntaxNode::new_root(green.0.clone());
-    let dir = includer
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    let dir = includer.parent().map(Path::to_path_buf).unwrap_or_default();
 
     let mut out: Vec<PathBuf> = Vec::new();
     for node in root.descendants() {
@@ -212,7 +212,7 @@ mod tests {
             .map(|f| {
                 f.uri
                     .path_segments()
-                    .and_then(|s| s.last())
+                    .and_then(|mut s| s.next_back())
                     .unwrap_or("")
                     .to_string()
             })
@@ -254,8 +254,14 @@ mod tests {
         // ai1 and ai2 both include util, but not each other.
         let ws = ws_with(&[
             ("util.leek", "function shared() { return 0 }\n"),
-            ("ai1.leek", "include(\"util\")\nfunction priv1() { return shared() }\n"),
-            ("ai2.leek", "include(\"util\")\nfunction priv2() { return shared() }\n"),
+            (
+                "ai1.leek",
+                "include(\"util\")\nfunction priv1() { return shared() }\n",
+            ),
+            (
+                "ai2.leek",
+                "include(\"util\")\nfunction priv2() { return shared() }\n",
+            ),
         ]);
         // The shared library is in every AI's program.
         assert_eq!(

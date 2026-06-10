@@ -169,12 +169,10 @@ fn run_case(case: &Case, file_id: usize) -> Result<Outcome> {
         } else {
             Outcome::Fail
         }),
-        Expectation::Equals(ref want) => {
-            Ok(match native_run(hir, case.version, 5_000_000) {
-                Some(got) if &got == want => Outcome::Pass,
-                _ => Outcome::Fail,
-            })
-        }
+        Expectation::Equals(ref want) => Ok(match native_run(hir, case.version, 5_000_000) {
+            Some(got) if &got == want => Outcome::Pass,
+            _ => Outcome::Fail,
+        }),
         Expectation::Error => Ok(Outcome::Fail),
     }
 }

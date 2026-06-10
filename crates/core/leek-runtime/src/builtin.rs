@@ -106,7 +106,8 @@ pub extern "C" fn leek_hypot(a: f64, b: f64) -> f64 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn leek_ipow(a: i64, b: i64) -> i64 {
-    a.checked_pow(u32::try_from(b).unwrap_or(u32::MAX)).unwrap_or(i64::MAX)
+    a.checked_pow(u32::try_from(b).unwrap_or(u32::MAX))
+        .unwrap_or(i64::MAX)
 }
 
 /// Address of [`leek_ipow`] for the native backend's `**` lowering (it's

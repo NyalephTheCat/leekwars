@@ -333,8 +333,7 @@ impl Resolver {
                 _ => {
                     if let Some(stmt) = Stmt::cast(child) {
                         self.resolve_stmt(&stmt);
-                        if terminated_at.is_none()
-                            && crate::statements::is_block_terminator(&stmt)
+                        if terminated_at.is_none() && crate::statements::is_block_terminator(&stmt)
                         {
                             terminated_at = Some(self.node_span(stmt.syntax()));
                         } else if terminated_at.is_some() {
@@ -402,8 +401,10 @@ mod index_tests {
         let src = "var apple = 5;\nvar n = apple;\n";
         // Skip the declaration occurrence; find the second `apple`.
         let first = src.find("apple").unwrap();
-        let use_offset =
-            (first + "apple".len() + src[first + "apple".len()..].find("apple").unwrap()) as u32;
+        let use_offset = u32::try_from(
+            first + "apple".len() + src[first + "apple".len()..].find("apple").unwrap(),
+        )
+        .unwrap();
         let found = r.table.reference_at(use_offset).expect("cursor on use");
         let target = r.table.symbol(found.target).unwrap();
         assert_eq!(target.name, "apple");
@@ -481,11 +482,9 @@ mod index_tests {
         // same-named variable in another function. Here `other`'s `obj` is an
         // array, so `obj.f = 5` must NOT raise CANNOT_ASSIGN_FINAL_FIELD — that
         // would be a false positive from a stale, un-popped class-type entry.
-        let r = run(
-            "class A { final f = 12 }\n\
+        let r = run("class A { final f = 12 }\n\
              function uses() { var obj = new A() }\n\
-             function other() { var obj = [1, 2, 3] obj.f = 5 return obj }\n",
-        );
+             function other() { var obj = [1, 2, 3] obj.f = 5 return obj }\n");
         assert!(
             !r.diagnostics
                 .iter()
@@ -499,11 +498,9 @@ mod index_tests {
     fn final_field_check_still_fires_in_scope() {
         // Positive control: within the same scope the tracked class type still
         // drives the final-field check, so a real violation is still caught.
-        let r = run(
-            "class A { final f = 12 }\n\
+        let r = run("class A { final f = 12 }\n\
              var a = new A()\n\
-             a.f = 5\n",
-        );
+             a.f = 5\n");
         assert!(
             r.diagnostics
                 .iter()

@@ -3,8 +3,8 @@
 pub mod extract;
 
 pub use leek_test_driver::{
-    audit::audit_case, backends, cases, checks, run, CaseAudit, CasePlan, CheckKind, Expectation,
-    Manifest, MultiReport, SuiteBackend, TestCase,
+    CaseAudit, CasePlan, CheckKind, Expectation, Manifest, MultiReport, SuiteBackend, TestCase,
+    audit::audit_case, backends, cases, checks, run,
 };
 
 use std::path::{Path, PathBuf};
@@ -52,8 +52,7 @@ pub fn upstream_tests_dir() -> PathBuf {
 }
 
 pub fn manifest_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("data/upstream_cases.toml")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("data/upstream_cases.toml")
 }
 
 pub fn baseline_path() -> PathBuf {
@@ -66,7 +65,11 @@ pub fn suite_backends() -> Vec<SuiteBackend> {
         .join("Miku.toml");
     let table = miku
         .exists()
-        .then(|| leek_manifest::load_from(&miku).ok().map(|load| load.manifest.backend))
+        .then(|| {
+            leek_manifest::load_from(&miku)
+                .ok()
+                .map(|load| load.manifest.backend)
+        })
         .flatten();
     backends::detect_backends(table.as_ref())
 }
@@ -92,7 +95,9 @@ where
 pub fn run_manifest_on_large_stack(manifest: &Manifest, backends: &[SuiteBackend]) -> MultiReport {
     let manifest = manifest.clone();
     let backends = backends.to_vec();
-    run_on_large_stack("upstream-suite", move || backends::run_manifest(&manifest, &backends))
+    run_on_large_stack("upstream-suite", move || {
+        backends::run_manifest(&manifest, &backends)
+    })
 }
 
 pub fn run_upstream_suite() -> MultiReport {

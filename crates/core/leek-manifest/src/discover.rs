@@ -53,7 +53,8 @@ pub fn load_from(path: &Path) -> Result<ManifestLoad, ManifestError> {
         message: format!("reading {}: {e}", path.display()),
     })?;
     let root = path
-        .parent().map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
     let (manifest, warnings) = crate::parse::parse(&text)?;
     Ok(ManifestLoad {
         manifest,

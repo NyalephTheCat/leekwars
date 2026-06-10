@@ -264,9 +264,12 @@ pub fn run() -> Result<ExitCode> {
                         .native_out
                         .clone()
                         .unwrap_or_else(|| std::path::PathBuf::from("a.out"));
-                    if let Err(e) =
-                        leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, false)
-                    {
+                    if let Err(e) = leek_backend_native::aot::compile_to_executable(
+                        hir.0.as_ref(),
+                        &opts,
+                        &out,
+                        false,
+                    ) {
                         eprintln!("native: {e}");
                         return Ok(ExitCode::from(1));
                     }
@@ -302,4 +305,3 @@ pub fn run() -> Result<ExitCode> {
         ExitCode::SUCCESS
     })
 }
-

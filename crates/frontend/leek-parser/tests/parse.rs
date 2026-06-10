@@ -8,6 +8,8 @@
 //!    `insta` snapshots; for now plain `assert_eq` keeps the slice
 //!    dependency-light.
 
+use std::fmt::Write as _;
+
 use leek_parser::ast::{AstNode, BinaryExpr, Expr, SourceFile, Stmt};
 use leek_parser::parse;
 use leek_span::SourceId;
@@ -27,8 +29,7 @@ fn parse_str(text: &str) -> (SyntaxNode, Vec<leek_diagnostics::Diagnostic>) {
 fn dump(node: &SyntaxNode) -> String {
     let mut out = String::new();
     fn walk(node: &SyntaxNode, depth: usize, out: &mut String) {
-        out.push_str(&"  ".repeat(depth));
-        out.push_str(&format!("{:?}\n", node.kind()));
+        let _ = writeln!(out, "{}{:?}", "  ".repeat(depth), node.kind());
         for child in node.children_with_tokens() {
             match child {
                 SyntaxElement::Node(n) => walk(&n, depth + 1, out),
@@ -36,8 +37,13 @@ fn dump(node: &SyntaxNode) -> String {
                     if t.kind().is_trivia() {
                         continue; // strip trivia for shape tests
                     }
-                    out.push_str(&"  ".repeat(depth + 1));
-                    out.push_str(&format!("{:?} {:?}\n", t.kind(), t.text()));
+                    let _ = writeln!(
+                        out,
+                        "{}{:?} {:?}",
+                        "  ".repeat(depth + 1),
+                        t.kind(),
+                        t.text()
+                    );
                 }
             }
         }
@@ -80,7 +86,7 @@ fn bodiless_function_signature_parses_with_flag() {
     let lex_out = lex(text, src(), Version::LATEST);
     let features = ParseFeatures {
         function_signatures: true,
-            ..Default::default()
+        ..Default::default()
     };
     let result = parse_tokens_with(text, src(), &lex_out.tokens, Version::LATEST, features);
     let node = SyntaxNode::new_root(result.green);
@@ -97,7 +103,8 @@ fn bodiless_function_signature_parses_with_flag() {
     assert_eq!(fns.len(), 2);
     for f in &fns {
         assert!(
-            !f.children().any(|c| c.kind() == leek_syntax::SyntaxKind::Block),
+            !f.children()
+                .any(|c| c.kind() == leek_syntax::SyntaxKind::Block),
             "signature should have no body block"
         );
     }
@@ -137,9 +144,13 @@ fn generic_function_parses_with_flag() {
 
 #[test]
 fn generic_class_and_method_parse_with_flag() {
-    let text = "class Box<T> extends Container<T> {\n  T value\n  T get<U>(U key) { return value }\n}\n";
+    let text =
+        "class Box<T> extends Container<T> {\n  T value\n  T get<U>(U key) { return value }\n}\n";
     let (_node, diags) = parse_generics(text);
-    assert!(diags.is_empty(), "generic class/method should parse: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "generic class/method should parse: {diags:?}"
+    );
 }
 
 #[test]

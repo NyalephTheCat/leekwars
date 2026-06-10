@@ -43,7 +43,12 @@ pub fn handle(
     let in_window = |off: u32| -> bool {
         off >= range_start && off < range_end && pm.to_position(off).line <= stop_line
     };
-    let is_var = |k| matches!(k, SymbolKind::Local | SymbolKind::Param | SymbolKind::Global);
+    let is_var = |k| {
+        matches!(
+            k,
+            SymbolKind::Local | SymbolKind::Param | SymbolKind::Global
+        )
+    };
 
     let mut out: Vec<lsp::InlineValue> = Vec::new();
 

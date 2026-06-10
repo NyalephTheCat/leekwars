@@ -25,16 +25,16 @@ pub mod schema;
 pub mod testing;
 
 pub use load::{
-    build_fight, build_fight_with_cache, build_world, compile_ai, compile_ai_source, LoadedFight,
-    World,
+    LoadedFight, World, build_fight, build_fight_with_cache, build_world, compile_ai,
+    compile_ai_source,
 };
 pub use schema::{
     Bracket, EntitySpec, FarmerSpec, MapSpec, RandomSpec, RandomTarget, Scenario, ScenarioPatch,
     StatKind, TeamSpec, TestMode, TestingSpec,
 };
 pub use testing::{
-    run_matrix, run_random, run_tournament, CellResult, FightResult, MatrixAxes, Standing,
-    TestReport, TournamentSpec,
+    CellResult, FightResult, MatrixAxes, Standing, TestReport, TournamentSpec, run_matrix,
+    run_random, run_tournament,
 };
 
 use std::path::Path;

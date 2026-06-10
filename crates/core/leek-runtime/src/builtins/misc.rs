@@ -8,8 +8,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{BuiltinFlow, BuiltinHost};
 use crate::value::Value;
+use crate::{BuiltinFlow, BuiltinHost};
 
 use super::array::contains_in;
 
@@ -458,7 +458,9 @@ pub(crate) fn interval_to_array(iv_val: &Value, step_arg: Option<&Value>) -> Val
     let (Some(start), Some(end)) = (iv.start, iv.end) else {
         return Value::Null;
     };
-    let step = step_arg.and_then(super::super::value::types::Value::as_real).unwrap_or(1.0);
+    let step = step_arg
+        .and_then(super::super::value::types::Value::as_real)
+        .unwrap_or(1.0);
     if step == 0.0 {
         return Value::Array(Rc::new(RefCell::new(out)));
     }
@@ -562,10 +564,11 @@ pub(crate) fn json_encode(
         _ => None,
     };
     if let Some(id) = id
-        && !visited.insert(id) {
-            out.push_str("null");
-            return;
-        }
+        && !visited.insert(id)
+    {
+        out.push_str("null");
+        return;
+    }
     json_encode_inner(out, v, visited);
     if let Some(id) = id {
         visited.remove(&id);

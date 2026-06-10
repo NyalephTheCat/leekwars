@@ -116,9 +116,10 @@ impl MigrationPass for V4ToV3 {
                     }
                 }
             } else if let Some((_, new_name)) = RENAMES.iter().find(|(old, _)| *old == name)
-                && edits.replace_token(&ident, (*new_name).to_string()).is_ok() {
-                    consumed.insert(range(&ident));
-                }
+                && edits.replace_token(&ident, (*new_name).to_string()).is_ok()
+            {
+                consumed.insert(range(&ident));
+            }
         }
 
         // Pass B: first-class refs. `randReal`/`mapRemove` rename
@@ -194,7 +195,6 @@ fn range(tok: &leek_syntax::SyntaxToken) -> (u32, u32) {
     let r = tok.text_range();
     (u32::from(r.start()), u32::from(r.end()))
 }
-
 
 fn deprecated_diag(old: &str, new: &str, span: Span, note: &str) -> Diagnostic {
     Diagnostic::warning(

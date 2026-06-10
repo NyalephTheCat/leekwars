@@ -55,7 +55,9 @@ fn diagnostic(had: &str, want: &str, span: leek_span::Span) -> Diagnostic {
         span,
         format!("`!(a {had} b)` is clearer as `a {want} b`"),
     )
-    .with_note(format!("rewrite the negated comparison using `{want}` directly"))
+    .with_note(format!(
+        "rewrite the negated comparison using `{want}` directly"
+    ))
 }
 
 #[cfg(test)]

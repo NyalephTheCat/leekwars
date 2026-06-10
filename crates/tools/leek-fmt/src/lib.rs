@@ -182,17 +182,20 @@ pub(crate) fn parse_fmt_pragma(raw: &str) -> FmtPragma {
             // name happens to start with "next"/"push"/"set" (e.g. a
             // future `nextline_threshold`) doesn't get misparsed.
             if let Some(after) = strip_verb(rest, "next")
-                && let Some((k, v)) = parse_key_eq_value(after) {
-                    return FmtPragma::Next(k.to_string(), v.to_string());
-                }
+                && let Some((k, v)) = parse_key_eq_value(after)
+            {
+                return FmtPragma::Next(k.to_string(), v.to_string());
+            }
             if let Some(after) = strip_verb(rest, "push")
-                && let Some((k, v)) = parse_key_eq_value(after) {
-                    return FmtPragma::Push(k.to_string(), v.to_string());
-                }
+                && let Some((k, v)) = parse_key_eq_value(after)
+            {
+                return FmtPragma::Push(k.to_string(), v.to_string());
+            }
             if let Some(after) = strip_verb(rest, "set")
-                && let Some((k, v)) = parse_key_eq_value(after) {
-                    return FmtPragma::Set(k.to_string(), v.to_string());
-                }
+                && let Some((k, v)) = parse_key_eq_value(after)
+            {
+                return FmtPragma::Set(k.to_string(), v.to_string());
+            }
             if let Some((k, v)) = parse_key_eq_value(rest) {
                 return FmtPragma::Set(k.to_string(), v.to_string());
             }

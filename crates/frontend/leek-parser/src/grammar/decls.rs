@@ -195,8 +195,7 @@ fn class_member(p: &mut Parser) {
     if p.at(S::Ident) {
         let after_name = p.nth(1);
         // A method is `name(` — or, with generics on, `name<…>(`.
-        let is_method = after_name == S::LParen
-            || (p.features().generics && after_name == S::Lt);
+        let is_method = after_name == S::LParen || (p.features().generics && after_name == S::Lt);
         if is_method {
             // Method.
             p.start_node_at(cp, S::ClassMethod);

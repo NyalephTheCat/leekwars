@@ -81,7 +81,12 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
         seed_library: crate::seed_library_enabled(),
         experimental_prelude: cx.flags().prelude,
     };
-    check_collecting(&ast, cx.source(), version_from_byte(cx.version_byte()), opts)
+    check_collecting(
+        &ast,
+        cx.source(),
+        version_from_byte(cx.version_byte()),
+        opts,
+    )
 }
 
 /// Salsa-tracked entry point for type checking. Re-runs only when the

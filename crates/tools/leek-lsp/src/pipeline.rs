@@ -8,11 +8,7 @@ use tower_lsp::lsp_types as lsp;
 
 use crate::workspace::Workspace;
 
-pub fn run_on_file(
-    ws: &Workspace,
-    source_file: SourceFile,
-    target: Target,
-) -> Option<Run<'_>> {
+pub fn run_on_file(ws: &Workspace, source_file: SourceFile, target: Target) -> Option<Run<'_>> {
     let pipeline = leek_recipes::pipeline(target, &leek_recipes::lsp_params()).ok()?;
     Some(pipeline.run_memoized(&ws.db, source_file))
 }

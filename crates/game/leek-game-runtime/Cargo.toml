@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Leek-wars fight builtins (getCell, getLife, …), operating through a GameHost — the game-side equivalent of leek-runtime."
+description = "Leek-wars fight engine: the fight builtins (getCell, getLife, …) operating through a GameHost, plus the reference world model (Fight, Entity) — the game-side equivalent of leek-runtime."
 
 [dependencies]
 leek-runtime = { workspace = true }

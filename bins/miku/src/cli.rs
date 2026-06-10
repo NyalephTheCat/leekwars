@@ -57,6 +57,10 @@ pub enum MessageFormat {
     Junit,
 }
 
+// Clap subcommand enums are short-lived (parsed once, matched once), so the
+// size spread between arg structs doesn't matter; boxing them would only hurt
+// the derive ergonomics.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Create a new project skeleton in a new directory.

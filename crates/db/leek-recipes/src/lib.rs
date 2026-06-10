@@ -218,7 +218,10 @@ fn leekwars_header_arities() -> Vec<(String, u8, u8)> {
             .children()
             .find(|n| n.kind() == SyntaxKind::ParamList)
             .map_or(0, |pl| {
-                let n = pl.children().filter(|n| n.kind() == SyntaxKind::Param).count();
+                let n = pl
+                    .children()
+                    .filter(|n| n.kind() == SyntaxKind::Param)
+                    .count();
                 u8::try_from(n).unwrap_or(u8::MAX)
             });
         arities
@@ -229,7 +232,10 @@ fn leekwars_header_arities() -> Vec<(String, u8, u8)> {
             })
             .or_insert((argc, argc));
     }
-    arities.into_iter().map(|(n, (lo, hi))| (n, lo, hi)).collect()
+    arities
+        .into_iter()
+        .map(|(n, (lo, hi))| (n, lo, hi))
+        .collect()
 }
 
 /// What one library contributed when loaded, for verbose logging.

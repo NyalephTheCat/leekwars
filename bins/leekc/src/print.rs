@@ -92,7 +92,8 @@ pub(crate) fn print_hir_stmt(s: &leek_hir::Stmt, indent: usize) {
             v.name,
             v.ty.as_ref().map(|t| format!("{t:?} ")).unwrap_or_default(),
             v.init
-                .as_ref().map_or_else(|| "<none>".into(), format_hir_expr),
+                .as_ref()
+                .map_or_else(|| "<none>".into(), format_hir_expr),
         ),
         Stmt::Return(Some(e)) => println!("{pad}return {}", format_hir_expr(e)),
         Stmt::Return(None) => println!("{pad}return"),
@@ -153,7 +154,8 @@ pub(crate) fn print_hir_stmt(s: &leek_hir::Stmt, indent: usize) {
                 println!(
                     "{pad}  case {}",
                     arm.case
-                        .as_ref().map_or_else(|| "default".into(), format_hir_expr),
+                        .as_ref()
+                        .map_or_else(|| "default".into(), format_hir_expr),
                 );
                 for s in &arm.body {
                     print_hir_stmt(s, indent + 4);

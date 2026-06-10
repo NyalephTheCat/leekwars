@@ -12,7 +12,7 @@ use leek_mir::{
     BinOp, Const, FunctionKind, MirProgram, Operand, Place, Rvalue, Statement, Terminator,
     lower_file,
 };
-use leek_span::{SourceId, Span};
+use leek_span::Span;
 
 fn span() -> Span {
     Span::synthetic()
@@ -35,8 +35,10 @@ fn lit_bool(b: bool) -> Expr {
 }
 
 fn build(main: Vec<Stmt>) -> MirProgram {
-    let mut h = HirFile::default();
-    h.main = main;
+    let h = HirFile {
+        main,
+        ..Default::default()
+    };
     let (program, errs) = lower_file(&h);
     assert!(errs.is_empty(), "unexpected lowering errors: {errs:?}");
     program
@@ -116,6 +118,7 @@ fn if_else_forks_into_three_blocks() {
         cond: lit_bool(true),
         then_branch: Box::new(Stmt::Return(Some(lit_int(1)))),
         else_branch: Some(Box::new(Stmt::Return(Some(lit_int(2))))),
+        soft: false,
         span: span(),
     };
     let prog = build(vec![Stmt::If(i)]);
@@ -290,9 +293,10 @@ fn hfield(def: u32, name: &str) -> Field {
 }
 
 fn hmethod(def: u32, name: &str, arity: usize) -> MethodDef {
-    let params = (0..arity)
+    let params = (0u32..)
+        .take(arity)
         .map(|i| Param {
-            def: DefId(5000 + def * 10 + i as u32),
+            def: DefId(5000 + def * 10 + i),
             name: format!("p{i}"),
             ty: None,
             default: None,

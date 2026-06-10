@@ -46,9 +46,7 @@ fn find_existing(source: &str) -> Option<(usize, usize)> {
         // tokens can carry pragmas. Anything else exits the
         // leading band.
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            let line_end = source[i..]
-                .find('\n')
-                .map_or(source.len(), |p| i + p);
+            let line_end = source[i..].find('\n').map_or(source.len(), |p| i + p);
             if is_version_directive(&source[i..line_end]) {
                 return Some((i, line_end));
             }

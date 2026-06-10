@@ -108,7 +108,8 @@ pub struct DiskFolder;
 impl Folder for DiskFolder {
     fn load(&self, includer: &Path, name: &str) -> Result<LoadedFile, LoadError> {
         let base = includer
-            .parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         // `include("util")` looks for `util.leek` first, then
         // `util` (matching upstream's `Folder.resolve` behaviour
         // — names may or may not carry the extension).

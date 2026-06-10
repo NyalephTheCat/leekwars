@@ -40,8 +40,7 @@ pub fn handle(
         _ => None,
     }?;
 
-    let (target_range, replacement) =
-        leek_fmt::format_range(green, &ws.settings.format, range)?;
+    let (target_range, replacement) = leek_fmt::format_range(green, &ws.settings.format, range)?;
 
     let span = Span::new(
         doc.source_file_source_id(&ws.db),

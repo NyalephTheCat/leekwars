@@ -1,6 +1,12 @@
 //! Runtime-import declarations (moved verbatim from translate/mod.rs).
 
-use super::{FunctionBuilder, MirFunction, Module, HashMap, DefId, FnSig, MirProgram, Lang, Imports, NativeError, new_class_locals, aliased_class_locals, classref_locals, super_locals, stmt_has_string_const, Statement, Callee, is_generic_builtin, receiver_class, resolve_static_method, Rvalue, Place, BinOp, const_pow_exp, Terminator, Operand, Const, scalar_valty, ValTy, unsupported, ClType, FuncRef, AbiParam, Linkage, MathSig, types};
+use super::{
+    AbiParam, BinOp, Callee, ClType, Const, DefId, FnSig, FuncRef, FunctionBuilder, HashMap,
+    Imports, Lang, Linkage, MathSig, MirFunction, MirProgram, Module, NativeError, Operand, Place,
+    Rvalue, Statement, Terminator, ValTy, aliased_class_locals, classref_locals, const_pow_exp,
+    is_generic_builtin, new_class_locals, receiver_class, resolve_static_method, scalar_valty,
+    stmt_has_string_const, super_locals, types, unsupported,
+};
 
 /// Declare, as imports in `module`, the runtime functions `main` needs —
 /// named scalar math builtins plus the `**` operator's `leek_pow` /
@@ -56,9 +62,9 @@ pub(super) fn declare_imports(
                         Callee::Method { method, .. } => Some(method.as_str()),
                         // A `@native-backend:` directive call dispatches a
                         // runtime builtin — declare that builtin's imports.
-                        Callee::Function(def_id) => {
-                            native_directives.get(def_id).map(std::string::String::as_str)
-                        }
+                        Callee::Function(def_id) => native_directives
+                            .get(def_id)
+                            .map(std::string::String::as_str),
                         _ => None,
                     };
                     // Builtin imports needed when the call dispatches as a
@@ -89,9 +95,12 @@ pub(super) fn declare_imports(
                         // `ClassInstance`): resolve it through the vtable
                         // and pull its function in as a callee.
                         Callee::Method { receiver, method } => {
-                            if let Some(name) =
-                                receiver_class(&mir_fn.locals, &new_classes, &aliased_classes, *receiver)
-                                && let Some(c) = program.class_by_name(name)
+                            if let Some(name) = receiver_class(
+                                &mir_fn.locals,
+                                &new_classes,
+                                &aliased_classes,
+                                *receiver,
+                            ) && let Some(c) = program.class_by_name(name)
                                 && let Some(vt) =
                                     program.resolve_method(c, method, Some(call.args.len()))
                                 && let Some(d) = program.functions[vt.function_idx].def_id
@@ -197,10 +206,7 @@ pub(super) fn declare_imports(
                     | Rvalue::Cast(..)
                     | Rvalue::GlobalRef(..),
                 )
-                | Statement::Assign(
-                    Place::Index(..) | Place::Field(..) | Place::Global(..),
-                    _,
-                ) => {
+                | Statement::Assign(Place::Index(..) | Place::Field(..) | Place::Global(..), _) => {
                     uses_composite = true;
                 }
                 Statement::Assign(_, Rvalue::Binary(op, _l, r))
@@ -305,7 +311,9 @@ pub(super) fn declare_imports(
             let id = m
                 .declare_function(sym, Linkage::Import, &sig)
                 .map_err(|e| NativeError::Compile(e.to_string()))?;
-            imports.rt.insert(sym, m.declare_func_in_func(id, builder.func));
+            imports
+                .rt
+                .insert(sym, m.declare_func_in_func(id, builder.func));
         }
     }
 
@@ -343,10 +351,10 @@ pub(super) fn declare_imports(
 
     // Helper: declare an import with a given (params, ret) and resolve it.
     let declare = |module: &mut dyn Module,
-                       builder: &mut FunctionBuilder,
-                       symbol: &str,
-                       params: &[ClType],
-                       ret: ClType|
+                   builder: &mut FunctionBuilder,
+                   symbol: &str,
+                   params: &[ClType],
+                   ret: ClType|
      -> Result<FuncRef, NativeError> {
         let mut sig = module.make_signature();
         for &p in params {
@@ -373,7 +381,13 @@ pub(super) fn declare_imports(
         imports.named.insert(name.to_string(), (fref, b.sig));
     }
     if pow_real {
-        let fref = declare(module, builder, "leek_pow", &[types::F64, types::F64], types::F64)?;
+        let fref = declare(
+            module,
+            builder,
+            "leek_pow",
+            &[types::F64, types::F64],
+            types::F64,
+        )?;
         imports.pow_real = Some(fref);
     }
     if pow_int {
@@ -404,7 +418,11 @@ pub(super) fn declare_imports(
             // non-instance fallback only.
             ("leek_field_get_slot", &[i, i, i, i, i], Some(i)),
             ("leek_field_get_slot_int", &[i, i, i, i, i], Some(i)),
-            ("leek_field_get_slot_real", &[i, i, i, i, i], Some(types::F64)),
+            (
+                "leek_field_get_slot_real",
+                &[i, i, i, i, i],
+                Some(types::F64),
+            ),
             ("leek_field_set_slot", &[i, i, i, i, i, i], None),
             ("leek_set_index_int", &[i, i, i, i], None),
             // Typed array reads with an unboxed integer index: `leek_index_int`
@@ -468,7 +486,9 @@ pub(super) fn declare_imports(
             let id = module
                 .declare_function(sym, Linkage::Import, &sig)
                 .map_err(|e| NativeError::Compile(e.to_string()))?;
-            imports.rt.insert(sym, module.declare_func_in_func(id, builder.func));
+            imports
+                .rt
+                .insert(sym, module.declare_func_in_func(id, builder.func));
         }
     }
     if debug_hooks {
@@ -482,9 +502,10 @@ pub(super) fn declare_imports(
         let id = module
             .declare_function("leek_dbg_safepoint", Linkage::Import, &sig)
             .map_err(|e| NativeError::Compile(e.to_string()))?;
-        imports
-            .rt
-            .insert("leek_dbg_safepoint", module.declare_func_in_func(id, builder.func));
+        imports.rt.insert(
+            "leek_dbg_safepoint",
+            module.declare_func_in_func(id, builder.func),
+        );
 
         // `leek_dbg_enter(frame_desc: i64) -> ()` — pushes a shadow frame.
         let mut enter_sig = module.make_signature();
@@ -492,18 +513,20 @@ pub(super) fn declare_imports(
         let enter_id = module
             .declare_function("leek_dbg_enter", Linkage::Import, &enter_sig)
             .map_err(|e| NativeError::Compile(e.to_string()))?;
-        imports
-            .rt
-            .insert("leek_dbg_enter", module.declare_func_in_func(enter_id, builder.func));
+        imports.rt.insert(
+            "leek_dbg_enter",
+            module.declare_func_in_func(enter_id, builder.func),
+        );
 
         // `leek_dbg_leave() -> ()` — pops the top shadow frame.
         let leave_sig = module.make_signature();
         let leave_id = module
             .declare_function("leek_dbg_leave", Linkage::Import, &leave_sig)
             .map_err(|e| NativeError::Compile(e.to_string()))?;
-        imports
-            .rt
-            .insert("leek_dbg_leave", module.declare_func_in_func(leave_id, builder.func));
+        imports.rt.insert(
+            "leek_dbg_leave",
+            module.declare_func_in_func(leave_id, builder.func),
+        );
     }
     if link_game {
         // `leek_game_builtin(name, argv, argc) -> i64` — host game functions.
@@ -515,9 +538,10 @@ pub(super) fn declare_imports(
         let id = module
             .declare_function("leek_game_builtin", Linkage::Import, &sig)
             .map_err(|e| NativeError::Compile(e.to_string()))?;
-        imports
-            .rt
-            .insert("leek_game_builtin", module.declare_func_in_func(id, builder.func));
+        imports.rt.insert(
+            "leek_game_builtin",
+            module.declare_func_in_func(id, builder.func),
+        );
     }
     Ok(imports)
 }

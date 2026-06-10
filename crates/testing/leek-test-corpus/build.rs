@@ -25,14 +25,15 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../tools/java-emitter/GenerateReference.java");
     println!("cargo:rerun-if-changed=../leek-test-driver/src/cases.rs");
     if upstream.exists()
-        && let Ok(entries) = std::fs::read_dir(&upstream) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.extension().is_some_and(|x| x == "java") {
-                    println!("cargo:rerun-if-changed={}", p.display());
-                }
+        && let Ok(entries) = std::fs::read_dir(&upstream)
+    {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "java") {
+                println!("cargo:rerun-if-changed={}", p.display());
             }
         }
+    }
 
     let out_dir_path = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let out_path = Path::new(&out_dir_path).join("upstream_cases.toml");

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::{Init, New};
 
-pub fn new(args: New, quiet: bool) -> Result<()> {
+pub fn new(args: &New, quiet: bool) -> Result<()> {
     let dir = args.name.as_path();
     let project_name = project_name_from(dir)?;
     if dir.exists() {

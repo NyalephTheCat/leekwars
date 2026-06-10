@@ -69,7 +69,8 @@ fn fixtures_match_expected() {
             ));
         }
     }
-    assert!(failures.is_empty(), 
+    assert!(
+        failures.is_empty(),
         "{} fixture(s) failed:\n\n{}",
         failures.len(),
         failures.join("\n\n")
@@ -90,7 +91,8 @@ fn fixtures_idempotent() {
             ));
         }
     }
-    assert!(failures.is_empty(), 
+    assert!(
+        failures.is_empty(),
         "{} fixture(s) non-idempotent:\n\n{}",
         failures.len(),
         failures.join("\n\n")

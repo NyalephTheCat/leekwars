@@ -232,9 +232,7 @@ impl Stmt {
             Stmt::Break(s) | Stmt::Continue(s) => *s,
             Stmt::Include(i) => i.span,
             Stmt::Import(i) => i.span,
-            Stmt::Return(None) | Stmt::Charge(_) => {
-                Span::synthetic()
-            }
+            Stmt::Return(None) | Stmt::Charge(_) => Span::synthetic(),
         }
     }
 }

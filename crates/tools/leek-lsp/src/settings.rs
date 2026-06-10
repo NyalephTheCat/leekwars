@@ -190,7 +190,8 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_ignored() {
-        let s = Settings::from_value(&json!({ "leek": { "bogus": 1, "format": { "nope": true } } }));
+        let s =
+            Settings::from_value(&json!({ "leek": { "bogus": 1, "format": { "nope": true } } }));
         assert_eq!(s.format, FormatOptions::default());
     }
 

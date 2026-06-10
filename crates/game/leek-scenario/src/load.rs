@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use leek_diagnostics::Severity;
 use leek_generator::{Entity, Fight};
-use leek_hir::pipeline::HirArtifact;
 use leek_hir::HirFile;
+use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::{FeatureFlags, Input};
 use leek_recipes::Target;
 use leek_span::SourceId;
@@ -120,7 +120,9 @@ pub fn build_fight_with_cache(
 /// Construct a generator [`Entity`] from a spec, applying the present stats via
 /// the builders (and the public fields for stats without a builder).
 fn build_entity(spec: &EntitySpec) -> Result<Entity> {
-    let id = spec.id.ok_or_else(|| anyhow!("entity is missing an `id`"))?;
+    let id = spec
+        .id
+        .ok_or_else(|| anyhow!("entity is missing an `id`"))?;
     let cell = spec
         .cell
         .ok_or_else(|| anyhow!("entity {id} is missing a `cell`"))?;

@@ -12,11 +12,11 @@
 //! output version target with the same code." A textual rename
 //! that changes runtime behaviour fails here.
 
-use leek_runtime::Value;
 use leek_diagnostics::Severity;
 use leek_hir::lower_file;
 use leek_migrate::migrate_text;
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_runtime::Value;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 

@@ -259,7 +259,10 @@ fn lambda_write_to_captured_local_is_boxed() {
         "factory should take the box as a final Object[] param: {java}"
     );
     // The outlined factory is used, not the null-returning stub.
-    assert!(java.contains("__anon_"), "lambda should be outlined: {java}");
+    assert!(
+        java.contains("__anon_"),
+        "lambda should be outlined: {java}"
+    );
     assert!(
         !java.contains("throws LeekRunException {return null;}}"),
         "must not emit the null-returning stub: {java}"

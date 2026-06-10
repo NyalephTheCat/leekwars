@@ -219,7 +219,10 @@ pub fn walk_expr_children_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
         }
         ExprKind::Slice(s) => {
             f(&mut s.base);
-            for x in [&mut s.start, &mut s.end, &mut s.step].into_iter().flatten() {
+            for x in [&mut s.start, &mut s.end, &mut s.step]
+                .into_iter()
+                .flatten()
+            {
                 f(x);
             }
         }
@@ -245,7 +248,10 @@ pub fn walk_expr_children_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
             f(e);
         }
         ExprKind::Interval(i) => {
-            for x in [&mut i.start, &mut i.end, &mut i.step].into_iter().flatten() {
+            for x in [&mut i.start, &mut i.end, &mut i.step]
+                .into_iter()
+                .flatten()
+            {
                 f(x);
             }
         }
@@ -628,11 +634,11 @@ mod tests {
     }
     impl VisitMut<Expr> for Zeroer {
         fn visit_mut(&mut self, e: &mut Expr) -> Flow {
-            if let ExprKind::Literal(crate::ir::Literal::Int(n)) = &mut e.kind {
-                if *n != 0 {
-                    *n = 0;
-                    self.count += 1;
-                }
+            if let ExprKind::Literal(crate::ir::Literal::Int(n)) = &mut e.kind
+                && *n != 0
+            {
+                *n = 0;
+                self.count += 1;
             }
             Flow::Walk
         }
@@ -650,10 +656,10 @@ mod tests {
         assert_eq!(z.count, 3, "1, 2, 3 all rewritten");
         let mut remaining = 0usize;
         fn check(e: &Expr, r: &mut usize) {
-            if let ExprKind::Literal(crate::ir::Literal::Int(n)) = &e.kind {
-                if *n != 0 {
-                    *r += 1;
-                }
+            if let ExprKind::Literal(crate::ir::Literal::Int(n)) = &e.kind
+                && *n != 0
+            {
+                *r += 1;
             }
             walk_expr_children(e, &mut |c| check(c, r));
         }

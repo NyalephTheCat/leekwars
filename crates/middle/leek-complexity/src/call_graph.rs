@@ -123,7 +123,7 @@ fn dfs_for_cycles<'a>(
     color: &mut HashMap<&'a str, Color>,
     recursive: &mut HashSet<String>,
 ) {
-    use Color::{Gray, White, Black};
+    use Color::{Black, Gray, White};
     // Iterative DFS with an explicit stack of "frame = (node, child iterator)".
     let mut stack: Vec<(&str, std::vec::IntoIter<&str>)> = Vec::new();
     let mut path: Vec<&str> = Vec::new();

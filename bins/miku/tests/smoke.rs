@@ -30,10 +30,15 @@ fn scratch_dir(label: &str) -> PathBuf {
 
 fn random_suffix() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
+    // Truncating the nanosecond count is fine — the suffix just needs to vary
+    // between runs, not be a faithful timestamp.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    }
 }
 
 struct Output {
@@ -99,8 +104,7 @@ fn explain_unknown_code_lists_available() {
     let out = miku(&["explain", "Z9999"], &base);
     assert_eq!(out.status, 2, "stderr: {}", out.stderr);
     assert!(
-        out.stderr.contains("unknown diagnostic code")
-            && out.stderr.contains("available for"),
+        out.stderr.contains("unknown diagnostic code") && out.stderr.contains("available for"),
         "stderr: {}",
         out.stderr
     );
@@ -690,7 +694,10 @@ return [x, y, head]\n";
 }
 
 #[test]
-fn profile_table_lists_user_functions() {
+fn profile_reports_unavailable() {
+    // `miku profile` relied on the interpreter's per-call-stack ops profiler;
+    // the interpreter backend was removed and the native JIT has no
+    // equivalent, so the command must fail loudly (not pretend to profile).
     let dir = scratch_dir("profile_table");
     write(
         &dir,
@@ -707,9 +714,12 @@ version = "0.1.0"
     );
 
     let out = miku(&["profile"], &dir);
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("work"), "stdout: {}", out.stdout);
-    assert!(out.stdout.contains("self ops"), "stdout: {}", out.stdout);
+    assert_ne!(out.status, 0, "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("`miku profile` is unavailable"),
+        "stderr: {}",
+        out.stderr
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -760,50 +770,6 @@ version = "0.1.0"
         "missing complexity row: {html}"
     );
     assert!(html.contains("O(arr)"), "missing big-O: {html}");
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn profile_folded_format_is_flamegraph_ready() {
-    let dir = scratch_dir("profile_folded");
-    write(
-        &dir,
-        "Miku.toml",
-        r#"[project]
-name = "p"
-version = "0.1.0"
-"#,
-    );
-    write(
-        &dir,
-        "src/main.leek",
-        "// @version:4\n\
-         function a(arr) {\n    var t = 0\n    for (var x in arr) { t = t + x }\n    return t\n}\n\
-         function b(arr) { return a(arr) }\n\
-         return b([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])\n",
-    );
-
-    let out = miku(&["profile", "--format", "folded"], &dir);
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    // Each line must have `name;name;... N` shape with N > 0.
-    let mut saw_nested = false;
-    for line in out.stdout.lines() {
-        let last_space = line.rfind(' ').expect("line missing count");
-        let n: u64 = line[last_space + 1..].parse().expect("count is u64");
-        assert!(n > 0, "zero count on line: {line}");
-        let stack_part = &line[..last_space];
-        assert!(!stack_part.is_empty());
-        if stack_part.contains(';') {
-            saw_nested = true;
-        }
-    }
-    assert!(
-        saw_nested,
-        "folded output should include at least one nested-stack line: {}",
-        out.stdout
-    );
-    assert!(out.stdout.contains('a'), "stdout: {}", out.stdout);
 
     std::fs::remove_dir_all(&dir).ok();
 }

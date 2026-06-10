@@ -81,7 +81,10 @@ pub(crate) fn run_fight_debug(config: &LaunchConfig, program: &Compiled) -> RunO
                 .winner_team
                 .map_or_else(|| "draw".to_string(), |t| format!("team {t}"));
             RunOutcome {
-                output: format!("fight over after {} turns — winner: {winner}\n", outcome.turns),
+                output: format!(
+                    "fight over after {} turns — winner: {winner}\n",
+                    outcome.turns
+                ),
                 exit_code: 0,
             }
         }
@@ -91,7 +94,11 @@ pub(crate) fn run_fight_debug(config: &LaunchConfig, program: &Compiled) -> RunO
 
 /// Resolve which entity `program` controls: the explicit `fightEntity`, else the
 /// entity whose `ai` resolves to `program`, else the first entity.
-fn pick_debug_entity(config: &LaunchConfig, scn: &Scenario, base_dir: &Path) -> Result<i64, String> {
+fn pick_debug_entity(
+    config: &LaunchConfig,
+    scn: &Scenario,
+    base_dir: &Path,
+) -> Result<i64, String> {
     if let Some(id) = config.fight_entity {
         return Ok(id);
     }

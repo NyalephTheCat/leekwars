@@ -28,8 +28,7 @@ mod stmts;
 // signature. We park them in a thread-local for the duration of one
 // top-level `format()` call instead.
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct FmtCtx {
     /// Currently active options. Mutated by `// fmt: <key> = <value>`
     /// pragmas; pushed onto [`opts_stack`] and replaced by `// fmt:
@@ -43,7 +42,6 @@ pub(crate) struct FmtCtx {
     /// (the `// fmt: off … // fmt: on` regions).
     pub off_regions: Vec<Range<u32>>,
 }
-
 
 thread_local! {
     static FMT_CTX: RefCell<FmtCtx> = RefCell::new(FmtCtx::default());
@@ -126,7 +124,7 @@ pub(crate) fn wrap_with_active_opts(inner: crate::doc::Doc) -> crate::doc::Doc {
 /// emitting a diagnostic mid-format would couple the formatter to
 /// the diagnostic pipeline. A future slice can surface them.
 pub(crate) fn apply_pragma_to_ctx(p: &crate::FmtPragma) {
-    use crate::FmtPragma::{Push, Pop, Set, Next, Off, On, Skip, None};
+    use crate::FmtPragma::{Next, None, Off, On, Pop, Push, Set, Skip};
     FMT_CTX.with(|c| {
         let mut cx = c.borrow_mut();
         match p {
@@ -445,7 +443,7 @@ mod ctx_panic_tests {
         // Install a distinguishable context, then panic inside the body. The
         // drop guard must restore the previous (default) context during unwind.
         let custom = FmtCtx {
-            off_regions: vec![0..1],
+            off_regions: std::iter::once(0..1).collect(),
             ..FmtCtx::default()
         };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
