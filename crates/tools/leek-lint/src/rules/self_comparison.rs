@@ -4,37 +4,34 @@
 //! always false) — usually a typo for a different variable.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{BinaryOp, ExprKind, HirFile};
+use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct SelfComparison;
 
-impl LintRule for SelfComparison {
-    fn name(&self) -> &'static str {
-        "self-comparison"
+static META: LintMeta = LintMeta {
+    name: "self-comparison",
+    code: codes::SELF_COMPARISON,
+    group: LintGroup::Suspicious,
+    description: "comparison whose two sides are identical — always true or always false",
+};
+
+impl LintPass for SelfComparison {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::SELF_COMPARISON
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Binary(op, a, b) = &e.kind
-                        && is_comparison(*op)
-                        && !has_side_effect(a)
-                        && expr_key(a) == expr_key(b)
-                    {
-                        out.push(diagnostic(*op, e.span));
-                    }
-                });
-            }
-        });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Binary(op, a, b) = &e.kind
+            && is_comparison(*op)
+            && !has_side_effect(a)
+            && expr_key(a) == expr_key(b)
+        {
+            cx.emit(diagnostic(*op, e.span));
+        }
     }
 }
 
@@ -72,19 +69,10 @@ fn diagnostic(op: BinaryOp, span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        SelfComparison.check(&hir, &mut out);
-        out
+        lint_one(SelfComparison, src)
     }
 
     #[test]

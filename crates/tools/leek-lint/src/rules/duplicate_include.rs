@@ -5,29 +5,39 @@
 use std::collections::HashSet;
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
-use leek_hir::{HirFile, Stmt};
+use leek_hir::Stmt;
 
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct DuplicateInclude;
 
-impl LintRule for DuplicateInclude {
-    fn name(&self) -> &'static str {
-        "duplicate-include"
+static META: LintMeta = LintMeta {
+    name: "duplicate-include",
+    code: codes::DUPLICATE_INCLUDE,
+    group: LintGroup::Style,
+    description: "second `include` of the same file — a no-op",
+};
+
+impl LintPass for DuplicateInclude {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::DUPLICATE_INCLUDE
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
+    // Includes only count at the top level of `main`, so this drives
+    // its own (one-level) walk instead of hooking `check_stmt`.
+    fn check_file(&mut self, cx: &mut LintCx<'_, '_>) {
         let mut seen: HashSet<&str> = HashSet::new();
-        for stmt in &file.main {
+        let mut dups = Vec::new();
+        for stmt in &cx.file.main {
             if let Stmt::Include(inc) = stmt
                 && !seen.insert(inc.path.as_str())
             {
-                out.push(diagnostic(&inc.path, inc.span));
+                dups.push(diagnostic(&inc.path, inc.span));
             }
+        }
+        for d in dups {
+            cx.emit(d);
         }
     }
 }
@@ -53,19 +63,10 @@ fn diagnostic(path: &str, span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        DuplicateInclude.check(&hir, &mut out);
-        out
+        lint_one(DuplicateInclude, src)
     }
 
     #[test]

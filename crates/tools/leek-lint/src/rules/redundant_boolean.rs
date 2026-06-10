@@ -3,43 +3,40 @@
 //! to `x` or `!x`, and the lint ships a machine-applicable autofix.
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
-use leek_hir::{BinaryOp, Expr, ExprKind, HirFile, Literal};
+use leek_hir::{BinaryOp, Expr, ExprKind, Literal};
 use leek_span::Span;
 
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct RedundantBoolean;
 
-impl LintRule for RedundantBoolean {
-    fn name(&self) -> &'static str {
-        "redundant-boolean"
+static META: LintMeta = LintMeta {
+    name: "redundant-boolean",
+    code: codes::REDUNDANT_BOOLEAN,
+    group: LintGroup::Complexity,
+    description: "comparison against a boolean literal — `x == true` is just `x`",
+};
+
+impl LintPass for RedundantBoolean {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::REDUNDANT_BOOLEAN
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Binary(op, a, b) = &e.kind
-                        && matches!(op, BinaryOp::Eq | BinaryOp::Ne)
-                    {
-                        // Whichever side is the boolean literal; the
-                        // other side is the operand we keep.
-                        if let Some(v) = bool_lit(b) {
-                            out.push(diagnostic(*op, v, e, a, /* literal_on_right = */ true));
-                        } else if let Some(v) = bool_lit(a) {
-                            out.push(diagnostic(
-                                *op, v, e, b, /* literal_on_right = */ false,
-                            ));
-                        }
-                    }
-                });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Binary(op, a, b) = &e.kind
+            && matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+        {
+            // Whichever side is the boolean literal; the other side is
+            // the operand we keep.
+            if let Some(v) = bool_lit(b) {
+                cx.emit(diagnostic(*op, v, e, a, /* literal_on_right = */ true));
+            } else if let Some(v) = bool_lit(a) {
+                cx.emit(diagnostic(
+                    *op, v, e, b, /* literal_on_right = */ false,
+                ));
             }
-        });
+        }
     }
 }
 
@@ -135,19 +132,10 @@ fn simplify(es: Span, os: Span, literal_on_right: bool, negate: bool) -> Suggest
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        RedundantBoolean.check(&hir, &mut out);
-        out
+        lint_one(RedundantBoolean, src)
     }
 
     #[test]

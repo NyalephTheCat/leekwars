@@ -18,40 +18,40 @@
 //! non-terminal expression statements are reported.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Expr, ExprKind, HirFile, Stmt};
+use leek_hir::{Expr, ExprKind, Stmt};
 
-use super::for_each_block;
 use super::structural::has_side_effect;
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct UnusedExpression;
 
-impl LintRule for UnusedExpression {
-    fn name(&self) -> &'static str {
-        "unused-expression"
+static META: LintMeta = LintMeta {
+    name: "unused-expression",
+    code: codes::UNUSED_EXPRESSION,
+    group: LintGroup::Suspicious,
+    description: "expression statement whose value is discarded without side effects",
+};
+
+impl LintPass for UnusedExpression {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::UNUSED_EXPRESSION
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            // Exempt the trailing statement: its value may be the block's
-            // implicit return. Everything before it is in statement
-            // position, so a discarded value there is dead.
-            let n = block.stmts.len();
-            for (i, stmt) in block.stmts.iter().enumerate() {
-                if i + 1 == n {
-                    break;
-                }
-                if let Stmt::Expr(e) = stmt
-                    && !has_side_effect(e)
-                {
-                    out.push(diagnostic(e));
-                }
+    fn check_block(&mut self, cx: &mut LintCx<'_, '_>, stmts: &[Stmt]) {
+        // Exempt the trailing statement: its value may be the block's
+        // implicit return. Everything before it is in statement
+        // position, so a discarded value there is dead.
+        let Some((_, init)) = stmts.split_last() else {
+            return;
+        };
+        for stmt in init {
+            if let Stmt::Expr(e) = stmt
+                && !has_side_effect(e)
+            {
+                cx.emit(diagnostic(e));
             }
-        });
+        }
     }
 }
 
@@ -75,19 +75,10 @@ fn diagnostic(e: &Expr) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        UnusedExpression.check(&hir, &mut out);
-        out
+        lint_one(UnusedExpression, src)
     }
 
     #[test]

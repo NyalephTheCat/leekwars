@@ -4,58 +4,65 @@
 //! Reported as a *hint* (not a warning): an unused parameter is
 //! sometimes required by a signature the function must match (a
 //! callback, an overridden method). A `_`-prefixed name silences it.
+//!
+//! Lambda parameters are deliberately skipped: lambdas are usually
+//! callbacks whose arity is dictated by the caller (`arrayMap`
+//! passes the index whether you want it or not), so flagging them
+//! would be noisy.
 
 use std::collections::HashSet;
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, Def, DefId, Expr, ExprKind, HirFile, LambdaBody, NameRef, Param, Stmt};
+use leek_hir::{Callee, DefId, ExprKind, NameRef};
 
-use crate::LintRule;
+use super::for_each_expr_deep_in_stmts;
+use crate::LintGroup;
+use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
 
 pub struct UnusedParameter;
 
-impl LintRule for UnusedParameter {
-    fn name(&self) -> &'static str {
-        "unused-parameter"
+static META: LintMeta = LintMeta {
+    name: "unused-parameter",
+    code: codes::UNUSED_PARAMETER,
+    group: LintGroup::Suspicious,
+    description: "function parameter that is never read in the body",
+};
+
+impl LintPass for UnusedParameter {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::UNUSED_PARAMETER
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for def in &file.defs {
-            match def {
-                Def::Function(fun) => check_params(&fun.params, fun.body.as_ref(), out),
-                Def::Class(cls) => {
-                    for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                        check_params(&m.params, m.body.as_ref(), out);
-                    }
-                }
-                Def::Global(_) | Def::Local(_) => {}
+    fn check_body(&mut self, cx: &mut LintCx<'_, '_>, body: &Body<'_>) {
+        if body.kind == BodyKind::Lambda || body.params.is_empty() {
+            return;
+        }
+        // A parameter used only inside a nested lambda is still used —
+        // hence the *deep* walker, which descends lambda bodies. A
+        // parameter invoked as a callback (`cb()`) is referenced
+        // through `Callee::Function`, not an `ExprKind::Name`.
+        let mut used: HashSet<DefId> = HashSet::new();
+        for_each_expr_deep_in_stmts(body.stmts, &mut |e| match &e.kind {
+            ExprKind::Name(NameRef::Local(d)) => {
+                used.insert(*d);
             }
-        }
-    }
-}
+            ExprKind::Call(call) => {
+                if let Callee::Function(NameRef::Local(d)) = &call.callee {
+                    used.insert(*d);
+                }
+            }
+            _ => {}
+        });
 
-fn check_params(params: &[Param], body: Option<&Block>, out: &mut Vec<Diagnostic>) {
-    let Some(body) = body else {
-        return; // signature only — nothing to analyze
-    };
-    if params.is_empty() {
-        return;
-    }
-    let mut used: HashSet<DefId> = HashSet::new();
-    collect_block(body, &mut used);
-
-    for p in params {
-        // `_`-prefixed names opt out (the conventional "intentionally
-        // unused" marker).
-        if p.name.starts_with('_') {
-            continue;
-        }
-        if !used.contains(&p.def) {
-            out.push(diagnostic(&p.name, p.span));
+        for p in body.params {
+            // `_`-prefixed names opt out (the conventional "intentionally
+            // unused" marker).
+            if p.name.starts_with('_') {
+                continue;
+            }
+            if !used.contains(&p.def) {
+                cx.emit(diagnostic(&p.name, p.span));
+            }
         }
     }
 }
@@ -73,115 +80,13 @@ fn diagnostic(name: &str, span: leek_span::Span) -> Diagnostic {
     ))
 }
 
-// ---- reference collection (recurses into lambda bodies) ----
-
-fn collect_block(b: &Block, out: &mut HashSet<DefId>) {
-    for s in &b.stmts {
-        collect_stmt(s, out);
-    }
-}
-
-fn collect_stmt(s: &Stmt, out: &mut HashSet<DefId>) {
-    match s {
-        Stmt::Expr(e) => collect_expr(e, out),
-        Stmt::VarDecl(v) => {
-            if let Some(i) = &v.init {
-                collect_expr(i, out);
-            }
-        }
-        Stmt::Return(o) => {
-            if let Some(e) = o {
-                collect_expr(e, out);
-            }
-        }
-        Stmt::If(i) => {
-            collect_expr(&i.cond, out);
-            collect_stmt(&i.then_branch, out);
-            if let Some(e) = &i.else_branch {
-                collect_stmt(e, out);
-            }
-        }
-        Stmt::While(w) => {
-            collect_expr(&w.cond, out);
-            collect_stmt(&w.body, out);
-        }
-        Stmt::DoWhile(d) => {
-            collect_stmt(&d.body, out);
-            collect_expr(&d.cond, out);
-        }
-        Stmt::For(f) => {
-            if let Some(i) = &f.init {
-                collect_stmt(i, out);
-            }
-            if let Some(c) = &f.cond {
-                collect_expr(c, out);
-            }
-            if let Some(st) = &f.step {
-                collect_expr(st, out);
-            }
-            collect_stmt(&f.body, out);
-        }
-        Stmt::Foreach(fe) => {
-            collect_expr(&fe.iter, out);
-            collect_stmt(&fe.body, out);
-        }
-        Stmt::Block(b) => collect_block(b, out),
-        Stmt::Switch(sw) => {
-            collect_expr(&sw.discriminant, out);
-            for arm in &sw.arms {
-                if let Some(c) = &arm.case {
-                    collect_expr(c, out);
-                }
-                for s in &arm.body {
-                    collect_stmt(s, out);
-                }
-            }
-        }
-        Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Include(_)
-        | Stmt::Import(_)
-        | Stmt::Charge(_) => {}
-    }
-}
-
-fn collect_expr(e: &Expr, out: &mut HashSet<DefId>) {
-    if let ExprKind::Name(NameRef::Local(d)) = &e.kind {
-        out.insert(*d);
-    }
-    // `walk_expr_children` treats a lambda as a leaf, so descend into its
-    // body (and param defaults) by hand — a parameter used only inside a
-    // nested lambda must still count as used.
-    if let ExprKind::Lambda(l) = &e.kind {
-        for p in &l.params {
-            if let Some(d) = &p.default {
-                collect_expr(d, out);
-            }
-        }
-        match &l.body {
-            LambdaBody::Block(b) => collect_block(b, out),
-            LambdaBody::Expr(ex) => collect_expr(ex, out),
-        }
-    }
-    leek_hir::walk_expr_children(e, &mut |c| collect_expr(c, out));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        UnusedParameter.check(&hir, &mut out);
-        out
+        lint_one(UnusedParameter, src)
     }
 
     #[test]
@@ -207,6 +112,14 @@ mod tests {
     fn param_used_in_lambda_counts() {
         // `y` is used only inside the lambda body — must not be flagged.
         let d = run("function f(y) { var g = x -> x + y return g(1) }\n");
+        assert!(d.is_empty(), "got {d:?}");
+    }
+
+    #[test]
+    fn lambda_params_are_skipped() {
+        // The lambda ignores its own `i` — callbacks often must accept
+        // arguments they don't use, so this stays silent.
+        let d = run("function f(xs) { var g = (x, i) -> x return g(xs, 0) }\n");
         assert!(d.is_empty(), "got {d:?}");
     }
 }

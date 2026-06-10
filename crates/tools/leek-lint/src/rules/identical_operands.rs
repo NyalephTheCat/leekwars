@@ -4,38 +4,35 @@
 //! ships a machine-applicable autofix.
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
-use leek_hir::{BinaryOp, ExprKind, HirFile};
+use leek_hir::{BinaryOp, Expr, ExprKind};
 use leek_span::Span;
 
 use super::structural::{expr_key, has_side_effect};
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct IdenticalOperands;
 
-impl LintRule for IdenticalOperands {
-    fn name(&self) -> &'static str {
-        "identical-operands"
+static META: LintMeta = LintMeta {
+    name: "identical-operands",
+    code: codes::IDENTICAL_OPERANDS,
+    group: LintGroup::Suspicious,
+    description: "logical/bitwise expression whose two operands are identical",
+};
+
+impl LintPass for IdenticalOperands {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::IDENTICAL_OPERANDS
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Binary(op, a, b) = &e.kind
-                        && collapses_to_operand(*op)
-                        && !has_side_effect(a)
-                        && expr_key(a) == expr_key(b)
-                    {
-                        out.push(diagnostic(*op, e.span, a.span));
-                    }
-                });
-            }
-        });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Binary(op, a, b) = &e.kind
+            && collapses_to_operand(*op)
+            && !has_side_effect(a)
+            && expr_key(a) == expr_key(b)
+        {
+            cx.emit(diagnostic(*op, e.span, a.span));
+        }
     }
 }
 
@@ -90,19 +87,10 @@ fn diagnostic(op: BinaryOp, expr: Span, operand: Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        IdenticalOperands.check(&hir, &mut out);
-        out
+        lint_one(IdenticalOperands, src)
     }
 
     #[test]

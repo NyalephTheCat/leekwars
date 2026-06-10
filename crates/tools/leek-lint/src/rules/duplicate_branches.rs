@@ -8,50 +8,27 @@
 //! a false duplicate.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, Def, HirFile, Stmt};
+use leek_hir::Stmt;
 
-use super::{for_each_stmt, structural::stmt_key};
-use crate::LintRule;
+use super::structural::stmt_key;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct DuplicateBranches;
 
-impl LintRule for DuplicateBranches {
-    fn name(&self) -> &'static str {
-        "duplicate-branches"
+static META: LintMeta = LintMeta {
+    name: "duplicate-branches",
+    code: codes::DUPLICATE_BRANCHES,
+    group: LintGroup::Suspicious,
+    description: "`if` whose then- and else-branches are identical — the condition has no effect",
+};
+
+impl LintPass for DuplicateBranches {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::DUPLICATE_BRANCHES
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        check_stmts(&file.main, out);
-        for def in &file.defs {
-            match def {
-                Def::Function(fun) => {
-                    if let Some(body) = &fun.body {
-                        check_stmts(&body.stmts, out);
-                    }
-                }
-                Def::Class(cls) => {
-                    for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                        if let Some(body) = &m.body {
-                            check_stmts(&body.stmts, out);
-                        }
-                    }
-                }
-                Def::Global(_) | Def::Local(_) => {}
-            }
-        }
-    }
-}
-
-fn check_stmts(stmts: &[Stmt], out: &mut Vec<Diagnostic>) {
-    let wrapper = Block {
-        stmts: stmts.to_vec(),
-        span: leek_span::Span::synthetic(),
-    };
-    for_each_stmt(&wrapper, &mut |s| {
+    fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
         if let Stmt::If(i) = s
             && let Some(else_b) = &i.else_branch
             // An `else if` chain has an `If` else-branch; skip those (the
@@ -61,9 +38,9 @@ fn check_stmts(stmts: &[Stmt], out: &mut Vec<Diagnostic>) {
             && !is_empty_branch(&i.then_branch)
             && stmt_key(&i.then_branch) == stmt_key(else_b)
         {
-            out.push(diagnostic(i.span));
+            cx.emit(diagnostic(i.span));
         }
-    });
+    }
 }
 
 /// An empty `{ }` branch is the `EmptyBlock` lint's territory, not ours.
@@ -86,19 +63,10 @@ fn diagnostic(span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        DuplicateBranches.check(&hir, &mut out);
-        out
+        lint_one(DuplicateBranches, src)
     }
 
     #[test]

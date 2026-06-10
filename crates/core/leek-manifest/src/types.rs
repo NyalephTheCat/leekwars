@@ -176,12 +176,17 @@ pub enum JavaMode {
     Clean,
 }
 
-/// `[lint]` — severity overrides applied on top of the catalog defaults.
+/// `[lint]` — severity overrides applied on top of the catalog defaults,
+/// plus opt-in lint groups.
 #[derive(Debug, Clone, Default)]
 pub struct LintTable {
     pub deny: Vec<String>,
     pub warn: Vec<String>,
     pub allow: Vec<String>,
+    /// `lint.pedantic = true` — run the strictness lints.
+    pub pedantic: bool,
+    /// `lint.nursery = true` — run the teaching lints.
+    pub nursery: bool,
 }
 
 /// `[test]` — runner configuration.

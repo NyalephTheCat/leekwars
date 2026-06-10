@@ -360,7 +360,7 @@ fn parse_lint(
     tbl: &toml::value::Table,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<LintTable, ManifestError> {
-    const KNOWN: &[&str] = &["deny", "warn", "allow"];
+    const KNOWN: &[&str] = &["deny", "warn", "allow", "pedantic", "nursery"];
     warn_unknown(tbl, "lint", KNOWN, warnings);
     let mut out = LintTable::default();
     if let Some(v) = tbl.get("deny") {
@@ -371,6 +371,12 @@ fn parse_lint(
     }
     if let Some(v) = tbl.get("allow") {
         out.allow = string_array(v, "lint.allow")?;
+    }
+    if let Some(v) = tbl.get("pedantic") {
+        out.pedantic = bool_val(v, "lint.pedantic")?;
+    }
+    if let Some(v) = tbl.get("nursery") {
+        out.nursery = bool_val(v, "lint.nursery")?;
     }
     Ok(out)
 }

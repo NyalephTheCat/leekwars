@@ -3,35 +3,32 @@
 //! the leading `!!`.
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
-use leek_hir::{ExprKind, HirFile, UnaryOp};
+use leek_hir::{Expr, ExprKind, UnaryOp};
 use leek_span::Span;
 
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct DoubleNegation;
 
-impl LintRule for DoubleNegation {
-    fn name(&self) -> &'static str {
-        "double-negation"
+static META: LintMeta = LintMeta {
+    name: "double-negation",
+    code: codes::DOUBLE_NEGATION,
+    group: LintGroup::Complexity,
+    description: "`!!x` is just `x` — the double negation is redundant",
+};
+
+impl LintPass for DoubleNegation {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::DOUBLE_NEGATION
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Unary(UnaryOp::Not, inner) = &e.kind
-                        && let ExprKind::Unary(UnaryOp::Not, innermost) = &inner.kind
-                    {
-                        out.push(diagnostic(e.span, innermost.span));
-                    }
-                });
-            }
-        });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Unary(UnaryOp::Not, inner) = &e.kind
+            && let ExprKind::Unary(UnaryOp::Not, innermost) = &inner.kind
+        {
+            cx.emit(diagnostic(e.span, innermost.span));
+        }
     }
 }
 
@@ -58,19 +55,10 @@ fn diagnostic(outer: Span, operand: Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        DoubleNegation.check(&hir, &mut out);
-        out
+        lint_one(DoubleNegation, src)
     }
 
     #[test]

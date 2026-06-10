@@ -7,40 +7,37 @@
 //!   rewrite depends on `cond` already being boolean).
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
-use leek_hir::{Expr, ExprKind, HirFile, Literal};
+use leek_hir::{Expr, ExprKind, Literal};
 use leek_span::Span;
 
 use super::structural::{expr_key, has_side_effect};
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct RedundantTernary;
 
-impl LintRule for RedundantTernary {
-    fn name(&self) -> &'static str {
-        "redundant-ternary"
+static META: LintMeta = LintMeta {
+    name: "redundant-ternary",
+    code: codes::REDUNDANT_TERNARY,
+    group: LintGroup::Complexity,
+    description: "ternary with identical arms or boolean-literal arms",
+};
+
+impl LintPass for RedundantTernary {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::REDUNDANT_TERNARY
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Ternary(cond, then, els) = &e.kind {
-                        if expr_key(then) == expr_key(els) {
-                            out.push(identical_arms(e.span, then.span, cond));
-                        } else if let (Some(t), Some(f)) = (bool_lit(then), bool_lit(els))
-                            && t != f
-                        {
-                            out.push(boolean_ternary(e.span));
-                        }
-                    }
-                });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Ternary(cond, then, els) = &e.kind {
+            if expr_key(then) == expr_key(els) {
+                cx.emit(identical_arms(e.span, then.span, cond));
+            } else if let (Some(t), Some(f)) = (bool_lit(then), bool_lit(els))
+                && t != f
+            {
+                cx.emit(boolean_ternary(e.span));
             }
-        });
+        }
     }
 }
 
@@ -94,19 +91,10 @@ fn boolean_ternary(expr: Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        RedundantTernary.check(&hir, &mut out);
-        out
+        lint_one(RedundantTernary, src)
     }
 
     #[test]

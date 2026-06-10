@@ -3,38 +3,34 @@
 //! place. It does nothing — usually a leftover or a typo.
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
-use leek_hir::{BinaryOp, ExprKind, HirFile};
+use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct SelfAssignment;
 
-impl LintRule for SelfAssignment {
-    fn name(&self) -> &'static str {
-        "self-assignment"
+static META: LintMeta = LintMeta {
+    name: "self-assignment",
+    code: codes::SELF_ASSIGNMENT,
+    group: LintGroup::Correctness,
+    description: "assignment of a value to itself — has no effect",
+};
+
+impl LintPass for SelfAssignment {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::SELF_ASSIGNMENT
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    // Only plain `=`; compound forms (`x += x`) are not
-                    // no-ops.
-                    if let ExprKind::Binary(BinaryOp::Assign, lhs, rhs) = &e.kind
-                        && !has_side_effect(lhs)
-                        && expr_key(lhs) == expr_key(rhs)
-                    {
-                        out.push(diagnostic(e.span));
-                    }
-                });
-            }
-        });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        // Only plain `=`; compound forms (`x += x`) are not no-ops.
+        if let ExprKind::Binary(BinaryOp::Assign, lhs, rhs) = &e.kind
+            && !has_side_effect(lhs)
+            && expr_key(lhs) == expr_key(rhs)
+        {
+            cx.emit(diagnostic(e.span));
+        }
     }
 }
 
@@ -60,19 +56,10 @@ fn diagnostic(span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        SelfAssignment.check(&hir, &mut out);
-        out
+        lint_one(SelfAssignment, src)
     }
 
     #[test]

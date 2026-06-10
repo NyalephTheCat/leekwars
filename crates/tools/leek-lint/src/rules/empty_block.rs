@@ -5,93 +5,67 @@
 //! polling spin-wait) but more often a leftover stub.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, Def, HirFile, Stmt};
+use leek_hir::Stmt;
 
-use super::for_each_stmt;
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct EmptyBlock;
 
-impl LintRule for EmptyBlock {
-    fn name(&self) -> &'static str {
-        "empty-block"
+static META: LintMeta = LintMeta {
+    name: "empty-block",
+    code: codes::EMPTY_BLOCK,
+    group: LintGroup::Style,
+    description: "control-flow construct with an empty body",
+};
+
+impl LintPass for EmptyBlock {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::EMPTY_BLOCK
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        check_block(&file.main, out);
-        for def in &file.defs {
-            match def {
-                Def::Function(fun) => {
-                    if let Some(body) = &fun.body {
-                        check_block(&body.stmts, out);
-                    }
+    fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
+        match s {
+            Stmt::If(i) => {
+                if let Some(span) = empty_block_span(&i.then_branch) {
+                    cx.emit(empty(span, "if"));
                 }
-                Def::Class(cls) => {
-                    for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                        if let Some(body) = &m.body {
-                            check_block(&body.stmts, out);
-                        }
-                    }
+                if let Some(else_b) = &i.else_branch
+                    && let Some(span) = empty_block_span(else_b)
+                {
+                    cx.emit(empty(span, "else"));
                 }
-                Def::Global(_) | Def::Local(_) => {}
             }
+            Stmt::While(w) => {
+                if let Some(span) = empty_block_span(&w.body) {
+                    cx.emit(empty(span, "while"));
+                }
+            }
+            Stmt::DoWhile(dw) => {
+                if let Some(span) = empty_block_span(&dw.body) {
+                    cx.emit(empty(span, "do-while"));
+                }
+            }
+            Stmt::For(fr) => {
+                if let Some(span) = empty_block_span(&fr.body) {
+                    cx.emit(empty(span, "for"));
+                }
+            }
+            Stmt::Foreach(fe) => {
+                if let Some(span) = empty_block_span(&fe.body) {
+                    cx.emit(empty(span, "foreach"));
+                }
+            }
+            _ => {}
         }
     }
 }
 
-fn check_block(stmts: &[Stmt], out: &mut Vec<Diagnostic>) {
-    let wrapper = Block {
-        stmts: stmts.to_vec(),
-        span: leek_span::Span::synthetic(),
-    };
-    for_each_stmt(&wrapper, &mut |s| match s {
-        Stmt::If(i) => {
-            if let Stmt::Block(b) = &*i.then_branch
-                && b.stmts.is_empty()
-            {
-                out.push(empty(b.span, "if"));
-            }
-            if let Some(else_b) = &i.else_branch
-                && let Stmt::Block(b) = &**else_b
-                && b.stmts.is_empty()
-            {
-                out.push(empty(b.span, "else"));
-            }
-        }
-        Stmt::While(w) => {
-            if let Stmt::Block(b) = &*w.body
-                && b.stmts.is_empty()
-            {
-                out.push(empty(b.span, "while"));
-            }
-        }
-        Stmt::DoWhile(dw) => {
-            if let Stmt::Block(b) = &*dw.body
-                && b.stmts.is_empty()
-            {
-                out.push(empty(b.span, "do-while"));
-            }
-        }
-        Stmt::For(fr) => {
-            if let Stmt::Block(b) = &*fr.body
-                && b.stmts.is_empty()
-            {
-                out.push(empty(b.span, "for"));
-            }
-        }
-        Stmt::Foreach(fe) => {
-            if let Stmt::Block(b) = &*fe.body
-                && b.stmts.is_empty()
-            {
-                out.push(empty(b.span, "foreach"));
-            }
-        }
-        _ => {}
-    });
+fn empty_block_span(s: &Stmt) -> Option<leek_span::Span> {
+    match s {
+        Stmt::Block(b) if b.stmts.is_empty() => Some(b.span),
+        _ => None,
+    }
 }
 
 fn empty(span: leek_span::Span, what: &str) -> Diagnostic {
@@ -103,4 +77,39 @@ fn empty(span: leek_span::Span, what: &str) -> Diagnostic {
         format!("empty {what} body"),
     )
     .with_note("if this is intentional, leave a comment explaining why")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::lint_one;
+
+    fn run(src: &str) -> Vec<Diagnostic> {
+        lint_one(EmptyBlock, src)
+    }
+
+    #[test]
+    fn flags_empty_if_body() {
+        let d = run("function f(x) {\n  if (x > 0) {}\n  return 0\n}\n");
+        assert_eq!(d.len(), 1, "got {d:?}");
+    }
+
+    #[test]
+    fn flags_empty_else() {
+        let d = run("function f(x) {\n  if (x > 0) { return 1 } else {}\n  return 0\n}\n");
+        assert_eq!(d.len(), 1, "got {d:?}");
+        assert!(d[0].message.contains("else"), "{d:?}");
+    }
+
+    #[test]
+    fn flags_empty_while() {
+        let d = run("function f(x) {\n  while (x > 0) {}\n  return 0\n}\n");
+        assert_eq!(d.len(), 1, "got {d:?}");
+    }
+
+    #[test]
+    fn ignores_nonempty_bodies() {
+        let d = run("function f(x) {\n  if (x > 0) { return 1 }\n  return 0\n}\n");
+        assert!(d.is_empty(), "got {d:?}");
+    }
 }

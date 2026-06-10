@@ -81,7 +81,7 @@ pub enum Command {
     /// Format all `.leek` sources.
     Fmt(Fmt),
     /// Run the linter.
-    Lint,
+    Lint(Lint),
     /// Print the extended explanation for a diagnostic code.
     Explain(Explain),
     /// Apply machine-applicable diagnostic suggestions in place.
@@ -293,6 +293,16 @@ pub struct Fmt {
     /// Don't write changes; exit non-zero if anything would change.
     #[arg(long)]
     pub check: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Lint {
+    /// Also run the pedantic lints (strictness; verbose-but-fine code).
+    #[arg(long)]
+    pub pedantic: bool,
+    /// Also run the nursery lints (teaching; points at idiomatic constructs).
+    #[arg(long)]
+    pub nursery: bool,
 }
 
 #[derive(Debug, clap::Args)]

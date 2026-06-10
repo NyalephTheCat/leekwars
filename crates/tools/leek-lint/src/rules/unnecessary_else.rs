@@ -16,39 +16,36 @@
 //! layer doesn't model.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, HirFile, Stmt};
+use leek_hir::Stmt;
 use leek_span::Span;
 
-use super::for_each_block;
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct UnnecessaryElse;
 
-impl LintRule for UnnecessaryElse {
-    fn name(&self) -> &'static str {
-        "unnecessary-else"
+static META: LintMeta = LintMeta {
+    name: "unnecessary-else",
+    code: codes::UNNECESSARY_ELSE,
+    group: LintGroup::Style,
+    description: "`else` after a branch that always exits — dedent its body instead",
+};
+
+impl LintPass for UnnecessaryElse {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::UNNECESSARY_ELSE
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block: &Block| {
-            for stmt in &block.stmts {
-                if let Stmt::If(i) = stmt
-                    && let Some(els) = &i.else_branch
-                    && then_always_exits(&i.then_branch)
-                {
-                    // Don't flag `else if` chains — those aren't redundant
-                    // nesting, they're a guard sequence.
-                    if matches!(els.as_ref(), Stmt::If(_)) {
-                        continue;
-                    }
-                    out.push(diagnostic(els.span(), exit_kind(&i.then_branch)));
-                }
-            }
-        });
+    fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
+        if let Stmt::If(i) = s
+            && let Some(els) = &i.else_branch
+            && then_always_exits(&i.then_branch)
+            // Don't flag `else if` chains — those aren't redundant
+            // nesting, they're a guard sequence.
+            && !matches!(els.as_ref(), Stmt::If(_))
+        {
+            cx.emit(diagnostic(els.span(), exit_kind(&i.then_branch)));
+        }
     }
 }
 
@@ -88,19 +85,10 @@ fn diagnostic(span: Span, kind: &str) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        UnnecessaryElse.check(&hir, &mut out);
-        out
+        lint_one(UnnecessaryElse, src)
     }
 
     #[test]

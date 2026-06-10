@@ -1,10 +1,19 @@
-//! Individual lint rule implementations.
+//! Individual lint implementations.
 //!
-//! Each rule lives in its own module and is a unit struct
-//! implementing [`crate::LintRule`].
+//! Each lint lives in its own module as a unit struct implementing
+//! [`crate::LintPass`], plus a `static META` describing it. The
+//! driver in [`crate::pass`] walks the HIR once and fires every
+//! pass's hooks, so modules here contain *only* the lint logic — no
+//! traversal boilerplate.
 
+pub mod approx_constant;
+pub mod array_literal_membership;
 pub mod assignment_in_condition;
+pub mod chained_comparison;
+pub mod collapsible_if;
 pub mod constant_condition;
+pub mod count_in_loop_condition;
+pub mod deep_nesting;
 pub mod deprecated_feature;
 pub mod division_by_zero;
 pub mod double_negation;
@@ -14,238 +23,83 @@ pub mod duplicate_condition;
 pub mod duplicate_include;
 pub mod empty_block;
 pub mod identical_operands;
+pub mod interval_loop;
+pub mod long_function;
+pub mod manual_min_max;
+pub mod manual_range_check;
+pub mod map_as_set;
+pub mod needless_index_loop;
 pub mod negated_comparison;
 pub mod redundant_boolean;
 pub mod redundant_ternary;
 pub mod self_assignment;
 pub mod self_comparison;
 pub mod shadowed_binding;
+pub mod shadowed_builtin;
+pub mod string_concat_in_loop;
 pub(crate) mod structural;
+pub mod switch_missing_default;
+pub mod too_many_arguments;
 pub mod unnecessary_else;
 pub mod unreachable_code;
 pub mod unused_expression;
 pub mod unused_parameter;
 pub mod unused_variable;
+pub mod useless_foreach_write;
 
-// ---- Shared HIR walker helpers ----
+// ---- Recursive walk helpers ----
+//
+// Thin recursive closures over `leek-hir`'s canonical shallow walkers,
+// for passes that need their own sub-walk (collecting references in a
+// body, scanning a condition). They borrow statement slices directly —
+// no synthesized `Block` wrappers, no cloning.
 
-use leek_hir::{Block, Def, Expr, HirFile, Stmt};
-use leek_span::Span;
+use leek_hir::{Expr, ExprKind, LambdaBody, Stmt};
 
-/// Visit every `Block` reachable from `file` — the main block plus
-/// each function/method/constructor body plus every nested
-/// statement-block. The callback runs once per block.
-pub(crate) fn for_each_block(file: &HirFile, f: &mut impl FnMut(&Block)) {
-    // Synthesize a `Block` wrapper for the main statements so
-    // walking semantics are uniform. The span is a sentinel — the
-    // visitor doesn't read it.
-    let main = Block {
-        stmts: file.main.clone(),
-        span: Span::synthetic(),
-    };
-    visit_blocks(&main, f);
-    for def in &file.defs {
-        match def {
-            Def::Function(fun) => {
-                if let Some(body) = &fun.body {
-                    visit_blocks(body, f);
-                }
-            }
-            Def::Class(cls) => {
-                for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                    if let Some(body) = &m.body {
-                        visit_blocks(body, f);
-                    }
-                }
-            }
-            Def::Global(_) | Def::Local(_) => {}
-        }
-    }
-}
-
-fn visit_blocks(block: &Block, f: &mut impl FnMut(&Block)) {
-    f(block);
-    for s in &block.stmts {
-        visit_blocks_in_stmt(s, f);
-    }
-}
-
-fn visit_blocks_in_stmt(s: &Stmt, f: &mut impl FnMut(&Block)) {
-    match s {
-        Stmt::Block(b) => visit_blocks(b, f),
-        Stmt::If(i) => {
-            visit_blocks_in_stmt(&i.then_branch, f);
-            if let Some(e) = &i.else_branch {
-                visit_blocks_in_stmt(e, f);
-            }
-        }
-        Stmt::While(w) => visit_blocks_in_stmt(&w.body, f),
-        Stmt::DoWhile(d) => visit_blocks_in_stmt(&d.body, f),
-        Stmt::For(fr) => {
-            if let Some(init) = &fr.init {
-                visit_blocks_in_stmt(init, f);
-            }
-            visit_blocks_in_stmt(&fr.body, f);
-        }
-        Stmt::Foreach(fe) => visit_blocks_in_stmt(&fe.body, f),
-        Stmt::Switch(sw) => {
-            for arm in &sw.arms {
-                let synthetic = Block {
-                    stmts: arm.body.clone(),
-                    span: Span::synthetic(),
-                };
-                visit_blocks(&synthetic, f);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Visit every [`Stmt`] inside `block`, including those nested in
-/// child block-like statements. Order is source order.
-pub(crate) fn for_each_stmt(block: &Block, f: &mut impl FnMut(&Stmt)) {
-    for s in &block.stmts {
+/// Visit every statement in `stmts` and, recursively, every statement
+/// nested inside them. Source order. Statements only nest inside
+/// statements, so lambda bodies (expressions) are never entered.
+pub(crate) fn for_each_stmt(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
+    fn visit(s: &Stmt, f: &mut impl FnMut(&Stmt)) {
         f(s);
-        descend_stmt(s, f);
+        leek_hir::walk_stmt_child_stmts(s, &mut |c| visit(c, f));
+    }
+    for s in stmts {
+        visit(s, f);
     }
 }
 
-/// Visit every nested [`Stmt`] reachable from `s`.
-pub(crate) fn descend_stmt(s: &Stmt, f: &mut impl FnMut(&Stmt)) {
-    match s {
-        Stmt::If(i) => {
-            f(&i.then_branch);
-            descend_stmt(&i.then_branch, f);
-            if let Some(e) = &i.else_branch {
-                f(e);
-                descend_stmt(e, f);
-            }
-        }
-        Stmt::While(w) => {
-            f(&w.body);
-            descend_stmt(&w.body, f);
-        }
-        Stmt::DoWhile(dw) => {
-            f(&dw.body);
-            descend_stmt(&dw.body, f);
-        }
-        Stmt::For(fr) => {
-            if let Some(init) = &fr.init {
-                f(init);
-                descend_stmt(init, f);
-            }
-            f(&fr.body);
-            descend_stmt(&fr.body, f);
-        }
-        Stmt::Foreach(fe) => {
-            f(&fe.body);
-            descend_stmt(&fe.body, f);
-        }
-        Stmt::Block(b) => {
-            for inner in &b.stmts {
-                f(inner);
-                descend_stmt(inner, f);
-            }
-        }
-        Stmt::Switch(sw) => {
-            for arm in &sw.arms {
-                for inner in &arm.body {
-                    f(inner);
-                    descend_stmt(inner, f);
-                }
-            }
-        }
-        Stmt::Expr(_)
-        | Stmt::VarDecl(_)
-        | Stmt::Return(_)
-        | Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Include(_)
-        | Stmt::Import(_)
-        | Stmt::Charge(_) => {}
-    }
-}
-
-/// Visit every [`Expr`] inside `block`, recursing through nested
-/// statements and sub-expressions. Used by lints that need to find
-/// every reference to something.
-pub(crate) fn for_each_expr_in_block(block: &Block, f: &mut impl FnMut(&Expr)) {
-    for s in &block.stmts {
-        for_each_expr_in_stmt(s, f);
-    }
-}
-
-pub(crate) fn for_each_expr_in_stmt(s: &Stmt, f: &mut impl FnMut(&Expr)) {
-    match s {
-        Stmt::Expr(e) => for_each_expr(e, f),
-        Stmt::VarDecl(v) => {
-            if let Some(init) = &v.init {
-                for_each_expr(init, f);
-            }
-        }
-        Stmt::Return(opt) => {
-            if let Some(e) = opt {
-                for_each_expr(e, f);
-            }
-        }
-        Stmt::If(i) => {
-            for_each_expr(&i.cond, f);
-            for_each_expr_in_stmt(&i.then_branch, f);
-            if let Some(e) = &i.else_branch {
-                for_each_expr_in_stmt(e, f);
-            }
-        }
-        Stmt::While(w) => {
-            for_each_expr(&w.cond, f);
-            for_each_expr_in_stmt(&w.body, f);
-        }
-        Stmt::DoWhile(dw) => {
-            for_each_expr_in_stmt(&dw.body, f);
-            for_each_expr(&dw.cond, f);
-        }
-        Stmt::For(fr) => {
-            if let Some(init) = &fr.init {
-                for_each_expr_in_stmt(init, f);
-            }
-            if let Some(c) = &fr.cond {
-                for_each_expr(c, f);
-            }
-            if let Some(s) = &fr.step {
-                for_each_expr(s, f);
-            }
-            for_each_expr_in_stmt(&fr.body, f);
-        }
-        Stmt::Foreach(fe) => {
-            for_each_expr(&fe.iter, f);
-            for_each_expr_in_stmt(&fe.body, f);
-        }
-        Stmt::Block(b) => for_each_expr_in_block(b, f),
-        Stmt::Switch(sw) => {
-            for_each_expr(&sw.discriminant, f);
-            for arm in &sw.arms {
-                if let Some(c) = &arm.case {
-                    for_each_expr(c, f);
-                }
-                for inner in &arm.body {
-                    for_each_expr_in_stmt(inner, f);
-                }
-            }
-        }
-        Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Include(_)
-        | Stmt::Import(_)
-        | Stmt::Charge(_) => {}
-    }
-}
-
+/// Visit `e` and every sub-expression. Lambdas are leaves — their
+/// bodies are separate scopes; use [`for_each_expr_deep`] to enter
+/// them.
 pub(crate) fn for_each_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
     f(e);
-    // `walk_expr_children` covers every `ExprKind` variant (the
-    // hand-rolled match this replaced silently dropped `Ternary`,
-    // `Map`, `Set`, `Object`, `Slice`, `Interval`, `Cast`, and
-    // `New`). It treats `Lambda` as a leaf, so the previous
-    // skip-lambda-bodies behaviour is preserved: rule authors who
-    // need lambda internals special-case `ExprKind::Lambda`.
-    leek_hir::walk_expr_children(e, &mut |child| for_each_expr(child, f));
+    leek_hir::walk_expr_children(e, &mut |c| for_each_expr(c, f));
+}
+
+/// Like [`for_each_expr`], but descends through lambda parameter
+/// defaults and bodies. For lints where a reference inside a nested
+/// lambda still counts (e.g. "is this variable used?").
+pub(crate) fn for_each_expr_deep(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    f(e);
+    if let ExprKind::Lambda(lam) = &e.kind {
+        for p in &lam.params {
+            if let Some(d) = &p.default {
+                for_each_expr_deep(d, f);
+            }
+        }
+        match &lam.body {
+            LambdaBody::Block(b) => for_each_expr_deep_in_stmts(&b.stmts, f),
+            LambdaBody::Expr(x) => for_each_expr_deep(x, f),
+        }
+        return;
+    }
+    leek_hir::walk_expr_children(e, &mut |c| for_each_expr_deep(c, f));
+}
+
+/// [`for_each_expr_in_stmts`], descending into lambdas.
+pub(crate) fn for_each_expr_deep_in_stmts(stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
+    for_each_stmt(stmts, &mut |s| {
+        leek_hir::walk_stmt_child_exprs(s, &mut |e| for_each_expr_deep(e, f));
+    });
 }

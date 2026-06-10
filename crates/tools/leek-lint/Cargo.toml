@@ -11,6 +11,7 @@ leek-span        = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-hir         = { workspace = true }
 leek-pipeline    = { workspace = true }
+leek-resolver    = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-parser      = { workspace = true }
 
@@ -24,6 +25,7 @@ salsa = [
   "leek-pipeline/salsa",
   "leek-hir/salsa",
   "leek-diagnostics/salsa",
+  "leek-resolver/salsa",
   "leek-span/salsa",
   "leek-syntax/salsa",
 ]
