@@ -74,7 +74,8 @@ impl Checker {
         let Some(declared) = self.lookup(ident.text()).cloned() else {
             return;
         };
-        if !matches!(declared, Type::Any | Type::Null) && !Type::assignable_to(rhs_ty, &declared) {
+        if !matches!(declared, Type::Any | Type::Null) && !self.types_assignable(rhs_ty, &declared)
+        {
             self.err(
                 codes::ASSIGNMENT_INCOMPATIBLE_TYPE,
                 self.span_of(&ident),

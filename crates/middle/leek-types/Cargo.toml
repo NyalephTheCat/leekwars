@@ -15,6 +15,7 @@ leek-diagnostics = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-prelude     = { workspace = true }
 rowan            = { workspace = true }
+bitflags         = { workspace = true }
 salsa            = { version = "0.26", optional = true }
 
 [features]

@@ -32,6 +32,7 @@ fn parse_prelude(prelude_enabled: bool) -> Option<(leek_parser::ast::SourceFile,
         leek_parser::ParseFeatures {
             function_signatures: true,
             generics: true,
+            ..Default::default()
         },
     );
     let ast = AstSourceFile::cast(SyntaxNode::new_root(parsed.green))?;

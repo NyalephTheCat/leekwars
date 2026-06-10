@@ -5,108 +5,83 @@
 
 use crate::ty::Type;
 
-/// Per-parameter "allowed types" bitmask. We don't model full
-/// signatures yet; instead a small set of common builtins lists
-/// the type categories their args must fall into.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct TypeSet {
-    pub(crate) accept_any: bool,
-    pub(crate) accept_integer: bool,
-    pub(crate) accept_real: bool,
-    pub(crate) accept_boolean: bool,
-    pub(crate) accept_string: bool,
-    pub(crate) accept_null: bool,
-    pub(crate) accept_array: bool,
-    pub(crate) accept_map: bool,
-    pub(crate) accept_set: bool,
-    pub(crate) accept_object: bool,
-    pub(crate) accept_function: bool,
+bitflags::bitflags! {
+    /// Per-parameter "allowed types" bitset. We don't model full
+    /// signatures yet; instead a small set of common builtins lists
+    /// the type categories their args must fall into. One bit per
+    /// category; compose sets with `|`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct TypeSet: u16 {
+        const INTEGER = 1 << 0;
+        const REAL = 1 << 1;
+        const BOOLEAN = 1 << 2;
+        const STRING = 1 << 3;
+        const NULL = 1 << 4;
+        const ARRAY = 1 << 5;
+        const MAP = 1 << 6;
+        const SET = 1 << 7;
+        const OBJECT = 1 << 8;
+        const FUNCTION = 1 << 9;
+        /// Accepts everything — types we don't categorize (class
+        /// instances, intervals) only pass when this bit is set.
+        const ANY = 1 << 10;
+
+        /// `boolean` counts as numeric: Leekscript coerces it to 0/1.
+        const NUMERIC = Self::INTEGER.bits() | Self::REAL.bits() | Self::BOOLEAN.bits();
+        const CONTAINER = Self::ARRAY.bits() | Self::MAP.bits() | Self::SET.bits();
+        const ARRAY_ONLY = Self::ARRAY.bits();
+    }
 }
 
-impl TypeSet {
-    pub(crate) const NUMERIC: TypeSet = TypeSet {
-        accept_any: false,
-        accept_integer: true,
-        accept_real: true,
-        accept_boolean: true,
-        accept_string: false,
-        accept_null: false,
-        accept_array: false,
-        accept_map: false,
-        accept_set: false,
-        accept_object: false,
-        accept_function: false,
-    };
-    pub(crate) const CONTAINER: TypeSet = TypeSet {
-        accept_any: false,
-        accept_integer: false,
-        accept_real: false,
-        accept_boolean: false,
-        accept_string: false,
-        accept_null: false,
-        accept_array: true,
-        accept_map: true,
-        accept_set: true,
-        accept_object: false,
-        accept_function: false,
-    };
-    pub(crate) const ARRAY_ONLY: TypeSet = TypeSet {
-        accept_any: false,
-        accept_integer: false,
-        accept_real: false,
-        accept_boolean: false,
-        accept_string: false,
-        accept_null: false,
-        accept_array: true,
-        accept_map: false,
-        accept_set: false,
-        accept_object: false,
-        accept_function: false,
-    };
-}
-
-pub(crate) fn type_in_set(t: &Type, s: &TypeSet) -> bool {
+pub(crate) fn type_in_set(t: &Type, s: TypeSet) -> bool {
+    if s.contains(TypeSet::ANY) {
+        return true;
+    }
     match t {
         Type::Any => true,
-        Type::Integer => s.accept_integer || s.accept_any,
-        Type::Real => s.accept_real || s.accept_any,
-        Type::Boolean => s.accept_boolean || s.accept_any,
-        Type::String => s.accept_string || s.accept_any,
-        Type::Null => s.accept_null || s.accept_any,
-        Type::Void => s.accept_null || s.accept_any,
-        Type::Array(_) => s.accept_array || s.accept_any,
-        Type::Map(_, _) => s.accept_map || s.accept_any,
-        Type::Set(_) => s.accept_set || s.accept_any,
-        Type::Object => s.accept_object || s.accept_any,
-        Type::Function | Type::FunctionWithReturn { .. } => s.accept_function || s.accept_any,
-        Type::ClassInstance(..) | Type::Interval => s.accept_any,
+        Type::Integer => s.contains(TypeSet::INTEGER),
+        Type::Real => s.contains(TypeSet::REAL),
+        Type::Boolean => s.contains(TypeSet::BOOLEAN),
+        Type::String => s.contains(TypeSet::STRING),
+        Type::Null | Type::Void => s.contains(TypeSet::NULL),
+        // A tuple-shaped array is an ordinary array at runtime.
+        Type::Array(_) | Type::Tuple(_) => s.contains(TypeSet::ARRAY),
+        Type::Map(_, _) => s.contains(TypeSet::MAP),
+        Type::Set(_) => s.contains(TypeSet::SET),
+        Type::Object => s.contains(TypeSet::OBJECT),
+        Type::Function | Type::FunctionWithReturn { .. } => s.contains(TypeSet::FUNCTION),
+        Type::ClassInstance(..) | Type::Interval => false,
         // Nullable types accept whatever their inner type accepts
         // (plus null, but null is always accepted via Type::Null).
         Type::Nullable(inner) => type_in_set(inner, s),
+        // A union fits when at least one member could fit at
+        // runtime — flagging only certain mismatches keeps this
+        // check false-positive-free.
+        Type::Union(members) => members.iter().any(|m| type_in_set(m, s)),
     }
 }
 
-pub(crate) fn describe_type_set(s: &TypeSet) -> String {
+pub(crate) fn describe_type_set(s: TypeSet) -> String {
     let mut parts = Vec::new();
-    if s.accept_integer || s.accept_real || s.accept_boolean {
+    if s.intersects(TypeSet::NUMERIC) {
         parts.push("number");
     }
-    if s.accept_string {
+    if s.contains(TypeSet::STRING) {
         parts.push("string");
     }
-    if s.accept_array {
+    if s.contains(TypeSet::ARRAY) {
         parts.push("Array");
     }
-    if s.accept_map {
+    if s.contains(TypeSet::MAP) {
         parts.push("Map");
     }
-    if s.accept_set {
+    if s.contains(TypeSet::SET) {
         parts.push("Set");
     }
-    if s.accept_object {
+    if s.contains(TypeSet::OBJECT) {
         parts.push("Object");
     }
-    if s.accept_function {
+    if s.contains(TypeSet::FUNCTION) {
         parts.push("function");
     }
     if parts.is_empty() {

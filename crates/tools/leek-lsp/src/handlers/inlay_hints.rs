@@ -110,7 +110,20 @@ fn format_type(ty: &Type) -> String {
             format!("Function<{} => {}>", ps.join(", "), format_type(ret))
         }
         Type::Interval => "Interval".into(),
-        Type::Nullable(t) => format!("{}?", format_type(t)),
+        Type::Nullable(t) => match t.as_ref() {
+            // `A | B | null` reads better than `A | B?`, where the
+            // `?` visually binds to the last member only.
+            Type::Union(_) => format!("{} | null", format_type(t)),
+            _ => format!("{}?", format_type(t)),
+        },
+        Type::Union(members) => {
+            let inner: Vec<String> = members.iter().map(format_type).collect();
+            inner.join(" | ")
+        }
+        Type::Tuple(members) => {
+            let inner: Vec<String> = members.iter().map(format_type).collect();
+            format!("Array[{}]", inner.join(", "))
+        }
     }
 }
 

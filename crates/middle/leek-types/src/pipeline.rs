@@ -80,6 +80,9 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
         experimental_generics: cx.flags().generics,
         seed_library: crate::seed_library_enabled(),
         experimental_prelude: cx.flags().prelude,
+        experimental_types: cx.flags().types,
+        experimental_interfaces: cx.flags().interfaces,
+        experimental_enums: cx.flags().enums,
     };
     check_collecting(
         &ast,
@@ -114,6 +117,9 @@ pub fn typecheck_query(
         experimental_generics: flags.generics,
         seed_library: crate::seed_library_enabled(),
         experimental_prelude: flags.prelude,
+        experimental_types: flags.types,
+        experimental_interfaces: flags.interfaces,
+        experimental_enums: flags.enums,
     };
     let TypeCheckResult {
         diagnostics,

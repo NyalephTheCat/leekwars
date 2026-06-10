@@ -46,4 +46,9 @@ impl Checker {
         self.diagnostics
             .push(Diagnostic::new(code, Severity::Error, span, msg));
     }
+
+    pub(crate) fn warn(&mut self, code: Code, span: Span, msg: impl Into<String>) {
+        self.diagnostics
+            .push(Diagnostic::new(code, Severity::Warning, span, msg));
+    }
 }

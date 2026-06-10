@@ -101,6 +101,15 @@ pub struct Cli {
     #[arg(long, value_name = "CODE")]
     pub allow: Vec<String>,
 
+    /// Also run the pedantic lints (strictness; verbose-but-fine code).
+    #[arg(long)]
+    pub pedantic: bool,
+
+    /// Also run the nursery lints (teaching; points at idiomatic
+    /// constructs).
+    #[arg(long)]
+    pub nursery: bool,
+
     /// Load a host-environment function library. Repeatable. Accepts a
     /// built-in name (`leekwars` for the leek-wars-generator fight
     /// functions) or a path to a library-definition file. Its functions

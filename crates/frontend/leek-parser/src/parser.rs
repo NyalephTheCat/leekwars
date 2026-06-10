@@ -28,6 +28,14 @@ pub struct ParseFeatures {
     /// Allow generic type parameters — `function f<T>(…)`, `class Box<T>`,
     /// `T m<U>(…)` — declared after a function/class/method name.
     pub generics: bool,
+    /// Allow `type Name = T` alias declarations and tuple-shaped array
+    /// types (`Array[integer, boolean]`).
+    pub types: bool,
+    /// Allow `interface Name { … }` declarations and the
+    /// `implements I1, I2` clause on classes.
+    pub interfaces: bool,
+    /// Allow `enum Name { A, B = 10 }` declarations.
+    pub enums: bool,
 }
 
 impl ParseFeatures {
@@ -44,6 +52,9 @@ impl From<leek_span::FeatureFlags> for ParseFeatures {
         Self {
             function_signatures: f.function_signatures,
             generics: f.generic_syntax,
+            types: f.types,
+            interfaces: f.interfaces,
+            enums: f.enums,
         }
     }
 }

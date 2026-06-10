@@ -88,6 +88,22 @@ pub struct Options {
     /// by the pipeline rather than read from env inside the (salsa-tracked)
     /// type-check query.
     pub experimental_prelude: bool,
+    /// **Experimental.** `type Name = T` alias declarations and
+    /// tuple-shaped array types (`LEEK_EXPERIMENTAL_TYPES`). Resolves
+    /// aliases in annotations and infers per-position element types
+    /// for array literals.
+    pub experimental_types: bool,
+    /// **Experimental.** `interface Name { … }` declarations and
+    /// `class C implements I` clauses (`LEEK_EXPERIMENTAL_INTERFACES`).
+    /// Verifies implementing classes provide the declared members and
+    /// lets interface names act as structural types in annotations.
+    pub experimental_interfaces: bool,
+    /// **Experimental.** `enum Name { A, B = 10 }` declarations
+    /// (`LEEK_EXPERIMENTAL_ENUMS`). HIR lowers them to a class with
+    /// static final integer fields; the checker registers the variants
+    /// as integer-typed statics, lets the enum name act as an `integer`
+    /// annotation, and reports duplicate variants.
+    pub experimental_enums: bool,
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -273,6 +289,47 @@ mod index_tests {
         )
     }
 
+    /// Parse + check with the experimental `types` feature on
+    /// (`type` aliases, `Array[T, U]` tuple shapes, tuple inference
+    /// for array literals).
+    fn run_types(text: &str) -> TypeCheckResult {
+        run_types_core(text, false)
+    }
+
+    /// Strict variant — `var x = …` commits to the initializer's
+    /// inferred type, so tuple-shape inference is observable through
+    /// plain `var` bindings.
+    fn run_types_strict(text: &str) -> TypeCheckResult {
+        run_types_core(text, true)
+    }
+
+    fn run_types_core(text: &str, strict: bool) -> TypeCheckResult {
+        use leek_parser::{ParseFeatures, parse_tokens_with};
+        let src = SourceId::new(1).unwrap();
+        let lex_out = lex(text, src, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures {
+                types: true,
+                ..Default::default()
+            },
+        );
+        let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
+        check_collecting(
+            &ast,
+            src,
+            Version::LATEST,
+            Options {
+                strict,
+                experimental_types: true,
+                ..Default::default()
+            },
+        )
+    }
+
     fn run_generics(text: &str) -> TypeCheckResult {
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(text, src, Version::LATEST);
@@ -453,6 +510,315 @@ mod index_tests {
         let r = run_strict(text);
         // Inside the guard, `c` is non-null `Cat`, so `c.age` is integer.
         assert_eq!(ty_at(&r, text, "c.age", 1), Type::Integer);
+    }
+
+    #[test]
+    fn union_annotation_accepts_each_member() {
+        // `integer | string` is official v4 syntax; assigning either
+        // member must not fire ASSIGNMENT_INCOMPATIBLE_TYPE.
+        let text = "integer | string x = 1\nx = \"a\"\nx = 2\n";
+        let r = run(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "no diagnostics expected, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn union_annotation_rejects_non_member() {
+        let text = "integer | string x = 1\nx = true\n";
+        let r = run(text);
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "boolean is not a member: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn nullable_union_member_parses_and_lifts() {
+        // `A | B?` is parseable; the member-level `?` lifts to the
+        // whole union, so `null` is assignable.
+        let text = "integer | string? x = 1\nx = null\nx = \"a\"\n";
+        let r = run(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "null fits the lifted nullable union, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn ternary_distinct_branches_join_to_union() {
+        let text = "var x = true ? 1 : \"a\"\n";
+        let r = run(text);
+        assert_eq!(
+            ty_at(&r, text, "true ? 1 : \"a\"", 1),
+            Type::union_of(vec![Type::Integer, Type::String])
+        );
+    }
+
+    #[test]
+    fn type_alias_substitutes_into_annotations() {
+        // `Coord` resolves to its body; reassigning an incompatible
+        // value fires against the *substituted* type.
+        let text = "type Coord = integer\nCoord x = 1\nx = 2\nx = \"a\"\n";
+        let r = run_types(text);
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "only the string assignment may fire: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn type_alias_union_body_and_chain() {
+        // Aliases chain in declaration order, and a union body stays
+        // canonical after substitution.
+        let text = "type Id = integer | string\ntype MaybeId = Id | null\nMaybeId x = 1\nx = \"a\"\nx = null\nx = true\n";
+        let r = run_types(text);
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "only the boolean assignment may fire: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn type_alias_lowercase_name_warns_and_is_ignored() {
+        let text = "type coord = integer\n";
+        let r = run_types(text);
+        assert_eq!(r.diagnostics.len(), 1, "expected the E0255 warning");
+        assert_eq!(r.diagnostics[0].code.id(), "E0255");
+    }
+
+    #[test]
+    fn tuple_annotation_accepts_matching_literal() {
+        let text = "Array[integer, boolean] t = [1, true]\nt = [2, false]\n";
+        let r = run_types(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "position-wise match expected, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn tuple_annotation_rejects_position_mismatch() {
+        let text = "Array[integer, boolean] t = [1, true]\nt = [true, 1]\n";
+        let r = run_types(text);
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "swapped positions must fire: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn tuple_literal_fits_plain_array_slot() {
+        // A tuple-shaped literal is still an array: member-wise
+        // assignable to `Array<T>`, rejected on a foreign member.
+        let text = "Array<integer> a = [1, 2]\na = [3]\na = [\"x\"]\n";
+        let r = run_types(text);
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "only the string-member literal may fire: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn tuple_constant_index_picks_member_type() {
+        let text = "var t = [1, \"a\"]\nvar x = t[0]\nvar y = t[1]\n";
+        let r = run_types_strict(text);
+        assert_eq!(ty_at(&r, text, "t[0]", 1), Type::Integer);
+        assert_eq!(ty_at(&r, text, "t[1]", 1), Type::String);
+    }
+
+    #[test]
+    fn tuple_dynamic_index_joins_members() {
+        let text = "var t = [1, \"a\"]\nvar i = 0\nvar x = t[i]\n";
+        let r = run_types_strict(text);
+        assert_eq!(
+            ty_at(&r, text, "t[i]", 1),
+            Type::union_of(vec![Type::Integer, Type::String])
+        );
+    }
+
+    #[test]
+    fn tuple_inference_off_without_flag() {
+        // Without `experimental_types`, literals keep the homogeneous
+        // Array inference (strict mode so `var` commits).
+        let text = "var t = [1, \"a\"]\nvar x = t[0]\n";
+        let r = run_strict(text);
+        assert_eq!(
+            ty_at(&r, text, "t[0]", 1),
+            Type::union_of(vec![Type::Integer, Type::String])
+        );
+    }
+
+    /// Parse + check with the experimental `interfaces` feature on
+    /// (`interface Name { … }` declarations, `implements` clauses,
+    /// interface-typed slots).
+    fn run_interfaces(text: &str) -> TypeCheckResult {
+        use leek_parser::{ParseFeatures, parse_tokens_with};
+        let src = SourceId::new(1).unwrap();
+        let lex_out = lex(text, src, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures {
+                interfaces: true,
+                ..Default::default()
+            },
+        );
+        let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
+        check_collecting(
+            &ast,
+            src,
+            Version::LATEST,
+            Options {
+                experimental_interfaces: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn interface_implemented_is_clean() {
+        let text = "interface Named {\n  string name;\n  string describe();\n}\nclass Dog implements Named {\n  string name = \"rex\"\n  string describe() { return this.name }\n}\n";
+        let r = run_interfaces(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "satisfied implements must be clean: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn interface_missing_member_fires() {
+        let text = "interface Named {\n  string name;\n  string describe();\n}\nclass Dog implements Named {\n  string name = \"rex\"\n}\n";
+        let r = run_interfaces(text);
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "missing describe() must fire: {:?}",
+            r.diagnostics
+        );
+        assert_eq!(r.diagnostics[0].code.id(), "E0256");
+        assert!(r.diagnostics[0].message.contains("describe"));
+    }
+
+    #[test]
+    fn interface_member_via_parent_class_counts() {
+        // The implementing class inherits the members through `extends`.
+        let text = "interface Named {\n  string name;\n}\nclass Animal {\n  string name = \"x\"\n}\nclass Dog extends Animal implements Named {\n}\n";
+        let r = run_interfaces(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "inherited member satisfies the interface: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn unknown_interface_warns() {
+        let text = "class Dog implements Nameable {\n}\n";
+        let r = run_interfaces(text);
+        assert_eq!(r.diagnostics.len(), 1, "got {:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code.id(), "E0257");
+    }
+
+    /// Parse + check with the experimental `enums` feature on
+    /// (`enum Name { … }` declarations).
+    fn run_enums(text: &str) -> TypeCheckResult {
+        use leek_parser::{ParseFeatures, parse_tokens_with};
+        let src = SourceId::new(1).unwrap();
+        let lex_out = lex(text, src, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures {
+                enums: true,
+                ..Default::default()
+            },
+        );
+        let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
+        check_collecting(
+            &ast,
+            src,
+            Version::LATEST,
+            Options {
+                experimental_enums: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn enum_variant_access_infers_integer() {
+        let text = "enum Color { RED, GREEN, BLUE = 10 }\nvar x = Color.GREEN\n";
+        let r = run_enums(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "enum usage must be clean: {:?}",
+            r.diagnostics
+        );
+        assert_eq!(ty_at(&r, text, "Color.GREEN", 1), Type::Integer);
+    }
+
+    #[test]
+    fn enum_name_works_as_integer_annotation() {
+        let text = "enum Color { RED, GREEN }\nColor c = Color.RED\ninteger i = c\n";
+        let r = run_enums(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "enum-typed slot must accept a variant: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn enum_duplicate_variant_fires() {
+        let text = "enum Color { RED, GREEN, RED }\n";
+        let r = run_enums(text);
+        assert_eq!(r.diagnostics.len(), 1, "got {:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code.id(), "E0258");
+        assert!(r.diagnostics[0].message.contains("RED"));
+    }
+
+    #[test]
+    fn interface_typed_slot_accepts_implementor() {
+        let text = "interface Named {\n  string name;\n}\nclass Dog implements Named {\n  string name = \"rex\"\n}\nNamed n = null\nn = new Dog()\n";
+        let r = run_interfaces(text);
+        assert!(
+            r.diagnostics.is_empty(),
+            "implementor instance must fit the interface slot: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn interface_typed_slot_rejects_non_implementor() {
+        let text = "interface Named {\n  string name;\n}\nclass Dog implements Named {\n  string name = \"rex\"\n}\nclass Rock {\n}\nNamed n = null\nn = new Rock()\n";
+        let r = run_interfaces(text);
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "non-implementor must be rejected: {:?}",
+            r.diagnostics
+        );
+        assert_eq!(r.diagnostics[0].code.id(), "E0250");
     }
 
     #[test]

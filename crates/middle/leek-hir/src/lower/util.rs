@@ -181,6 +181,28 @@ pub(crate) fn parse_hex_float(body: &str) -> f64 {
     value * 2f64.powi(exp)
 }
 
+/// Parse an `IntLiteral` token's text (decimal / `0x` hex / `0b`
+/// binary, `_` separators allowed) into an `i64`. Falls back to `0`
+/// for malformed text — a bad-suffix lexer diagnostic already covers
+/// those cases. Shared by literal-expression lowering and enum
+/// variant values.
+pub(crate) fn parse_int_text(text: &str) -> i64 {
+    let cleaned: String = text.chars().filter(|c| *c != '_').collect();
+    if let Some(hex) = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+    {
+        i64::from_str_radix(hex, 16).unwrap_or(0)
+    } else if let Some(bin) = cleaned
+        .strip_prefix("0b")
+        .or_else(|| cleaned.strip_prefix("0B"))
+    {
+        i64::from_str_radix(bin, 2).unwrap_or(0)
+    } else {
+        cleaned.parse::<i64>().unwrap_or(0)
+    }
+}
+
 pub(crate) fn strip_string_quotes_and_unescape(text: &str) -> String {
     // Default (and historical) behavior — modern dialect, unescape
     // every standard sequence.

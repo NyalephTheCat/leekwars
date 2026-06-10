@@ -53,7 +53,32 @@ pub enum Type {
     /// `T?` — nullable wrapper. Permits `null`, but the inner type
     /// still drives coercion (`real? a = 12` stores `12.0`).
     Nullable(Box<Type>),
+    /// `A | B | …` — a value that is one of the listed types. Kept in
+    /// canonical form by [`Type::union_of`]: flattened (no nested
+    /// unions), deduplicated, at least two members, never containing
+    /// `Any`/`Null`/`Nullable` (null-ness lifts to a `Nullable`
+    /// wrapper around the union), and sorted by display name so
+    /// `integer | string` and `string | integer` compare equal.
+    Union(Vec<Type>),
+    /// **Experimental** (`LEEK_EXPERIMENTAL_TYPES`).
+    /// `Array[T0, T1, …]` — an array with per-position element types,
+    /// so `[1, true]` types as `Array[integer, boolean]`. At runtime
+    /// it is an ordinary array; the shape exists only for checking,
+    /// and a tuple is assignable wherever a plain `Array` is.
+    Tuple(Vec<Type>),
 }
+
+/// Joins wider than this collapse to `Any` — keeps inferred types
+/// readable and the checker's structural recursion cheap. Explicit
+/// annotations are *not* capped; a user who writes five variants
+/// gets five variants.
+const MAX_INFERRED_UNION: usize = 4;
+
+/// Array literals at most this long infer as tuple shapes
+/// (`Array[T0, T1, …]`) under `LEEK_EXPERIMENTAL_TYPES`; longer
+/// literals keep the homogeneous `Array<T>` inference — per-position
+/// types past a few elements are noise, not signal.
+pub(crate) const MAX_INFERRED_TUPLE: usize = 8;
 
 impl Type {
     /// Build a `Function<params… => ret>` type.
@@ -62,6 +87,51 @@ impl Type {
             params,
             ret: Box::new(ret),
         }
+    }
+
+    /// Canonicalizing union constructor. Flattens nested unions,
+    /// deduplicates members, lifts `Null`/`Nullable` members into an
+    /// outer `Nullable` wrapper, short-circuits to `Any` when any
+    /// member is `Any`, and sorts members by display name so member
+    /// order never affects equality. Zero distinct members yield
+    /// `Null` (all-null) or `Any` (empty input); a single member
+    /// yields that member unwrapped.
+    pub fn union_of(members: Vec<Type>) -> Type {
+        fn add(t: Type, flat: &mut Vec<Type>, has_null: &mut bool, has_any: &mut bool) {
+            match t {
+                Type::Any => *has_any = true,
+                Type::Null => *has_null = true,
+                Type::Nullable(inner) => {
+                    *has_null = true;
+                    add(*inner, flat, has_null, has_any);
+                }
+                Type::Union(ms) => {
+                    for m in ms {
+                        add(m, flat, has_null, has_any);
+                    }
+                }
+                other => {
+                    if !flat.contains(&other) {
+                        flat.push(other);
+                    }
+                }
+            }
+        }
+        let mut flat = Vec::new();
+        let (mut has_null, mut has_any) = (false, false);
+        for m in members {
+            add(m, &mut flat, &mut has_null, &mut has_any);
+        }
+        if has_any {
+            return Type::Any;
+        }
+        flat.sort_by_key(type_name);
+        let inner = match flat.len() {
+            0 => return if has_null { Type::Null } else { Type::Any },
+            1 => flat.pop().expect("len checked"),
+            _ => Type::Union(flat),
+        };
+        if has_null { nullable_of(&inner) } else { inner }
     }
 
     /// True if a value of `actual` can be assigned to a slot of
@@ -81,8 +151,30 @@ impl Type {
         if let Type::Nullable(inner) = actual {
             return Type::assignable_to(inner, expected);
         }
+        // A union source must fit wholly: every member assignable.
+        // Decomposed BEFORE the expected side so `A|B → A|B` checks
+        // member-by-member rather than demanding all of `A|B` fit `A`.
+        if let Type::Union(members) = actual {
+            return members.iter().all(|m| Type::assignable_to(m, expected));
+        }
+        // A union target accepts a value fitting any one member.
+        if let Type::Union(members) = expected {
+            return members.iter().any(|m| Type::assignable_to(actual, m));
+        }
         match (actual, expected) {
             (Type::Any, _) | (_, Type::Any) => true,
+            // Tuple-shaped arrays: position-wise against another tuple;
+            // member-wise against a plain `Array<T>` (a tuple *is* an
+            // array). A plain `Array` is NOT assignable to a tuple —
+            // its length and per-position types are unknown, and that
+            // strictness is the point of the shape.
+            (Type::Tuple(a), Type::Tuple(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| Type::assignable_to(x, y))
+            }
+            (Type::Tuple(ms), Type::Array(el)) => ms.iter().all(|m| Type::assignable_to(m, el)),
             // Null is universally assignable in dynamic semantics.
             (Type::Null, _) | (_, Type::Null) => true,
             // Integer ↔ Real cross is permitted (per type-system.md §5.1).
@@ -131,10 +223,12 @@ pub(crate) fn instance_type_args(ty: &Type) -> Vec<Type> {
     }
 }
 
-/// Wrap `t` as nullable, collapsing `Null`/already-nullable cases.
+/// Wrap `t` as nullable, collapsing `Null`/`Any`/already-nullable cases.
 pub(crate) fn nullable_of(t: &Type) -> Type {
     match t {
         Type::Null => Type::Null,
+        // `any` already admits null — wrapping would only add noise.
+        Type::Any => Type::Any,
         Type::Nullable(_) => t.clone(),
         _ => Type::Nullable(Box::new(t.clone())),
     }
@@ -150,9 +244,29 @@ pub(crate) fn strip_nullable(t: &Type) -> Type {
     }
 }
 
-/// Join two branch types (ternary arms, narrowed merges). Equal types
-/// collapse; `int`/`real` promote to `real`; `null` + `T` becomes `T?`;
-/// anything else widens to `any`.
+/// Collapse an *inferred* union that grew too wide back to `Any`.
+/// Applied to `unify_types` joins only — explicit annotations keep
+/// however many members the user wrote.
+fn cap_union(t: Type) -> Type {
+    let width = match &t {
+        Type::Union(ms) => ms.len(),
+        Type::Nullable(inner) => match inner.as_ref() {
+            Type::Union(ms) => ms.len(),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    if width > MAX_INFERRED_UNION {
+        Type::Any
+    } else {
+        t
+    }
+}
+
+/// Join two branch types (ternary arms, narrowed merges, container
+/// element joins). Equal types collapse; `int`/`real` promote to
+/// `real`; `null` + `T` becomes `T?`; distinct types form a bounded
+/// union (wider than [`MAX_INFERRED_UNION`] widens to `any`).
 pub(crate) fn unify_types(a: &Type, b: &Type) -> Type {
     if a == b {
         return a.clone();
@@ -162,13 +276,15 @@ pub(crate) fn unify_types(a: &Type, b: &Type) -> Type {
         (Type::Integer, Type::Real) | (Type::Real, Type::Integer) => Type::Real,
         (Type::Null, t) | (t, Type::Null) => nullable_of(t),
         (Type::Nullable(x), y) | (y, Type::Nullable(x)) => {
-            if **x == *y {
-                Type::Nullable(x.clone())
-            } else {
-                Type::Any
-            }
+            cap_union(nullable_of(&unify_types(x, y)))
         }
-        _ => Type::Any,
+        // Same-length tuple shapes join position-wise; everything
+        // else (length mismatch, tuple vs plain array) goes through
+        // the bounded-union fallback below.
+        (Type::Tuple(x), Type::Tuple(y)) if x.len() == y.len() => {
+            Type::Tuple(x.iter().zip(y).map(|(m, n)| unify_types(m, n)).collect())
+        }
+        _ => cap_union(Type::union_of(vec![a.clone(), b.clone()])),
     }
 }
 
@@ -320,7 +436,9 @@ pub(crate) fn gtype_from_node(
         .filter_map(rowan::NodeOrToken::into_token)
         .any(|t| t.kind() == SyntaxKind::Pipe);
     if has_pipe {
-        return GType::Concrete(Type::Any);
+        // Unions don't participate in generic-variable binding; resolve
+        // the whole annotation as a concrete (union) type instead.
+        return GType::Concrete(type_from_node(node));
     }
     let has_nullable = node
         .children_with_tokens()
@@ -379,29 +497,79 @@ fn gtype_from_node_primitive(
 /// accepts anything), so we never raise a false-positive on a type
 /// we don't model.
 pub fn type_from_node(node: &SyntaxNode) -> Type {
-    // Union types (`integer|real`, `real|null`) collapse to `Any`
-    // for coercion purposes — the runtime should accept any of the
-    // listed variants without conversion. Nullable annotations
-    // (`real?`) still coerce numerically (so `real? a = 12` stores
-    // `12.0`) but tolerate `null`; those are handled below in the
-    // primitive switch by mapping through a tiny helper that
-    // strips the trailing `?` token.
-    let has_pipe = node
-        .children_with_tokens()
-        .filter_map(rowan::NodeOrToken::into_token)
-        .any(|t| t.kind() == SyntaxKind::Pipe);
+    // Union types parse FLAT: `Array<integer> | string` is ONE
+    // `TypeRef` whose direct tokens are the member heads separated by
+    // `Pipe`, with each member's generic args nested as child
+    // `TypeRef`s. Split the element stream at top-level pipes and
+    // resolve each segment independently.
+    let elements: Vec<leek_syntax::SyntaxElement> = node.children_with_tokens().collect();
+    let has_pipe = elements
+        .iter()
+        .any(|el| el.as_token().is_some_and(|t| t.kind() == SyntaxKind::Pipe));
     if has_pipe {
-        return Type::Any;
+        let mut segments: Vec<Vec<leek_syntax::SyntaxElement>> = vec![Vec::new()];
+        for el in elements {
+            if el.as_token().is_some_and(|t| t.kind() == SyntaxKind::Pipe) {
+                segments.push(Vec::new());
+            } else {
+                segments.last_mut().expect("non-empty").push(el);
+            }
+        }
+        let members: Vec<Type> = segments.iter().map(|s| type_from_segment(s)).collect();
+        return Type::union_of(members);
     }
-    let has_nullable = node
-        .children_with_tokens()
-        .filter_map(rowan::NodeOrToken::into_token)
-        .any(|t| t.kind() == SyntaxKind::Question);
+    let has_nullable = elements.iter().any(|el| {
+        el.as_token()
+            .is_some_and(|t| t.kind() == SyntaxKind::Question)
+    });
     let inner = type_from_node_primitive(node);
     if has_nullable {
-        return Type::Nullable(Box::new(inner));
+        return nullable_of(&inner);
     }
     inner
+}
+
+/// Resolve one pipe-separated segment of a flat union `TypeRef`: the
+/// segment's head token names the type, nested `TypeRef` children in
+/// the segment are its generic arguments, and a trailing `?` makes
+/// the member nullable (lifted to the whole union by `union_of`).
+fn type_from_segment(seg: &[leek_syntax::SyntaxElement]) -> Type {
+    let has_nullable = seg.iter().any(|el| {
+        el.as_token()
+            .is_some_and(|t| t.kind() == SyntaxKind::Question)
+    });
+    let head = seg.iter().filter_map(|el| el.as_token()).find(|t| {
+        matches!(
+            t.kind(),
+            SyntaxKind::Ident | SyntaxKind::KwBoolean | SyntaxKind::KwVoid | SyntaxKind::KwNull
+        )
+    });
+    let Some(head) = head else {
+        return Type::Any;
+    };
+    let args: Vec<SyntaxNode> = seg
+        .iter()
+        .filter_map(|el| el.as_node())
+        .filter(|n| n.kind() == SyntaxKind::TypeRef)
+        .cloned()
+        .collect();
+    // `Array[T0, T1, …]` (experimental tuple shape): the parser keeps
+    // the square brackets as direct tokens, which is what tells the
+    // shape apart from `<…>` generic arguments.
+    let has_bracket = seg.iter().any(|el| {
+        el.as_token()
+            .is_some_and(|t| t.kind() == SyntaxKind::LBracket)
+    });
+    let inner = if has_bracket {
+        Type::Tuple(args.iter().map(type_from_node).collect())
+    } else {
+        type_from_parts(head.text(), &args)
+    };
+    if has_nullable {
+        nullable_of(&inner)
+    } else {
+        inner
+    }
 }
 
 /// Like `type_from_node` but skips the union/nullable detection.
@@ -422,8 +590,29 @@ fn type_from_node_primitive(node: &SyntaxNode) -> Type {
     let Some(head) = head else {
         return Type::Any;
     };
-    let name = head.text();
-    let has_generic = node.children().any(|n| n.kind() == SyntaxKind::TypeRef);
+    let args: Vec<SyntaxNode> = node
+        .children()
+        .filter(|n| n.kind() == SyntaxKind::TypeRef)
+        .collect();
+    // `Array[T0, T1, …]` (experimental tuple shape): the parser keeps
+    // the square brackets as direct tokens, which is what tells the
+    // shape apart from `<…>` generic arguments.
+    let has_bracket = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .any(|t| t.kind() == SyntaxKind::LBracket);
+    if has_bracket {
+        return Type::Tuple(args.iter().map(type_from_node).collect());
+    }
+    type_from_parts(head.text(), &args)
+}
+
+/// Resolve a type from its head *name* and generic-argument nodes.
+/// Shared by whole-`TypeRef` resolution and per-segment union-member
+/// resolution (where the head and args come from an element slice
+/// rather than a node).
+fn type_from_parts(name: &str, args: &[SyntaxNode]) -> Type {
+    let has_generic = !args.is_empty();
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
         "integer" | "int" => Type::Integer,
@@ -434,27 +623,17 @@ fn type_from_node_primitive(node: &SyntaxNode) -> Type {
         "void" => Type::Void,
         "any" => Type::Any,
         "array" if has_generic => {
-            let arg = node
-                .children()
-                .find(|n| n.kind() == SyntaxKind::TypeRef)
-                .map_or(Type::Any, |n| type_from_node(&n));
+            let arg = args.first().map_or(Type::Any, type_from_node);
             Type::Array(Box::new(arg))
         }
         "array" => Type::Array(Box::new(Type::Any)),
         "map" => {
-            let mut args = node
-                .children()
-                .filter(|n| n.kind() == SyntaxKind::TypeRef)
-                .map(|n| type_from_node(&n));
-            let k = args.next().unwrap_or(Type::Any);
-            let v = args.next().unwrap_or(Type::Any);
+            let k = args.first().map_or(Type::Any, type_from_node);
+            let v = args.get(1).map_or(Type::Any, type_from_node);
             Type::Map(Box::new(k), Box::new(v))
         }
         "set" => {
-            let arg = node
-                .children()
-                .find(|n| n.kind() == SyntaxKind::TypeRef)
-                .map_or(Type::Any, |n| type_from_node(&n));
+            let arg = args.first().map_or(Type::Any, type_from_node);
             Type::Set(Box::new(arg))
         }
         "object" => Type::Object,
@@ -464,10 +643,6 @@ fn type_from_node_primitive(node: &SyntaxNode) -> Type {
             // separates its head (the final param) from the return type,
             // which is nested as a `TypeRef` after the `=>`.
             // `Function< => R>` has no params.
-            let args: Vec<SyntaxNode> = node
-                .children()
-                .filter(|n| n.kind() == SyntaxKind::TypeRef)
-                .collect();
             let mut params = Vec::new();
             let mut ret_ty = Type::Any;
             if let Some((last, init)) = args.split_last() {
@@ -506,12 +681,8 @@ fn type_from_node_primitive(node: &SyntaxNode) -> Type {
             // Generic arguments (`Box<integer>`) are captured so a typed
             // binding carries them into member-access inference.
             if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                let args: Vec<Type> = node
-                    .children()
-                    .filter(|n| n.kind() == SyntaxKind::TypeRef)
-                    .map(|n| type_from_node(&n))
-                    .collect();
-                Type::ClassInstance(name.to_string(), args)
+                let targs: Vec<Type> = args.iter().map(type_from_node).collect();
+                Type::ClassInstance(name.to_string(), targs)
             } else {
                 Type::Any
             }
@@ -590,6 +761,111 @@ pub(crate) fn type_name(t: &Type) -> String {
             format!("Function<{} => {}>", ps.join(", "), type_name(ret))
         }
         Type::Interval => "Interval".into(),
-        Type::Nullable(inner) => format!("{}?", type_name(inner)),
+        Type::Nullable(inner) => match inner.as_ref() {
+            // Spell nullable unions `A | B | null` — clearer than the
+            // equally-parseable `A | B?`, where the `?` visually binds
+            // to the last member even though null-ness is union-wide.
+            Type::Union(_) => format!("{} | null", type_name(inner)),
+            _ => format!("{}?", type_name(inner)),
+        },
+        Type::Union(members) => {
+            let names: Vec<String> = members.iter().map(type_name).collect();
+            names.join(" | ")
+        }
+        Type::Tuple(members) => {
+            let names: Vec<String> = members.iter().map(type_name).collect();
+            format!("Array[{}]", names.join(", "))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn union_of_canonicalizes_order_and_dupes() {
+        let a = Type::union_of(vec![Type::String, Type::Integer, Type::String]);
+        let b = Type::union_of(vec![Type::Integer, Type::String]);
+        assert_eq!(a, b);
+        assert_eq!(type_name(&a), "integer | string");
+    }
+
+    #[test]
+    fn union_of_flattens_nested_and_lifts_null() {
+        let inner = Type::union_of(vec![Type::Integer, Type::Boolean]);
+        let t = Type::union_of(vec![inner, Type::Null, Type::String]);
+        assert_eq!(
+            t,
+            Type::Nullable(Box::new(Type::Union(vec![
+                Type::Boolean,
+                Type::Integer,
+                Type::String,
+            ])))
+        );
+        assert_eq!(type_name(&t), "boolean | integer | string | null");
+    }
+
+    #[test]
+    fn union_of_collapses_degenerate_forms() {
+        assert_eq!(Type::union_of(vec![Type::Integer]), Type::Integer);
+        assert_eq!(
+            Type::union_of(vec![Type::Integer, Type::Any]),
+            Type::Any,
+            "any absorbs the union"
+        );
+        assert_eq!(Type::union_of(vec![Type::Null, Type::Null]), Type::Null);
+        // A nullable member lifts its null-ness to the whole union —
+        // `A | B?` and `A? | B` both mean `(A | B) | null`.
+        assert_eq!(
+            Type::union_of(vec![Type::Integer, Type::Nullable(Box::new(Type::String))]),
+            Type::union_of(vec![Type::Nullable(Box::new(Type::Integer)), Type::String]),
+        );
+    }
+
+    #[test]
+    fn union_assignability_decomposes_actual_first() {
+        let int_or_str = Type::union_of(vec![Type::Integer, Type::String]);
+        // Member into union.
+        assert!(Type::assignable_to(&Type::Integer, &int_or_str));
+        assert!(!Type::assignable_to(&Type::Boolean, &int_or_str));
+        // Union into itself / into a wider union.
+        assert!(Type::assignable_to(&int_or_str, &int_or_str));
+        let wider = Type::union_of(vec![Type::Integer, Type::String, Type::Boolean]);
+        assert!(Type::assignable_to(&int_or_str, &wider));
+        assert!(!Type::assignable_to(&wider, &int_or_str));
+        // Union into a single member only if every member fits.
+        assert!(!Type::assignable_to(&int_or_str, &Type::Integer));
+    }
+
+    #[test]
+    fn unify_joins_to_bounded_union() {
+        assert_eq!(
+            unify_types(&Type::Integer, &Type::String),
+            Type::union_of(vec![Type::Integer, Type::String])
+        );
+        // int/real still promote rather than union.
+        assert_eq!(unify_types(&Type::Integer, &Type::Real), Type::Real);
+        // Joins wider than MAX_INFERRED_UNION collapse to any.
+        let mut t = Type::Integer;
+        for next in [
+            Type::String,
+            Type::Boolean,
+            Type::Object,
+            Type::Interval,
+            Type::Function,
+        ] {
+            t = unify_types(&t, &next);
+        }
+        assert_eq!(t, Type::Any);
+    }
+
+    #[test]
+    fn unify_nullable_unions_through_wrapper() {
+        let t = unify_types(&Type::Nullable(Box::new(Type::Integer)), &Type::String);
+        assert_eq!(
+            t,
+            Type::Nullable(Box::new(Type::union_of(vec![Type::Integer, Type::String])))
+        );
     }
 }

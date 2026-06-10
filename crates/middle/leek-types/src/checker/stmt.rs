@@ -123,7 +123,7 @@ impl Checker {
             .children()
             .find(|n| n.kind() == SyntaxKind::TypeRef)
         {
-            let declared = type_from_node(&type_ref);
+            let declared = self.resolve_type_node(&type_ref);
             for name in &names {
                 self.declare(name.text(), declared.clone());
             }
@@ -204,7 +204,7 @@ impl Checker {
                 );
             }
             (Some(actual), _) => {
-                if !Type::assignable_to(&actual, &expected) {
+                if !self.types_assignable(&actual, &expected) {
                     self.err(
                         codes::INCOMPATIBLE_TYPE,
                         span,

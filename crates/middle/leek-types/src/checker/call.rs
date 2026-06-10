@@ -142,7 +142,7 @@ impl Checker {
             return result;
         };
         for (i, (actual_ty, span)) in arg_types.iter().zip(arg_spans.iter()).enumerate() {
-            let Some(allowed) = sig.params.get(i) else {
+            let Some(&allowed) = sig.params.get(i) else {
                 break;
             };
             if !type_in_set(actual_ty, allowed) {

@@ -196,6 +196,7 @@ fn leekwars_header_arities() -> Vec<(String, u8, u8)> {
         ParseFeatures {
             function_signatures: true,
             generics: true,
+            ..Default::default()
         },
     );
     let Some(file) = SourceFile::cast(SyntaxNode::new_root(parsed.green)) else {

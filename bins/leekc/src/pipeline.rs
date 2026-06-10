@@ -3,14 +3,14 @@
 use anyhow::Result;
 use leek_diagnostics::Code;
 use leek_fmt::FormatOptions;
-use leek_pipeline::Pipeline;
+use leek_pipeline::{LintGroups, Pipeline};
 use leek_recipes::{self, Target};
 
 use crate::cli::Emit;
 
 /// Pick the shortest pipeline that produces the artifact `emit` needs.
-pub fn pipeline_for(emit: Emit, fmt_opts: FormatOptions) -> Pipeline {
-    let params = leek_recipes::driver_params();
+pub fn pipeline_for(emit: Emit, fmt_opts: FormatOptions, lints: LintGroups) -> Pipeline {
+    let params = leek_recipes::driver_params().with_lints(lints);
     match emit {
         Emit::Check | Emit::Hir | Emit::Java | Emit::Run | Emit::Native => {
             leek_recipes::pipeline(Target::Linted, &params).expect("recipe")

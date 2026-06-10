@@ -849,10 +849,16 @@ fn compile_error_outcome(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
         && let Some(hir) = ctx.hir.as_deref()
     {
         // The native JIT surfaces a runtime error (e.g. ARRAY_OUT_OF_BOUND,
-        // TOO_MUCH_OPERATIONS) as `Err(NativeError::Runtime(..))`.
+        // TOO_MUCH_OPERATIONS) as `Err(NativeError::Runtime(..))`. The budget
+        // matches `native_error_outcome`: it must stay *small*, because a
+        // terminating program (e.g. `rec(10000)` under upstream `max_ops(1000)`)
+        // has to trip the budget before it completes — op-charge coalescing
+        // made a 200k budget too generous for exactly that case. Any runtime
+        // error counts here, so tightening the budget can only turn "ran to
+        // completion" into a trip, never break a passing case.
         let mut opts =
             leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
-        opts.op_limit = 200_000;
+        opts.op_limit = 10_000;
         opts.emit = leek_backend_native::NativeEmit::Jit;
         if matches!(
             leek_backend_native::compile(hir, &opts),

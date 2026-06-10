@@ -79,6 +79,34 @@ pub(crate) struct Checker {
     /// class declares a `TypeParamList`. Drives member-access inference
     /// against a bound instance type (`Box<integer>` → `value: integer`).
     pub(crate) generic_classes: HashMap<String, GenericClassInfo>,
+    /// Experimental (`LEEK_EXPERIMENTAL_TYPES`): `type Name = T`
+    /// aliases, collected in a file-wide pre-pass. Alias names follow
+    /// the class-name convention (uppercase initial) so a reference
+    /// resolves as `ClassInstance(Name, [])` and [`Checker::
+    /// substitute_aliases`] can swap the body in.
+    pub(crate) type_aliases: HashMap<String, Type>,
+    /// Experimental (`LEEK_EXPERIMENTAL_INTERFACES`): `interface Name
+    /// { … }` declarations, collected in a file-wide pre-pass. An
+    /// interface name in an annotation resolves as `ClassInstance(Name,
+    /// [])` (uppercase fallback); [`Checker::types_assignable`] treats
+    /// instances of implementing classes as assignable to it.
+    pub(crate) interfaces: HashMap<String, InterfaceInfo>,
+    /// Experimental: `class C implements I, J` → `C` ⇒ `[I, J]`.
+    /// Checked against [`interfaces`](Self::interfaces) and consulted
+    /// (through the `extends` chain) by interface assignability.
+    pub(crate) class_implements: HashMap<String, Vec<String>>,
+}
+
+/// Declared members of an experimental `interface Name { … }` — what an
+/// implementing class must provide. Member entries carry the declared
+/// type (fields) or return type (methods); presence on the class (or an
+/// ancestor) is what's verified.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct InterfaceInfo {
+    /// Field name → declared type.
+    pub fields: HashMap<String, Type>,
+    /// Method name → declared return type.
+    pub methods: HashMap<String, Type>,
 }
 
 /// Collected generic metadata for a `class C<T, …>`. Member types are
@@ -124,7 +152,108 @@ impl Checker {
             class_field_types: HashMap::new(),
             class_method_returns: HashMap::new(),
             generic_classes: HashMap::new(),
+            type_aliases: HashMap::new(),
+            interfaces: HashMap::new(),
+            class_implements: HashMap::new(),
         }
+    }
+
+    /// Resolve a `TypeRef` node with experimental `type` aliases
+    /// applied. Checker call sites use this instead of bare
+    /// [`type_from_node`](crate::ty::type_from_node) so annotations
+    /// can reference declared aliases.
+    pub(crate) fn resolve_type_node(&self, node: &leek_syntax::SyntaxNode) -> Type {
+        self.substitute_aliases(crate::ty::type_from_node(node))
+    }
+
+    /// Replace experimental alias references in a resolved type with
+    /// their bodies. Alias names resolve as argument-less unknown
+    /// `ClassInstance`s (uppercase initial), so the swap is a
+    /// recursive rewrite of those nodes; everything else passes
+    /// through structurally.
+    pub(crate) fn substitute_aliases(&self, t: Type) -> Type {
+        if self.type_aliases.is_empty() {
+            return t;
+        }
+        self.subst_alias_rec(&t)
+    }
+
+    fn subst_alias_rec(&self, t: &Type) -> Type {
+        use crate::ty::nullable_of;
+        match t {
+            Type::ClassInstance(name, args) if args.is_empty() => self
+                .type_aliases
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| t.clone()),
+            Type::Array(el) => Type::Array(Box::new(self.subst_alias_rec(el))),
+            Type::Set(el) => Type::Set(Box::new(self.subst_alias_rec(el))),
+            Type::Map(k, v) => Type::Map(
+                Box::new(self.subst_alias_rec(k)),
+                Box::new(self.subst_alias_rec(v)),
+            ),
+            // Re-wrap through the canonicalizing constructors: an
+            // alias body may itself be nullable or a union, and the
+            // result must stay in canonical form (flattened, null
+            // lifted outward).
+            Type::Nullable(inner) => nullable_of(&self.subst_alias_rec(inner)),
+            Type::Union(ms) => Type::union_of(ms.iter().map(|m| self.subst_alias_rec(m)).collect()),
+            Type::Tuple(ms) => Type::Tuple(ms.iter().map(|m| self.subst_alias_rec(m)).collect()),
+            Type::FunctionWithReturn { params, ret } => Type::FunctionWithReturn {
+                params: params.iter().map(|p| self.subst_alias_rec(p)).collect(),
+                ret: Box::new(self.subst_alias_rec(ret)),
+            },
+            _ => t.clone(),
+        }
+    }
+
+    /// Interface-aware assignability: [`Type::assignable_to`], plus —
+    /// when experimental interfaces are collected — an instance of a
+    /// class is assignable to an interface it (or an ancestor)
+    /// `implements`. Checker diagnostics sites use this instead of bare
+    /// `assignable_to` so interface-typed slots accept implementors.
+    pub(crate) fn types_assignable(&self, actual: &Type, expected: &Type) -> bool {
+        Type::assignable_to(actual, expected) || self.interface_accepts(actual, expected)
+    }
+
+    /// Whether `expected` is (modulo nullability) a declared interface
+    /// that `actual`'s class implements. Unions recurse through
+    /// [`Self::types_assignable`] so a member can satisfy the slot
+    /// either nominally or via an interface.
+    fn interface_accepts(&self, actual: &Type, expected: &Type) -> bool {
+        if self.interfaces.is_empty() {
+            return false;
+        }
+        match (actual, expected) {
+            // Pairwise nullability: a nullable actual only fits a
+            // nullable expected; a plain actual fits either.
+            (Type::Nullable(a), Type::Nullable(e)) => self.interface_accepts(a, e),
+            // (a nullable actual against a plain expected falls through
+            // to the catch-all below and is rejected.)
+            (a, Type::Nullable(e)) => self.interface_accepts(a, e),
+            // Every member of a union actual must fit; any member of a
+            // union expected may accept.
+            (Type::Union(ms), e) => ms.iter().all(|m| self.types_assignable(m, e)),
+            (a, Type::Union(ms)) => ms.iter().any(|m| self.types_assignable(a, m)),
+            (Type::ClassInstance(class, _), Type::ClassInstance(iface, eargs)) => {
+                eargs.is_empty()
+                    && self.interfaces.contains_key(iface)
+                    && self.class_implements_iface(class, iface)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `class` (or an ancestor on its `extends` chain) declares
+    /// `implements iface`.
+    pub(crate) fn class_implements_iface(&self, class: &str, iface: &str) -> bool {
+        self.walk_chain(class, |c| {
+            self.class_implements
+                .get(c)
+                .is_some_and(|list| list.iter().any(|i| i == iface))
+                .then_some(())
+        })
+        .is_some()
     }
 
     /// The class `this` refers to at the current walk position, if any.

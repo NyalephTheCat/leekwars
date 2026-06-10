@@ -63,7 +63,7 @@ impl Checker {
                     .syntax()
                     .children()
                     .find(|n| n.kind() == SyntaxKind::TypeRef)
-                    .map(|n| type_from_node(&n));
+                    .map(|n| self.resolve_type_node(&n));
                 if let (Some(name), Some(ty)) = (name, ty) {
                     return (vec![(name, ty)], Vec::new());
                 }

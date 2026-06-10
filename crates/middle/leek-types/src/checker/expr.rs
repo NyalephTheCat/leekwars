@@ -64,11 +64,22 @@ impl Checker {
             }
             Expr::Paren(p) => p.inner().map_or(Type::Any, |i| self.infer_expr(&i)),
             Expr::Array(a) => {
+                let elems: Vec<Type> = a.elements().map(|el| self.infer_expr(&el)).collect();
+                // Experimental tuple shapes: a literal's per-position
+                // types are exactly known, so model short literals as
+                // `Array[T0, T1, …]` — assignable position-wise to a
+                // tuple annotation and member-wise to plain `Array<T>`
+                // slots (`Type::assignable_to`).
+                if self.opts.experimental_types
+                    && !elems.is_empty()
+                    && elems.len() <= MAX_INFERRED_TUPLE
+                {
+                    return Type::Tuple(elems);
+                }
                 // Infer a homogeneous element type so `[1, 2, 3][0]`
                 // types as `integer`; mixed elements widen to `any`.
                 let mut elem: Option<Type> = None;
-                for el in a.elements() {
-                    let t = self.infer_expr(&el);
+                for t in elems {
                     elem = Some(match elem {
                         Some(prev) => unify_types(&prev, &t),
                         None => t,
@@ -175,6 +186,20 @@ impl Checker {
         }
         match base_ty {
             Type::Array(el) => *el,
+            // Tuple shape: a constant index picks that position's
+            // exact type; a dynamic index joins all member types.
+            Type::Tuple(members) => match index_literal_int(idx) {
+                Some(i) => members.get(i).cloned().unwrap_or(Type::Any),
+                None => members
+                    .iter()
+                    .fold(None, |acc: Option<Type>, m| {
+                        Some(match acc {
+                            Some(prev) => unify_types(&prev, m),
+                            None => m.clone(),
+                        })
+                    })
+                    .unwrap_or(Type::Any),
+            },
             Type::Map(_, v) => *v,
             Type::String => Type::String,
             _ => Type::Any,
@@ -305,7 +330,7 @@ impl Checker {
                 let t = p
                     .children()
                     .find(|n| n.kind() == SyntaxKind::TypeRef)
-                    .map_or(Type::Any, |n| type_from_node(&n));
+                    .map_or(Type::Any, |n| self.resolve_type_node(&n));
                 params.push(t);
             }
         }
@@ -322,7 +347,9 @@ impl Checker {
         self.pop_scope();
         // Explicit `=> R` annotation wins; otherwise fall back to the
         // arrow-body type.
-        let ret = fn_return_type(l.syntax()).or(body_ret);
+        let ret = fn_return_type(l.syntax())
+            .map(|t| self.substitute_aliases(t))
+            .or(body_ret);
         match ret {
             Some(r) => Type::function_with(params, r),
             None if params.iter().all(|t| matches!(t, Type::Any)) => Type::Function,
@@ -366,6 +393,20 @@ impl Checker {
         };
         Type::ClassInstance(class, args)
     }
+}
+
+/// The index expression as a constant non-negative integer literal,
+/// when it is one (`t[1]` — not `t[i]` or `t[1 + 0]`). Used to pick
+/// the exact member type out of a tuple shape.
+fn index_literal_int(idx: &leek_parser::ast::IndexExpr) -> Option<usize> {
+    let Some(Expr::Literal(lit)) = idx.index() else {
+        return None;
+    };
+    let tok = lit.token()?;
+    if tok.kind() != SyntaxKind::IntLiteral {
+        return None;
+    }
+    tok.text().parse().ok()
 }
 
 /// When a `NameRef` is a bare self-keyword (`this` / `super`), return

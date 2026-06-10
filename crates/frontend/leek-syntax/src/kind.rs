@@ -257,6 +257,36 @@ pub enum SyntaxKind {
     // Type system
     /// A complete type expression: atom plus optional `?` / `|` chain.
     TypeRef,
+    /// Experimental `type Name = T` alias declaration (behind
+    /// `LEEK_EXPERIMENTAL_TYPES`). Holds the alias-name `Ident` and a
+    /// [`TypeRef`] body; invisible to HIR lowering, so codegen and
+    /// runtime behavior are unaffected.
+    TypeAliasDecl,
+    /// Experimental `interface Name { … }` declaration (behind
+    /// `LEEK_EXPERIMENTAL_INTERFACES`). Holds the interface-name
+    /// `Ident` and [`InterfaceMember`] children; invisible to HIR
+    /// lowering like [`TypeAliasDecl`], so runtime behavior is
+    /// unaffected.
+    InterfaceDecl,
+    /// One interface member: a typed field (`integer hp`) or a
+    /// bodiless method signature (`real area()`). A member with a
+    /// `ParamList` child is a method; without one, a field.
+    InterfaceMember,
+    /// Experimental `implements I1, I2` clause inside a `class`
+    /// header (behind `LEEK_EXPERIMENTAL_INTERFACES`). Wrapping the
+    /// interface names in a node keeps the class's own name/parent
+    /// token scans unaffected.
+    ImplementsClause,
+    /// Experimental `enum Name { A, B = 10 }` declaration (behind
+    /// `LEEK_EXPERIMENTAL_ENUMS`). Holds the enum-name `Ident` and
+    /// [`EnumMember`] children. Unlike [`TypeAliasDecl`] /
+    /// [`InterfaceDecl`] it is NOT invisible to HIR: lowering turns it
+    /// into a class with static final integer fields.
+    EnumDecl,
+    /// One enum variant: an `Ident`, optionally followed by
+    /// `= (-)? IntLiteral` for an explicit value. Without one the
+    /// value auto-increments from the previous variant (from 0).
+    EnumMember,
 
     /// Error-recovery container — holds the tokens we skipped over.
     ErrorNode,

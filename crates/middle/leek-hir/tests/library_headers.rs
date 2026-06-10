@@ -16,6 +16,7 @@ fn check(src: &str, min_fns: usize) {
         ParseFeatures {
             function_signatures: true,
             generics: true,
+            ..Default::default()
         },
     );
     let parse_errs: Vec<_> = parsed
