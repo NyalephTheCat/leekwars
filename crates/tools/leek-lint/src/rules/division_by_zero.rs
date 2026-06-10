@@ -3,35 +3,32 @@
 //! or a non-finite value), so it's almost always a mistake.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{BinaryOp, Expr, ExprKind, HirFile, Literal};
+use leek_hir::{BinaryOp, Expr, ExprKind, Literal};
 
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct DivisionByZero;
 
-impl LintRule for DivisionByZero {
-    fn name(&self) -> &'static str {
-        "division-by-zero"
+static META: LintMeta = LintMeta {
+    name: "division-by-zero",
+    code: codes::DIVISION_BY_ZERO,
+    group: LintGroup::Correctness,
+    description: "division or modulo by a literal zero — faults at runtime",
+};
+
+impl LintPass for DivisionByZero {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::DIVISION_BY_ZERO
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Binary(op, _, rhs) = &e.kind
-                        && is_division(*op)
-                        && is_zero(rhs)
-                    {
-                        out.push(diagnostic(*op, e.span));
-                    }
-                });
-            }
-        });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Binary(op, _, rhs) = &e.kind
+            && is_division(*op)
+            && is_zero(rhs)
+        {
+            cx.emit(diagnostic(*op, e.span));
+        }
     }
 }
 
@@ -60,19 +57,10 @@ fn diagnostic(op: BinaryOp, span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        DivisionByZero.check(&hir, &mut out);
-        out
+        lint_one(DivisionByZero, src)
     }
 
     #[test]

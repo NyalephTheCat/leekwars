@@ -78,7 +78,7 @@ impl AllowMap {
 }
 
 /// Map a diagnostic code id (`"L0014"`) to its lint rule's name
-/// (`"identical-operands"`), built once from [`crate::default_rules`].
+/// (`"identical-operands"`), built once from [`crate::all_passes`].
 /// Returns `None` for non-lint codes (parse/type errors, which have no
 /// rule name).
 fn code_to_rule_name(id: &str) -> Option<&'static str> {
@@ -86,9 +86,12 @@ fn code_to_rule_name(id: &str) -> Option<&'static str> {
     use std::sync::OnceLock;
     static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     let map = MAP.get_or_init(|| {
-        crate::default_rules()
+        crate::all_passes(&crate::LintOptions::default())
             .iter()
-            .map(|r| (r.code().id(), r.name()))
+            .map(|p| {
+                let m = p.meta();
+                (m.code.id(), m.name)
+            })
             .collect()
     });
     map.get(id).copied()

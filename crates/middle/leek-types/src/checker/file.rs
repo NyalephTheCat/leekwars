@@ -52,6 +52,7 @@ fn cached_prelude_parse(tag: u8, version: Version, src: &str) -> GreenNode {
         ParseFeatures {
             function_signatures: true,
             generics: true,
+            ..Default::default()
         },
     );
     PRELUDE_PARSE_CACHE
@@ -131,6 +132,25 @@ impl Checker {
     }
 
     pub(crate) fn check_file(&mut self, file: &SourceFile) {
+        // Experimental `type Name = T` aliases: collected before any
+        // signature pass so every annotation in the file (including
+        // ones textually above the alias) can reference them.
+        if self.opts.experimental_types {
+            self.collect_type_aliases(file);
+        }
+        // Experimental `interface Name { … }` declarations: also a
+        // file-wide pre-pass (after aliases, so interface member
+        // annotations can reference them) so `implements` clauses and
+        // interface-typed annotations work in any declaration order.
+        if self.opts.experimental_interfaces {
+            self.collect_interfaces(file);
+        }
+        // Experimental `enum Name { … }` declarations: another
+        // file-wide pre-pass. Variants register as integer-typed
+        // statics and the enum name becomes an `integer` alias.
+        if self.opts.experimental_enums {
+            self.collect_enums(file);
+        }
         // Pre-pass: collect every top-level function's param/return
         // types so call-site checks for Function<X => Y>-typed
         // parameters (IMPOSSIBLE_CAST detection) can resolve them.
@@ -154,6 +174,14 @@ impl Checker {
                         }
                         self.collect_class_members(&cls, &name);
                         self.collect_generic_class(&cls, &name);
+                        if self.opts.experimental_interfaces {
+                            let ifaces: Vec<String> = implements_idents(cls.syntax())
+                                .map(|t| t.text().to_string())
+                                .collect();
+                            if !ifaces.is_empty() {
+                                self.class_implements.insert(name.clone(), ifaces);
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -180,6 +208,213 @@ impl Checker {
         }
     }
 
+    /// Pre-pass for the experimental `type Name = T` alias
+    /// declarations (anywhere in the file — aliases are file-scoped).
+    /// Each body is resolved immediately with previously collected
+    /// aliases substituted, so chains (`type B = A | string`) work in
+    /// declaration order. A self/forward reference stays an unknown
+    /// `ClassInstance` and resolves to nothing — conservative, no
+    /// false positives.
+    pub(crate) fn collect_type_aliases(&mut self, file: &SourceFile) {
+        let decls: Vec<SyntaxNode> = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::TypeAliasDecl)
+            .collect();
+        for node in decls {
+            // Shape: `type` (contextual Ident) · name Ident · `=` · TypeRef.
+            let Some(name) = node
+                .children_with_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .filter(|t| t.kind() == SyntaxKind::Ident)
+                .nth(1)
+            else {
+                continue;
+            };
+            // Alias names follow the class-name convention: an
+            // uppercase initial is what makes a reference resolve as
+            // a `ClassInstance` for substitution; a lowercase alias
+            // would silently resolve to `any`, so reject it loudly.
+            if !name
+                .text()
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
+                let span = self.span_of(&name);
+                self.warn(
+                    codes::TYPE_ALIAS_NOT_CAPITALIZED,
+                    span,
+                    format!(
+                        "type alias `{}` is ignored — alias names must start \
+                         with an uppercase letter (like class names)",
+                        name.text()
+                    ),
+                );
+                continue;
+            }
+            let body = node
+                .children()
+                .find(|n| n.kind() == SyntaxKind::TypeRef)
+                .map_or(Type::Any, |n| type_from_node(&n));
+            let body = self.substitute_aliases(body);
+            self.type_aliases.insert(name.text().to_string(), body);
+        }
+    }
+
+    /// Pre-pass for the experimental `interface Name { … }`
+    /// declarations (file-scoped, like aliases). Each member is a
+    /// `TypeRef` + name `Ident` (+ `ParamList` for a method); the
+    /// member's declared type resolves with aliases applied.
+    pub(crate) fn collect_interfaces(&mut self, file: &SourceFile) {
+        let decls: Vec<SyntaxNode> = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::InterfaceDecl)
+            .collect();
+        for node in decls {
+            // Shape: `interface` (KwInterface) · name Ident · `{` ·
+            // members · `}` — the name is the first Ident token.
+            let Some(name) = node
+                .children_with_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .find(|t| t.kind() == SyntaxKind::Ident)
+            else {
+                continue;
+            };
+            let mut info = super::InterfaceInfo::default();
+            for member in node
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::InterfaceMember)
+            {
+                let Some(member_name) = member
+                    .children_with_tokens()
+                    .filter_map(NodeOrToken::into_token)
+                    .find(|t| t.kind() == SyntaxKind::Ident)
+                else {
+                    continue;
+                };
+                let ty = member
+                    .children()
+                    .find(|n| n.kind() == SyntaxKind::TypeRef)
+                    .map_or(Type::Any, |n| self.resolve_type_node(&n));
+                let is_method = member.children().any(|n| n.kind() == SyntaxKind::ParamList);
+                let slot = if is_method {
+                    &mut info.methods
+                } else {
+                    &mut info.fields
+                };
+                slot.insert(member_name.text().to_string(), ty);
+            }
+            self.interfaces.insert(name.text().to_string(), info);
+        }
+    }
+
+    /// Pre-pass for the experimental `enum Name { A, B = 10 }`
+    /// declarations (file-scoped, like aliases/interfaces). HIR
+    /// desugars an enum to a class with static final integer fields,
+    /// and the checker mirrors that shape: every variant registers as
+    /// an integer-typed field of `Name` (so `Name.VARIANT` infers
+    /// `integer`) and `Name` itself becomes an alias for `integer` so
+    /// annotations accept variant values. A repeated variant name is
+    /// [`DuplicateEnumVariant`](codes::DUPLICATE_ENUM_VARIANT).
+    pub(crate) fn collect_enums(&mut self, file: &SourceFile) {
+        let decls: Vec<SyntaxNode> = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::EnumDecl)
+            .collect();
+        for node in decls {
+            // Shape: `enum` (KwEnum) · name Ident · `{` · EnumMember* ·
+            // `}` — the name is the only direct Ident token; variant
+            // idents live inside `EnumMember` children.
+            let Some(name) = node
+                .children_with_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .find(|t| t.kind() == SyntaxKind::Ident)
+            else {
+                continue;
+            };
+            let mut variants: HashMap<String, Type> = HashMap::new();
+            for member in node
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::EnumMember)
+            {
+                let Some(variant) = member
+                    .children_with_tokens()
+                    .filter_map(NodeOrToken::into_token)
+                    .find(|t| t.kind() == SyntaxKind::Ident)
+                else {
+                    continue;
+                };
+                if variants
+                    .insert(variant.text().to_string(), Type::Integer)
+                    .is_some()
+                {
+                    let span = self.span_of(&variant);
+                    self.err(
+                        codes::DUPLICATE_ENUM_VARIANT,
+                        span,
+                        format!(
+                            "duplicate variant `{}` in enum `{}`",
+                            variant.text(),
+                            name.text()
+                        ),
+                    );
+                }
+            }
+            self.class_field_types
+                .insert(name.text().to_string(), variants);
+            self.type_aliases
+                .insert(name.text().to_string(), Type::Integer);
+        }
+    }
+
+    /// Verify a class's `implements` clause: every named interface must
+    /// be declared (else [`UnknownInterface`](codes::UNKNOWN_INTERFACE),
+    /// a warning — it may live in another file we can't see), and the
+    /// class or an ancestor must provide each declared member (else
+    /// [`InterfaceMemberMissing`](codes::INTERFACE_MEMBER_MISSING)).
+    /// Diagnostics attach to the interface-name token in the clause.
+    fn check_implements(&mut self, decl: &ClassDecl, class: &str) {
+        for token in implements_idents(decl.syntax()) {
+            let iface = token.text().to_string();
+            let Some(info) = self.interfaces.get(&iface) else {
+                let span = self.span_of(&token);
+                self.warn(
+                    codes::UNKNOWN_INTERFACE,
+                    span,
+                    format!("unknown interface `{iface}`"),
+                );
+                continue;
+            };
+            let mut missing: Vec<String> = info
+                .fields
+                .keys()
+                .filter(|f| self.lookup_field_type(class, f).is_none())
+                .map(|f| format!("field `{f}`"))
+                .chain(
+                    info.methods
+                        .keys()
+                        .filter(|m| self.lookup_method_return(class, m).is_none())
+                        .map(|m| format!("method `{m}()`")),
+                )
+                .collect();
+            missing.sort();
+            if !missing.is_empty() {
+                let span = self.span_of(&token);
+                self.err(
+                    codes::INTERFACE_MEMBER_MISSING,
+                    span,
+                    format!(
+                        "class `{class}` implements `{iface}` but is missing {}",
+                        missing.join(", "),
+                    ),
+                );
+            }
+        }
+    }
+
     pub(crate) fn collect_fn_signature(&mut self, decl: &FnDecl) {
         let Some(name) = decl
             .syntax()
@@ -202,22 +437,25 @@ impl Checker {
                 let ty = p
                     .children()
                     .find(|n| n.kind() == SyntaxKind::TypeRef)
-                    .map_or(Type::Any, |n| type_from_node(&n));
+                    .map_or(Type::Any, |n| self.resolve_type_node(&n));
                 param_types.push(ty);
             }
         }
-        let ret = fn_return_type(decl.syntax()).unwrap_or_else(|| {
-            // No `=> T` annotation. Inferring "does this body
-            // return anything?" precisely needs a flow walk; for
-            // the IMPOSSIBLE_CAST case we only need to know that a
-            // body *with no return statement* yields null. Anything
-            // else falls back to Any so we don't false-fire.
-            if has_return_stmt(decl.syntax()) {
-                Type::Any
-            } else {
-                Type::Null
-            }
-        });
+        let ret = fn_return_type(decl.syntax()).map_or_else(
+            || {
+                // No `=> T` annotation. Inferring "does this body
+                // return anything?" precisely needs a flow walk; for
+                // the IMPOSSIBLE_CAST case we only need to know that a
+                // body *with no return statement* yields null. Anything
+                // else falls back to Any so we don't false-fire.
+                if has_return_stmt(decl.syntax()) {
+                    Type::Any
+                } else {
+                    Type::Null
+                }
+            },
+            |t| self.substitute_aliases(t),
+        );
         // Experimental: a generic function (`f<T>(…) -> T`) also records
         // a GenericSig so call sites resolve `T` against concrete args.
         let typarams = crate::ty::collect_type_params(decl.syntax());
@@ -265,7 +503,7 @@ impl Checker {
     pub(crate) fn check_fn_body(&mut self, decl: &FnDecl) {
         self.push_function();
         self.declare_params_as_any(decl.syntax());
-        let ret_ty = fn_return_type(decl.syntax());
+        let ret_ty = fn_return_type(decl.syntax()).map(|t| self.substitute_aliases(t));
         self.return_types.push(ret_ty);
         if let Some(body) = decl.syntax().children().find_map(Block::cast) {
             self.check_block(&body);
@@ -293,7 +531,7 @@ impl Checker {
                     let ty = member
                         .children()
                         .find(|n| n.kind() == SyntaxKind::TypeRef)
-                        .map_or(Type::Any, |n| type_from_node(&n));
+                        .map_or(Type::Any, |n| self.resolve_type_node(&n));
                     if let Some(name) = name {
                         fields.insert(name, ty);
                     }
@@ -306,8 +544,8 @@ impl Checker {
                     let ret = member
                         .children()
                         .find(|n| n.kind() == SyntaxKind::TypeRef)
-                        .map(|n| type_from_node(&n))
-                        .or_else(|| fn_return_type(&member));
+                        .map(|n| self.resolve_type_node(&n))
+                        .or_else(|| fn_return_type(&member).map(|t| self.substitute_aliases(t)));
                     if let Some(name) = name {
                         methods.insert(name, ret.unwrap_or(Type::Any));
                     }
@@ -490,6 +728,11 @@ impl Checker {
         // Make `this` resolve to this class while we walk its members.
         let class_name = class_name_and_parent(decl).0;
         if let Some(name) = class_name.clone() {
+            if self.opts.experimental_interfaces {
+                // Verified here (not the pre-pass) so member lookups see
+                // every class in the file, including ones declared later.
+                self.check_implements(decl, &name);
+            }
             self.class_stack.push(name);
         }
         for member in body.children() {
@@ -500,7 +743,7 @@ impl Checker {
             }
             self.push_function();
             self.declare_params_as_any(&member);
-            let ret_ty = fn_return_type(&member);
+            let ret_ty = fn_return_type(&member).map(|t| self.substitute_aliases(t));
             self.return_types.push(ret_ty);
             if let Some(body) = member.children().find_map(Block::cast) {
                 self.check_block(&body);
@@ -530,7 +773,7 @@ impl Checker {
             let ty = p
                 .children()
                 .find(|n| n.kind() == SyntaxKind::TypeRef)
-                .map_or(Type::Any, |n| type_from_node(&n));
+                .map_or(Type::Any, |n| self.resolve_type_node(&n));
             if let Some(ident) = p
                 .children_with_tokens()
                 .filter_map(rowan::NodeOrToken::into_token)
@@ -548,6 +791,22 @@ impl Checker {
         }
         self.pop_scope();
     }
+}
+
+/// The interface-name tokens of a class's `implements` clause, if any
+/// (the `implements` keyword itself is `KwImplements`, so every
+/// `Ident` in the clause is a name).
+fn implements_idents(class: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
+    class
+        .children()
+        .find(|n| n.kind() == SyntaxKind::ImplementsClause)
+        .into_iter()
+        .flat_map(|clause| {
+            clause
+                .children_with_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .filter(|t| t.kind() == SyntaxKind::Ident)
+        })
 }
 
 /// The declared name of a class member — the first `Ident` token child

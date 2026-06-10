@@ -17,57 +17,53 @@
 //!   actually meant it.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, Expr, ExprKind, HirFile, Literal, Stmt};
+use leek_hir::{Expr, ExprKind, Literal, Stmt};
 use leek_span::Span;
 
-use super::for_each_block;
-use crate::LintRule;
+use super::for_each_stmt;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct ConstantCondition;
 
-impl LintRule for ConstantCondition {
-    fn name(&self) -> &'static str {
-        "constant-condition"
+static META: LintMeta = LintMeta {
+    name: "constant-condition",
+    code: codes::CONSTANT_CONDITION,
+    group: LintGroup::Suspicious,
+    description: "`if`/`while` condition is a compile-time constant — the branch is unconditional",
+};
+
+impl LintPass for ConstantCondition {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::CONSTANT_CONDITION
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block: &Block| {
-            for stmt in &block.stmts {
-                check_stmt(stmt, out);
-            }
-        });
-    }
-}
-
-fn check_stmt(s: &Stmt, out: &mut Vec<Diagnostic>) {
-    match s {
-        Stmt::If(i) => {
-            if let Some(verdict) = constant_truthiness(&i.cond) {
-                out.push(diagnostic(i.cond.span, "if", verdict));
-            }
-        }
-        Stmt::While(w) => {
-            if let Some(verdict) = constant_truthiness(&w.cond) {
-                if verdict && body_breaks_or_returns(&w.body) {
-                    // Idiomatic `while (true) { … break }`.
-                    return;
+    fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
+        match s {
+            Stmt::If(i) => {
+                if let Some(verdict) = constant_truthiness(&i.cond) {
+                    cx.emit(diagnostic(i.cond.span, "if", verdict));
                 }
-                out.push(diagnostic(w.cond.span, "while", verdict));
             }
-        }
-        Stmt::DoWhile(d) => {
-            if let Some(verdict) = constant_truthiness(&d.cond) {
-                if verdict && body_breaks_or_returns(&d.body) {
-                    return;
+            Stmt::While(w) => {
+                if let Some(verdict) = constant_truthiness(&w.cond) {
+                    if verdict && body_breaks_or_returns(&w.body) {
+                        // Idiomatic `while (true) { … break }`.
+                        return;
+                    }
+                    cx.emit(diagnostic(w.cond.span, "while", verdict));
                 }
-                out.push(diagnostic(d.cond.span, "do-while", verdict));
             }
+            Stmt::DoWhile(d) => {
+                if let Some(verdict) = constant_truthiness(&d.cond) {
+                    if verdict && body_breaks_or_returns(&d.body) {
+                        return;
+                    }
+                    cx.emit(diagnostic(d.cond.span, "do-while", verdict));
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -90,25 +86,17 @@ fn constant_truthiness(e: &Expr) -> Option<bool> {
     }
 }
 
-/// Heuristic: does the loop body contain a top-level `break`,
-/// `return`, or any nested terminator that would make `while (true)`
-/// the canonical idiom rather than a mistake? Walks one level into
-/// blocks / if / nested loops; doesn't follow lambdas.
+/// Heuristic: does the loop body contain a `break` or `return`
+/// anywhere, making `while (true)` the canonical idiom rather than
+/// a mistake? Doesn't follow lambdas.
 fn body_breaks_or_returns(body: &Stmt) -> bool {
-    fn walk(s: &Stmt) -> bool {
-        match s {
-            Stmt::Break(_) | Stmt::Return(_) => true,
-            Stmt::Block(b) => b.stmts.iter().any(walk),
-            Stmt::If(i) => walk(&i.then_branch) || i.else_branch.as_deref().is_some_and(walk),
-            Stmt::While(w) => walk(&w.body),
-            Stmt::DoWhile(d) => walk(&d.body),
-            Stmt::For(fr) => walk(&fr.body),
-            Stmt::Foreach(fe) => walk(&fe.body),
-            Stmt::Switch(sw) => sw.arms.iter().any(|a| a.body.iter().any(walk)),
-            _ => false,
+    let mut found = false;
+    for_each_stmt(std::slice::from_ref(body), &mut |s| {
+        if matches!(s, Stmt::Break(_) | Stmt::Return(_)) {
+            found = true;
         }
-    }
-    walk(body)
+    });
+    found
 }
 
 fn diagnostic(span: Span, kind: &str, value: bool) -> Diagnostic {
@@ -123,20 +111,10 @@ fn diagnostic(span: Span, kind: &str, value: bool) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let root = SyntaxNode::new_root(parsed.green);
-        let ast = SourceFile::cast(root).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        ConstantCondition.check(&hir, &mut out);
-        out
+        lint_one(ConstantCondition, src)
     }
 
     #[test]

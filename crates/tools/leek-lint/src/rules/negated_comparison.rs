@@ -2,35 +2,32 @@
 //! more clearly as the negated comparison (`a != b`). A readability hint.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{BinaryOp, ExprKind, HirFile, UnaryOp};
+use leek_hir::{BinaryOp, Expr, ExprKind, UnaryOp};
 
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct NegatedComparison;
 
-impl LintRule for NegatedComparison {
-    fn name(&self) -> &'static str {
-        "negated-comparison"
+static META: LintMeta = LintMeta {
+    name: "negated-comparison",
+    code: codes::NEGATED_COMPARISON,
+    group: LintGroup::Style,
+    description: "`!(a == b)` reads more clearly as `a != b`",
+};
+
+impl LintPass for NegatedComparison {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::NEGATED_COMPARISON
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Unary(UnaryOp::Not, inner) = &e.kind
-                        && let ExprKind::Binary(op, ..) = &inner.kind
-                        && let Some((had, want)) = negation(*op)
-                    {
-                        out.push(diagnostic(had, want, e.span));
-                    }
-                });
-            }
-        });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Unary(UnaryOp::Not, inner) = &e.kind
+            && let ExprKind::Binary(op, ..) = &inner.kind
+            && let Some((had, want)) = negation(*op)
+        {
+            cx.emit(diagnostic(had, want, e.span));
+        }
     }
 }
 
@@ -63,19 +60,10 @@ fn diagnostic(had: &str, want: &str, span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        NegatedComparison.check(&hir, &mut out);
-        out
+        lint_one(NegatedComparison, src)
     }
 
     #[test]

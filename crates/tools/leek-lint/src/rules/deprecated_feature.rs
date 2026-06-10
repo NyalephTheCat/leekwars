@@ -13,35 +13,32 @@
 //! users migrate before the function disappears.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Callee, ExprKind, HirFile, NameRef};
+use leek_hir::{Callee, Expr, ExprKind, NameRef};
 
-use super::{for_each_block, for_each_expr_in_stmt};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct DeprecatedFeature;
 
-impl LintRule for DeprecatedFeature {
-    fn name(&self) -> &'static str {
-        "deprecated-feature"
+static META: LintMeta = LintMeta {
+    name: "deprecated-feature",
+    code: codes::DEPRECATED_FEATURE,
+    group: LintGroup::Style,
+    description: "call to a deprecated builtin that has a newer replacement",
+};
+
+impl LintPass for DeprecatedFeature {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::DEPRECATED_FEATURE
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block| {
-            for stmt in &block.stmts {
-                for_each_expr_in_stmt(stmt, &mut |e| {
-                    if let ExprKind::Call(c) = &e.kind
-                        && let Callee::Function(NameRef::Builtin(name)) = &c.callee
-                        && let Some(replacement) = deprecated_replacement(name)
-                    {
-                        out.push(diagnostic(name, replacement, e.span));
-                    }
-                });
-            }
-        });
+    fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
+        if let ExprKind::Call(c) = &e.kind
+            && let Callee::Function(NameRef::Builtin(name)) = &c.callee
+            && let Some(replacement) = deprecated_replacement(name)
+        {
+            cx.emit(diagnostic(name, replacement, e.span));
+        }
     }
 }
 
@@ -97,20 +94,10 @@ fn diagnostic(name: &str, replacement: &str, span: leek_span::Span) -> Diagnosti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let root = SyntaxNode::new_root(parsed.green);
-        let ast = SourceFile::cast(root).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        DeprecatedFeature.check(&hir, &mut out);
-        out
+        lint_one(DeprecatedFeature, src)
     }
 
     #[test]

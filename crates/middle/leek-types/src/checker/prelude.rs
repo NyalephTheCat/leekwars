@@ -12,8 +12,8 @@ pub(crate) use crate::builtins::{BUILTIN_SIGS, describe_type_set, type_in_set};
 pub(crate) use crate::codes;
 pub(crate) use crate::index::TypedExpr;
 pub(crate) use crate::ty::{
-    Type, class_name_of_type, fn_return_type, strip_nullable, type_from_node, type_name,
-    unify_types,
+    MAX_INFERRED_TUPLE, Type, class_name_of_type, fn_return_type, strip_nullable, type_from_node,
+    type_name, unify_types,
 };
 
 pub(crate) use super::Checker;

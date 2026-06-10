@@ -264,27 +264,7 @@ impl Lowerer {
                 // Strip underscore separators and parse — falls back
                 // to 0 if a bad-suffix lexer diagnostic already
                 // covered the case.
-                let cleaned: String = text.chars().filter(|c| *c != '_').collect();
-                if let Some(hex) = cleaned
-                    .strip_prefix("0x")
-                    .or_else(|| cleaned.strip_prefix("0X"))
-                {
-                    i64::from_str_radix(hex, 16)
-                        .map(Literal::Int)
-                        .unwrap_or(Literal::Int(0))
-                } else if let Some(bin) = cleaned
-                    .strip_prefix("0b")
-                    .or_else(|| cleaned.strip_prefix("0B"))
-                {
-                    i64::from_str_radix(bin, 2)
-                        .map(Literal::Int)
-                        .unwrap_or(Literal::Int(0))
-                } else {
-                    cleaned
-                        .parse::<i64>()
-                        .map(Literal::Int)
-                        .unwrap_or(Literal::Int(0))
-                }
+                Literal::Int(super::util::parse_int_text(text))
             }
             SyntaxKind::RealLiteral => {
                 let cleaned: String = text.chars().filter(|c| *c != '_').collect();

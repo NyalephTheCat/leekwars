@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{self, AstNode, Stmt as AstStmt};
 use leek_span::{SourceId, Span};
-use leek_syntax::{SyntaxNode, SyntaxToken};
+use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use leek_types::Type;
 
 use crate::ir::{Block, Def, DefId, Expr, ExprKind, Global, HirFile, Literal, Local, Stmt};
@@ -121,6 +121,8 @@ pub fn lower_file_with_prelude_with_flags(
                 lo.predeclare_function(&fn_decl);
             } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
                 lo.predeclare_class(&cls);
+            } else if child.kind() == SyntaxKind::EnumDecl {
+                lo.lower_enum_decl(&child);
             }
         }
     }
@@ -199,6 +201,8 @@ pub fn lower_files(
                 lo.predeclare_function(&fn_decl);
             } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
                 lo.predeclare_class(&cls);
+            } else if child.kind() == SyntaxKind::EnumDecl {
+                lo.lower_enum_decl(&child);
             }
         }
     }
@@ -209,6 +213,8 @@ pub fn lower_files(
             lo.predeclare_function(&fn_decl);
         } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
             lo.predeclare_class(&cls);
+        } else if child.kind() == SyntaxKind::EnumDecl {
+            lo.lower_enum_decl(&child);
         }
     }
 
@@ -438,6 +444,8 @@ impl Lowerer {
                 self.predeclare_function(&fn_decl);
             } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
                 self.predeclare_class(&cls);
+            } else if child.kind() == SyntaxKind::EnumDecl {
+                self.lower_enum_decl(&child);
             }
         }
         // Second pass — lower bodies (functions / classes) and the

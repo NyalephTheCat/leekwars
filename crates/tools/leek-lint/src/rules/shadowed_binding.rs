@@ -10,11 +10,15 @@
 //!
 //! ## Detection
 //!
-//! Walk each function/method body (and the main block) keeping a
-//! stack of currently-in-scope locals. Push on every block entry,
-//! pop on exit; each `Stmt::VarDecl` and foreach binding both
-//! declares the new name AND triggers the check. Function
-//! parameters seed the function-body scope.
+//! Walk each body keeping a stack of currently-in-scope locals. Push
+//! on every block entry, pop on exit; each `Stmt::VarDecl` and
+//! foreach binding both declares the new name AND triggers the
+//! check. Function parameters seed the outermost scope.
+//!
+//! This rule keeps its own statement walk (instead of the driver's
+//! `check_stmt` hook) because the scope stack must mirror block
+//! nesting exactly — push/pop bracketing doesn't map onto flat
+//! per-statement callbacks.
 //!
 //! ## Known limitations
 //!
@@ -28,55 +32,43 @@
 use std::collections::HashSet;
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, Def, ForStmt, ForeachStmt, HirFile, Stmt, VarDecl};
+use leek_hir::{ForStmt, ForeachStmt, Stmt, VarDecl};
 
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
 
 pub struct ShadowedBinding;
 
-impl LintRule for ShadowedBinding {
-    fn name(&self) -> &'static str {
-        "shadowed-binding"
+static META: LintMeta = LintMeta {
+    name: "shadowed-binding",
+    code: codes::SHADOWED_BINDING,
+    group: LintGroup::Style,
+    description: "binding that shadows an outer binding with the same name",
+};
+
+impl LintPass for ShadowedBinding {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::SHADOWED_BINDING
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        // Main block scope.
-        let mut scopes: Vec<HashSet<String>> = vec![HashSet::new()];
-        for s in &file.main {
-            walk_stmt(s, &mut scopes, out);
+    fn check_body(&mut self, cx: &mut LintCx<'_, '_>, body: &Body<'_>) {
+        if body.kind == BodyKind::Lambda {
+            return; // see "Known limitations" above
         }
-        for def in &file.defs {
-            match def {
-                Def::Function(fun) => check_callable(&fun.params, fun.body.as_ref(), out),
-                Def::Class(cls) => {
-                    for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                        check_callable(&m.params, m.body.as_ref(), out);
-                    }
-                }
-                _ => {}
-            }
+        let mut out = Vec::new();
+        // Parameters seed the outermost scope; the body's own
+        // statements get a fresh scope on top so a body `var x`
+        // that reuses a param name fires the shadow check.
+        let mut scopes: Vec<HashSet<String>> = vec![HashSet::new(), HashSet::new()];
+        for p in body.params {
+            scopes[0].insert(p.name.clone());
         }
-    }
-}
-
-fn check_callable(params: &[leek_hir::Param], body: Option<&Block>, out: &mut Vec<Diagnostic>) {
-    let mut scopes: Vec<HashSet<String>> = vec![HashSet::new()];
-    // Parameters seed the outermost function scope; the body's
-    // own statements get a fresh scope on top so a body `var x`
-    // that reuses a param name fires the shadow check.
-    for p in params {
-        scopes[0].insert(p.name.clone());
-    }
-    if let Some(body) = body {
-        scopes.push(HashSet::new());
-        for s in &body.stmts {
-            walk_stmt(s, &mut scopes, out);
+        for s in body.stmts {
+            walk_stmt(s, &mut scopes, &mut out);
         }
-        scopes.pop();
+        for d in out {
+            cx.emit(d);
+        }
     }
 }
 
@@ -191,20 +183,10 @@ fn diagnostic(name: &str, span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let root = SyntaxNode::new_root(parsed.green);
-        let ast = SourceFile::cast(root).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        ShadowedBinding.check(&hir, &mut out);
-        out
+        lint_one(ShadowedBinding, src)
     }
 
     #[test]

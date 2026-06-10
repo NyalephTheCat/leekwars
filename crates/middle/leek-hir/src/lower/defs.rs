@@ -3,10 +3,14 @@
 use leek_parser::ast::{self, AstNode, Expr as AstExpr};
 use leek_syntax::{SyntaxKind, SyntaxNode};
 
-use crate::ir::{Class, Def, Field, Function, Local, MethodDef, Param, Visibility};
+use crate::ir::{
+    Class, Def, Expr, ExprKind, Field, Function, Literal, Local, MethodDef, Param, Visibility,
+};
 
 use super::traits::LowerExpr;
-use super::util::{collect_modifiers, field_name, first_ident_after, fn_return_type, method_name};
+use super::util::{
+    collect_modifiers, field_name, first_ident_after, fn_return_type, method_name, parse_int_text,
+};
 use super::{ClassCtx, Lowerer, NameKind};
 
 impl Lowerer {
@@ -97,6 +101,86 @@ impl Lowerer {
             parent: first_ident_after(decl.syntax(), SyntaxKind::KwExtends)
                 .map(|t| t.text().to_string()),
             fields: Vec::new(),
+            methods: Vec::new(),
+            constructors: Vec::new(),
+        }));
+        self.out.items.push(id);
+        self.file_decls.insert(name, NameKind::Class(id));
+    }
+
+    /// Lower an experimental `enum Name { A, B = 10, C }` declaration.
+    /// Registered in the same first pass as classes (everything about
+    /// it is literal, so there is no body pass): variants become
+    /// static final integer fields on a synthesized class — exactly
+    /// `class Name { static final integer A = 0 … }` — so backends
+    /// need no enum-specific support and the construct stays
+    /// expressible in official LeekScript for the converter. Values
+    /// auto-increment from 0; an explicit `= (-)? INT` resets the
+    /// counter (duplicate-name/value diagnostics live in the type
+    /// checker, which sees the same CST).
+    pub(crate) fn lower_enum_decl(&mut self, node: &SyntaxNode) {
+        let Some(name_tok) = first_ident_after(node, SyntaxKind::KwEnum) else {
+            return;
+        };
+        let name = name_tok.text().to_string();
+        let span = self.span_of_node(node);
+        let mut fields = Vec::new();
+        let mut next_value: i64 = 0;
+        for member in node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::EnumMember)
+        {
+            let mut variant = None;
+            let mut int_tok = None;
+            let mut negated = false;
+            for tok in member
+                .children_with_tokens()
+                .filter_map(rowan::NodeOrToken::into_token)
+            {
+                match tok.kind() {
+                    SyntaxKind::Ident if variant.is_none() => variant = Some(tok),
+                    SyntaxKind::Minus => negated = true,
+                    SyntaxKind::IntLiteral => int_tok = Some(tok),
+                    _ => {}
+                }
+            }
+            let Some(variant) = variant else { continue };
+            if let Some(tok) = int_tok {
+                let magnitude = parse_int_text(tok.text());
+                next_value = if negated { -magnitude } else { magnitude };
+            }
+            let value = next_value;
+            next_value = next_value.wrapping_add(1);
+            let member_span = self.span_of_node(&member);
+            let variant_name = variant.text().to_string();
+            let field_def = self.alloc_def(Def::Local(Local {
+                name: variant_name.clone(),
+                ty: Some(leek_types::Type::Integer),
+                span: member_span,
+            }));
+            fields.push(Field {
+                def: field_def,
+                name: variant_name,
+                ty: Some(leek_types::Type::Integer),
+                init: Some(Expr {
+                    kind: ExprKind::Literal(Literal::Int(value)),
+                    // HIR expression types are uniformly `Any` (the
+                    // checker's TypeTable is the type source) — keep
+                    // the synthesized literal consistent with that.
+                    ty: leek_types::Type::Any,
+                    span: member_span,
+                }),
+                is_static: true,
+                is_final: true,
+                visibility: Visibility::Public,
+                span: member_span,
+            });
+        }
+        let id = self.alloc_def(Def::Class(Class {
+            name: name.clone(),
+            span,
+            parent: None,
+            fields,
             methods: Vec::new(),
             constructors: Vec::new(),
         }));

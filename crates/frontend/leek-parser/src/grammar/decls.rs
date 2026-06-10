@@ -129,6 +129,21 @@ pub(super) fn class_decl_at(p: &mut Parser, cp: rowan::Checkpoint) {
         let _ = p.expect(S::Ident);
         maybe_type_params(p); // `extends Base<T>`
     }
+    // Experimental `implements I1, I2` clause. `implements` is a
+    // *reserved* keyword (v3+) lexed as `KwImplements`; the flag
+    // unlocks the production. Wrapped in its own node so the class's
+    // name/parent token scans stay unaffected.
+    if p.features().interfaces && p.at(S::KwImplements) {
+        p.start_node(S::ImplementsClause);
+        p.bump(); // `implements` keyword
+        loop {
+            let _ = p.expect(S::Ident);
+            if !p.eat(S::Comma) {
+                break;
+            }
+        }
+        p.finish_node();
+    }
     class_body(p);
     p.finish_node();
 }

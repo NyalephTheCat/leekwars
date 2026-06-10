@@ -14,101 +14,43 @@
 //! between evaluations, so it is left alone.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Def, HirFile, Stmt, SwitchStmt};
+use leek_hir::Stmt;
 use leek_span::Span;
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct DuplicateCase;
 
-impl LintRule for DuplicateCase {
-    fn name(&self) -> &'static str {
-        "duplicate-case"
+static META: LintMeta = LintMeta {
+    name: "duplicate-case",
+    code: codes::DUPLICATE_CASE,
+    group: LintGroup::Correctness,
+    description: "`case` label identical to an earlier one — never matches",
+};
+
+impl LintPass for DuplicateCase {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::DUPLICATE_CASE
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        // `for_each_block` recurses through nested blocks but treats each
-        // switch arm as its own block — it does not hand us the `Switch`
-        // statement itself. Walk statements directly instead.
-        let main = leek_hir::Block {
-            stmts: file.main.clone(),
-            span: Span::synthetic(),
-        };
-        walk_stmts(&main.stmts, out);
-        for def in &file.defs {
-            match def {
-                Def::Function(fun) => {
-                    if let Some(body) = &fun.body {
-                        walk_stmts(&body.stmts, out);
-                    }
-                }
-                Def::Class(cls) => {
-                    for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                        if let Some(body) = &m.body {
-                            walk_stmts(&body.stmts, out);
-                        }
-                    }
-                }
-                Def::Global(_) | Def::Local(_) => {}
+    fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
+        let Stmt::Switch(sw) = s else { return };
+        // Track the span of the first label carrying each fingerprint so
+        // the diagnostic can point back at the original.
+        let mut seen: Vec<(String, Span)> = Vec::new();
+        for arm in &sw.arms {
+            let Some(case) = &arm.case else { continue };
+            if has_side_effect(case) {
+                continue;
             }
-        }
-    }
-}
-
-fn walk_stmts(stmts: &[Stmt], out: &mut Vec<Diagnostic>) {
-    for s in stmts {
-        walk(s, out);
-    }
-}
-
-fn walk(s: &Stmt, out: &mut Vec<Diagnostic>) {
-    match s {
-        Stmt::Switch(sw) => {
-            check_switch(sw, out);
-            // Recurse into arm bodies for nested switches.
-            for arm in &sw.arms {
-                walk_stmts(&arm.body, out);
+            let key = expr_key(case);
+            if let Some((_, first)) = seen.iter().find(|(k, _)| k == &key) {
+                cx.emit(diagnostic(case.span, *first));
+            } else {
+                seen.push((key, case.span));
             }
-        }
-        Stmt::If(i) => {
-            walk(&i.then_branch, out);
-            if let Some(e) = &i.else_branch {
-                walk(e, out);
-            }
-        }
-        Stmt::While(w) => walk(&w.body, out),
-        Stmt::DoWhile(d) => walk(&d.body, out),
-        Stmt::For(fr) => {
-            if let Some(init) = &fr.init {
-                walk(init, out);
-            }
-            walk(&fr.body, out);
-        }
-        Stmt::Foreach(fe) => walk(&fe.body, out),
-        Stmt::Block(b) => walk_stmts(&b.stmts, out),
-        _ => {}
-    }
-}
-
-fn check_switch(sw: &SwitchStmt, out: &mut Vec<Diagnostic>) {
-    // Track the span of the first label carrying each fingerprint so the
-    // diagnostic can point back at the original.
-    let mut seen: Vec<(String, Span)> = Vec::new();
-    for arm in &sw.arms {
-        let Some(case) = &arm.case else { continue };
-        if has_side_effect(case) {
-            continue;
-        }
-        let key = expr_key(case);
-        if let Some((_, first)) = seen.iter().find(|(k, _)| k == &key) {
-            out.push(diagnostic(case.span, *first));
-        } else {
-            seen.push((key, case.span));
         }
     }
 }
@@ -126,19 +68,10 @@ fn diagnostic(span: Span, first: Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        DuplicateCase.check(&hir, &mut out);
-        out
+        lint_one(DuplicateCase, src)
     }
 
     #[test]

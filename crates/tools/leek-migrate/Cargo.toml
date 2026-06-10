@@ -13,11 +13,21 @@ leek-lexer       = { workspace = true }
 leek-parser      = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-rewrite     = { workspace = true }
+# Post-migration verification: compile the migrated source under the
+# target version's full frontend and surface any new errors as
+# migration diagnostics instead of silently emitting broken code.
+leek-pipeline    = { workspace = true }
+leek-recipes     = { workspace = true }
 
 [dev-dependencies]
 leek-hir    = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
+# For the `corpus_verify` example: differential semantic verification
+# of every migration direction against the embedded upstream corpus.
+leek-test-corpus = { workspace = true }
+leek-pipeline    = { workspace = true }
+leek-recipes     = { workspace = true }
 
 [lints]
 workspace = true

@@ -53,6 +53,7 @@ fn skip_type(p: &Parser, mut i: usize) -> Option<usize> {
     if !is_type_starter(p, i) {
         return None;
     }
+    let head_is_array = p.nth_text(i) == "Array";
     i += 1;
     // Optional generic args. Treat each `>>` as two closers and `>>>`
     // as three, since nested generics like `Map<K, Array<V>>` produce
@@ -78,6 +79,25 @@ fn skip_type(p: &Parser, mut i: usize) -> Option<usize> {
             // For lookahead purposes that still counts as a valid
             // type ending at this position.
             return Some(i);
+        }
+        if depth != 0 {
+            return None;
+        }
+    }
+    // Optional experimental tuple args — `Array[integer, boolean]`.
+    if head_is_array && p.features().types && p.nth(i) == S::LBracket {
+        i += 1;
+        let mut depth: i32 = 1;
+        let mut steps = 0;
+        while depth > 0 && steps < LOOKAHEAD_CAP {
+            match p.nth(i) {
+                S::LBracket => depth += 1,
+                S::RBracket => depth -= 1,
+                S::Eof => return None,
+                _ => {}
+            }
+            i += 1;
+            steps += 1;
         }
         if depth != 0 {
             return None;
@@ -251,9 +271,14 @@ fn parse_type_inner(p: &mut Parser, nullable: bool) -> u8 {
 fn type_atom(p: &mut Parser) -> u8 {
     match p.current() {
         S::Ident | S::KwBoolean | S::KwVoid | S::KwNull => {
+            let head_is_array = p.current_text() == "Array";
             p.bump();
             if p.at(S::Lt) {
                 return generic_args(p);
+            }
+            // Experimental tuple-shaped array — `Array[integer, boolean]`.
+            if head_is_array && p.features().types && p.at(S::LBracket) {
+                tuple_args(p);
             }
             0
         }
@@ -267,6 +292,23 @@ fn type_atom(p: &mut Parser) -> u8 {
             0
         }
     }
+}
+
+/// `[T, U, …]` after `Array` — experimental per-position element
+/// types. The `[`/`]` tokens stay in the `TypeRef` so the checker can
+/// tell a tuple from `<…>` generic args.
+fn tuple_args(p: &mut Parser) {
+    assert!(p.at(S::LBracket));
+    p.bump(); // '['
+    if !p.at(S::RBracket) {
+        loop {
+            let _ = parse_type(p, true);
+            if !p.eat(S::Comma) {
+                break;
+            }
+        }
+    }
+    p.expect(S::RBracket);
 }
 
 /// Returns extras (count of `>`s beyond this `<...>`'s natural close).

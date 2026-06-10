@@ -82,7 +82,14 @@ pub fn run() -> Result<ExitCode> {
     // Build a pipeline tailored to the requested emit. Each Emit
     // picks the shortest chain that produces the needed artifact;
     // result reuse comes for free within a single run.
-    let pipeline = pipeline_for(cli.emit, fmt_opts);
+    let pipeline = pipeline_for(
+        cli.emit,
+        fmt_opts,
+        leek_pipeline::LintGroups {
+            pedantic: cli.pedantic,
+            nursery: cli.nursery,
+        },
+    );
     let result = pipeline.run(input);
 
     let mut sev_cfg = SeverityConfig::new();

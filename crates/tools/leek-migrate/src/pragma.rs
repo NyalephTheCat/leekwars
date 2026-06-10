@@ -12,12 +12,16 @@ use leek_syntax::Version;
 /// advertises `target`. Idempotent on already-correct sources.
 pub fn set_version(source: &str, target: Version) -> String {
     let n = version_byte(target);
-    if let Some((start, end)) = find_existing(source) {
-        // Re-render the directive verbatim so the user's leading
-        // whitespace / `//` style is preserved.
+    if let Some((start, end, style)) = find_existing(source) {
+        // Re-render the directive in its original comment style.
+        // Rewriting a `/* @version:N */` as a `// …` line comment
+        // would swallow any code that follows on the same line.
         let prefix = &source[..start];
         let suffix = &source[end..];
-        return format!("{prefix}// @version:{n}{suffix}");
+        return match style {
+            CommentStyle::Line => format!("{prefix}// @version:{n}{suffix}"),
+            CommentStyle::Block => format!("{prefix}/* @version:{n} */{suffix}"),
+        };
     }
     // Insert at the very top. A trailing `\n` after the directive
     // keeps the rest of the file's first line intact.
@@ -27,11 +31,18 @@ pub fn set_version(source: &str, target: Version) -> String {
     format!("// @version:{n}\n{source}")
 }
 
+/// How an existing `@version` directive is delimited.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CommentStyle {
+    Line,
+    Block,
+}
+
 /// Find an existing `// @version:N` directive's byte range
-/// (inclusive start, exclusive end). Scans only the leading
-/// comment band — pragmas after the first significant token are
-/// invisible to the lexer.
-fn find_existing(source: &str) -> Option<(usize, usize)> {
+/// (inclusive start, exclusive end) and comment style. Scans only
+/// the leading comment band — pragmas after the first significant
+/// token are invisible to the lexer.
+fn find_existing(source: &str) -> Option<(usize, usize, CommentStyle)> {
     let mut i = 0;
     let bytes = source.as_bytes();
     while i < bytes.len() {
@@ -48,7 +59,7 @@ fn find_existing(source: &str) -> Option<(usize, usize)> {
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             let line_end = source[i..].find('\n').map_or(source.len(), |p| i + p);
             if is_version_directive(&source[i..line_end]) {
-                return Some((i, line_end));
+                return Some((i, line_end, CommentStyle::Line));
             }
             i = line_end;
         } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
@@ -56,7 +67,7 @@ fn find_existing(source: &str) -> Option<(usize, usize)> {
                 .find("*/")
                 .map_or(source.len(), |p| i + 2 + p + 2);
             if is_version_directive(&source[i..close]) {
-                return Some((i, close));
+                return Some((i, close, CommentStyle::Block));
             }
             i = close;
         } else {
@@ -122,5 +133,14 @@ mod tests {
         let s = "// header comment\n\n// @version:2\nvar x = 1\n";
         let out = set_version(s, Version::V4);
         assert!(out.starts_with("// header comment\n\n// @version:4\n"));
+    }
+
+    #[test]
+    fn block_comment_directive_keeps_block_style() {
+        // A `/* @version:N */` followed by code on the SAME line:
+        // rewriting it as a `// …` line comment would swallow the
+        // code. The block style must be preserved.
+        let out = set_version("/* @version:2 */ return 1;", Version::V3);
+        assert_eq!(out, "/* @version:3 */ return 1;");
     }
 }

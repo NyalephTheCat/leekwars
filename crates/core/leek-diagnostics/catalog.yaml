@@ -56,6 +56,10 @@ types:
   - { id: E0252, name: WrongArgumentType, severity: error }
   - { id: E0253, name: MapDuplicatedKey, severity: error }
   - { id: E0254, name: ImpossibleCast, severity: error }
+  - { id: E0255, name: TypeAliasNotCapitalized, severity: warning }
+  - { id: E0256, name: InterfaceMemberMissing, severity: error }
+  - { id: E0257, name: UnknownInterface, severity: warning }
+  - { id: E0258, name: DuplicateEnumVariant, severity: error }
 
 lowering:
   - { id: E0300, name: LoweringUnsupported, severity: error }
@@ -68,6 +72,11 @@ rewrite:
   - { id: E0500, name: EditOverlap, severity: error }
   - { id: E0501, name: EditOutOfBounds, severity: error }
   - { id: E0502, name: EditInvalidRange, severity: error }
+  # Migration (leek-migrate): warnings about version-to-version
+  # rewrites that need manual review.
+  - { id: W0510, name: MigrationCompileBreak, severity: warning }
+  - { id: W0511, name: MigrationBehaviorChange, severity: warning }
+  - { id: W0512, name: MigrationUnsupported, severity: warning }
 
 lint:
   - { id: L0001, name: UnusedVariable, severity: warning }
@@ -92,3 +101,23 @@ lint:
   - { id: L0022, name: UnusedExpression, severity: warning }
   - { id: L0023, name: DuplicateCase, severity: warning }
   - { id: L0024, name: UnnecessaryElse, severity: hint }
+  # Pedantic (opt-in via --pedantic / [lints] pedantic = true)
+  - { id: L0025, name: TooManyArguments, severity: hint }
+  - { id: L0026, name: LongFunction, severity: hint }
+  - { id: L0027, name: DeepNesting, severity: hint }
+  - { id: L0028, name: CollapsibleIf, severity: hint }
+  - { id: L0029, name: SwitchMissingDefault, severity: hint }
+  - { id: L0030, name: ManualMinMax, severity: hint }
+  - { id: L0031, name: ApproxConstant, severity: hint }
+  - { id: L0032, name: NeedlessIndexLoop, severity: hint }
+  # Suspicious (default-on)
+  - { id: L0033, name: ChainedComparison, severity: warning }
+  # Nursery (opt-in via --nursery / [lints] nursery = true)
+  - { id: L0034, name: CountInLoopCondition, severity: hint }
+  - { id: L0035, name: StringConcatInLoop, severity: hint }
+  - { id: L0036, name: UselessForeachWrite, severity: hint }
+  - { id: L0037, name: IntervalLoop, severity: hint }
+  - { id: L0038, name: ShadowedBuiltin, severity: hint }
+  - { id: L0039, name: ManualRangeCheck, severity: hint }
+  - { id: L0040, name: ArrayLiteralMembership, severity: hint }
+  - { id: L0041, name: MapAsSet, severity: hint }

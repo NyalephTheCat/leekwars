@@ -4,50 +4,27 @@
 //! out, so we always warn.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{BinaryOp, Block, Def, Expr, ExprKind, HirFile, Stmt};
+use leek_hir::{Expr, ExprKind, Stmt};
 
-use super::for_each_stmt;
-use crate::LintRule;
+use super::structural::is_assignment;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct AssignmentInCondition;
 
-impl LintRule for AssignmentInCondition {
-    fn name(&self) -> &'static str {
-        "assignment-in-condition"
+static META: LintMeta = LintMeta {
+    name: "assignment-in-condition",
+    code: codes::ASSIGNMENT_IN_CONDITION,
+    group: LintGroup::Suspicious,
+    description: "assignment used as a condition — likely a typo for `==`",
+};
+
+impl LintPass for AssignmentInCondition {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::ASSIGNMENT_IN_CONDITION
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        check_stmts(&file.main, out);
-        for def in &file.defs {
-            match def {
-                Def::Function(fun) => {
-                    if let Some(body) = &fun.body {
-                        check_stmts(&body.stmts, out);
-                    }
-                }
-                Def::Class(cls) => {
-                    for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                        if let Some(body) = &m.body {
-                            check_stmts(&body.stmts, out);
-                        }
-                    }
-                }
-                Def::Global(_) | Def::Local(_) => {}
-            }
-        }
-    }
-}
-
-fn check_stmts(stmts: &[Stmt], out: &mut Vec<Diagnostic>) {
-    let wrapper = Block {
-        stmts: stmts.to_vec(),
-        span: leek_span::Span::synthetic(),
-    };
-    for_each_stmt(&wrapper, &mut |s| {
+    fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
         let cond = match s {
             Stmt::If(i) => Some(&i.cond),
             Stmt::While(w) => Some(&w.cond),
@@ -58,9 +35,9 @@ fn check_stmts(stmts: &[Stmt], out: &mut Vec<Diagnostic>) {
         if let Some(cond) = cond
             && let Some(span) = assignment_span(cond)
         {
-            out.push(diagnostic(span));
+            cx.emit(diagnostic(span));
         }
-    });
+    }
 }
 
 /// The span of `cond` when it's an assignment expression, else `None`.
@@ -69,27 +46,6 @@ fn assignment_span(cond: &Expr) -> Option<leek_span::Span> {
         ExprKind::Binary(op, ..) if is_assignment(*op) => Some(cond.span),
         _ => None,
     }
-}
-
-fn is_assignment(op: BinaryOp) -> bool {
-    matches!(
-        op,
-        BinaryOp::Assign
-            | BinaryOp::AddAssign
-            | BinaryOp::SubAssign
-            | BinaryOp::MulAssign
-            | BinaryOp::DivAssign
-            | BinaryOp::IntDivAssign
-            | BinaryOp::ModAssign
-            | BinaryOp::PowAssign
-            | BinaryOp::BitAndAssign
-            | BinaryOp::BitOrAssign
-            | BinaryOp::BitXorAssign
-            | BinaryOp::ShiftLAssign
-            | BinaryOp::ShiftRAssign
-            | BinaryOp::UShiftRAssign
-            | BinaryOp::NullCoalesceAssign
-    )
 }
 
 fn diagnostic(span: leek_span::Span) -> Diagnostic {
@@ -107,19 +63,10 @@ fn diagnostic(span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        AssignmentInCondition.check(&hir, &mut out);
-        out
+        lint_one(AssignmentInCondition, src)
     }
 
     #[test]

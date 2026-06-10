@@ -232,6 +232,16 @@ pub struct FeatureFlags {
     pub overloads: bool,
     /// `LEEK_EXPERIMENTAL_PRELUDE`: implicit standard-library prelude.
     pub prelude: bool,
+    /// `LEEK_EXPERIMENTAL_TYPES`: `type Name = T` alias declarations
+    /// and tuple-shaped array types (`Array[integer, boolean]`).
+    pub types: bool,
+    /// `LEEK_EXPERIMENTAL_INTERFACES`: `interface Name { … }`
+    /// declarations and the `implements` clause on classes.
+    pub interfaces: bool,
+    /// `LEEK_EXPERIMENTAL_ENUMS`: `enum Name { A, B = 10 }`
+    /// declarations — integer-backed variants lowered to a class with
+    /// static final integer fields.
+    pub enums: bool,
 }
 
 impl FeatureFlags {
@@ -253,6 +263,9 @@ impl FeatureFlags {
             generics: on("LEEK_EXPERIMENTAL_GENERICS"),
             overloads: on("LEEK_EXPERIMENTAL_FN_OVERLOADS"),
             prelude: on("LEEK_EXPERIMENTAL_PRELUDE"),
+            types: on("LEEK_EXPERIMENTAL_TYPES"),
+            interfaces: on("LEEK_EXPERIMENTAL_INTERFACES"),
+            enums: on("LEEK_EXPERIMENTAL_ENUMS"),
         }
     }
 
@@ -266,6 +279,9 @@ impl FeatureFlags {
             | (u8::from(self.generics) << 2)
             | (u8::from(self.overloads) << 3)
             | (u8::from(self.prelude) << 4)
+            | (u8::from(self.types) << 5)
+            | (u8::from(self.interfaces) << 6)
+            | (u8::from(self.enums) << 7)
     }
 
     /// Unpack from the [`to_bits`](Self::to_bits) representation.
@@ -277,6 +293,9 @@ impl FeatureFlags {
             generics: bits & (1 << 2) != 0,
             overloads: bits & (1 << 3) != 0,
             prelude: bits & (1 << 4) != 0,
+            types: bits & (1 << 5) != 0,
+            interfaces: bits & (1 << 6) != 0,
+            enums: bits & (1 << 7) != 0,
         }
     }
 }
@@ -288,7 +307,7 @@ mod tests {
     #[test]
     fn feature_flags_bits_round_trip() {
         // Every distinct combination survives the salsa-wire bitmask encoding.
-        for bits in 0u8..(1 << 5) {
+        for bits in 0u8..=u8::MAX {
             let f = FeatureFlags::from_bits(bits);
             assert_eq!(f.to_bits(), bits, "round-trip changed the bits");
         }
@@ -299,9 +318,12 @@ mod tests {
             generics: true,
             overloads: true,
             prelude: true,
+            types: true,
+            interfaces: true,
+            enums: true,
         };
-        assert_eq!(all.to_bits(), 0b1_1111);
-        assert_eq!(FeatureFlags::from_bits(0b1_1111), all);
+        assert_eq!(all.to_bits(), 0b1111_1111);
+        assert_eq!(FeatureFlags::from_bits(0b1111_1111), all);
         assert_eq!(FeatureFlags::none(), FeatureFlags::from_bits(0));
         // A lone flag sets exactly its bit.
         let only_overloads = FeatureFlags {

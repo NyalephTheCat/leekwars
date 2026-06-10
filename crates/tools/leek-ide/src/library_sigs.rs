@@ -57,6 +57,7 @@ fn collect_header(src: &str, map: &mut HashMap<String, Vec<LibSig>>) {
         ParseFeatures {
             function_signatures: true,
             generics: true,
+            ..Default::default()
         },
     );
     let Some(file) = SourceFile::cast(SyntaxNode::new_root(parsed.green)) else {

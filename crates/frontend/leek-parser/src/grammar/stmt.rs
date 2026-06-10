@@ -109,9 +109,124 @@ pub(super) fn stmt_at(p: &mut Parser, cp: rowan::Checkpoint) {
             p.bump();
         }
         S::Eof => {}
+        // Experimental `type Name = T` alias declaration. `type` is a
+        // contextual identifier (not a keyword), so this only triggers
+        // on the exact `type IDENT =` shape — `type(x)` calls and
+        // `type` variables keep parsing as expressions.
+        _ if p.features().types
+            && p.at(S::Ident)
+            && p.current_text() == "type"
+            && p.nth(1) == S::Ident
+            && p.nth(2) == S::Eq =>
+        {
+            type_alias_decl(p);
+        }
+        // Experimental `interface Name { … }` declaration. Unlike
+        // `type`, `interface` is a *reserved* keyword (v3+) lexed as
+        // `KwInterface`, so the flag just unlocks the production —
+        // without it the token stays an error like upstream.
+        S::KwInterface if p.features().interfaces => {
+            interface_decl(p);
+        }
+        // Experimental `enum Name { A, B = 10 }` declaration. `enum`
+        // is a reserved keyword (v3+) like `interface`, so the flag
+        // just unlocks the production.
+        S::KwEnum if p.features().enums => {
+            enum_decl(p);
+        }
         _ if types::looks_like_typed_var_decl(p) => typed_var_decl_stmt_at(p, cp),
         _ => expr_stmt(p),
     }
+}
+
+/// `type IDENT = <type> [;]` — experimental alias declaration. The
+/// node is not a statement at the AST layer (no `Stmt::cast` arm), so
+/// HIR lowering skips it entirely; only the type checker reads it.
+fn type_alias_decl(p: &mut Parser) {
+    p.start_node(S::TypeAliasDecl);
+    p.bump(); // contextual `type`
+    p.expect(S::Ident); // alias name
+    p.expect(S::Eq);
+    types::ty(p);
+    let _ = p.eat(S::Semicolon);
+    p.finish_node();
+}
+
+/// `interface IDENT { member* }` — experimental interface
+/// declaration. Members are typed fields (`integer hp`) or bodiless
+/// method signatures (`real area()`); a member with a `ParamList` is
+/// a method. Like [`type_alias_decl`] the node has no `Stmt::cast`
+/// arm, so HIR lowering skips it — interfaces are pure type
+/// information with no runtime footprint.
+fn interface_decl(p: &mut Parser) {
+    p.start_node(S::InterfaceDecl);
+    p.bump(); // `interface` keyword
+    p.expect(S::Ident); // interface name
+    p.expect(S::LBrace);
+    while !p.at(S::RBrace) && !p.at_eof() {
+        let before = p.position();
+        interface_member(p);
+        if !p.at(S::RBrace) && !p.at_eof() && p.position() == before {
+            let kind = p.current();
+            p.err_and_bump(format!("unexpected token in interface body: {kind:?}"));
+        }
+    }
+    let _ = p.expect(S::RBrace);
+    p.finish_node();
+}
+
+/// One interface member: `<type> IDENT` (field) or
+/// `<type> IDENT ( params )` (method signature), each with an
+/// optional trailing `;`.
+fn interface_member(p: &mut Parser) {
+    p.start_node(S::InterfaceMember);
+    types::ty(p); // member type / method return type
+    let _ = p.expect(S::Ident);
+    if p.at(S::LParen) {
+        super::decls::param_list(p);
+    }
+    let _ = p.eat(S::Semicolon);
+    p.finish_node();
+}
+
+/// `enum IDENT { variant (, variant)* ,? }` — experimental enum
+/// declaration. Unlike `type`/`interface` the node DOES reach HIR:
+/// lowering turns it into a class with static final integer fields,
+/// so `Color.RED` is an ordinary static read at runtime.
+fn enum_decl(p: &mut Parser) {
+    p.start_node(S::EnumDecl);
+    p.bump(); // `enum` keyword
+    p.expect(S::Ident); // enum name
+    p.expect(S::LBrace);
+    while !p.at(S::RBrace) && !p.at_eof() {
+        let before = p.position();
+        enum_member(p);
+        if !p.eat(S::Comma) && !p.at(S::RBrace) && !p.at_eof() && p.position() == before {
+            let kind = p.current();
+            p.err_and_bump(format!("unexpected token in enum body: {kind:?}"));
+        }
+    }
+    let _ = p.expect(S::RBrace);
+    p.finish_node();
+}
+
+/// One enum variant: `IDENT` or `IDENT = (-)? INT`. The value is
+/// restricted to an integer literal (variants are compile-time
+/// integer constants), so anything fancier is a parse error rather
+/// than a silently-misbehaving runtime expression.
+fn enum_member(p: &mut Parser) {
+    p.start_node(S::EnumMember);
+    let _ = p.expect(S::Ident);
+    if p.eat(S::Eq) {
+        let _ = p.eat(S::Minus);
+        if !p.eat(S::IntLiteral) {
+            let kind = p.current();
+            p.err_and_bump(format!(
+                "enum variant value must be an integer literal, found {kind:?}"
+            ));
+        }
+    }
+    p.finish_node();
 }
 
 /// `{ stmt* }` — block statement.

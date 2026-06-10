@@ -111,6 +111,235 @@ fn bodiless_function_signature_parses_with_flag() {
     assert_eq!(node.text().to_string(), text, "round-trip mismatch");
 }
 
+fn parse_types_feature(text: &str) -> (SyntaxNode, Vec<leek_diagnostics::Diagnostic>) {
+    use leek_lexer::lex;
+    use leek_parser::{ParseFeatures, parse_tokens_with};
+    let lex_out = lex(text, src(), Version::LATEST);
+    let features = ParseFeatures {
+        types: true,
+        ..Default::default()
+    };
+    let r = parse_tokens_with(text, src(), &lex_out.tokens, Version::LATEST, features);
+    (SyntaxNode::new_root(r.green), r.diagnostics)
+}
+
+#[test]
+fn type_alias_parses_with_flag() {
+    let text = "type Id = integer | string\nId x = 1\n";
+    let (node, diags) = parse_types_feature(text);
+    assert!(diags.is_empty(), "alias should parse cleanly: {diags:?}");
+    assert_eq!(node.text().to_string(), text, "round-trip");
+    let alias = node
+        .children()
+        .find(|n| n.kind() == leek_syntax::SyntaxKind::TypeAliasDecl)
+        .expect("TypeAliasDecl node");
+    assert!(
+        alias
+            .children()
+            .any(|n| n.kind() == leek_syntax::SyntaxKind::TypeRef),
+        "alias body should be a TypeRef"
+    );
+}
+
+#[test]
+fn type_alias_is_not_a_decl_without_flag() {
+    // Without the flag `type` is an ordinary identifier; no
+    // TypeAliasDecl node may appear.
+    let (node, _) = parse_str("type Id = integer\n");
+    assert!(
+        !node
+            .descendants()
+            .any(|n| n.kind() == leek_syntax::SyntaxKind::TypeAliasDecl),
+        "TypeAliasDecl must be feature-gated"
+    );
+}
+
+#[test]
+fn tuple_type_parses_with_flag() {
+    let text = "Array[integer, boolean] t = [1, true]\n";
+    let (node, diags) = parse_types_feature(text);
+    assert!(diags.is_empty(), "tuple type should parse: {diags:?}");
+    assert_eq!(node.text().to_string(), text, "round-trip");
+    // The annotation is one TypeRef keeping its square brackets as
+    // direct tokens (that is what distinguishes it from `<…>` args).
+    let type_ref = node
+        .descendants()
+        .find(|n| n.kind() == leek_syntax::SyntaxKind::TypeRef)
+        .expect("TypeRef");
+    assert!(
+        type_ref
+            .children_with_tokens()
+            .filter_map(leek_syntax::language::NodeOrToken::into_token)
+            .any(|t| t.kind() == leek_syntax::SyntaxKind::LBracket),
+        "tuple TypeRef should keep its LBracket"
+    );
+}
+
+#[test]
+fn tuple_type_union_member_parses_with_flag() {
+    let text = "Array[integer, boolean] | string x = [1, true]\n";
+    let (node, diags) = parse_types_feature(text);
+    assert!(diags.is_empty(), "tuple-in-union should parse: {diags:?}");
+    assert_eq!(node.text().to_string(), text, "round-trip");
+}
+
+fn parse_interfaces(text: &str) -> (SyntaxNode, Vec<leek_diagnostics::Diagnostic>) {
+    use leek_lexer::lex;
+    use leek_parser::{ParseFeatures, parse_tokens_with};
+    let lex_out = lex(text, src(), Version::LATEST);
+    let features = ParseFeatures {
+        interfaces: true,
+        ..Default::default()
+    };
+    let r = parse_tokens_with(text, src(), &lex_out.tokens, Version::LATEST, features);
+    (SyntaxNode::new_root(r.green), r.diagnostics)
+}
+
+#[test]
+fn interface_decl_parses_with_flag() {
+    let text = "interface Named {\n  string name;\n  string describe();\n}\n";
+    let (node, diags) = parse_interfaces(text);
+    assert!(
+        diags.is_empty(),
+        "interface should parse cleanly: {diags:?}"
+    );
+    assert_eq!(node.text().to_string(), text, "round-trip");
+    let iface = node
+        .children()
+        .find(|n| n.kind() == leek_syntax::SyntaxKind::InterfaceDecl)
+        .expect("InterfaceDecl node");
+    let members: Vec<_> = iface
+        .children()
+        .filter(|n| n.kind() == leek_syntax::SyntaxKind::InterfaceMember)
+        .collect();
+    assert_eq!(members.len(), 2, "field + method");
+    // The field has no ParamList; the method has one.
+    assert!(
+        !members[0]
+            .children()
+            .any(|n| n.kind() == leek_syntax::SyntaxKind::ParamList),
+        "field member has no param list"
+    );
+    assert!(
+        members[1]
+            .children()
+            .any(|n| n.kind() == leek_syntax::SyntaxKind::ParamList),
+        "method member has a param list"
+    );
+}
+
+#[test]
+fn implements_clause_parses_with_flag() {
+    let text = "class Dog extends Animal implements Named, Walker {\n}\n";
+    let (node, diags) = parse_interfaces(text);
+    assert!(
+        diags.is_empty(),
+        "implements should parse cleanly: {diags:?}"
+    );
+    assert_eq!(node.text().to_string(), text, "round-trip");
+    let class = node
+        .children()
+        .find(|n| n.kind() == leek_syntax::SyntaxKind::ClassDecl)
+        .expect("ClassDecl node");
+    let clause = class
+        .children()
+        .find(|n| n.kind() == leek_syntax::SyntaxKind::ImplementsClause)
+        .expect("ImplementsClause node");
+    let names: Vec<String> = clause
+        .children_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+        .filter(|t| t.kind() == leek_syntax::SyntaxKind::Ident)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(names, ["Named", "Walker"]);
+}
+
+#[test]
+fn interface_decl_is_not_a_decl_without_flag() {
+    // Without the flag the reserved `interface` keyword stays an
+    // error (mirroring upstream's reservation); no InterfaceDecl node
+    // may appear.
+    let (node, _) = parse_str("interface Named {\n  string name;\n}\n");
+    assert!(
+        !node
+            .descendants()
+            .any(|n| n.kind() == leek_syntax::SyntaxKind::InterfaceDecl),
+        "InterfaceDecl must be feature-gated"
+    );
+}
+
+fn parse_enums(text: &str) -> (SyntaxNode, Vec<leek_diagnostics::Diagnostic>) {
+    use leek_lexer::lex;
+    use leek_parser::{ParseFeatures, parse_tokens_with};
+    let lex_out = lex(text, src(), Version::LATEST);
+    let features = ParseFeatures {
+        enums: true,
+        ..Default::default()
+    };
+    let r = parse_tokens_with(text, src(), &lex_out.tokens, Version::LATEST, features);
+    (SyntaxNode::new_root(r.green), r.diagnostics)
+}
+
+#[test]
+fn enum_decl_parses_with_flag() {
+    let text = "enum Color {\n  RED,\n  GREEN,\n  BLUE = 10,\n}\n";
+    let (node, diags) = parse_enums(text);
+    assert!(diags.is_empty(), "enum should parse cleanly: {diags:?}");
+    assert_eq!(node.text().to_string(), text, "round-trip");
+    let decl = node
+        .children()
+        .find(|n| n.kind() == leek_syntax::SyntaxKind::EnumDecl)
+        .expect("EnumDecl node");
+    let members: Vec<_> = decl
+        .children()
+        .filter(|n| n.kind() == leek_syntax::SyntaxKind::EnumMember)
+        .collect();
+    assert_eq!(members.len(), 3, "three variants");
+    // Only the explicit-value variant carries an IntLiteral token.
+    let has_int = |m: &SyntaxNode| {
+        m.children_with_tokens()
+            .filter_map(leek_syntax::language::NodeOrToken::into_token)
+            .any(|t| t.kind() == leek_syntax::SyntaxKind::IntLiteral)
+    };
+    assert!(!has_int(&members[0]), "RED has no explicit value");
+    assert!(!has_int(&members[1]), "GREEN has no explicit value");
+    assert!(has_int(&members[2]), "BLUE = 10 keeps its IntLiteral");
+}
+
+#[test]
+fn enum_negative_value_parses_with_flag() {
+    let text = "enum Temp { FREEZING = -10, ZERO = 0 }\n";
+    let (node, diags) = parse_enums(text);
+    assert!(
+        diags.is_empty(),
+        "negative variant value should parse: {diags:?}"
+    );
+    assert_eq!(node.text().to_string(), text, "round-trip");
+}
+
+#[test]
+fn enum_non_integer_value_is_an_error() {
+    let text = "enum Bad { A = \"x\" }\n";
+    let (_, diags) = parse_enums(text);
+    assert!(
+        !diags.is_empty(),
+        "non-integer variant value must be rejected"
+    );
+}
+
+#[test]
+fn enum_decl_is_not_a_decl_without_flag() {
+    // Without the flag the reserved `enum` keyword stays an error
+    // (mirroring upstream's reservation); no EnumDecl node may appear.
+    let (node, _) = parse_str("enum Color { RED }\n");
+    assert!(
+        !node
+            .descendants()
+            .any(|n| n.kind() == leek_syntax::SyntaxKind::EnumDecl),
+        "EnumDecl must be feature-gated"
+    );
+}
+
 fn parse_generics(text: &str) -> (SyntaxNode, Vec<leek_diagnostics::Diagnostic>) {
     use leek_lexer::lex;
     use leek_parser::{ParseFeatures, parse_tokens_with};

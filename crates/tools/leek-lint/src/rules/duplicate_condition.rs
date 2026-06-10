@@ -2,101 +2,62 @@
 //! the same (side-effect-free) condition twice. A later arm with a
 //! condition identical to an earlier one is unreachable.
 
+use std::collections::HashSet;
+
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, Def, HirFile, IfStmt, Stmt};
+use leek_hir::Stmt;
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
-pub struct DuplicateCondition;
-
-impl LintRule for DuplicateCondition {
-    fn name(&self) -> &'static str {
-        "duplicate-condition"
-    }
-
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::DUPLICATE_CONDITION
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        let main = Block {
-            stmts: file.main.clone(),
-            span: leek_span::Span::synthetic(),
-        };
-        walk(&Stmt::Block(main), out);
-        for def in &file.defs {
-            match def {
-                Def::Function(fun) => {
-                    if let Some(body) = &fun.body {
-                        walk(&Stmt::Block(body.clone()), out);
-                    }
-                }
-                Def::Class(cls) => {
-                    for m in cls.methods.iter().chain(cls.constructors.iter()) {
-                        if let Some(body) = &m.body {
-                            walk(&Stmt::Block(body.clone()), out);
-                        }
-                    }
-                }
-                Def::Global(_) | Def::Local(_) => {}
-            }
-        }
-    }
+#[derive(Default)]
+pub struct DuplicateCondition {
+    /// Spans of `else if` statements already consumed as part of a
+    /// chain. The driver visits every `If` — including the inner ones
+    /// of an `else if` chain — but a chain must be checked exactly
+    /// once, from its head.
+    chain_links: HashSet<(u32, u32)>,
 }
 
-/// Recurse into every statement, handling `if … else if` chains as a
-/// unit so each chain is checked exactly once.
-fn walk(s: &Stmt, out: &mut Vec<Diagnostic>) {
-    match s {
-        Stmt::If(i) => walk_chain(i, out),
-        Stmt::While(w) => walk(&w.body, out),
-        Stmt::DoWhile(d) => walk(&d.body, out),
-        Stmt::For(f) => {
-            if let Some(init) = &f.init {
-                walk(init, out);
-            }
-            walk(&f.body, out);
+static META: LintMeta = LintMeta {
+    name: "duplicate-condition",
+    code: codes::DUPLICATE_CONDITION,
+    group: LintGroup::Correctness,
+    description: "`else if` testing a condition an earlier arm already tested — never runs",
+};
+
+impl LintPass for DuplicateCondition {
+    fn meta(&self) -> &'static LintMeta {
+        &META
+    }
+
+    fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
+        let Stmt::If(head) = s else { return };
+        if self.chain_links.contains(&(head.span.start, head.span.end)) {
+            return; // interior of a chain we already walked
         }
-        Stmt::Foreach(fe) => walk(&fe.body, out),
-        Stmt::Block(b) => {
-            for s in &b.stmts {
-                walk(s, out);
-            }
-        }
-        Stmt::Switch(sw) => {
-            for arm in &sw.arms {
-                for s in &arm.body {
-                    walk(s, out);
+        let mut seen: Vec<String> = Vec::new();
+        let mut cur = head;
+        loop {
+            // Only deterministic conditions can be "definitely"
+            // duplicated; a side-effecting condition might legitimately
+            // differ on re-eval.
+            if !has_side_effect(&cur.cond) {
+                let key = expr_key(&cur.cond);
+                if seen.iter().any(|k| k == &key) {
+                    cx.emit(diagnostic(cur.cond.span));
+                } else {
+                    seen.push(key);
                 }
             }
-        }
-        _ => {}
-    }
-}
-
-fn walk_chain(first: &IfStmt, out: &mut Vec<Diagnostic>) {
-    let mut seen: Vec<String> = Vec::new();
-    let mut cur = first;
-    loop {
-        // Only deterministic conditions can be "definitely" duplicated;
-        // a side-effecting condition might legitimately differ on re-eval.
-        if !has_side_effect(&cur.cond) {
-            let key = expr_key(&cur.cond);
-            if seen.iter().any(|k| k == &key) {
-                out.push(diagnostic(cur.cond.span));
-            } else {
-                seen.push(key);
+            match cur.else_branch.as_deref() {
+                Some(Stmt::If(next)) => {
+                    self.chain_links.insert((next.span.start, next.span.end));
+                    cur = next;
+                }
+                _ => break,
             }
-        }
-        walk(&cur.then_branch, out);
-        match cur.else_branch.as_deref() {
-            Some(Stmt::If(next)) => cur = next,
-            Some(other) => {
-                walk(other, out);
-                break;
-            }
-            None => break,
         }
     }
 }
@@ -113,19 +74,10 @@ fn diagnostic(span: leek_span::Span) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        DuplicateCondition.check(&hir, &mut out);
-        out
+        lint_one(DuplicateCondition::default(), src)
     }
 
     #[test]

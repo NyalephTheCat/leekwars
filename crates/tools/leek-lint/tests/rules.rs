@@ -301,3 +301,79 @@ fn unnecessary_else_fires_end_to_end() {
     );
     assert_eq!(has_code(&diags, codes::UNNECESSARY_ELSE), 1);
 }
+
+// ---- Lint groups: pedantic is opt-in ----
+
+fn lint_src_with(src: &str, opts: leek_lint::LintOptions) -> Vec<leek_diagnostics::Diagnostic> {
+    let source = SourceId::new(1).unwrap();
+    let parsed = parse(src, source, Version::V4);
+    let root = SyntaxNode::new_root(parsed.green);
+    let ast = SourceFile::cast(root).expect("source file root");
+    let (hir, _diags) = lower_file(&ast, source);
+    leek_lint::lint_with(&hir, &opts)
+}
+
+#[test]
+fn pedantic_lints_are_off_by_default() {
+    // Manual max — a pedantic finding.
+    let src = "function f(a, b) {\n  return a > b ? a : b\n}\n";
+    let diags = lint_src(src);
+    assert_eq!(has_code(&diags, codes::MANUAL_MIN_MAX), 0, "{diags:?}");
+}
+
+#[test]
+fn pedantic_lints_fire_when_opted_in() {
+    let src = "function f(a, b) {\n  return a > b ? a : b\n}\n";
+    let opts = leek_lint::LintOptions {
+        pedantic: true,
+        ..Default::default()
+    };
+    let diags = lint_src_with(src, opts);
+    assert_eq!(has_code(&diags, codes::MANUAL_MIN_MAX), 1, "{diags:?}");
+}
+
+#[test]
+fn default_groups_still_fire_with_pedantic_on() {
+    let src = "function f() { var x = 1; return 0; }\n";
+    let opts = leek_lint::LintOptions {
+        pedantic: true,
+        ..Default::default()
+    };
+    let diags = lint_src_with(src, opts);
+    assert_eq!(has_code(&diags, codes::UNUSED_VARIABLE), 1, "{diags:?}");
+}
+
+#[test]
+fn nursery_lints_are_off_by_default() {
+    // `count(...)` in a loop condition — a nursery finding.
+    let src = "function f(items) {\n  var t = 0\n  for (var i = 0; i < count(items); i++) {\n    t += items[i]\n  }\n  return t\n}\n";
+    let diags = lint_src(src);
+    assert_eq!(
+        has_code(&diags, codes::COUNT_IN_LOOP_CONDITION),
+        0,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn nursery_lints_fire_when_opted_in() {
+    let src = "function f(items) {\n  var t = 0\n  for (var i = 0; i < count(items); i++) {\n    t += items[i]\n  }\n  return t\n}\n";
+    let opts = leek_lint::LintOptions {
+        nursery: true,
+        ..Default::default()
+    };
+    let diags = lint_src_with(src, opts);
+    assert_eq!(
+        has_code(&diags, codes::COUNT_IN_LOOP_CONDITION),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn chained_comparison_fires_by_default() {
+    // Suspicious group — on without any opt-in.
+    let src = "function f(x) {\n  if (0 < x < 10) { return 1 }\n  return 0\n}\n";
+    let diags = lint_src(src);
+    assert_eq!(has_code(&diags, codes::CHAINED_COMPARISON), 1, "{diags:?}");
+}

@@ -3,11 +3,12 @@
 //!
 //! ## Detection
 //!
-//! Walk every block (the main block + each function/method body
-//! plus nested blocks) and emit one finding the first time a
-//! statement appears after a "terminator". Subsequent siblings in
-//! the same block aren't reported again — one diagnostic per
-//! unreachable region is friendlier than N.
+//! For every statement sequence (the driver's `check_block` fires for
+//! body statements, `{}` block contents, and switch-arm bodies), emit
+//! one finding the first time a statement appears after a
+//! "terminator". Subsequent siblings in the same block aren't
+//! reported again — one diagnostic per unreachable region is
+//! friendlier than N.
 //!
 //! ## Known limitations
 //!
@@ -17,45 +18,40 @@
 //!   `if (a) return else return` shape requires the same
 //!   `stmt_definitely_returns` analysis the Java backend uses;
 //!   factor that out in a later slice if useful.
-//! - **Switch arms** aren't analyzed individually — each arm is
-//!   walked as its own straight-line block.
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_hir::{Block, HirFile, Stmt};
+use leek_hir::Stmt;
 use leek_span::Span;
 
-use super::for_each_block;
-use crate::LintRule;
+use crate::LintGroup;
+use crate::pass::{LintCx, LintMeta, LintPass};
 
 pub struct UnreachableCode;
 
-impl LintRule for UnreachableCode {
-    fn name(&self) -> &'static str {
-        "unreachable-code"
+static META: LintMeta = LintMeta {
+    name: "unreachable-code",
+    code: codes::UNREACHABLE_CODE,
+    group: LintGroup::Correctness,
+    description: "statement after a `return`/`break`/`continue` — never runs",
+};
+
+impl LintPass for UnreachableCode {
+    fn meta(&self) -> &'static LintMeta {
+        &META
     }
 
-    fn code(&self) -> leek_diagnostics::Code {
-        codes::UNREACHABLE_CODE
-    }
-
-    fn check(&self, file: &HirFile, out: &mut Vec<Diagnostic>) {
-        for_each_block(file, &mut |block: &Block| {
-            check_block(block, out);
-        });
-    }
-}
-
-fn check_block(block: &Block, out: &mut Vec<Diagnostic>) {
-    let mut iter = block.stmts.iter();
-    while let Some(stmt) = iter.next() {
-        if is_terminator(stmt) {
-            // Everything after this in the same block is
-            // unreachable. Emit one diagnostic spanning the first
-            // such statement; siblings inherit the same annotation.
-            if let Some(next) = iter.next() {
-                out.push(diagnostic(next.span(), terminator_kind(stmt)));
+    fn check_block(&mut self, cx: &mut LintCx<'_, '_>, stmts: &[Stmt]) {
+        let mut iter = stmts.iter();
+        while let Some(stmt) = iter.next() {
+            if is_terminator(stmt) {
+                // Everything after this in the same block is
+                // unreachable. Emit one diagnostic spanning the first
+                // such statement; siblings inherit the same annotation.
+                if let Some(next) = iter.next() {
+                    cx.emit(diagnostic(next.span(), terminator_kind(stmt)));
+                }
+                break;
             }
-            break;
         }
     }
 }
@@ -84,20 +80,10 @@ fn diagnostic(span: Span, kind: &str) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::ast::{AstNode, SourceFile};
-    use leek_parser::parse;
-    use leek_span::SourceId;
-    use leek_syntax::{SyntaxNode, Version};
+    use crate::testing::lint_one;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
-        let root = SyntaxNode::new_root(parsed.green);
-        let ast = SourceFile::cast(root).unwrap();
-        let (hir, _) = leek_hir::lower_file(&ast, source);
-        let mut out = Vec::new();
-        UnreachableCode.check(&hir, &mut out);
-        out
+        lint_one(UnreachableCode, src)
     }
 
     #[test]

@@ -1212,6 +1212,7 @@ dependencies = [
  "leek-parser",
  "leek-pipeline",
  "leek-recipes",
+ "leek-resolver",
  "leek-span",
  "leek-syntax",
 ]
@@ -1267,10 +1268,13 @@ dependencies = [
  "leek-hir",
  "leek-lexer",
  "leek-parser",
+ "leek-pipeline",
+ "leek-recipes",
  "leek-rewrite",
  "leek-runtime",
  "leek-span",
  "leek-syntax",
+ "leek-test-corpus",
 ]
 
 [[package]]
@@ -1469,6 +1473,7 @@ version = "0.0.1"
 name = "leek-types"
 version = "0.0.1"
 dependencies = [
+ "bitflags 2.11.1",
  "leek-diagnostics",
  "leek-lexer",
  "leek-parser",

@@ -21,12 +21,20 @@ use leek_syntax::SyntaxNode;
 pub struct LintFindings(pub Vec<Diagnostic>);
 impl Artifact for LintFindings {}
 
-/// Lint pipeline step.
-pub struct Lint;
+/// Lint pipeline step. Carries the opt-in groups requested by the
+/// recipe ([`RecipeParams::lints`]); the language version is read
+/// from the [`Context`] at run time.
+pub struct Lint {
+    pedantic: bool,
+    nursery: bool,
+}
 
 impl RecipeStep for Lint {
-    fn build(_: &RecipeParams) -> Box<dyn leek_pipeline::Step> {
-        Box::new(Lint)
+    fn build(params: &RecipeParams) -> Box<dyn leek_pipeline::Step> {
+        Box::new(Lint {
+            pedantic: params.lints.pedantic,
+            nursery: params.lints.nursery,
+        })
     }
 }
 
@@ -46,7 +54,12 @@ impl Step for Lint {
             // No HIR (parse failed) — nothing to lint. Not an error.
             return Ok(());
         };
-        let mut findings = crate::lint(hir.0.as_ref());
+        let opts = crate::LintOptions {
+            pedantic: self.pedantic,
+            nursery: self.nursery,
+            version: cx.version_byte(),
+        };
+        let mut findings = crate::lint_with(hir.0.as_ref(), &opts);
 
         // Apply `// @allow(LXXXX)` annotation suppression when the
         // green tree is available. The lint step runs after Parse so

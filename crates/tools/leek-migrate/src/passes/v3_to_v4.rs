@@ -33,9 +33,10 @@ use leek_parser::ast::{AstNode, CallExpr, Expr, SourceFile};
 use leek_parser::parse;
 use leek_rewrite::EditSet;
 use leek_span::{SourceId, Span};
-use leek_syntax::language::NodeOrToken;
 use leek_syntax::{SyntaxKind, SyntaxNode, Version};
 
+use super::boundary34;
+use super::util::{ident_of_name_ref_expr, is_field_name_position, name_ref_ident, token_range};
 use crate::MigrationPass;
 
 pub struct V3ToV4;
@@ -108,10 +109,7 @@ impl MigrationPass for V3ToV4 {
                     .replace_token(&ident, "arraySlice".to_string())
                     .is_ok()
                 {
-                    consumed_ident_ranges.insert((
-                        u32::from(ident.text_range().start()),
-                        u32::from(ident.text_range().end()),
-                    ));
+                    consumed_ident_ranges.insert(token_range(&ident));
                 }
                 // Compensate inclusive→exclusive end semantics by
                 // bumping the third arg.
@@ -122,10 +120,7 @@ impl MigrationPass for V3ToV4 {
             } else if let Some((_, new_name)) = RENAMES.iter().find(|(old, _)| *old == name)
                 && edits.replace_token(&ident, (*new_name).to_string()).is_ok()
             {
-                consumed_ident_ranges.insert((
-                    u32::from(ident.text_range().start()),
-                    u32::from(ident.text_range().end()),
-                ));
+                consumed_ident_ranges.insert(token_range(&ident));
             }
         }
 
@@ -141,17 +136,10 @@ impl MigrationPass for V3ToV4 {
             if is_field_name_position(&node) {
                 continue;
             }
-            let Some(ident) = node
-                .children_with_tokens()
-                .filter_map(leek_syntax::language::NodeOrToken::into_token)
-                .find(|t| t.kind() == SyntaxKind::Ident)
-            else {
+            let Some(ident) = name_ref_ident(&node) else {
                 continue;
             };
-            let range = (
-                u32::from(ident.text_range().start()),
-                u32::from(ident.text_range().end()),
-            );
+            let range = token_range(&ident);
             if consumed_ident_ranges.contains(&range) {
                 continue;
             }
@@ -161,11 +149,7 @@ impl MigrationPass for V3ToV4 {
                 diagnostics.push(deprecated_diag(
                     name,
                     "arraySlice",
-                    Span::new(
-                        source_id,
-                        u32::from(ident.text_range().start()),
-                        u32::from(ident.text_range().end()),
-                    ),
+                    Span::new(source_id, range.0, range.1),
                     "first-class reference to `subArray`; \
                      end-index semantics differ — migrate by hand",
                 ));
@@ -175,44 +159,15 @@ impl MigrationPass for V3ToV4 {
                 let _ = edits.replace_token(&ident, (*new).to_string());
             }
         }
-    }
-}
 
-/// Extract the `Ident` token from an `Expr` that's a bare
-/// `NameRef`. Returns `None` for any other expression shape (e.g.
-/// `a.b`, `(x)`, etc.), which is what we want — those aren't
-/// calls to a top-level builtin.
-fn ident_of_name_ref_expr(expr: &Expr) -> Option<leek_syntax::SyntaxToken> {
-    let Expr::Name(name_ref) = expr else {
-        return None;
-    };
-    name_ref_ident(name_ref.syntax())
-}
-
-fn name_ref_ident(node: &SyntaxNode) -> Option<leek_syntax::SyntaxToken> {
-    node.children_with_tokens()
-        .filter_map(leek_syntax::language::NodeOrToken::into_token)
-        .find(|t| t.kind() == SyntaxKind::Ident)
-}
-
-/// True iff `node` (a NameRef) sits in the field-name slot of a
-/// `FieldExpr` (`receiver.field`).
-fn is_field_name_position(node: &SyntaxNode) -> bool {
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    if parent.kind() != SyntaxKind::FieldExpr {
-        return false;
+        // Pass C — semantic drift at the 3/4 boundary (shared with
+        // the downgrade direction, see `boundary34`): swap
+        // (key, value) callback parameters, then flag everything
+        // that has no faithful rewrite.
+        boundary34::swap_callback_params(&file, source_id, edits, diagnostics);
+        boundary34::flag_juggling_equality(&file, source_id, diagnostics);
+        boundary34::flag_container_drift(&file, source_id, diagnostics);
     }
-    let mut seen_dot = false;
-    for el in parent.children_with_tokens() {
-        match el {
-            NodeOrToken::Token(t) if t.kind() == SyntaxKind::Dot => seen_dot = true,
-            NodeOrToken::Node(n) if n == *node => return seen_dot,
-            _ => {}
-        }
-    }
-    false
 }
 
 fn deprecated_diag(old: &str, new: &str, span: Span, note: &str) -> Diagnostic {
@@ -308,5 +263,188 @@ mod tests {
     fn bumps_version_pragma() {
         let out = migrate("// @version:3\nvar x = subArray([1], 0, 0)\n");
         assert!(out.starts_with("// @version:4\n"));
+    }
+
+    #[test]
+    fn swaps_two_param_callback_names() {
+        // v3 calls the callback with (key, value); v4 with
+        // (value, key). Swapping the names keeps the body's meaning.
+        let out = migrate("return arrayMap([1, 2], (k, v) => v * 2)\n");
+        assert!(out.contains("(v, k) => v * 2"), "got: {out}");
+    }
+
+    #[test]
+    fn one_param_callback_untouched() {
+        let out = migrate("return arrayMap([1, 2], v => v * 2)\n");
+        assert!(out.contains("v => v * 2"), "got: {out}");
+    }
+
+    #[test]
+    fn non_inline_callback_is_flagged() {
+        let res = run_pass(
+            &V3ToV4,
+            "function f(k, v) { return v }\nreturn arrayMap([1], f)\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("(key, value)")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn bool_literal_equality_is_flagged() {
+        let res = run_pass(&V3ToV4, "return 1 == true\n", SourceId::new(1).unwrap());
+        assert!(res.text.contains("1 == true"), "got: {}", res.text);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("boolean literal")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn index_assignment_is_flagged() {
+        let res = run_pass(
+            &V3ToV4,
+            "var a = []\na[3] = 1\nreturn a\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("out-of-range index")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn map_literal_base_index_assignment_not_flagged() {
+        let res = run_pass(
+            &V3ToV4,
+            "var m = [:]\nm[3] = 1\nreturn m\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            !res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("out-of-range index")),
+            "spurious flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn mixed_literal_equality_is_flagged() {
+        let res = run_pass(&V3ToV4, "return 0 == '0'\n", SourceId::new(1).unwrap());
+        assert!(res.text.contains("0 == '0'"), "got: {}", res.text);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("different types")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn same_class_literal_equality_not_flagged() {
+        // int vs real is fine (`1 == 1.0` is true in both versions).
+        let res = run_pass(&V3ToV4, "return 1 == 1.0\n", SourceId::new(1).unwrap());
+        assert!(
+            !res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("different types")),
+            "spurious flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn self_indexed_map_assignment_is_flagged() {
+        // Even with a map-literal base, `a[a] = 1` uses the container
+        // as its own key — that drifts, so the map skip must not win.
+        let res = run_pass(
+            &V3ToV4,
+            "var a = [:]\na[a] = 1\nreturn a\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("out-of-range index")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn real_key_remove_is_flagged() {
+        let res = run_pass(
+            &V3ToV4,
+            "var m = [:]\nremoveKey(m, 12.12)\nreturn m\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("real-number key")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn string_of_container_literal_is_flagged() {
+        let res = run_pass(
+            &V3ToV4,
+            "return string([['a']])\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("without quotes")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn array_filter_keys_are_flagged() {
+        let res = run_pass(
+            &V3ToV4,
+            "return arrayFilter([1, 2, 3], x => x > 1)\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("arrayFilter")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn json_decode_is_flagged() {
+        let res = run_pass(
+            &V3ToV4,
+            "return jsonDecode('[1]')\n",
+            SourceId::new(1).unwrap(),
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("jsonDecode")),
+            "missing flag: {:?}",
+            res.diagnostics
+        );
     }
 }

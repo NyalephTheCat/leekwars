@@ -40,6 +40,17 @@ impl OptLevel {
     }
 }
 
+/// Which opt-in lint groups the lint step should run, on top of the
+/// always-on defaults. Populated from CLI flags (`--pedantic`,
+/// `--nursery`) and the project manifest's `[lints]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LintGroups {
+    /// Strictness lints — verbose-but-fine code worth tightening.
+    pub pedantic: bool,
+    /// Teaching lints — point newcomers at the idiomatic construct.
+    pub nursery: bool,
+}
+
 #[derive(Clone)]
 pub struct RecipeParams {
     /// If set, producer steps that opt into [`crate::combinators::RecipeStepStopOnError`]
@@ -49,6 +60,9 @@ pub struct RecipeParams {
     /// analysis/diagnostic recipes see the code as written; codegen recipes
     /// raise it via [`RecipeParams::with_opt`].
     pub opt: OptLevel,
+    /// Opt-in lint groups for recipes that include the lint step.
+    /// Defaults to "none" — only the always-on groups run.
+    pub lints: LintGroups,
     /// Per-artifact inclusion gate used by [`crate::combinators::Optional`].
     /// Defaults to "include everything".
     want: Option<std::sync::Arc<dyn Fn(TypeId) -> bool + Send + Sync>>,
@@ -59,6 +73,7 @@ impl Default for RecipeParams {
         Self {
             stop_on_diagnostics: Some(Severity::Error),
             opt: OptLevel::default(),
+            lints: LintGroups::default(),
             want: None,
         }
     }
@@ -69,6 +84,7 @@ impl std::fmt::Debug for RecipeParams {
         f.debug_struct("RecipeParams")
             .field("stop_on_diagnostics", &self.stop_on_diagnostics)
             .field("opt", &self.opt)
+            .field("lints", &self.lints)
             .field("want", &self.want.as_ref().map(|_| ".."))
             .finish()
     }
@@ -85,6 +101,7 @@ impl RecipeParams {
         Self {
             stop_on_diagnostics: None,
             opt: OptLevel::O0,
+            lints: LintGroups::default(),
             want: None,
         }
     }
@@ -94,6 +111,7 @@ impl RecipeParams {
         Self {
             stop_on_diagnostics: None,
             opt: OptLevel::O0,
+            lints: LintGroups::default(),
             want: None,
         }
     }
@@ -108,6 +126,13 @@ impl RecipeParams {
     #[must_use]
     pub fn with_opt(mut self, opt: OptLevel) -> Self {
         self.opt = opt;
+        self
+    }
+
+    /// Enable opt-in lint groups for this recipe's lint step.
+    #[must_use]
+    pub fn with_lints(mut self, lints: LintGroups) -> Self {
+        self.lints = lints;
         self
     }
 

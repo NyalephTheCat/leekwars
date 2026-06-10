@@ -53,6 +53,16 @@ pub fn run_with_reporter(
     DriverRun { run, had_error }
 }
 
+/// Merge the manifest's opt-in lint groups into `config`'s params.
+/// OR semantics: a group runs if either the CLI flags or `Miku.toml`'s
+/// `[lint]` table asks for it.
+fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfig {
+    let mut config = config.clone();
+    config.params.lints.pedantic |= project.manifest.lint.pedantic;
+    config.params.lints.nursery |= project.manifest.lint.nursery;
+    config
+}
+
 /// Convenience: discover project, build reporter, run one file.
 pub fn run_file(
     project: &Project,
@@ -68,7 +78,7 @@ pub fn run_file(
     };
     let reporter =
         Reporter::new(config.color, config.format, lint).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let pipeline = pipeline_for(config)?;
+    let pipeline = pipeline_for(&merge_manifest_lints(project, config))?;
     let label = path.display().to_string();
     Ok(run_with_reporter(
         &pipeline,
@@ -106,7 +116,8 @@ pub fn run_file_timed(
     };
     let reporter =
         Reporter::new(config.color, config.format, lint).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let pipeline = leek_recipes::pipeline_timed(config.target, &config.params, sink)?;
+    let merged = merge_manifest_lints(project, config);
+    let pipeline = leek_recipes::pipeline_timed(merged.target, &merged.params, sink)?;
     let label = path.display().to_string();
     Ok(run_with_reporter(
         &pipeline,
