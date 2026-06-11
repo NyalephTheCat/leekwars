@@ -1,0 +1,56 @@
+// entity-state corpus, 4-turn cycle. The statue gate is self-aware
+// (!isStatic()), so in a mirror only the FIRST mover ever pins STATIC on
+// the other — the asymmetry that exercises every swap path below.
+//
+// Phase 1: swap (1018) — the second mover was just statued, so its swap
+// runs with a STATIC caster and still succeeds (invertEntities checks only
+// the TARGET) — then statue (1034: their moves no-op, no MP spent, isStatic
+// gates the recast), regen (1012) arms the HoT the UNHEALABLE phase will
+// silence, and a shot (turn 1 spends 1 TP on setWeapon, so that first shot
+// fails free).
+// Phase 2: ghost (1035) INVINCIBLE + mirror (1014) + venom (1001), and a swap
+// aimed at the statued enemy — refused, a permutation can't TARGET a
+// STATIC entity.
+// Phase 3: double-shot into the enemy's live ghost+mirror — damage zeroed
+// AFTER shields ([101, fid, 0, 0] still logs, no life-steal fed), return
+// damage still computed from the raw pre-shield value but BLOCKED on our
+// side (we're invincible too: caster-INVINCIBLE guard); meanwhile their
+// venom ticks on us log NOTHING while our ghost lasts.
+// Phase 0: curse (1036) UNHEALABLE on the enemy + cure (1011) — the first
+// mover's cure lands, the second mover is already cursed and its cure
+// skips silently BEFORE the log — and a shot.
+var e = getNearestEnemy();
+if (getTurn() == 1) {
+	setWeapon(WEAPON_PISTOL);
+}
+var t = getTurn() % 4;
+if (t == 1) {
+	var ec = getCell(e);
+	if (ec != null) {
+		useChipOnCell(1018, ec);
+	}
+	if (!isStatic() && !isStatic(e)) {
+		useChip(1034, e);
+	}
+	useChip(1012);
+	moveToward(e);
+	useWeapon(e);
+} else if (t == 2) {
+	useChip(1035);
+	useChip(1014);
+	useChip(1001, e);
+	var ec2 = getCell(e);
+	if (ec2 != null) {
+		useChipOnCell(1018, ec2);
+	}
+	moveToward(e);
+} else if (t == 3) {
+	moveToward(e);
+	useWeapon(e);
+	useWeapon(e);
+} else {
+	useChip(1036, e);
+	useChip(1011);
+	moveToward(e);
+	useWeapon(e);
+}

@@ -98,14 +98,60 @@ pub fn last_jit_split() -> Option<(std::time::Duration, std::time::Duration)> {
 pub fn run(hir: &HirFile, opts: &NativeOptions) -> Result<Value, NativeError> {
     let mut opts = opts.clone();
     opts.emit = NativeEmit::Jit;
-    match compile(hir, &opts)? {
+    match compile_entry(hir, &opts, JitEntry::Main)? {
         NativeArtifact::Value(v) => Ok(v),
         _ => unreachable!("Jit emit yields a Value"),
     }
 }
 
+/// JIT-compile `hir` and invoke the stored function *value* `callee` with
+/// `args` instead of running `main`. The full per-run setup/teardown of
+/// [`run`] applies (tables installed, ops armed, module memory reclaimed) —
+/// only the entry differs.
+///
+/// This is how a summon's AI function runs: the `Value::Function` was
+/// captured during an earlier run of the *same* `hir` (so its
+/// `function_idx` / `DefId` resolve identically in the re-JIT'd module) and
+/// is dispatched through `dispatch_call_value` exactly like an indirect call
+/// inside the program. Globals are NOT initialized (`main` never runs):
+/// matching Java would require the owner's live global state, which the
+/// per-turn re-run model doesn't keep.
+///
+/// # Errors
+/// Same failure modes as [`run`] (compile errors, runtime faults).
+pub fn run_call(
+    hir: &HirFile,
+    opts: &NativeOptions,
+    callee: &Value,
+    args: Vec<Value>,
+) -> Result<Value, NativeError> {
+    let mut opts = opts.clone();
+    opts.emit = NativeEmit::Jit;
+    match compile_entry(hir, &opts, JitEntry::CallValue(callee, args))? {
+        NativeArtifact::Value(v) => Ok(v),
+        _ => unreachable!("Jit emit yields a Value"),
+    }
+}
+
+/// What the [`NativeEmit::Jit`] path invokes once the module is finalized
+/// and the runtime tables are installed.
+enum JitEntry<'a> {
+    /// Call the program's `main` (the normal [`run`] path).
+    Main,
+    /// Dispatch a stored function value with the given args ([`run_call`]).
+    CallValue(&'a Value, Vec<Value>),
+}
+
 /// Compile `hir` according to `opts.emit`.
 pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, NativeError> {
+    compile_entry(hir, opts, JitEntry::Main)
+}
+
+fn compile_entry(
+    hir: &HirFile,
+    opts: &NativeOptions,
+    entry: JitEntry<'_>,
+) -> Result<NativeArtifact, NativeError> {
     // Emit op-budget back-edge checks (so an unbounded loop stops) only when a
     // finite budget is set — keeps zero-overhead the common unlimited runs.
     runtime::set_enforce_budget(opts.op_limit != u64::MAX);
@@ -366,35 +412,47 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
             // SAFETY: `leek_main` was declared with the matching ABI
             // (`() -> i64` or `() -> f64`) and the module finalized; the
             // pointer is a valid host function.
-            let value = match ret_ty {
-                ValTy::Real => {
-                    let f =
-                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr) };
-                    Value::Real(f())
-                }
-                ValTy::Bool => {
-                    let f =
-                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
-                    Value::Bool(f() != 0)
-                }
-                ValTy::Int => {
-                    let f =
-                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
-                    Value::Int(f())
-                }
-                // A composite / boxed result: the function returns a
-                // handle; recover the owned `Value` (freeing the box). A
-                // top-level instance whose class declares `string()` is routed
-                // through it (matching the interpreter's display).
-                ValTy::Ref => {
-                    let f = unsafe {
-                        std::mem::transmute::<*const u8, extern "C" fn() -> *mut Value>(ptr)
-                    };
-                    // Clone the result out of its handle (don't free the box —
-                    // `free_run_boxes` below reclaims every handle at once). The
-                    // clone keeps the result's `Rc`-backed data alive past the
-                    // sweep.
-                    runtime::invoke_top_level_string(unsafe { runtime::read_handle(f()) })
+            let value = match entry {
+                JitEntry::Main => match ret_ty {
+                    ValTy::Real => {
+                        let f = unsafe {
+                            std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr)
+                        };
+                        Value::Real(f())
+                    }
+                    ValTy::Bool => {
+                        let f = unsafe {
+                            std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)
+                        };
+                        Value::Bool(f() != 0)
+                    }
+                    ValTy::Int => {
+                        let f = unsafe {
+                            std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)
+                        };
+                        Value::Int(f())
+                    }
+                    // A composite / boxed result: the function returns a
+                    // handle; recover the owned `Value` (freeing the box). A
+                    // top-level instance whose class declares `string()` is routed
+                    // through it (matching the interpreter's display).
+                    ValTy::Ref => {
+                        let f = unsafe {
+                            std::mem::transmute::<*const u8, extern "C" fn() -> *mut Value>(ptr)
+                        };
+                        // Clone the result out of its handle (don't free the box —
+                        // `free_run_boxes` below reclaims every handle at once). The
+                        // clone keeps the result's `Rc`-backed data alive past the
+                        // sweep.
+                        runtime::invoke_top_level_string(unsafe { runtime::read_handle(f()) })
+                    }
+                },
+                // `run_call`: skip `main` entirely and dispatch the stored
+                // function value (its indexes resolve against the tables
+                // installed above). The result is already an owned `Value`.
+                JitEntry::CallValue(callee, args) => {
+                    let _ = ptr;
+                    runtime::call_value_entry(callee, args, opts.version)
                 }
             };
             LAST_JIT_SPLIT.with(|c| c.set(Some((compile_dur, t_exec.elapsed()))));

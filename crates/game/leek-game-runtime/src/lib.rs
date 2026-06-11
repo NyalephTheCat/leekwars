@@ -16,6 +16,7 @@
 //! map — exactly the `leek-runtime` / backend split, one layer up.
 
 pub mod actions;
+pub mod attack;
 pub mod builtins;
 pub mod chips;
 pub mod effect;

@@ -1,0 +1,7 @@
+// baseline weapon corpus: close in and double-shot — pins pathfinding,
+// crit rolls, the damage formula, life-steal and multi-use per turn.
+var e = getNearestEnemy();
+setWeapon(WEAPON_PISTOL);
+moveToward(e, 10);
+useWeapon(e);
+useWeapon(e);

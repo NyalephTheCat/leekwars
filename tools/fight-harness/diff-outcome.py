@@ -81,6 +81,23 @@ def walk(cand, gold, path, ignored, out):
         out.append(f"{path}: {cand!r} vs {gold!r}")
 
 
+def normalize_log_traces(outcome):
+    """Blank the trace element of system-log entries on both sides.
+
+    `logs.<farmer>.<action>` entries are `[fid, type, trace, key, params?]`
+    where the trace is Java's rendering of its own AI call stack
+    ("\\t▶ runIA, java line N\\n" — leekscript codegen line numbers). The
+    Rust simulator can't reproduce it, so it is excluded from conformance.
+    """
+    for farmer in outcome.get("logs", {}).values():
+        if not isinstance(farmer, dict):
+            continue
+        for entries in farmer.values():
+            for entry in entries:
+                if isinstance(entry, list) and len(entry) >= 4 and isinstance(entry[2], str):
+                    entry[2] = ""
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = {a for a in sys.argv[1:] if a.startswith("--")}
@@ -93,6 +110,9 @@ def main():
     except (OSError, json.JSONDecodeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+    normalize_log_traces(cand)
+    normalize_log_traces(gold)
 
     ignored = [".execution_time"]
     if "--ignore-ops" in flags:

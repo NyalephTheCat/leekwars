@@ -1,0 +1,29 @@
+// EffectMultiplyStats corpus — both leeks run this: chip 1049 doubles
+// every base stat for 3 turns (cooldown 2 < turns 3, so the turn-3 recast
+// REPLACES the live effect).
+//
+// Turn 1: cast → first-apply branch (totalLife ≤ lifeBase): every base
+// stat gains base×(factor−1) carried on the effect, max life +500, then
+// the ratio-preserving heal tops life up SILENTLY (addLife logs nothing).
+// The TP buff lands immediately: 6 + 6 − 3 spent = 9 → three pistol
+// shots with doubled strength.
+// Turn 2: recast → -3 (cooldown), no RNG.
+// Turn 3: recast → the previous effect is removed (ActionRemoveEffect,
+// buff stats reverted — but NOT the max-life bonus) and re-applied down
+// the REPLACEMENT branch: lifeDelta is exactly 1× base life.
+// Turn 5+: the effect expires; no recast (getTurn() > 3) so the fight
+// finishes on base stats.
+//
+// NO cross-turn globals (Rust clears them between turns, Java persists).
+
+var e = getNearestEnemy();
+if (getTurn() == 1) {
+	setWeapon(WEAPON_PISTOL);
+}
+if (getTurn() <= 3) {
+	useChip(1049); // self-cast — -3 on cooldown turns, no RNG there
+}
+moveToward(e);
+useWeapon(e);
+useWeapon(e);
+useWeapon(e);

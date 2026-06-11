@@ -14,9 +14,12 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::actions::{Action, ActionLog};
+use crate::attack::{
+    Area, AttackType, EffectInstance, EffectParams, EffectType, EntityState, java_round,
+};
 use crate::map::Map;
 use crate::outcome::{entity_snapshot, map_json};
 use crate::rng::OfficialRng;
@@ -43,9 +46,12 @@ pub const STAT_POWER: usize = 15;
 pub const STAT_CORES: usize = 16;
 pub const STAT_RAM: usize = 17;
 
+/// `Stats.SIZE` — the number of stat slots (`STAT_RAM + 1`).
+pub const STAT_COUNT: usize = 18;
+
 /// A characteristics vector indexed by `STAT_*` id (`leek/Stats.java`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Stats([i32; 18]);
+pub struct Stats([i32; STAT_COUNT]);
 
 impl Stats {
     /// `Stats.getStat(id)`.
@@ -88,6 +94,20 @@ pub const SHOW_LIMIT_TURN: i32 = 5;
 
 /// `State.MAX_TURNS`.
 pub const MAX_TURNS: i32 = 64;
+
+/// `State.SUMMON_LIMIT` — max *alive* summons per team.
+pub const SUMMON_LIMIT: usize = 8;
+
+/// `AILog.SSTANDARD` — system-log level a `LeekLog.STANDARD` log is
+/// upgraded to by `EntityAI.addSystemLog`.
+pub const LOG_SSTANDARD: i32 = 6;
+/// `AILog.SWARNING` — system-log level a `LeekLog.WARNING` log is
+/// upgraded to by `EntityAI.addSystemLog`.
+pub const LOG_SWARNING: i32 = 7;
+/// `FarmerLog.BULB_WITHOUT_AI`.
+pub const FARMER_LOG_BULB_WITHOUT_AI: i32 = 1005;
+/// `Error.HELP_PAGE_LINK.ordinal()`.
+pub const ERROR_HELP_PAGE_LINK: i32 = 113;
 
 /// One fighting entity — the fight-relevant core of `Entity.java`, scoped to
 /// leeks (no summons / turrets / chests yet). Mutations that need the rest
@@ -141,6 +161,9 @@ pub struct Fighter {
     pub effects: Vec<usize>,
     /// Indices of effects this fighter has *cast* (`launchedEffects`).
     pub launched_effects: Vec<usize>,
+    /// Entity states pinned by `EffectAddState` effects (`states`) — added on
+    /// apply, rebuilt from live effects by `State::update_buff_stats`.
+    pub states: Vec<EntityState>,
 
     /// `saysTurn` / `showsTurn` — per-turn action caps.
     pub says_turn: i32,
@@ -148,6 +171,14 @@ pub struct Fighter {
 
     /// Operations consumed across the fight (`totalOperations`).
     pub total_operations: i64,
+
+    /// The summoner's fid for a bulb (`Bulb.mOwner`); `None` for leeks.
+    /// `is_summon()` derives from it.
+    pub summoner: Option<usize>,
+    /// `mBirthTurn` — the turn this entity was summoned (0 for leeks).
+    pub birth_turn: i32,
+    /// `mSkin` — bulbs carry their template id; leeks default to 0.
+    pub skin: i32,
 }
 
 impl Fighter {
@@ -179,10 +210,20 @@ impl Fighter {
             item_uses: HashMap::new(),
             effects: Vec::new(),
             launched_effects: Vec::new(),
+            states: Vec::new(),
             says_turn: 0,
             shows_turn: 0,
             total_operations: 0,
+            summoner: None,
+            birth_turn: 0,
+            skin: 0,
         }
+    }
+
+    /// `Entity.isSummon()` — true for bulbs.
+    #[must_use]
+    pub fn is_summon(&self) -> bool {
+        self.summoner.is_some()
     }
 
     /// `Entity.getStat(id)` — base + buff.
@@ -195,6 +236,12 @@ impl Fighter {
     #[must_use]
     pub fn is_dead(&self) -> bool {
         self.life <= 0
+    }
+
+    /// `Entity.hasState(state)`.
+    #[must_use]
+    pub fn has_state(&self, state: EntityState) -> bool {
+        self.states.contains(&state)
     }
 
     /// `Entity.getTP()` — total minus used.
@@ -264,15 +311,8 @@ impl Fighter {
         decrement_or_remove(&mut self.cooldowns);
     }
 
-    /// `Entity.startTurn` — tick cooldowns. The effect ticks (start-turn
-    /// effect application, launched-effect expiry) need the world and live on
-    /// [`State`] when effects land (milestone 2).
-    pub fn start_turn(&mut self) {
-        self.apply_cooldown();
-    }
-
-    /// `Entity.endTurn` — reset the per-turn counters. (The poison
-    /// propagation step joins with the effect model in milestone 2.)
+    /// `Entity.endTurn` — reset the per-turn counters. (The propagation step
+    /// joins when `TYPE_PROPAGATION` effects are ported.)
     pub fn end_turn(&mut self) {
         self.used_mp = 0;
         self.used_tp = 0;
@@ -317,10 +357,24 @@ impl Team {
         self.fighters.iter().all(|&f| fighters[f].is_dead())
     }
 
-    /// `Team.getLife()` — summed member life (summons excluded; none yet).
+    /// `Team.getLife()` — summed member life, **summons excluded** (the
+    /// draw life-tiebreak only counts leeks).
     #[must_use]
     pub fn life(&self, fighters: &[Fighter]) -> i32 {
-        self.fighters.iter().map(|&f| fighters[f].life).sum()
+        self.fighters
+            .iter()
+            .filter(|&&f| !fighters[f].is_summon())
+            .map(|&f| fighters[f].life)
+            .sum()
+    }
+
+    /// `Team.getSummonCount()` — alive summons on this team.
+    #[must_use]
+    pub fn summon_count(&self, fighters: &[Fighter]) -> usize {
+        self.fighters
+            .iter()
+            .filter(|&&f| !fighters[f].is_dead() && fighters[f].is_summon())
+            .count()
     }
 
     /// `Team.addCooldown(chip, cooldown)`.
@@ -337,6 +391,12 @@ impl Team {
     #[must_use]
     pub fn has_cooldown(&self, chip: i32) -> bool {
         self.cooldowns.contains_key(&chip)
+    }
+
+    /// `Team.getCooldown(chipID)` — 0 when none.
+    #[must_use]
+    pub fn cooldown(&self, chip: i32) -> i32 {
+        self.cooldowns.get(&chip).copied().unwrap_or(0)
     }
 
     /// `Team.applyCoolDown()`.
@@ -385,6 +445,17 @@ impl Order {
     }
 
     /// `Order.addEntity(leek)` — append (initial order construction).
+    /// `Order.addSummon(owner, invoc)` — insert right after the owner, with
+    /// **no position fixup** (Java mutates the list directly here, unlike
+    /// `addEntity(index, …)`; the owner is the current entity, so the
+    /// insertion point is always past the cursor). A missing owner inserts
+    /// nothing.
+    pub fn add_summon(&mut self, owner: usize, fid: usize) {
+        if let Some(idx) = self.fids.iter().position(|&f| f == owner) {
+            self.fids.insert(idx + 1, fid);
+        }
+    }
+
     pub fn add_entity(&mut self, fid: usize) {
         self.fids.push(fid);
     }
@@ -481,9 +552,8 @@ pub const USE_TOO_MANY_SUMMONS: i32 = -5;
 pub const USE_RESURRECT_INVALID_ENTITY: i32 = -6;
 pub const USE_MAX_USES: i32 = -7;
 
-/// The use-rules of a weapon template (`weapons/Weapon.java` +
-/// `attack/Attack.java` accessors) — the subset the use ladder checks.
-/// Effects come with the attack model in milestone 2.
+/// The use-rules and effects of a weapon template (`weapons/Weapon.java` +
+/// `attack/Attack.java` accessors).
 #[derive(Debug, Clone)]
 pub struct WeaponSpec {
     pub id: i32,
@@ -496,6 +566,68 @@ pub struct WeaponSpec {
     /// `Attack.getMaxUses()` — `-1` is unlimited; `0` blocks every use
     /// (`getItemUses >= 0` holds immediately).
     pub max_uses: i32,
+    /// `Attack.getArea()`.
+    pub area: Area,
+    /// The attack's effect lines (`Attack.getEffects()`).
+    pub effects: Vec<EffectParams>,
+}
+
+/// The use-rules, effects and cooldown data of a chip template
+/// (`chips/Chip.java` + `attack/Attack.java` accessors).
+#[derive(Debug, Clone)]
+pub struct ChipSpec {
+    pub id: i32,
+    pub cost: i32,
+    pub min_range: i32,
+    pub max_range: i32,
+    /// `Attack.getLaunchType()` bits (1 = line, 2 = diagonal, 4 = other).
+    pub launch_type: i32,
+    pub needs_los: bool,
+    /// `Attack.getMaxUses()` — `-1` is unlimited.
+    pub max_uses: i32,
+    /// `Attack.getArea()`.
+    pub area: Area,
+    /// The attack's effect lines (`Attack.getEffects()`).
+    pub effects: Vec<EffectParams>,
+    /// `Chip.getCooldown()` — `0` is none, `-1` is "rest of the fight".
+    pub cooldown: i32,
+    /// `Chip.isTeamCooldown()` — cooldown lives on the team, not the entity.
+    pub team_cooldown: bool,
+    /// `Chip.getInitialCooldown()` — pre-charged for everyone at fight start.
+    pub initial_cooldown: i32,
+    /// `Chip.getLevel()` — copied onto bulbs summoned by this chip
+    /// (`createSummon(…, template.getLevel(), …)`).
+    pub level: i32,
+}
+
+/// One bulb template (`bulbs/BulbTemplate.java` — `data/summons.json` entry):
+/// `(min, max)` stat ranges scaled by the summoner's level, plus the chips
+/// granted to the bulb.
+#[derive(Debug, Clone)]
+pub struct BulbTemplate {
+    pub id: i32,
+    pub name: String,
+    pub life: (i32, i32),
+    pub strength: (i32, i32),
+    pub wisdom: (i32, i32),
+    pub agility: (i32, i32),
+    pub resistance: (i32, i32),
+    pub science: (i32, i32),
+    pub magic: (i32, i32),
+    pub tp: (i32, i32),
+    pub mp: (i32, i32),
+    /// Chip template ids, in `summons.json` order — `Entity.addChip` caps at
+    /// the bulb's RAM (6), so only the first 6 stick.
+    pub chips: Vec<i32>,
+}
+
+/// `BulbTemplate.base(base, bonus, coeff, multiplier)` — the bulb stat
+/// formula: `(int) ((min + Math.floor((max - min) * coeff)) * multiplier)`.
+/// The cast truncates toward zero like Java's `(int)`.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+fn bulb_base((min, max): (i32, i32), coeff: f64, multiplier: f64) -> i32 {
+    ((f64::from(min) + (f64::from(max - min) * coeff).floor()) * multiplier) as i32
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -539,6 +671,18 @@ pub struct State {
     pub actions: ActionLog,
     /// Registered weapon templates (`Weapons.getTemplates()`).
     pub weapon_specs: BTreeMap<i32, WeaponSpec>,
+    /// Registered chip templates (`Chips.getTemplates()` — TreeMap order).
+    pub chip_specs: BTreeMap<i32, ChipSpec>,
+    /// Registered bulb templates (`Bulbs.getInvocationTemplate`).
+    pub bulb_templates: BTreeMap<i32, BulbTemplate>,
+    /// The AI function value passed to `summon()`, keyed by the bulb's fid
+    /// (`BulbAI.mAIFunction`). Absent for `useChip`-summoned bulbs
+    /// (BULB_WITHOUT_AI) — they idle. The orchestrator dispatches these
+    /// through the owner's re-JIT'd module each bulb turn.
+    pub summon_ais: HashMap<usize, leek_runtime::Value>,
+    /// Live effect instances — an arena, never compacted: the fighters'
+    /// `effects` / `launched_effects` index lists are the membership truth.
+    pub effects: Vec<EffectInstance>,
     /// cell id → fid of the entity standing on it (`Cell.getPlayer`).
     occupancy: HashMap<usize, usize>,
     /// `mState == STATE_RUNNING`.
@@ -554,6 +698,10 @@ pub struct State {
     /// Map JSON captured by [`State::record_initial_state`]
     /// (`Actions.addMap` runs before obstacles can be destroyed).
     pub map_snapshot: Value,
+    /// Per-farmer system-log buffers (`FarmerLog.mObject`) — farmer id →
+    /// last-action-id key → entries appended while that action was current.
+    /// Serialized into the Outcome's `logs` object by `build_outcome`.
+    pub farmer_logs: BTreeMap<i64, BTreeMap<usize, Vec<Value>>>,
 }
 
 impl State {
@@ -569,12 +717,17 @@ impl State {
             order: Order::new(),
             actions: ActionLog::new(),
             weapon_specs: BTreeMap::new(),
+            chip_specs: BTreeMap::new(),
+            bulb_templates: BTreeMap::new(),
+            summon_ais: HashMap::new(),
+            effects: Vec::new(),
             occupancy: HashMap::new(),
             running: false,
             last_turn: 0,
             initial_order: Vec::new(),
             leek_snapshots: Vec::new(),
             map_snapshot: Value::Null,
+            farmer_logs: BTreeMap::new(),
         }
     }
 
@@ -622,9 +775,53 @@ impl State {
         }
     }
 
+    /// `State.slideEntity(entity, cell, caster)` — a forced move (push or
+    /// attract). Updates the occupancy only; like Java, it produces NO action
+    /// (the statistics manager is the sole observer there). The `onMoved`
+    /// passives are weapon passive effects — none in the leek scope.
+    pub fn slide_entity(&mut self, fid: usize, cell: usize) {
+        // A STATIC entity cannot be pushed or attracted.
+        if self.fighters[fid].has_state(EntityState::Static) {
+            return;
+        }
+        if self.fighters[fid].cell == Some(cell) {
+            return;
+        }
+        self.place_entity(fid, cell);
+    }
+
+    /// `State.teleportEntity(entity, cell, caster, itemId)` — like a slide,
+    /// it only moves the occupancy; statistics-only in Java, no action.
+    /// (Unlike the slides, Java has NO STATIC guard here — a static entity
+    /// can still teleport.)
+    pub fn teleport_entity(&mut self, fid: usize, cell: usize) {
+        self.place_entity(fid, cell);
+    }
+
+    /// `State.invertEntities(caster, target)` — permutation: swap the two
+    /// entities' cells. Occupancy-only like the slides (statistics-only in
+    /// Java, no action logged). The `onMoved` passives are weapon passive
+    /// effects — none in the leek scope.
+    pub fn invert_entities(&mut self, a: usize, b: usize) {
+        // Java checks ONLY the target for STATIC — a static caster still
+        // swaps (and moves itself doing so).
+        if self.fighters[b].has_state(EntityState::Static) {
+            return;
+        }
+        let (Some(ca), Some(cb)) = (self.fighters[a].cell, self.fighters[b].cell) else {
+            return;
+        };
+        self.occupancy.insert(ca, b);
+        self.occupancy.insert(cb, a);
+        self.fighters[a].cell = Some(cb);
+        self.fighters[b].cell = Some(ca);
+        // `map.entity_cells` already holds both cells — the swap doesn't
+        // change the set.
+    }
+
     /// `State.init()` — draw the obstacle count, generate the map, place the
-    /// entities, compute the start order. (The initial chip-cooldown pass
-    /// consumes no RNG and only matters once chips can be cast — milestone 2.)
+    /// entities, compute the start order, pre-charge the initial chip
+    /// cooldowns.
     ///
     /// # Panics
     /// Panics if the fight isn't the 2-team shape the map generator currently
@@ -670,6 +867,24 @@ impl State {
             self.initial_order.push(fid);
         }
 
+        // Cooldowns initiaux — every registered chip with an initial cooldown
+        // starts charged for every entity, at `initialCooldown + 1` (the +1
+        // absorbs the entity's first start-of-turn tick).
+        let initial: Vec<ChipSpec> = self
+            .chip_specs
+            .values()
+            .filter(|c| c.initial_cooldown > 0)
+            .cloned()
+            .collect();
+        for chip in &initial {
+            for t in 0..self.teams.len() {
+                for i in 0..self.teams[t].fighters.len() {
+                    let fid = self.teams[t].fighters[i];
+                    self.add_chip_cooldown(fid, chip, chip.initial_cooldown + 1);
+                }
+            }
+        }
+
         self.running = true;
     }
 
@@ -680,7 +895,7 @@ impl State {
         self.leek_snapshots = self
             .initial_order
             .iter()
-            .map(|&f| entity_snapshot(&self.fighters[f]))
+            .map(|&f| entity_snapshot(&self.fighters[f], false))
             .collect();
         self.map_snapshot = map_json(&self.map);
         self.actions.log(Action::StartFight {
@@ -699,11 +914,45 @@ impl State {
         self.actions.log(Action::EntityTurn {
             entity_id: fid as i64,
         });
-        self.fighters[fid].start_turn();
+        self.start_turn(fid);
         if self.fighters[fid].is_dead() {
             BeginTurn::Skip
         } else {
             BeginTurn::Act(fid)
+        }
+    }
+
+    /// `Entity.startTurn()` — tick the chip cooldowns, apply the start-turn
+    /// effects sitting *on* this entity (poison ticks), then decrement and
+    /// expire the effects this entity has *launched*.
+    fn start_turn(&mut self, fid: usize) {
+        self.fighters[fid].apply_cooldown();
+
+        // Apply start-turn effects on a copy of the list (Java iterates an
+        // `ArrayList` copy; ticks can mutate the live list via death).
+        let effects_copy = self.fighters[fid].effects.clone();
+        for ei in effects_copy {
+            self.apply_start_turn_effect(ei);
+            if self.fighters[fid].is_dead() {
+                // Dying mid-tick skips the launched-effect expiry entirely.
+                return;
+            }
+        }
+
+        // Decrement the launched effects; remove the ones that expire.
+        let mut i = 0;
+        while i < self.fighters[fid].launched_effects.len() {
+            let ei = self.fighters[fid].launched_effects[i];
+            if self.effects[ei].turns != -1 {
+                self.effects[ei].turns -= 1;
+            }
+            if self.effects[ei].turns == 0 {
+                let target = self.effects[ei].target;
+                self.remove_effect(target, ei);
+                self.fighters[fid].launched_effects.remove(i);
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -712,6 +961,7 @@ impl State {
     #[allow(clippy::cast_possible_wrap)]
     pub fn end_entity_turn(&mut self, fid: usize) {
         self.fighters[fid].end_turn();
+        self.propagate_effects(fid);
         self.actions.log(Action::EndTurn {
             entity_id: fid as i64,
             tp: i64::from(self.fighters[fid].tp()),
@@ -809,6 +1059,11 @@ impl State {
     /// the position. Returns the cells moved.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn move_entity(&mut self, fid: usize, path: &[usize]) -> i64 {
+        // A STATIC entity cannot move (checked before the size/MP gates —
+        // no log, no MP spent).
+        if self.fighters[fid].has_state(EntityState::Static) {
+            return 0;
+        }
         let size = path.len() as i32;
         if size == 0 || size > self.fighters[fid].mp() {
             return 0;
@@ -861,9 +1116,9 @@ impl State {
         }
     }
 
-    /// `State.moveTowardCell(entity, cell_id, pm_to_use)` — path to a cell.
-    /// (The unwalkable-target branch — pathing to the valid cells around an
-    /// obstacle — lands with the map port's `getValidCellsAroundObstacle`.)
+    /// `State.moveTowardCell(entity, cell_id, pm_to_use)` — path to a cell;
+    /// an unwalkable target paths to the valid cells around its obstacle
+    /// cluster instead (`getValidCellsAroundObstacle`).
     #[allow(clippy::cast_possible_truncation)]
     pub fn move_toward_cell(&mut self, fid: usize, cell_id: i64, pm_to_use: i64) -> i64 {
         let mp = self.fighters[fid].mp();
@@ -885,10 +1140,16 @@ impl State {
             .ok()
             .and_then(|c| self.map.get_cell(c));
         let Some(target) = target else { return 0 };
-        if target == start || !self.map.cells[target].walkable {
+        if target == start {
             return 0;
         }
-        match self.path_between(start, target) {
+        let path = if self.map.cells[target].walkable {
+            self.path_between(start, target)
+        } else {
+            let around = self.map.get_valid_cells_around_obstacle(target);
+            self.map.get_astar_path(start, &around, &[])
+        };
+        match path {
             Some(path) => {
                 // `pm > 0` was checked above.
                 let take = usize::try_from(pm).unwrap_or(0).min(path.len());
@@ -915,20 +1176,40 @@ impl State {
         true
     }
 
-    /// `Map.canUseAttack(caster, target, attack)` — range then LOS.
+    /// `Map.canUseAttack(caster, target, attack)` — range then LOS. The
+    /// first-in-line area pre-resolves its entity: aiming *at* it fails, and
+    /// it is otherwise transparent to the LoS walk.
     #[must_use]
-    pub fn can_use_attack(&self, caster: usize, target: usize, spec: &WeaponSpec) -> bool {
-        if !self.map.verify_range(
-            caster,
-            target,
-            spec.min_range,
-            spec.max_range,
-            spec.launch_type,
-        ) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn can_use_attack(
+        &self,
+        caster_cell: usize,
+        target_cell: usize,
+        min_range: i32,
+        max_range: i32,
+        launch_type: i32,
+        needs_los: bool,
+        area: Area,
+    ) -> bool {
+        if !self
+            .map
+            .verify_range(caster_cell, target_cell, min_range, max_range, launch_type)
+        {
             return false;
         }
+        let mut ignored = vec![caster_cell];
+        if area == Area::FirstInLine
+            && let Some(cell) =
+                self.map
+                    .get_first_entity(caster_cell, target_cell, min_range, max_range)
+        {
+            if cell == target_cell {
+                return false;
+            }
+            ignored.push(cell);
+        }
         self.map
-            .verify_los(caster, target, spec.needs_los, &[caster])
+            .verify_los(caster_cell, target_cell, needs_los, &ignored)
     }
 
     /// `Fight.generateCritical(entity)`.
@@ -936,9 +1217,85 @@ impl State {
         self.rng.get_double() < f64::from(self.fighters[fid].stat(STAT_AGILITY)) / 1000.0
     }
 
-    /// `State.useWeapon(launcher, target)` — the exact check ladder. The
-    /// attack application itself (`Attack.applyOnCell`) is milestone 2; the
-    /// ladder, crit roll, logging, TP cost and use accounting are complete.
+    // ── Life and death ───────────────────────────────────────────────────────
+
+    /// `Entity.removeLife(pv, erosion, attacker, type, effect, item)` —
+    /// clamp, take the damage, erode max life, and handle death.
+    /// (The statistics hooks aren't part of the Outcome.)
+    pub fn remove_life(&mut self, target: usize, pv: i32, erosion: i32, attacker: Option<usize>) {
+        if self.fighters[target].is_dead() {
+            return;
+        }
+        let pv = pv.max(0);
+        let erosion = erosion.max(0);
+        let f = &mut self.fighters[target];
+        f.life -= pv.min(f.life);
+        f.total_life = (f.total_life - erosion).max(1);
+        if f.life <= 0 {
+            self.on_player_die(target, attacker);
+            self.die(target);
+        }
+    }
+
+    /// `Entity.addLife(healer, pv)` — heal, clamped to max life.
+    pub fn add_life(&mut self, target: usize, pv: i32) {
+        let f = &mut self.fighters[target];
+        f.life += pv.clamp(0, f.total_life - f.life);
+    }
+
+    /// `State.onPlayerDie(entity, killer, item)` — pull the entity out of
+    /// the order and off the map, log `ActionEntityDie`. (BR power transfer,
+    /// chest loot and the ally-killed / kill passives are out of scope.)
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn on_player_die(&mut self, fid: usize, killer: Option<usize>) {
+        self.order.remove_entity(fid);
+        self.remove_entity_from_map(fid);
+        self.actions.log(Action::EntityDie {
+            entity_id: fid as i64,
+            killer_id: killer.map_or(-1, |k| k as i64),
+        });
+    }
+
+    /// `Entity.die()` — zero the life, drop every effect in both directions,
+    /// rebuild the buff stats, then kill the entity's summons.
+    pub fn die(&mut self, fid: usize) {
+        self.fighters[fid].life = 0;
+
+        // Remove launched effects — `removeEffect` on each target *does* log
+        // `ActionRemoveEffect`.
+        while let Some(&ei) = self.fighters[fid].launched_effects.first() {
+            let target = self.effects[ei].target;
+            self.remove_effect(target, ei);
+            self.fighters[fid].launched_effects.remove(0);
+        }
+
+        // Remove the effects on this entity — no remove-effect action, the
+        // client removes the dead entity's effects itself.
+        while let Some(&ei) = self.fighters[fid].effects.first() {
+            let caster = self.effects[ei].caster;
+            self.fighters[caster].launched_effects.retain(|&i| i != ei);
+            self.fighters[fid].effects.remove(0);
+        }
+        self.update_buff_stats(fid);
+
+        // Kill summons — `die()` ends by sweeping the dead entity's team for
+        // *alive* summons it owns (`getTeamEntities(team)` filters dead) and
+        // killing each: `onPlayerDie(e, null, null)` + recursive `die()`.
+        let team = self.fighters[fid].team;
+        let summons: Vec<usize> = self.teams[team]
+            .fighters
+            .iter()
+            .copied()
+            .filter(|&f| !self.fighters[f].is_dead() && self.fighters[f].summoner == Some(fid))
+            .collect();
+        for s in summons {
+            self.on_player_die(s, None);
+            self.die(s);
+        }
+    }
+
+    /// `State.useWeapon(launcher, target)` — the exact check ladder, crit
+    /// roll, logging, attack application, TP cost and use accounting.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn use_weapon(&mut self, fid: usize, target_cell: usize) -> i32 {
         if self.order.current() != Some(fid) {
@@ -959,7 +1316,15 @@ impl State {
         let Some(caster_cell) = self.fighters[fid].cell else {
             return USE_INVALID_POSITION;
         };
-        if !self.can_use_attack(caster_cell, target_cell, &spec) {
+        if !self.can_use_attack(
+            caster_cell,
+            target_cell,
+            spec.min_range,
+            spec.max_range,
+            spec.launch_type,
+            spec.needs_los,
+            spec.area,
+        ) {
             return USE_INVALID_POSITION;
         }
 
@@ -969,11 +1334,490 @@ impl State {
             cell: target_cell as i32,
             success: result,
         });
-        // TODO(milestone 2): Attack.applyOnCell — area targets + effects.
+        // launcher.onCritical(): weapon passive effects — none in leek scope.
+        self.apply_on_cell(
+            fid,
+            target_cell,
+            critical,
+            spec.area,
+            &spec.effects,
+            spec.id,
+            AttackType::Weapon,
+            spec.min_range,
+            spec.max_range,
+            spec.needs_los,
+        );
 
         self.fighters[fid].use_tp(spec.cost);
         self.fighters[fid].add_item_use(spec.id);
         result
+    }
+
+    // ── Chips ────────────────────────────────────────────────────────────────
+
+    /// `State.addCooldown(entity, chip, cooldown)` — dispatch to the team or
+    /// the entity depending on the chip.
+    pub fn add_chip_cooldown(&mut self, fid: usize, chip: &ChipSpec, cooldown: i32) {
+        if chip.team_cooldown {
+            self.teams[self.fighters[fid].team].add_cooldown(chip.id, cooldown);
+        } else {
+            self.fighters[fid].add_cooldown(chip.id, cooldown);
+        }
+    }
+
+    /// `State.hasCooldown(entity, chip)`.
+    #[must_use]
+    pub fn has_chip_cooldown(&self, fid: usize, chip: &ChipSpec) -> bool {
+        if chip.team_cooldown {
+            self.teams[self.fighters[fid].team].has_cooldown(chip.id)
+        } else {
+            self.fighters[fid].has_cooldown(chip.id)
+        }
+    }
+
+    /// `State.getCooldown(entity, chip)` — 0 when none or unknown chip.
+    #[must_use]
+    pub fn chip_cooldown(&self, fid: usize, chip_id: i32) -> i32 {
+        let Some(chip) = self.chip_specs.get(&chip_id) else {
+            return 0;
+        };
+        if chip.team_cooldown {
+            self.teams[self.fighters[fid].team].cooldown(chip.id)
+        } else {
+            self.fighters[fid].cooldown(chip.id)
+        }
+    }
+
+    /// `State.useChip(caster, target, template)` — the exact check ladder
+    /// (note the cost check is `cost > 0 && cost > TP`, unlike the weapon's),
+    /// crit roll, logging, attack application, cooldown, TP cost and use
+    /// accounting.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    pub fn use_chip(&mut self, fid: usize, target_cell: usize, chip_id: i32) -> i32 {
+        let Some(spec) = self.chip_specs.get(&chip_id).cloned() else {
+            return USE_INVALID_TARGET;
+        };
+        if self.order.current() != Some(fid) {
+            return USE_INVALID_TARGET;
+        }
+        if spec.cost > 0 && spec.cost > self.fighters[fid].tp() {
+            return USE_NOT_ENOUGH_TP;
+        }
+        if self.has_chip_cooldown(fid, &spec) {
+            return USE_INVALID_COOLDOWN;
+        }
+        // Uses per turn.
+        if spec.max_uses != -1 && self.fighters[fid].item_uses(spec.id) >= spec.max_uses {
+            return USE_MAX_USES;
+        }
+        let Some(caster_cell) = self.fighters[fid].cell else {
+            return USE_INVALID_POSITION;
+        };
+        if !self.map.cells[target_cell].walkable
+            || !self.can_use_attack(
+                caster_cell,
+                target_cell,
+                spec.min_range,
+                spec.max_range,
+                spec.launch_type,
+                spec.needs_los,
+                spec.area,
+            )
+        {
+            return USE_INVALID_POSITION;
+        }
+        // Teleportation gets an extra cell-availability check per effect
+        // (before the crit roll — a failed precheck draws no RNG and
+        // returns USE_INVALID_TARGET, not USE_INVALID_POSITION).
+        for params in &spec.effects {
+            if params.effect == EffectType::Teleport
+                && !(self.map.cells[target_cell].walkable && self.entity_on(target_cell).is_none())
+            {
+                return USE_INVALID_TARGET;
+            }
+        }
+
+        let critical = self.generate_critical(fid);
+        let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
+        self.actions.log(Action::UseChip {
+            chip_template: spec.id,
+            cell: target_cell as i32,
+            success: result,
+        });
+        // caster.onCritical(): passive effects — none in leek scope.
+        self.apply_on_cell(
+            fid,
+            target_cell,
+            critical,
+            spec.area,
+            &spec.effects,
+            spec.id,
+            AttackType::Chip,
+            spec.min_range,
+            spec.max_range,
+            spec.needs_los,
+        );
+
+        if spec.cooldown != 0 {
+            self.add_chip_cooldown(fid, &spec, spec.cooldown);
+        }
+        self.fighters[fid].use_tp(spec.cost);
+        self.fighters[fid].add_item_use(spec.id);
+        result
+    }
+
+    // ── Summons ──────────────────────────────────────────────────────────────
+
+    /// `State.summonEntity(caster, target, template, name)` — the exact check
+    /// ladder (note: a plain `cost > TP` check, unlike `useChip`'s
+    /// `cost > 0 &&` gate; no max-uses check; no `addItemUse`), crit roll,
+    /// `ActionUseChip` + bulb creation + `ActionInvocation` logging, cooldown
+    /// and TP cost. Returns the new bulb's fid alongside the result so the
+    /// orchestrator can attach the AI function (`Fight.summonEntity` does
+    /// this through `getLastEntity()`).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    pub fn summon_entity(
+        &mut self,
+        fid: usize,
+        target_cell: usize,
+        chip_id: i32,
+        name: Option<&str>,
+    ) -> (i32, Option<usize>) {
+        let Some(spec) = self.chip_specs.get(&chip_id).cloned() else {
+            return (USE_INVALID_TARGET, None);
+        };
+        let Some(params) = spec
+            .effects
+            .iter()
+            .find(|p| p.effect == EffectType::Summon)
+            .cloned()
+        else {
+            return (USE_INVALID_TARGET, None);
+        };
+        if self.order.current() != Some(fid) {
+            return (USE_INVALID_TARGET, None);
+        }
+        if spec.cost > self.fighters[fid].tp() {
+            return (USE_NOT_ENOUGH_TP, None);
+        }
+        if self.has_chip_cooldown(fid, &spec) {
+            return (USE_INVALID_COOLDOWN, None);
+        }
+        let Some(caster_cell) = self.fighters[fid].cell else {
+            return (USE_INVALID_POSITION, None);
+        };
+        if !self.can_use_attack(
+            caster_cell,
+            target_cell,
+            spec.min_range,
+            spec.max_range,
+            spec.launch_type,
+            spec.needs_los,
+            spec.area,
+        ) {
+            return (USE_INVALID_POSITION, None);
+        }
+        // `Cell.available(map)` — walkable and unoccupied.
+        if !self.map.cells[target_cell].walkable || self.entity_on(target_cell).is_some() {
+            return (USE_INVALID_POSITION, None);
+        }
+        let team = self.fighters[fid].team;
+        if self.teams[team].summon_count(&self.fighters) >= SUMMON_LIMIT {
+            return (USE_TOO_MANY_SUMMONS, None);
+        }
+
+        let critical = self.generate_critical(fid);
+        let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
+        self.actions.log(Action::UseChip {
+            chip_template: spec.id,
+            cell: target_cell as i32,
+            success: result,
+        });
+        // caster.onCritical(): passive effects — none in leek scope.
+
+        let bulb = self.create_summon(
+            fid,
+            params.value1 as i32,
+            target_cell,
+            spec.level,
+            critical,
+            name,
+        );
+
+        // `ActionInvocation` carries FIDs (`getSummoner().getFId()` /
+        // `target.getFId()`), not the bulb's negative real id.
+        self.actions.log(Action::Invocation {
+            owner_id: fid as i64,
+            summon_id: bulb as i64,
+            cell: target_cell as i32,
+            result,
+        });
+
+        if spec.cooldown != 0 {
+            self.add_chip_cooldown(fid, &spec, spec.cooldown);
+        }
+        self.fighters[fid].use_tp(spec.cost);
+        (result, Some(bulb))
+    }
+
+    /// `State.createSummon(owner, type, target, level, critical, name)` +
+    /// `Bulb.create` / `BulbTemplate.createInvocation` — build the bulb
+    /// fighter (stats scaled by the *owner's* level, frequency 0, RAM 6
+    /// capping the template chips), insert it into the team / arena / play
+    /// order, place it, and append its `fight.leeks` entry. The birth turn is
+    /// what `Fight.summonEntity` pins right after (`setBirthTurn(getTurn())`).
+    /// Unknown templates panic — coverage is corpus-driven.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn create_summon(
+        &mut self,
+        owner: usize,
+        template_id: i32,
+        target_cell: usize,
+        level: i32,
+        critical: bool,
+        name: Option<&str>,
+    ) -> usize {
+        let template = self
+            .bulb_templates
+            .get(&template_id)
+            .unwrap_or_else(|| panic!("official port: bulb template {template_id} not registered"))
+            .clone();
+
+        // `BulbTemplate.createInvocation` — coeff from the owner's level,
+        // 1.2x on critical.
+        let coeff = f64::from(self.fighters[owner].level.min(300)) / 300.0;
+        let multiplier = if critical { 1.2 } else { 1.0 };
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, bulb_base(template.life, coeff, multiplier));
+        stats.set(
+            STAT_STRENGTH,
+            bulb_base(template.strength, coeff, multiplier),
+        );
+        stats.set(STAT_WISDOM, bulb_base(template.wisdom, coeff, multiplier));
+        stats.set(STAT_AGILITY, bulb_base(template.agility, coeff, multiplier));
+        stats.set(
+            STAT_RESISTANCE,
+            bulb_base(template.resistance, coeff, multiplier),
+        );
+        stats.set(STAT_SCIENCE, bulb_base(template.science, coeff, multiplier));
+        stats.set(STAT_MAGIC, bulb_base(template.magic, coeff, multiplier));
+        stats.set(STAT_TP, bulb_base(template.tp, coeff, multiplier));
+        stats.set(STAT_MP, bulb_base(template.mp, coeff, multiplier));
+        stats.set(STAT_CORES, 1);
+        stats.set(STAT_RAM, 6);
+        // Frequency stays 0 (the Bulb constructor passes a literal 0).
+
+        let fid = self.fighters.len(); // getNextEntityId()
+        let bulb_name = match name {
+            // `Bulb.create` truncates an override at 20 chars.
+            Some(n) if !n.is_empty() => n.chars().take(20).collect(),
+            _ => template.name.clone(),
+        };
+        let mut fighter = Fighter::new(fid, -(fid as i64), bulb_name, 0, stats);
+        fighter.level = level;
+        fighter.farmer = self.fighters[owner].farmer;
+        fighter.ai_name.clone_from(&self.fighters[owner].ai_name);
+        fighter.skin = template.id;
+        fighter.summoner = Some(owner);
+        fighter.birth_turn = self.order.turn();
+        // `Entity.addChip` caps at the bulb's RAM (6).
+        for &chip in &template.chips {
+            if fighter.chips.len() < 6 {
+                fighter.chips.insert(chip);
+            }
+        }
+
+        let team = self.fighters[owner].team;
+        let fid = self.add_entity(team, fighter);
+        self.order.add_summon(owner, fid);
+        self.place_entity(fid, target_cell);
+
+        // `actions.addEntity(invoc, critical)` — appended to `fight.leeks`
+        // at creation time.
+        let snapshot = entity_snapshot(&self.fighters[fid], critical);
+        self.leek_snapshots.push(snapshot);
+
+        fid
+    }
+
+    // ── Resurrection ─────────────────────────────────────────────────────────
+
+    /// `State.resurrectEntity(caster, target, template, target_entity,
+    /// fullLife)` — the exact check ladder. Note the order quirk:
+    /// `canUseAttack` (-4) comes **before** `hasCooldown` (-3), the reverse
+    /// of `useChip`'s ladder. Like `summonEntity` there is no max-uses check
+    /// and no `addItemUse`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    pub fn resurrect_entity(
+        &mut self,
+        fid: usize,
+        target_cell: usize,
+        chip_id: i32,
+        target_entity: usize,
+        full_life: bool,
+    ) -> i32 {
+        let Some(spec) = self.chip_specs.get(&chip_id).cloned() else {
+            return USE_INVALID_TARGET;
+        };
+        if self.order.current() != Some(fid) {
+            return USE_INVALID_TARGET;
+        }
+        if spec.cost > self.fighters[fid].tp() {
+            return USE_NOT_ENOUGH_TP;
+        }
+        let Some(caster_cell) = self.fighters[fid].cell else {
+            return USE_INVALID_POSITION;
+        };
+        if !self.can_use_attack(
+            caster_cell,
+            target_cell,
+            spec.min_range,
+            spec.max_range,
+            spec.launch_type,
+            spec.needs_los,
+            spec.area,
+        ) {
+            return USE_INVALID_POSITION;
+        }
+        if self.has_chip_cooldown(fid, &spec) {
+            return USE_INVALID_COOLDOWN;
+        }
+        // `params == null || !target.available(map) || !target_entity.isDead()`.
+        if !spec
+            .effects
+            .iter()
+            .any(|p| p.effect == EffectType::Resurrect)
+            || !self.map.cells[target_cell].walkable
+            || self.entity_on(target_cell).is_some()
+            || !self.fighters[target_entity].is_dead()
+        {
+            return USE_INVALID_TARGET;
+        }
+        if self.fighters[target_entity].is_summon() {
+            let team = self.fighters[target_entity].team;
+            if self.teams[team].summon_count(&self.fighters) >= SUMMON_LIMIT {
+                return USE_TOO_MANY_SUMMONS;
+            }
+        }
+
+        let critical = self.generate_critical(fid);
+        let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
+        self.actions.log(Action::UseChip {
+            chip_template: spec.id,
+            cell: target_cell as i32,
+            success: result,
+        });
+        // caster.onCritical(): passive effects — none in leek scope.
+
+        self.resurrect(fid, target_entity, target_cell, critical, full_life);
+
+        if spec.cooldown != 0 {
+            self.add_chip_cooldown(fid, &spec, spec.cooldown);
+        }
+        // Upstream hardcodes a 3-turn INVINCIBLE ADD_STATE when the chip is
+        // 415 ("Awakening", the full-life variant) — only chip 84 is
+        // registered in the corpus, so that branch stays unported.
+        self.fighters[fid].use_tp(spec.cost);
+        result
+    }
+
+    /// `State.resurrect(owner, entity, cell, critical, fullLife)` — re-insert
+    /// the dead entity into the play order right before the first *alive*
+    /// entity that followed it in the initial order (appending when none is
+    /// left), restore its life (`Entity.resurrect`), put it back on the map
+    /// and log `ActionResurrect`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    pub fn resurrect(
+        &mut self,
+        owner: usize,
+        entity: usize,
+        cell: usize,
+        critical: bool,
+        full_life: bool,
+    ) {
+        let mut next = None;
+        let mut start = false;
+        for &e in &self.initial_order {
+            if e == entity {
+                start = true;
+                continue;
+            }
+            if !start || self.fighters[e].is_dead() {
+                continue;
+            }
+            next = Some(e);
+            break;
+        }
+        match next {
+            None => self.order.add_entity(entity),
+            Some(next) => {
+                // `next` is alive, so it IS in the order: turn order ≥ 1.
+                let index = usize::try_from(self.order.entity_turn_order(next) - 1)
+                    .expect("alive entity has a turn order");
+                self.order.insert_entity(index, entity);
+            }
+        }
+
+        // `Entity.resurrect(owner, factor, fullLife)` — Effect.CRITICAL_FACTOR
+        // is 1.3; the non-full-life revival halves the max life (floor 10)
+        // and wakes up at half of that (integer division).
+        let factor = if critical { 1.3 } else { 1.0 };
+        let f = &mut self.fighters[entity];
+        if full_life {
+            f.life = f.total_life;
+        } else {
+            f.total_life = java_round(f64::from(f.total_life) * 0.5 * factor).max(10);
+            f.life = f.total_life / 2;
+        }
+        // `endTurn()` — per-turn counters reset; the propagation sweep is
+        // vacuous here (every effect on the entity was dropped on death).
+        f.end_turn();
+
+        self.place_entity(entity, cell);
+
+        self.actions.log(Action::Resurrect {
+            owner_id: owner as i64,
+            target_id: entity as i64,
+            cell: cell as i32,
+            life: self.fighters[entity].life,
+            max_life: self.fighters[entity].total_life,
+        });
+    }
+
+    /// `EntityAI.addSystemLog` → `FarmerLog.addSystemLogString`: buffer a
+    /// `[fid, type, trace, key, params?]` entry on the entity's farmer log,
+    /// grouped under the id of the most recent action
+    /// (`max(0, Actions.getNextId() - 1)`).
+    ///
+    /// The trace element is Java's rendering of its own AI call stack
+    /// (`"\t▶ runIA, java line N\n"` — codegen line numbers); it can't be
+    /// reproduced from Rust, so we emit `""` and the conformance diff
+    /// normalizes the element away on both sides. The `FarmerLog` size
+    /// budget (500k / `TOO_MUCH_DEBUG`) is out of scope — corpus logs are
+    /// tiny.
+    pub fn add_system_log(&mut self, fid: usize, log_type: i32, key: i32, params: Option<&[&str]>) {
+        let action_key = self.actions.get_next_id().saturating_sub(1);
+        let mut entry = vec![json!(fid), json!(log_type), json!(""), json!(key)];
+        if let Some(params) = params {
+            entry.push(json!(params));
+        }
+        let farmer = self.fighters[fid].farmer;
+        self.farmer_logs
+            .entry(farmer)
+            .or_default()
+            .entry(action_key)
+            .or_default()
+            .push(Value::Array(entry));
+    }
+
+    /// The end-of-fight invocation sweep (`Fight.java`: every summon is
+    /// `removeInvocation`d from its team **before** `computeWinner` and
+    /// `getDeadReport`), so summons never appear in the dead report or the
+    /// winner computation.
+    pub fn remove_all_invocations(&mut self) {
+        for team in &mut self.teams {
+            team.fighters.retain(|&f| !self.fighters[f].is_summon());
+        }
     }
 }
 

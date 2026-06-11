@@ -1,0 +1,45 @@
+# Conformance corpus — one MIRROR fight per line: `name  ai  seed`.
+# Both leeks run the same AI; the asymmetry needed by interaction tests
+# (curse-blocks-heal, static-caster swaps, ...) comes from move order.
+#
+# Read by gen-goldens.sh (Java side), check-conformance.sh (Rust side) and
+# crates/game/leek-scenario/tests/conformance.rs — edit it once, everywhere
+# follows. Lines starting with # and blank lines are skipped.
+idle_s42       idle.leek      42
+pathing_s7     pathing.leek   7
+pathing_s42    pathing.leek   42
+weapon_s1      weapon.leek    1
+weapon_s42     weapon.leek    42
+weapon_s12345  weapon.leek    12345
+poison_s1      poison.leek    1
+poison_s42     poison.leek    42
+displace_s7    displace.leek  7
+displace_s42   displace.leek  42
+heal_s1        heal.leek      1
+heal_s42       heal.leek      42
+shield_s7      shield.leek    7
+shield_s99     shield.leek    99
+shackle_s1     shackle.leek   1
+shackle_s42    shackle.leek   42
+buff_s7        buff.leek      7
+buff_s99       buff.leek      99
+debuff_s1      debuff.leek    1
+debuff_s42     debuff.leek    42
+launch_s42     launch.leek    42
+launch_s99     launch.leek    99
+state_s1       state.leek     1
+state_s7       state.leek     7
+state_s42      state.leek     42
+exotic_s1      exotic.leek    1
+exotic_s42     exotic.leek    42
+exotic_s99     exotic.leek    99
+finisher_s7    finisher.leek  7
+finisher_s42   finisher.leek  42
+summoner_s1    summoner.leek  1
+summoner_s42   summoner.leek  42
+summoner_s99   summoner.leek  99
+necromancer_s1   necromancer.leek  1
+necromancer_s42  necromancer.leek  42
+necromancer_s99  necromancer.leek  99
+colossus_s1    colossus.leek  1
+colossus_s42   colossus.leek  42

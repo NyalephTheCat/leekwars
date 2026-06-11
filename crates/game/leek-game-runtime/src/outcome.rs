@@ -7,6 +7,8 @@
 //! including upstream quirks like `height` being emitted from `getWidth()`
 //! — is reproduced exactly.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map as JsonMap, Value, json};
 
 use crate::actions::ActionLog;
@@ -16,17 +18,18 @@ use crate::state::{
     STAT_STRENGTH, STAT_WISDOM, Team,
 };
 
-/// One entity's snapshot in `fight.leeks` (`Actions.addEntity`, leek scope:
-/// cosmetics default, never a summon).
+/// One entity's snapshot in `fight.leeks` (`Actions.addEntity`).
 ///
-/// Captured at `recordInitialState` time — current life/TP/MP, base + buff
-/// stats, current cell.
+/// Leeks are captured at `recordInitialState` time — current life/TP/MP,
+/// base + buff stats, current cell. Summons are appended at creation time
+/// with the extra `owner`/`critical` keys (`critical` only matters there;
+/// pass `false` for leeks).
 #[must_use]
-pub fn entity_snapshot(f: &Fighter) -> Value {
-    json!({
+pub fn entity_snapshot(f: &Fighter, critical: bool) -> Value {
+    let mut object = json!({
         "id": f.fid,
         "level": f.level,
-        "skin": 0,
+        "skin": f.skin, // bulbs carry their template id; leeks default to 0
         "hat": Value::Null, // getHat() > 0 ? hat : null — leeks default to 0
         "metal": false,
         "face": 0,
@@ -44,10 +47,16 @@ pub fn entity_snapshot(f: &Fighter) -> Value {
         "name": f.name,
         "cellPos": f.cell.map_or(Value::Null, |c| json!(c)),
         "farmer": f.farmer,
-        "type": 0, // Entity.TYPE_LEEK
+        "type": i32::from(f.is_summon()), // TYPE_LEEK (0) / TYPE_BULB (1)
         "orientation": -1,
-        "summon": false,
-    })
+        "summon": f.is_summon(),
+    });
+    if let Some(owner) = f.summoner {
+        let map = object.as_object_mut().expect("snapshot is an object");
+        map.insert("owner".to_string(), json!(owner));
+        map.insert("critical".to_string(), json!(critical));
+    }
+    object
 }
 
 /// `fight.map` (`Actions.addMap`, generated-map branch: `id == 0`, not
@@ -86,9 +95,10 @@ pub fn dead_report(teams: &[Team], fighters: &[Fighter]) -> Value {
 /// The full Outcome (`Outcome.toJson`).
 ///
 /// `leeks` is the snapshot array captured at `recordInitialState` (initial
-/// order); `farmers` lists farmer ids for the per-farmer `logs` objects
-/// (debug logs themselves are not emitted yet). `execution_time` is written
-/// as 0 — the conformance diff ignores it.
+/// order); `farmers` lists farmer ids for the per-farmer `logs` objects,
+/// populated from `farmer_logs` (`State::add_system_log` buffers — empty
+/// object when a farmer never logged). `execution_time` is written as 0 —
+/// the conformance diff ignores it.
 #[must_use]
 pub fn build_outcome(
     leeks: &[Value],
@@ -97,12 +107,24 @@ pub fn build_outcome(
     teams: &[Team],
     fighters: &[Fighter],
     farmers: &[i64],
+    farmer_logs: &BTreeMap<i64, BTreeMap<usize, Vec<Value>>>,
     winner: i32,
     duration: i32,
 ) -> Value {
     let mut logs = JsonMap::new();
     for farmer in farmers {
-        logs.insert(farmer.to_string(), json!({}));
+        let entries = farmer_logs.get(farmer).map_or_else(
+            || json!({}),
+            |groups| {
+                Value::Object(
+                    groups
+                        .iter()
+                        .map(|(action, list)| (action.to_string(), json!(list)))
+                        .collect(),
+                )
+            },
+        );
+        logs.insert(farmer.to_string(), entries);
     }
     json!({
         "fight": {
@@ -153,7 +175,7 @@ mod tests {
     fn snapshot_matches_java_golden() {
         let f = harness_leek(0, 1, 0, 284);
         assert_eq!(
-            entity_snapshot(&f),
+            entity_snapshot(&f, false),
             json!({
                 "id": 0, "level": 10, "skin": 0, "hat": null, "metal": false,
                 "face": 0, "life": 500, "strength": 100, "wisdom": 50,

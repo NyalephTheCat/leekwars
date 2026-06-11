@@ -1,0 +1,17 @@
+// shield corpus: odd turns wall (1013) absolute shield + mirror (1014)
+// damage return, even turns armor (1017) relative shield. Shooting a
+// mirror-bearer takes return damage, which can kill the attacker mid-turn
+// — Java throws ENTITY_DIED out of useWeapon and ends the turn silently,
+// so the moveToward AFTER the shot must not happen (the Rust runtimes
+// no-op every game call once the caster is dead).
+var e = getNearestEnemy();
+setWeapon(WEAPON_PISTOL);
+if (getTurn() % 2 == 1) {
+	useChip(1013);
+	useChip(1014);
+} else {
+	useChip(1017);
+}
+moveToward(e, 4);
+useWeapon(e);
+moveToward(e);

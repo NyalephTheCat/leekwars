@@ -1,0 +1,15 @@
+// kill corpus: build up for three turns (raw buffs, aftereffect, the
+// vulnerabilities), then start casting doom (1041: EFFECT_KILL) — value =
+// the target's FULL life, ActionKill logs the target fid in BOTH fields
+// (verbatim upstream ctor bug), and the fight ends the moment it lands.
+// Out-of-range doom attempts fail silently (no TP, no RNG), so the chase
+// turns before contact stay cheap.
+var e = getNearestEnemy();
+moveToward(e);
+if (getTurn() < 4) {
+	useChip(1042);
+	useChip(1037, e);
+	useChip(1045, e);
+} else {
+	useChip(1041, e);
+}

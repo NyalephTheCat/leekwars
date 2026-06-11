@@ -611,6 +611,107 @@ impl Map {
         (map, team0_cell, team1_cell)
     }
 
+    // ── Slides (push / attract) and line scans ──────────────────────────────
+
+    /// `Cell.available(map)` — walkable AND no entity occupying it (the
+    /// occupancy view is `entity_cells`, kept in sync by the [`State`]).
+    #[must_use]
+    fn cell_available(&self, cell: usize) -> bool {
+        self.cells[cell].walkable && !self.entity_cells.contains(&cell)
+    }
+
+    /// `Map.getFirstEntity(from, target, minRange, maxRange)` — walk the
+    /// signum ray from `from` toward `target` and return the first occupied
+    /// cell within range; stops at map edges and obstacles.
+    #[must_use]
+    pub fn get_first_entity(
+        &self,
+        from: usize,
+        target: usize,
+        min_range: i32,
+        max_range: i32,
+    ) -> Option<usize> {
+        let dx = (self.cells[target].x - self.cells[from].x).signum();
+        let dy = (self.cells[target].y - self.cells[from].y).signum();
+        let mut current = self.get_next_cell(from, dx, dy);
+        let mut range = 1;
+        while let Some(cell) = current {
+            if !self.cells[cell].walkable || range > max_range {
+                return None;
+            }
+            if range >= min_range && self.entity_cells.contains(&cell) {
+                return Some(cell);
+            }
+            current = self.get_next_cell(cell, dx, dy);
+            range += 1;
+        }
+        None
+    }
+
+    /// `Map.getPushLastAvailableCell(entity, target, caster)` — slide the
+    /// entity from its cell toward `target` (only if that direction points
+    /// *away* from the caster), stopping before the first unavailable cell.
+    ///
+    /// # Panics
+    /// Panics if the signum walk leaves the map before reaching `target`
+    /// (`next` is null there and Java NPEs — corpus-first).
+    #[must_use]
+    pub fn push_last_available_cell(&self, entity: usize, target: usize, caster: usize) -> usize {
+        // Delta caster --> entity
+        let cdx = (self.cells[entity].x - self.cells[caster].x).signum();
+        let cdy = (self.cells[entity].y - self.cells[caster].y).signum();
+        // Delta entity --> target
+        let dx = (self.cells[target].x - self.cells[entity].x).signum();
+        let dy = (self.cells[target].y - self.cells[entity].y).signum();
+        // Check deltas (must be pushed in the correct direction)
+        if cdx != dx || cdy != dy {
+            return entity; // no change
+        }
+        self.slide_walk(entity, target, dx, dy)
+    }
+
+    /// `Map.getAttractLastAvailableCell(entity, target, caster)` — same walk
+    /// as a push, but the direction must point *toward* the caster.
+    ///
+    /// # Panics
+    /// Panics if the signum walk leaves the map before reaching `target`
+    /// (`next` is null there and Java NPEs — corpus-first).
+    #[must_use]
+    pub fn attract_last_available_cell(
+        &self,
+        entity: usize,
+        target: usize,
+        caster: usize,
+    ) -> usize {
+        // Delta caster --> entity
+        let cdx = (self.cells[entity].x - self.cells[caster].x).signum();
+        let cdy = (self.cells[entity].y - self.cells[caster].y).signum();
+        // Delta entity --> target
+        let dx = (self.cells[target].x - self.cells[entity].x).signum();
+        let dy = (self.cells[target].y - self.cells[entity].y).signum();
+        // Check deltas (must be attracted in the correct direction)
+        if cdx != -dx || cdy != -dy {
+            return entity; // no change
+        }
+        self.slide_walk(entity, target, dx, dy)
+    }
+
+    /// The shared `while (current != target)` walk of the push/attract cell
+    /// finders: last available cell before the first blocked one.
+    fn slide_walk(&self, start: usize, target: usize, dx: i32, dy: i32) -> usize {
+        let mut current = start;
+        while current != target {
+            let next = self
+                .get_next_cell(current, dx, dy)
+                .expect("slide walk left the map before the target (Java NPEs here)");
+            if !self.cell_available(next) {
+                return current;
+            }
+            current = next;
+        }
+        current
+    }
+
     // ── Distance functions (Pathfinding.java) ────────────────────────────────
 
     /// `Pathfinding.getCaseDistance(Cell c1, Cell c2)` — Manhattan distance.
@@ -742,19 +843,18 @@ impl Map {
                     return false;
                 }
 
-                // Check occupancy — `cell.available(map)` = walkable && no entity
-                // In our standalone map, `available()` == `walkable`, so we
-                // only block on non-walkable (already checked above).
-                // But if the cell is not walkable AND it's the start or end, we
-                // apply the original Java special-cases.
-                if cell == start {
-                    continue;
-                }
-                if cell == end {
-                    return true;
-                }
-                if ignored.contains(&cell) {
-                    continue;
+                // `!cell.available(this)` — an occupied cell blocks the line
+                // unless it is the start, the end, or explicitly ignored.
+                if self.entity_cells.contains(&cell) {
+                    if cell == start {
+                        continue;
+                    }
+                    if cell == end {
+                        return true;
+                    }
+                    if !ignored.contains(&cell) {
+                        return false;
+                    }
                 }
             }
         }
@@ -926,6 +1026,71 @@ impl Map {
         self.get_astar_path(start, end_cells, &[])
     }
 
+    /// `Map.getValidCellsAroundObstacle(cell)` — the walkable cells hugging
+    /// the (possibly multi-cell) obstacle cluster around `cell`, scanned in
+    /// growing diamond rings (radius capped at 5; a ring only grows while it
+    /// keeps finding cluster cells). Feeds the unwalkable-target branch of
+    /// `State.moveTowardCell`. Scan order matters: `close` (the cluster) and
+    /// the result accumulate during the scan and the adjacency checks read
+    /// them mid-flight.
+    #[must_use]
+    pub fn get_valid_cells_around_obstacle(&self, cell: usize) -> Vec<usize> {
+        let mut result = Vec::new();
+        let mut close = vec![cell];
+        let (cx, cy) = (self.cells[cell].x, self.cells[cell].y);
+        let mut size = 1;
+        let mut i = 1;
+        while i <= size {
+            let mut stop = true;
+            for j in 0..i {
+                for (x, y) in [
+                    (cx + j, cy + (i - j)),
+                    (cx - j, cy - (i - j)),
+                    (cx + i - j, cy - j),
+                    (cx - i + j, cy + j),
+                ] {
+                    let c = self.get_cell_xy(x, y);
+                    stop = self.add_valid_cell(&mut result, &mut close, c, cell) && stop;
+                }
+            }
+            if !stop && size < 5 {
+                size += 1;
+            }
+            i += 1;
+        }
+        result
+    }
+
+    /// `Map.addValidCell` — classify one ring cell: an unwalkable cell
+    /// orthogonally touching the cluster (toward the center) joins `close`
+    /// and keeps the ring growing; a walkable cell touching the cluster is a
+    /// valid destination.
+    fn add_valid_cell(
+        &self,
+        result: &mut Vec<usize>,
+        close: &mut Vec<usize>,
+        c: Option<usize>,
+        center: usize,
+    ) -> bool {
+        let Some(c) = c else { return true };
+        let dx = (self.cells[center].x - self.cells[c].x).signum();
+        let dy = (self.cells[center].y - self.cells[c].y).signum();
+        let c1 = self.get_cell_xy(self.cells[c].x + dx, self.cells[c].y);
+        let c2 = self.get_cell_xy(self.cells[c].x, self.cells[c].y + dy);
+        let touches = [c1, c2]
+            .into_iter()
+            .any(|n| n.is_some_and(|n| !self.cells[n].walkable && close.contains(&n)));
+        if !self.cells[c].walkable {
+            if touches {
+                close.push(c);
+                return false;
+            }
+        } else if touches {
+            result.push(c);
+        }
+        true
+    }
+
     // ── Range verification ───────────────────────────────────────────────────
 
     /// `Map.verifyRange(Cell caster, Cell target, attack)` — check Manhattan
@@ -964,6 +1129,76 @@ impl Map {
             return false; // No other
         }
         true
+    }
+
+    /// `Map.available(Cell, List<Cell>)` — `Cell.available` (walkable and
+    /// unoccupied) OR listed in `cells_to_ignore`.
+    #[must_use]
+    fn available_with_ignore(&self, cell: usize, cells_to_ignore: &[usize]) -> bool {
+        self.cell_available(cell) || cells_to_ignore.contains(&cell)
+    }
+
+    /// `Map.getPossibleCastCellsForTarget(attack, target, cells_to_ignore)` —
+    /// every cell an attack could be cast *from* to hit `target`.
+    ///
+    /// `LAUNCH_TYPE_LINE` (== 1 exactly — launch type 9 does NOT take this
+    /// branch despite passing the same range gates) walks the four axis rays
+    /// outward from the target, stopping each ray at the map edge or (with
+    /// LoS) the first unavailable/unwalkable cell. Every other launch type
+    /// filters the [`generate_mask`] offsets through availability + LoS.
+    #[must_use]
+    pub fn get_possible_cast_cells_for_target(
+        &self,
+        min_range: i32,
+        max_range: i32,
+        launch_type: i32,
+        needs_los: bool,
+        target: usize,
+        cells_to_ignore: &[usize],
+    ) -> Vec<usize> {
+        let mut possible = Vec::new();
+        if !self.cells[target].walkable {
+            return possible;
+        }
+        let x = self.cells[target].x;
+        let y = self.cells[target].y;
+
+        if launch_type == 1 {
+            let mut line = [true; 4];
+            let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+            for i in 0..=max_range {
+                for (dir, &(dx, dy)) in dirs.iter().enumerate() {
+                    if !line[dir] {
+                        continue;
+                    }
+                    let Some(c) = self.get_cell_xy(x + i * dx, y + i * dy) else {
+                        line[dir] = false;
+                        continue;
+                    };
+                    if needs_los && !self.available_with_ignore(c, cells_to_ignore) && i > 0 {
+                        line[dir] = false;
+                    } else if needs_los && !self.cells[c].walkable {
+                        line[dir] = false;
+                    } else if min_range <= i && self.available_with_ignore(c, cells_to_ignore) {
+                        possible.push(c);
+                    }
+                }
+            }
+        } else {
+            for [mx, my] in generate_mask(launch_type, min_range, max_range) {
+                let Some(cell) = self.get_cell_xy(x + mx, y + my) else {
+                    continue;
+                };
+                if !self.available_with_ignore(cell, cells_to_ignore) {
+                    continue;
+                }
+                if !self.verify_los(cell, target, needs_los, cells_to_ignore) {
+                    continue;
+                }
+                possible.push(cell);
+            }
+        }
+        possible
     }
 
     // ── "Away" path helpers ──────────────────────────────────────────────────

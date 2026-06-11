@@ -1,0 +1,16 @@
+// poison corpus: odd turns stack protein (1002, free, STACKABLE), cast venom
+// (1001 — entity cooldown 2 + initial cooldown 1, so the turn-1 cast fails
+// free) and shoot; even turns cast plague (1005) whose effects[0]
+// propagation line re-poisons from its victims at the end of their turns.
+var e = getNearestEnemy();
+if (getTurn() % 2 == 1) {
+	setWeapon(WEAPON_PISTOL);
+	useChip(1002);
+	useChip(1002);
+	useChip(1001, e);
+	moveToward(e);
+	useWeapon(e);
+} else {
+	useChip(1005, e);
+	moveToward(e);
+}

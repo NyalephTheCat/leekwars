@@ -32,10 +32,18 @@ pub fn invoke_top_level_string(v: Value) -> Value {
     result
 }
 
-/// Invoke a function *value* with already-unboxed args, returning a `Value`.
-/// Lambdas dispatch through their JIT'd uniform-ABI body (captures prepended
-/// to the args); builtin references through the shared catalog; user-function
-/// and bound-method values aren't supported (return null — gated at compile).
+/// Invoke a function *value* from the host with no JIT frame on the stack —
+/// the entry [`crate::run_call`] uses to run a stored AI function (a summon's
+/// `FunctionLeekValue`) inside a freshly re-JIT'd module. The per-module
+/// dispatch tables must already be installed; `function_idx` / `DefId` keys
+/// are stable across re-JITs of the same HIR, so a function value captured
+/// during an earlier run resolves against the new module's addresses.
+#[must_use]
+pub fn call_value_entry(callee: &Value, args: Vec<Value>, version: u8) -> Value {
+    let mut host = NativeHost { version };
+    dispatch_call_value(&mut host, callee, args)
+}
+
 /// Peel a shared `Value::Cell` to its current value; pass any other value
 /// through unchanged. Used to convert a cell arg into a plain value for a
 /// by-value parameter.

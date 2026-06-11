@@ -17,9 +17,12 @@ use std::rc::Rc;
 
 // Scenario/bin callers build the official world through this module; export
 // the model surface so they don't need a direct `leek-game-runtime` edge.
+pub use leek_game_runtime::attack::{
+    Area, EffectModifiers, EffectParams, EffectTargets, EffectType,
+};
 pub use leek_game_runtime::state::{
-    Fighter, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE, STAT_MP, STAT_RESISTANCE, STAT_STRENGTH,
-    STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
+    BulbTemplate, ChipSpec, Fighter, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE, STAT_MP,
+    STAT_RESISTANCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
 };
 
 use leek_backend_native::{NativeError, NativeOptions, ops_used};
@@ -57,6 +60,27 @@ fn run_entity_ai(
         current: fid,
     })));
     let result = leek_backend_native::run(hir, opts);
+    leek_backend_native::set_game_runtime(None);
+    result.map(|_| ops_used())
+}
+
+/// Run a bulb's turn: invoke the AI function stored at `summon()` time inside
+/// the *owner's* compiled module, with `current` pointing at the bulb.
+/// Mirrors `BulbAI.runIA` (`mOwnerAI.mEntity = mEntity` + `mAIFunction.run`);
+/// the owner's `runTurn` resets its entity back at its next turn, which our
+/// per-run `current` models for free.
+fn run_bulb_ai(
+    state: &Rc<RefCell<State>>,
+    fid: usize,
+    ai_fn: &Value,
+    hir: &HirFile,
+    opts: &NativeOptions,
+) -> Result<u64, NativeError> {
+    leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+        state: Rc::clone(state),
+        current: fid,
+    })));
+    let result = leek_backend_native::run_call(hir, opts, ai_fn, Vec::new());
     leek_backend_native::set_game_runtime(None);
     result.map(|_| ops_used())
 }
@@ -101,7 +125,23 @@ pub fn run_official_fight(
         let begin = state.borrow_mut().begin_turn();
         match begin {
             BeginTurn::Act(fid) => {
-                if let Some(hir) = ais.get(&fid) {
+                // A bulb runs the function value captured at `summon()` time
+                // through the owner's module (`BulbAI`); one summoned via
+                // `useChip` has no entry and idles (BULB_WITHOUT_AI). Ops
+                // land on the owner's counter, like `mAIFunction.run(
+                // mOwnerAI, …)`.
+                let summon = {
+                    let s = state.borrow();
+                    s.fighters[fid]
+                        .summoner
+                        .map(|owner| (owner, s.summon_ais.get(&fid).cloned()))
+                };
+                if let Some((owner, ai_fn)) = summon {
+                    if let (Some(ai_fn), Some(hir)) = (ai_fn, ais.get(&owner)) {
+                        let ops = run_bulb_ai(&state, fid, &ai_fn, hir, opts)?;
+                        *total_ops.entry(owner).or_insert(0) += ops;
+                    }
+                } else if let Some(hir) = ais.get(&fid) {
                     let ops = run_entity_ai(&state, fid, hir, opts)?;
                     *total_ops.entry(fid).or_insert(0) += ops;
                 }
@@ -125,6 +165,9 @@ pub fn run_official_fight(
         let ops = i64::try_from(ops).unwrap_or(i64::MAX);
         s.actions.add_ops(fid, ops);
     }
+    // `Fight.java` removes every invocation from its team *before*
+    // `computeWinner` and `getDeadReport` — summons never appear in either.
+    s.remove_all_invocations();
     let winner = s.compute_winner(true);
     Ok(build_outcome(
         &s.leek_snapshots,
@@ -133,6 +176,7 @@ pub fn run_official_fight(
         &s.teams,
         &s.fighters,
         farmers,
+        &s.farmer_logs,
         winner,
         s.duration(),
     ))

@@ -1,3 +1,0 @@
-// pure movement: exercises pathfinding determinism without combat
-var e = getNearestEnemy();
-moveToward(e);

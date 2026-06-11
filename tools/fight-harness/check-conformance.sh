@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Conformance check: replay every golden's scenario+seed through the RUST
-# simulator (the `official-fight` bin, which mirrors Harness.java exactly)
-# and diff each Outcome against the Java generator's golden with
-# diff-outcome.py. `ops` / `execution_time` are runtime measurements and are
-# ignored; everything else must match byte-for-byte.
+# Conformance check: replay every corpus.txt golden (a MIRROR fight: the same
+# AI on both sides) through the RUST simulator (the `official-fight` bin,
+# which mirrors Harness.java exactly) and diff each Outcome against the Java
+# generator's golden with diff-outcome.py. `ops` / `execution_time` are
+# runtime measurements and are ignored; everything else must match
+# byte-for-byte. The same check runs as a cargo test:
+# crates/game/leek-scenario/tests/conformance.rs.
 #
 # Usage: check-conformance.sh [name-filter]
 set -uo pipefail
@@ -14,28 +16,13 @@ EX="$HERE/examples"
 GOLD="$HERE/goldens"
 FILTER="${1:-}"
 
-# Keep this corpus in sync with gen-goldens.sh.
-CORPUS=$(cat <<'EOF'
-chase_vs_chase_s1      chase.leek   chase.leek   1
-chase_vs_chase_s7      chase.leek   chase.leek   7
-chase_vs_chase_s42     chase.leek   chase.leek   42
-chase_vs_chase_s99     chase.leek   chase.leek   99
-chase_vs_chase_s12345  chase.leek   chase.leek   12345
-idle_vs_idle_s42       idle.leek    idle.leek    42
-walker_vs_walker_s7    walker.leek  walker.leek  7
-walker_vs_walker_s42   walker.leek  walker.leek  42
-chase_vs_idle_s42      chase.leek   idle.leek    42
-chase_vs_walker_s99    chase.leek   walker.leek  99
-EOF
-)
-
 echo "building official-fight..." >&2
 cargo build -q -p leek-scenario --bin official-fight --manifest-path "$ROOT/Cargo.toml" || exit 1
 BIN="$ROOT/target/debug/official-fight"
 
 pass=0 fail=0
-while read -r name ai1 ai2 seed; do
-  [[ -z "$name" ]] && continue
+while read -r name ai seed; do
+  [[ -z "$name" || "$name" == \#* ]] && continue
   if [[ -n "$FILTER" && "$name" != *"$FILTER"* ]]; then continue; fi
   golden="$GOLD/$name.json"
   if [[ ! -f "$golden" ]]; then
@@ -43,7 +30,7 @@ while read -r name ai1 ai2 seed; do
     continue
   fi
   ours=$(mktemp)
-  if ! "$BIN" "$EX/$ai1" "$EX/$ai2" "$seed" > "$ours"; then
+  if ! "$BIN" "$EX/$ai" "$EX/$ai" "$seed" > "$ours"; then
     echo "FAIL  $name (official-fight errored)"
     fail=$((fail + 1)); rm -f "$ours"; continue
   fi
@@ -56,7 +43,7 @@ while read -r name ai1 ai2 seed; do
     fail=$((fail + 1))
   fi
   rm -f "$ours"
-done <<< "$CORPUS"
+done <"$HERE/corpus.txt"
 
 echo "----"
 echo "$pass passed, $fail failed"
