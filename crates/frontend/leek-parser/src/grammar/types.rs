@@ -132,6 +132,17 @@ pub(crate) fn looks_like_type_then_name(p: &Parser) -> bool {
     p.nth(after) == S::Ident
 }
 
+/// True if the cursor is at a `type @IDENT` pattern — a typed
+/// by-reference parameter (`function f(integer @iCell)`). Upstream
+/// puts the type *before* the `@` (WordCompiler: `eatType` → `@` →
+/// name), so the param grammar needs this look-ahead variant.
+pub(crate) fn looks_like_type_then_ref_name(p: &Parser) -> bool {
+    let Some(after) = skip_type(p, 0) else {
+        return false;
+    };
+    p.nth(after) == S::At && p.nth(after + 1) == S::Ident
+}
+
 /// True if the cursor is at the start of a typed variable declaration
 /// statement: `type IDENT <followed by a stmt-end or stmt-start>`.
 ///

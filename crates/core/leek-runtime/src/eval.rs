@@ -34,10 +34,24 @@ pub fn slice(base: &Value, start: Option<i64>, end: Option<i64>, step: Option<f6
             ))))
         }
         Value::String(s) => {
-            let bytes = s.as_bytes();
-            let len = crate::len_as_int(bytes.len());
-            let sliced = slice_seq(bytes, len, start, end, int_step);
-            Value::String(Rc::new(String::from_utf8_lossy(&sliced).into_owned()))
+            // Upstream `stringSlice` treats a 0 stride as 1 (arrays keep the
+            // empty-slice behavior) and indexes by UTF-16 code unit
+            // (`String.charAt`), not by byte.
+            let step = match int_step {
+                Some(0) => Some(1),
+                other => other,
+            };
+            if s.is_ascii() {
+                let bytes = s.as_bytes();
+                let len = crate::len_as_int(bytes.len());
+                let sliced = slice_seq(bytes, len, start, end, step);
+                Value::String(Rc::new(String::from_utf8_lossy(&sliced).into_owned()))
+            } else {
+                let units: Vec<u16> = s.encode_utf16().collect();
+                let len = crate::len_as_int(units.len());
+                let sliced = slice_seq(&units, len, start, end, step);
+                Value::String(Rc::new(String::from_utf16_lossy(&sliced)))
+            }
         }
         Value::Interval(iv) => slice_interval(iv, start, end, step),
         _ => Value::Null,
@@ -389,14 +403,25 @@ pub fn read_index(base: &Value, idx: &Value) -> Value {
             }
         }
         Value::String(s) => {
-            let bytes = s.as_bytes();
-            let len = crate::len_as_int(bytes.len());
+            // Upstream `getString` indexes by UTF-16 code unit
+            // (`String.charAt`): negative wraps once, out-of-bounds → null.
+            // ASCII fast path avoids the UTF-16 re-encode.
+            let len = if s.is_ascii() {
+                crate::len_as_int(s.len())
+            } else {
+                crate::len_as_int(s.encode_utf16().count())
+            };
             let raw = idx.as_int().unwrap_or(0);
             let i = if raw < 0 { raw + len } else { raw };
             if i < 0 || i >= len {
                 Value::Null
+            } else if s.is_ascii() {
+                Value::String(Rc::new(
+                    (s.as_bytes()[crate::clamp_index(i)] as char).to_string(),
+                ))
             } else {
-                Value::String(Rc::new((bytes[crate::clamp_index(i)] as char).to_string()))
+                let unit = s.encode_utf16().nth(crate::clamp_index(i)).unwrap_or(0);
+                Value::String(Rc::new(String::from_utf16_lossy(&[unit])))
             }
         }
         Value::Object(_) | Value::Instance(_) | Value::BuiltinClass(_) | Value::ClassRef(_, _) => {

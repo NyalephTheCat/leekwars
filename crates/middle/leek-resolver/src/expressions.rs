@@ -456,6 +456,18 @@ impl Resolver {
         arg_count: u8,
         callee: &Expr,
     ) {
+        // `super.m(...)` must resolve statically on an ancestor — the
+        // upstream generator emits `super.u_m(...)`, which doesn't
+        // compile in Java when no ancestor declares a matching method,
+        // so it raises an analyze error instead (upstream 9627181,
+        // issue #4010): UNKNOWN_METHOD when the name is absent from
+        // the whole chain, INVALID_PARAMETER_COUNT when it exists with
+        // another arity.
+        if let Some(field_tok) = f.field()
+            && field_base_is_super(f)
+        {
+            self.check_super_method_call(&field_tok, arg_count);
+        }
         // Resolve base class for both private-method detection and
         // arity checks.
         let base_class = self.field_call_base_class(f);
@@ -487,6 +499,59 @@ impl Resolver {
             }
         }
         self.resolve_expr(callee);
+    }
+
+    /// Statically resolve a `super.method(args…)` call against the
+    /// enclosing class's ancestor chain, mirroring upstream's analyze
+    /// pass: the loop that walks `getParent()` looking for a method
+    /// group with a matching arity, then errors when nothing resolved.
+    fn check_super_method_call(&mut self, field_tok: &SyntaxToken, arg_count: u8) {
+        let Some(this_class) = self.current_class.clone() else {
+            return;
+        };
+        let Some(parent) = self.class_parent.get(&this_class).cloned() else {
+            return;
+        };
+        // Can't prove absence when an ancestor extends a class we
+        // don't know about — same guard the bare-name arity check uses.
+        if self
+            .walk_class_chain(&parent, |c| self.class_has_unknown_parent.contains(c))
+            .is_some()
+        {
+            return;
+        }
+        let method = field_tok.text().to_string();
+        let resolved = self
+            .walk_class_chain(&parent, |c| {
+                self.class_method_arities
+                    .get(c)
+                    .and_then(|m| m.get(&method))
+                    .is_some_and(|&(min, max)| arg_count >= min && arg_count <= max)
+            })
+            .is_some();
+        if resolved {
+            return;
+        }
+        let name_owner = self.walk_class_chain(&parent, |c| {
+            self.class_method_arities
+                .get(c)
+                .is_some_and(|m| m.contains_key(&method))
+        });
+        if let Some(owner) = name_owner {
+            // Method exists on an ancestor, but with another arity.
+            let &(min, max) = self
+                .class_method_arities
+                .get(&owner)
+                .and_then(|m| m.get(&method))
+                .expect("owner found by walk_class_chain");
+            self.err_invalid_arity(field_tok, &owner, &method, min, max, arg_count);
+        } else {
+            self.err(
+                codes::UNKNOWN_METHOD,
+                self.span_of(field_tok),
+                format!("unknown method `{method}` on class `{parent}`"),
+            );
+        }
     }
 
     fn field_call_base_class(&self, f: &leek_parser::ast::FieldExpr) -> Option<(String, bool)> {
@@ -797,6 +862,21 @@ impl Resolver {
             .collect();
         leek_diagnostics::best_match(needle, &names).map(String::from)
     }
+}
+
+/// Whether a field-call base is the `super` keyword (`super.m(...)`).
+/// `super` is a keyword token inside a NameRef, not an Ident, so
+/// [`Resolver::field_call_base_class`] never resolves it.
+fn field_base_is_super(f: &leek_parser::ast::FieldExpr) -> bool {
+    let Some(Expr::Name(base_name)) = f.base() else {
+        return false;
+    };
+    base_name
+        .syntax()
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|t| !t.kind().is_trivia())
+        .is_some_and(|t| t.kind() == SyntaxKind::KwSuper)
 }
 
 /// Format an arity range for use in INVALID_PARAMETER_COUNT messages.

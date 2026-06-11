@@ -1672,14 +1672,19 @@ impl Emitter<'_> {
         // instance methods called bare (like `get(...)`), NOT a non-existent
         // `LeekOperations.slice`. The method name selects on which bounds are
         // present; then the base, the present bound(s), and the stride:
-        //   a[i:j]   → range(base, i, j)        a[i:]  → range_start(base, i)
-        //   a[:j]    → range_end(base, j)       a[:]   → range_all(base)
+        //   a[i:j]  → rangeDynamic(base, i, j)   a[i:] → rangeDynamic_start(base, i)
+        //   a[:j]   → rangeDynamic_end(base, j)  a[:]  → rangeDynamic_all(base)
         // with the stride appended last when present (`a[i:j:k]` → +`, k`).
+        // We emit the `rangeDynamic*` family (upstream's ANY-typed choice, the
+        // string-indexing PR #3138): for a String base it routes to
+        // `stringSlice`, for everything else it is a pure delegate to the
+        // matching `range*` — same values, same ops. Our HIR is untyped, so
+        // the dynamic dispatch is always the right call.
         let name = match (s.start.is_some(), s.end.is_some()) {
-            (true, true) => "range",
-            (true, false) => "range_start",
-            (false, true) => "range_end",
-            (false, false) => "range_all",
+            (true, true) => "rangeDynamic",
+            (true, false) => "rangeDynamic_start",
+            (false, true) => "rangeDynamic_end",
+            (false, false) => "rangeDynamic_all",
         };
         buf.push_str(name);
         buf.push('(');

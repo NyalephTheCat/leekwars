@@ -2095,6 +2095,32 @@
 2	-	equals	true	8	return endsWith('bonjour','jour')
 3	-	equals	true	8	return endsWith('bonjour','jour')
 4	-	equals	true	8	return endsWith('bonjour','jour')
+4	-	equals	"h"	2	var s = 'hello' return s[0]
+4	-	equals	"e"	2	var s = 'hello' return s[1]
+4	-	equals	"o"	2	string s = 'hello' return s[4]
+4	-	equals	"e"	2	any s = 'hello' return s[1]
+4	-	equals	"e"	1	return 'hello'[1]
+4	-	equals	"o"	3	var s = 'hello' return s[-1]
+4	-	equals	"h"	3	var s = 'hello' return s[-5]
+4	-	equals	null	2	var s = 'hello' return s[10]
+4	-	equals	null	2	var s = '' return s[0]
+4	-	equals	"é"	2	var s = 'café' return s[3]
+4	-	equals	"ho"	7	var s = 'hello' return s[0] + s[-1]
+4	-	equals	"abc"	25	string s = 'abc' var r = '' for (var i = 0; i < 3; i++) r += s[i] return r
+4	-	equals	"ell"	5	var s = 'hello' return s[1:4]
+4	-	equals	"ell"	5	string s = 'hello' return s[1:4]
+4	-	equals	"ell"	5	any s = 'hello' return s[1:4]
+4	-	equals	"ell"	4	return 'hello'[1:4]
+4	-	equals	"hel"	5	var s = 'hello' return s[:3]
+4	-	equals	"llo"	5	var s = 'hello' return s[2:]
+4	-	equals	"hello"	7	var s = 'hello' return s[:]
+4	-	equals	"llo"	6	var s = 'hello' return s[-3:]
+4	-	equals	"hel"	6	var s = 'hello' return s[:-2]
+4	-	equals	"hlo"	5	var s = 'hello' return s[::2]
+4	-	equals	"el"	4	var s = 'hello' return s[1:4:2]
+4	-	equals	"olleh"	8	var s = 'hello' return s[::-1]
+4	-	equals	"olleh"	8	string s = 'hello' return s[::-1]
+4	-	equals	""	2	var s = 'hello' return s[3:1]
 1	-	equals	true	8	return startsWith('bonjour','bon')
 2	-	equals	true	8	return startsWith('bonjour','bon')
 3	-	equals	true	8	return startsWith('bonjour','bon')
@@ -2822,6 +2848,10 @@
 3	-	equals	7	3	var f = (a, b) => a + b return f(3, 4)
 4	-	equals	7	3	var f = (a, b) => a + b return f(3, 4)
 4	-	equals	11	3	var f = integer x => x + 1 return f(10)
+4	-	equals	0	3	var f = integer? x => x ?? 0 return f(null)
+4	-	equals	7	3	var f = integer? x => x ?? 0 return f(7)
+4	-	equals	[1, 2, 3]	31	return arrayFilter([1, null, 2, null, 3], integer? c => c != null)
+4	-	equals	42	2	var f = integer | string x => x return f(42)
 1	-	equals	5	2	var x = 5 var y = x return y
 2	-	equals	5	2	var x = 5 var y = x return y
 3	-	equals	5	2	var x = 5 var y = x return y
@@ -3214,6 +3244,16 @@
 2	-	equals	3	2	var x = (1) + (2) return x
 3	-	equals	3	2	var x = (1) + (2) return x
 4	-	equals	3	2	var x = (1) + (2) return x
+1	-	equals	20	3	function getCellGauche(integer @iCell) { return iCell - 18 } var a = 38 return getCellGauche(a)
+2	-	equals	20	4	function getCellGauche(integer @iCell) { return iCell - 18 } var a = 38 return getCellGauche(a)
+3	-	equals	20	4	function getCellGauche(integer @iCell) { return iCell - 18 } var a = 38 return getCellGauche(a)
+4	-	equals	20	4	function getCellGauche(integer @iCell) { return iCell - 18 } var a = 38 return getCellGauche(a)
+1	-	equals	58	6	function f(integer @iCell) { var g = -> iCell return iCell - 18 + g() } var a = 38 return f(a)
+2	-	equals	58	7	function f(integer @iCell) { var g = -> iCell return iCell - 18 + g() } var a = 38 return f(a)
+3	-	equals	58	7	function f(integer @iCell) { var g = -> iCell return iCell - 18 + g() } var a = 38 return f(a)
+4	-	equals	58	7	function f(integer @iCell) { var g = -> iCell return iCell - 18 + g() } var a = 38 return f(a)
+1	-	equals	6	4	function inc(@x) { x = x + 1 } var a = 5 inc(a) return a
+1	-	equals	6	4	function inc(integer @x) { x = x + 1 } var a = 5 inc(a) return a
 1	-	equals	[12]	7	function f(@x) { push(x, 12) } var a = [] f(a) return a
 1	-	equals	[]	9	function f(x) { push(x, 12) } var a = [] f(a) return a
 1	-	equals	[[], [12]]	27	function f(x) { push(x, 12) } function g(@x) { push(x, 12) } var a = [] var b = [] f(a) g(b) return [a, b]
@@ -3513,22 +3553,22 @@
 2	-	equals	null	3109	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 50; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
 3	-	equals	null	3109	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 50; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
 4	-	equals	null	3046	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 50; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
-1	-	equals	null	8690	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 100; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
-2	-	equals	null	8689	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 100; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
+1	-	equals	null	8689	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 100; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
+2	-	equals	null	8690	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 100; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
 3	-	equals	null	8689	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 100; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
-4	-	equals	null	8576	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 100; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
-1	-	equals	null	27349	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
-2	-	equals	null	27349	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
+4	-	equals	null	8577	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 100; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
+1	-	equals	null	27350	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
+2	-	equals	null	27350	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
 3	-	equals	null	27350	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
 4	-	equals	null	27137	var m = ['A', 'T', 'C', 'G'] var count = 0 var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++
-1	-	equals	null	13664798	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
-2	-	equals	null	13664794	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
-3	-	equals	null	13664782	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
-4	-	equals	null	13564776	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
-1	-	equals	true	13664788	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
-2	-	equals	true	13664808	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
-3	-	equals	true	13664803	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
-4	-	equals	true	13564787	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
+1	-	equals	null	13664813	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
+2	-	equals	null	13664806	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
+3	-	equals	null	13664789	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
+4	-	equals	null	13564794	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ }
+1	-	equals	true	13664792	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
+2	-	equals	true	13664809	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
+3	-	equals	true	13664796	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
+4	-	equals	true	13564792	var m = ['A', 'T', 'C', 'G'] var count = 0 var tests = 500 for (var k = 0; k < tests; k++) { var adn = '' for (var j = 0; j < 200; j++) { adn += m[randInt(0, 4)] } var c = contains(adn, 'GAGA'); if (c) count++ } return abs(100 * (count / tests) - 52) < 12;
 1	-	equals	44	22078	var items = [[37, 3], [47, 10], [28, 5]] var all = []; var aux; aux = function(@current, i, tp, added, last) { if (count(current[1])) push(all, current);\tvar item_count = count(items); for (var j = i; j < item_count; ++j) { var item = @items[j];\tvar item_id = item[0]; var cost = item[1]; if (cost > tp) continue;var new_added = added; new_added[item_id] = true; var copy = current; push(copy[1], @[item, cost, 1]); copy[0] += cost; aux(copy, j, tp - cost, new_added, item_id); } }; aux([0, []], 0, 25, [], -1); return count(all);
 1	-	equals	7	2	function f() => Function< => integer> { return function() => integer { return 7 } } return f()()
 2	-	equals	7	2	function f() => Function< => integer> { return function() => integer { return 7 } } return f()()

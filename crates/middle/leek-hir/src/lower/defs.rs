@@ -482,10 +482,16 @@ impl Lowerer {
                 .find_map(AstExpr::cast)
                 .map(|e| self.lower_expr(&e));
             // Optional `real`-style annotation in `function f(real r)`.
-            let param_ty = p
-                .children()
-                .find(|n| n.kind() == SyntaxKind::TypeRef)
-                .map(|n| leek_types::type_from_node(&n));
+            // A by-reference param is a shared mutable box, so upstream
+            // forces its declared type to ANY (`f(integer @iCell)`,
+            // b5ad4ec #3991) — drop the annotation to match.
+            let param_ty = if is_by_ref {
+                None
+            } else {
+                p.children()
+                    .find(|n| n.kind() == SyntaxKind::TypeRef)
+                    .map(|n| leek_types::type_from_node(&n))
+            };
             out.push(Param {
                 def: id,
                 name,

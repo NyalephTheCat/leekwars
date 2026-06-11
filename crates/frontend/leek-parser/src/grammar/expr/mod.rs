@@ -32,26 +32,29 @@ use interval::has_matching_rbracket;
 use lambda::looks_like_ternary_after_type;
 
 /// Parse an expression at the lowest precedence (allows assignments).
+/// Recognises **typed bare-param lambdas** like `integer x => x + 1`
+/// or `integer? c => c != null` — like the upstream fast-path, they
+/// are valid anywhere an expression starts (call args included): the
+/// `type name =>` token shape can't be anything else.
 pub(crate) fn expr(p: &mut Parser) {
-    expr_bp(p, 0);
-}
-
-/// Top-of-statement / top-of-init expression. Same as `expr` but
-/// additionally recognises **multi-param bare lambdas** like
-/// `x, y -> x + y` and **typed bare-param lambdas** like
-/// `integer x => x + 1`. Both shapes are only valid at a
-/// position where a `,` can't already mean "next item in a list"
-/// (so not inside call args / array literals).
-pub(crate) fn expr_top(p: &mut Parser) {
-    if let Some(count) = lambda::multi_bare_lambda_param_count(p) {
-        lambda::lambda_multi_bare(p, count);
-        return;
-    }
     if lambda::looks_like_typed_bare_lambda(p) {
         lambda::lambda_typed_bare(p);
         return;
     }
     expr_bp(p, 0);
+}
+
+/// Top-of-statement / top-of-init expression. Same as `expr` but
+/// additionally recognises **multi-param bare lambdas** like
+/// `x, y -> x + y`. That shape is only valid at a position where a
+/// `,` can't already mean "next item in a list" (so not inside call
+/// args / array literals).
+pub(crate) fn expr_top(p: &mut Parser) {
+    if let Some(count) = lambda::multi_bare_lambda_param_count(p) {
+        lambda::lambda_multi_bare(p, count);
+        return;
+    }
+    expr(p);
 }
 
 /// Tokens that can start an expression. Used by callers (e.g.
