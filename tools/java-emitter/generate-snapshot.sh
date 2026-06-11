@@ -12,22 +12,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LEEK="$ROOT/official-generator/leek-wars-generator/leekscript"
 TOOL="$ROOT/tools/java-emitter"
+OVERLAY="$TOOL/overlay"
 MAIN_CLASSES="$TOOL/build/classes"
-TEST_CLASSES="$LEEK/build/test-classes"
+TEST_CLASSES="$TOOL/build/test-classes"
 RUNNER_OUT="$TOOL/build/runner"
 SNAPSHOT="$ROOT/crates/backends/leek-backend-java/tests/fixtures/ops/snapshot.tsv"
+source "$TOOL/overlay.sh"
 
 GCACHE="$HOME/.gradle/caches/modules-2/files-2.1"
-JACKSON_DB=$(find "$GCACHE/tools.jackson.core/jackson-databind/3.0.3" -name "*.jar" | head -1)
-JACKSON_CORE=$(find "$GCACHE/tools.jackson.core/jackson-core/3.0.3" -name "*.jar" | head -1)
-JACKSON_ANN=$(find "$GCACHE/com.fasterxml.jackson.core/jackson-annotations" -name "*.jar" | sort -r | head -1)
-JUNIT_API=$(find "$GCACHE/org.junit.jupiter/junit-jupiter-api" -name "*.jar" | sort -r | head -1)
-JUNIT_ENGINE=$(find "$GCACHE/org.junit.jupiter/junit-jupiter-engine" -name "*.jar" | sort -r | head -1)
-JUNIT_PLAT_COMM=$(find "$GCACHE/org.junit.platform/junit-platform-commons" -name "*.jar" | sort -r | head -1)
-JUNIT_PLAT_ENG=$(find "$GCACHE/org.junit.platform/junit-platform-engine" -name "*.jar" | sort -r | head -1)
-JUNIT_LAUNCHER=$(find "$GCACHE/org.junit.platform/junit-platform-launcher" -name "*.jar" | sort -r | head -1)
-OPENTEST=$(find "$GCACHE/org.opentest4j/opentest4j" -name "*.jar" | sort -r | head -1)
-APIGUARDIAN=$(find "$GCACHE/org.apiguardian/apiguardian-api" -name "*.jar" | sort -r | head -1)
+# Exclude -sources/-javadoc jars: those carry .java, not .class, and
+# feeding them to javac fails (e.g. junit-api's Execution.java).
+jar_main() { find "$1" -name "*.jar" ! -name "*-sources.jar" ! -name "*-javadoc.jar" | sort -r | head -1; }
+JACKSON_DB=$(jar_main "$GCACHE/tools.jackson.core/jackson-databind/3.0.3")
+JACKSON_CORE=$(jar_main "$GCACHE/tools.jackson.core/jackson-core/3.0.3")
+JACKSON_ANN=$(jar_main "$GCACHE/com.fasterxml.jackson.core/jackson-annotations")
+JUNIT_API=$(jar_main "$GCACHE/org.junit.jupiter/junit-jupiter-api")
+JUNIT_ENGINE=$(jar_main "$GCACHE/org.junit.jupiter/junit-jupiter-engine")
+JUNIT_PLAT_COMM=$(jar_main "$GCACHE/org.junit.platform/junit-platform-commons")
+JUNIT_PLAT_ENG=$(jar_main "$GCACHE/org.junit.platform/junit-platform-engine")
+JUNIT_LAUNCHER=$(jar_main "$GCACHE/org.junit.platform/junit-platform-launcher")
+OPENTEST=$(jar_main "$GCACHE/org.opentest4j/opentest4j")
+APIGUARDIAN=$(jar_main "$GCACHE/org.apiguardian/apiguardian-api")
 
 if [[ ! -d "$MAIN_CLASSES" ]]; then
   "$TOOL/build.sh"
@@ -38,7 +43,7 @@ mkdir -p "$TEST_CLASSES" "$RUNNER_OUT" "$(dirname "$SNAPSHOT")"
 CP_TEST="$MAIN_CLASSES:$JACKSON_DB:$JACKSON_CORE:$JACKSON_ANN:$JUNIT_API:$JUNIT_PLAT_COMM:$OPENTEST:$APIGUARDIAN"
 SOURCES=$(mktemp)
 trap 'rm -f "$SOURCES"' EXIT
-find "$LEEK/src/test/java" -name "*.java" > "$SOURCES"
+list_sources "$LEEK/src/test/java" "$OVERLAY/src/test/java" > "$SOURCES"
 javac -d "$TEST_CLASSES" -cp "$CP_TEST" --release 25 @"$SOURCES"
 
 # Compile the snapshot generator main.

@@ -37,6 +37,15 @@ fn upstream_dirs(manifest_dir: &Path) -> [PathBuf; 2] {
     [leek.join("src/test/java"), leek.join("src/main/java")]
 }
 
+/// All Java source trees feeding the reference run: the upstream
+/// submodule plus the pristine-submodule overlay that carries the
+/// `LEEK_REFERENCE` probe (see `tools/java-emitter/overlay.sh`).
+fn source_dirs(manifest_dir: &Path) -> [PathBuf; 3] {
+    let [test, main] = upstream_dirs(manifest_dir);
+    let overlay = repo_root(manifest_dir).join("tools/java-emitter/overlay/src");
+    [test, main, overlay]
+}
+
 /// True when the upstream submodule is checked out.
 pub fn submodule_present(manifest_dir: &Path) -> bool {
     upstream_dirs(manifest_dir).iter().all(|d| d.exists())
@@ -80,9 +89,9 @@ fn newest_java_mtime(dir: &Path) -> Option<SystemTime> {
     newest
 }
 
-/// Newest mtime across all upstream source trees.
+/// Newest mtime across all source trees (upstream + overlay).
 fn sources_newest(manifest_dir: &Path) -> Option<SystemTime> {
-    upstream_dirs(manifest_dir)
+    source_dirs(manifest_dir)
         .iter()
         .filter_map(|d| newest_java_mtime(d))
         .max()
