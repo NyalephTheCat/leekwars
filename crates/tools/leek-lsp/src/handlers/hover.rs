@@ -698,8 +698,13 @@ fn base_class_name(
     table: &leek_types::TypeTable,
     base: &Expr,
 ) -> Option<String> {
-    let start = u32::from(base.syntax().text_range().start());
-    if let Some(entry) = table.smallest_at(start)
+    let range = base.syntax().text_range();
+    let start = u32::from(range.start());
+    let end = u32::from(range.end());
+    // A range query over the whole base expression — a point query at
+    // its start would land on the chain's *first* link (`fm` in
+    // `fm.leek.cell`) and resolve the wrong class for chained access.
+    if let Some(entry) = table.spanning(start, end)
         && let Some(name) = class_name_of_type(&entry.ty)
     {
         return Some(name);
