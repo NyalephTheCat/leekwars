@@ -371,7 +371,9 @@ pub fn keyword_lookup(word: &str, version: Version) -> Option<SyntaxKind> {
         // v3: rest of the Java-style reserved-word list
         ("instanceof", SyntaxKind::KwInstanceof, Version::V3),
         ("is", SyntaxKind::KwIs, Version::V1),
-        ("as", SyntaxKind::KwAs, Version::V3),
+        // Upstream's `LexicalParser` registers `as` with `KeywordInfo(1, …)`
+        // — the cast operator (and reserved word) exists from v1, not v3.
+        ("as", SyntaxKind::KwAs, Version::V1),
         ("xor", SyntaxKind::KwXor, Version::V1),
         ("switch", SyntaxKind::KwSwitch, Version::V3),
         ("case", SyntaxKind::KwCase, Version::V3),

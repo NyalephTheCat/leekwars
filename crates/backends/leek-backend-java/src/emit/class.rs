@@ -48,19 +48,35 @@ impl<'a> super::Emitter<'a> {
         let rebinds = f.params.iter().fold(String::new(), |mut acc, p| {
             let safe = sanitize_ident(&p.name);
             let body = mangle::local(self.opts, &p.name);
+            let ai = self.ai_this();
             if self.is_v1_ref_param(p) {
                 // `@x` at v1 → bind to a runtime `Box` (alias a passed box, else
                 // box the value); body ops route through `Box` methods so
                 // mutations propagate to the caller.
                 let _ = write!(
                     acc,
-                    "Box {body} = p_{safe} instanceof Box ? (Box) p_{safe} : new Box(this, load(p_{safe}));"
+                    "Box {body} = p_{safe} instanceof Box ? (Box) p_{safe} : new Box({ai}, load(p_{safe}));"
                 );
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else if v1 {
-                // v1 plain param: passed by value → deep-copy the arg so a
-                // mutation inside doesn't touch the caller's array/map.
-                let _ = write!(acc, "var {body} = copy(p_{safe});");
+                if self.ref_boxes.borrow().contains(&p.def) {
+                    // Plain v1 param passed onward at a `@` position → bind
+                    // through a runtime `Box` so the inner callee can alias
+                    // it (upstream boxes every v1 param: `var u_a = new
+                    // Box(AI.this, copy(p_a))`; the ctor's 1 op replaces this
+                    // param's share of `v1_param_box_ops`).
+                    let _ = write!(acc, "Box {body} = new Box({ai}, copy(p_{safe}));");
+                } else {
+                    // v1 plain param: passed by value → deep-copy the arg so a
+                    // mutation inside doesn't touch the caller's array/map.
+                    // `load(...)` first: a dynamically-dispatched call site
+                    // (executeArrayAccess) passes the caller's Box and
+                    // upstream `clone` passes Boxes through untouched — the
+                    // unwrap+clone there happens in the Box-ctor rebind we
+                    // don't emit. Charge-identical (load is free; the content
+                    // clone is the same either way).
+                    let _ = write!(acc, "var {body} = copy(load(p_{safe}));");
+                }
             } else if exact {
                 if p.is_by_ref {
                     // `@x` at v2+ → alias a passed box, else box a copy
@@ -68,7 +84,7 @@ impl<'a> super::Emitter<'a> {
                     // Box(AI.this, LeekOperations.clone(p_x))`).
                     let _ = write!(
                         acc,
-                        "Box {body} = p_{safe} instanceof Box ? (Box) p_{safe} : new Box(this, copy(p_{safe}));"
+                        "Box {body} = p_{safe} instanceof Box ? (Box) p_{safe} : new Box({ai}, copy(p_{safe}));"
                     );
                     self.ref_boxes.borrow_mut().insert(p.def);
                 } else if f
@@ -80,7 +96,7 @@ impl<'a> super::Emitter<'a> {
                     // runtime `Box` so writes propagate into the closure;
                     // the 2-arg ctor charges the same 1 op as upstream's
                     // `final var u_x = new Box<>(AI.this, p_x)`.
-                    let _ = write!(acc, "final Box {body} = new Box(this, p_{safe});");
+                    let _ = write!(acc, "final Box {body} = new Box({ai}, p_{safe});");
                     self.ref_boxes.borrow_mut().insert(p.def);
                 } else {
                     let _ = write!(acc, "var u_{safe} = p_{safe};");
@@ -132,39 +148,46 @@ impl<'a> super::Emitter<'a> {
         }
     }
 
-    pub(crate) fn emit_default_overload(&mut self, f: &Function, name: &str, arity: usize) {
-        let params = f.params[..arity]
-            .iter()
-            .map(|p| format!("Object {}", self.sig_param_name(&p.name)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let call_args = f
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                if i < arity {
-                    self.sig_param_name(&p.name)
-                } else {
-                    match &p.default {
-                        // The default expression is *evaluated* when the arg is
-                        // omitted, so charge its op cost (the reference counts the
-                        // default's `getOperations()`) — `f(a = [1,2,3])` called
-                        // as `f()` pays the array's 6 ops.
-                        Some(d) => self.expr_with_ops(d, 0),
-                        // Earlier params without defaults shouldn't
-                        // appear past `arity` (Leek convention puts
-                        // defaults at the tail). Emit `null` so the
-                        // method at least compiles.
-                        None => "null".into(),
-                    }
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        self.writer.add_line(&format!(
-            "private Object {name}({params}) throws LeekRunException {{ return {name}({call_args}); }}"
-        ));
+    pub(crate) fn emit_default_overload(&mut self, f: &Function, _name: &str, arity: usize) {
+        // Upstream duplicates the whole body per arity, binding each omitted
+        // param as a *local* initialized to its default expression (`var u_a
+        // = new Box(AI.this, <default>); …` — no `copy(p_a)` re-bind, since
+        // the default value is fresh). Delegating to the full-arity overload
+        // instead routed the fresh default through the param path's v1
+        // deep-copy, over-charging by a full clone (OPS_DRIFT L3153/L3157).
+        // The decl shape is charge-identical to upstream's: `ops(<default>,
+        // cost+1)` statically vs. Box-ctor 1 + `ops(cost);` runtime.
+        let mut g = f.clone();
+        g.params.truncate(arity);
+        // Clear remaining defaults so `emit_function` doesn't recursively
+        // re-emit the lower-arity overloads (the outer loop already covers
+        // every arity — leaving them produced duplicate methods).
+        for p in &mut g.params {
+            p.default = None;
+        }
+        if let Some(body) = &mut g.body {
+            // Mark the spliced defs so `emit_var_decl` knows to drop the +1
+            // declaration tick at v2+ (upstream binds an omitted param with
+            // only the default expression's own cost).
+            for p in &f.params[arity..] {
+                self.synthetic_default_decls.insert(p.def);
+            }
+            let decls: Vec<leek_hir::Stmt> = f.params[arity..]
+                .iter()
+                .map(|p| {
+                    leek_hir::Stmt::VarDecl(leek_hir::VarDecl {
+                        def: p.def,
+                        name: p.name.clone(),
+                        ty: p.ty.clone(),
+                        init: p.default.clone(),
+                        is_global: false,
+                        span: p.span,
+                    })
+                })
+                .collect();
+            body.stmts.splice(0..0, decls);
+        }
+        self.emit_function(&g);
     }
 
     /// Emit a user class as a `NativeObjectLeekValue` subclass — real public

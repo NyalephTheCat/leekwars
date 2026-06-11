@@ -139,11 +139,16 @@ impl super::Emitter<'_> {
                 .unwrap();
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else if matches!(self.opts.version, leek_syntax::Version::V1) {
-                // v1 by-value param: the runtime hands callbacks element/arg
-                // *boxes* (e.g. `arrayMap` passes a `Box` per element), so `load`
-                // to unwrap before the v1 value-semantics `copy`. Without the
-                // unwrap a boxed callee (`execute(box, …)`) silently yields null.
-                write!(buf, "var {pname} = copy(load({src}));").unwrap();
+                // Plain v1 lambda param: bind through the 2-arg Box ctor like
+                // upstream (`var u_x = new Box(AI.this, values[0])`). At v1
+                // the ctor deep-clones a *Box* argument (the runtime hands
+                // callbacks element/arg boxes, and `execute` call sites pass
+                // bare boxes for locals) — that clone is the value-semantics
+                // copy AND its data-dependent op charge. A fresh value is
+                // stored directly: no copy, no charge beyond the ctor's 1
+                // (which replaces this param's share of `v1_param_box_ops`).
+                write!(buf, "Box {pname} = new Box(ai, {src});").unwrap();
+                self.ref_boxes.borrow_mut().insert(p.def);
             } else if captured_by_nested_lambda_body(&l.body, p.def) {
                 // Param captured by an inner lambda (`x -> y -> x + 1`) →
                 // bind through a runtime `Box`; the 2-arg ctor charges the
@@ -162,7 +167,8 @@ impl super::Emitter<'_> {
             LambdaBody::Expr(e) => {
                 let code = self.expr_to_string(e);
                 if self.opts.emit_ops {
-                    buf.push_str(&self.v1_param_box_ops(&l.params));
+                    // (No `v1_param_box_ops` here: v1 lambda params bind
+                    // through Box ctors above, which charge at runtime.)
                     let cost = self.emit_cost(e);
                     if cost > 0 {
                         write!(buf, "ops(1);ops({cost}); ").unwrap();
@@ -178,7 +184,6 @@ impl super::Emitter<'_> {
                 // Inline path — caller has already confirmed no
                 // outer captures exist.
                 if self.opts.emit_ops {
-                    buf.push_str(&self.v1_param_box_ops(&l.params));
                     buf.push_str("ops(1);");
                 }
                 buf.push_str(&self.render_block_to_string(b));
@@ -289,6 +294,11 @@ impl super::Emitter<'_> {
                 )
                 .unwrap();
                 self.ref_boxes.borrow_mut().insert(p.def);
+            } else if matches!(self.opts.version, leek_syntax::Version::V1) {
+                // Plain v1 lambda param: 2-arg Box ctor binding — see
+                // `write_lambda_inline` for the clone/charge semantics.
+                write!(factory_buf, "Box {pname} = new Box(ai, {src});").unwrap();
+                self.ref_boxes.borrow_mut().insert(p.def);
             } else if !matches!(self.opts.version, leek_syntax::Version::V1)
                 && captured_by_nested_lambda_stmts(&body.stmts, p.def)
             {
@@ -302,7 +312,8 @@ impl super::Emitter<'_> {
         }
         self.lambda_depth.set(self.lambda_depth.get() + 1);
         if self.opts.emit_ops {
-            factory_buf.push_str(&self.v1_param_box_ops(&l.params));
+            // (No `v1_param_box_ops`: v1 lambda params bind through Box
+            // ctors above, which charge at runtime.)
             factory_buf.push_str("ops(1);");
         }
         // The factory is an AI-level method, so `<u_Class>.this` is out of scope

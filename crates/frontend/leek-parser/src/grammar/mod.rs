@@ -53,10 +53,53 @@ fn top_level_item(p: &mut Parser) {
     }
 }
 
+/// Whether the `@` at the cursor starts an *annotation* (`@unused`,
+/// `@deprecated(...)` preceding a declaration) rather than a reference
+/// expression statement (`@LamaSwag();` — upstream's `@` prefix operator
+/// applied to a call). Annotations are our extension, so when the
+/// `@name[(args)]` construct is immediately followed by `;` we prefer
+/// the upstream expression reading and leave the `@` for the statement
+/// parser.
+fn at_annotation(p: &Parser) -> bool {
+    if !p.at(SyntaxKind::At) {
+        return false;
+    }
+    let name = p.nth(1);
+    if !(matches!(name, SyntaxKind::Ident) || name.is_keyword()) {
+        // Malformed either way — let `consume_annotations` report it.
+        return true;
+    }
+    let mut i = 2;
+    if p.nth(i) == SyntaxKind::LParen {
+        // Skip the balanced `( … )` (bounded so a runaway unclosed
+        // paren can't scan the whole file).
+        let mut depth = 0usize;
+        loop {
+            match p.nth(i) {
+                SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                SyntaxKind::Eof => break,
+                _ => {}
+            }
+            i += 1;
+            if i > 256 {
+                break;
+            }
+        }
+    }
+    p.nth(i) != SyntaxKind::Semicolon
+}
+
 /// Consume `@name [(args)]` zero or more times. Each annotation is its
 /// own `Annotation` node, emitted into the current scope.
 pub(crate) fn consume_annotations(p: &mut Parser) {
-    while p.at(SyntaxKind::At) {
+    while at_annotation(p) {
         p.start_node(SyntaxKind::Annotation);
         p.bump(); // '@'
         // Annotation name — accept any identifier (and any keyword,

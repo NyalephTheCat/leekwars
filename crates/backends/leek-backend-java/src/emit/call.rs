@@ -717,6 +717,14 @@ impl super::Emitter<'_> {
                     self.write_expr(buf, key, false);
                     buf.push_str(", null");
                     for a in &c.args {
+                        // A ref-box local passes its Box bare — upstream hands
+                        // executeArrayAccess the variable's Box so an `@`
+                        // callee aliases it (and its binding charges nothing).
+                        if self.is_ref_box(a) {
+                            buf.push_str(", ");
+                            buf.push_str(&self.ref_box_name(a));
+                            continue;
+                        }
                         // `(Object)` cast so a lone `null` arg doesn't bind as a
                         // null `Object... arguments` array.
                         buf.push_str(", (Object) (");
@@ -821,6 +829,19 @@ impl super::Emitter<'_> {
             buf.push_str(", ");
             if positions.is_some_and(|p| p.get(i).copied().unwrap_or(false)) && self.is_ref_box(a) {
                 buf.push_str(&self.ref_box_name(a));
+            } else if matches!(self.opts.version, leek_syntax::Version::V1) && self.is_ref_box(a) {
+                // v1 passes the bare box for *any* variable arg (upstream:
+                // `execute(u_f.get(), u_x)`) — the callee's param Box ctor
+                // clones it, which is both the by-value copy and its
+                // data-dependent op charge. A `@` param aliases it instead.
+                buf.push_str(&self.ref_box_name(a));
+            } else if matches!(self.opts.version, leek_syntax::Version::V1) {
+                // v1 unboxed load (variable / field / index read): deep-copy at
+                // the call site so the callee's direct-store Box binding can't
+                // alias it — `copy`'s clone charge mirrors the clone the callee
+                // ctor would have paid had the local been a box. Fresh values
+                // pass through raw (stored directly, like upstream).
+                buf.push_str(&self.v1_clone(a));
             } else {
                 self.write_expr(buf, a, false);
             }

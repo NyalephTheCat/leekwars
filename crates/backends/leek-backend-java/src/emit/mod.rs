@@ -143,6 +143,22 @@ pub(crate) struct Emitter<'a> {
     /// there, aliasing the caller's variable). Keyed by the var's `DefId.0`.
     /// Empty at v2+ (no by-ref propagation). Built by [`caller_box_locals`].
     var_ref_positions: std::collections::HashMap<u32, Vec<bool>>,
+    /// v1 only. Callees whose call *result* is a `Box` upstream: their body
+    /// `return`s a plain variable (every v1 local is a Box there) — directly
+    /// or transitively through another such callee. A v1 `var x = f()` then
+    /// mirrors upstream's `new Box(ai, f())` clone-if-box with a `copy(...)`
+    /// wrapper (see `v1_store_clone`). Two id spaces: named-function defs
+    /// (index into `hir.defs`) and lambda-holding local vars (`DefId.0`).
+    /// Built by [`v1_box_returners`]; empty at v2+.
+    returns_box_fns: std::collections::HashSet<u32>,
+    returns_box_vars: std::collections::HashSet<u32>,
+    /// Param defs spliced as synthetic body-leading locals into a
+    /// default-param overload (see `emit_default_overload`). At v2+ upstream
+    /// binds an omitted param with only the default expression's own cost
+    /// (`ops(0);` for a literal) — no +1 declaration tick — so
+    /// `emit_var_decl` drops its base cost for these. v1 keeps the +1 (it
+    /// matches the Box ctor's runtime charge).
+    synthetic_default_decls: std::collections::HashSet<leek_hir::DefId>,
 }
 
 mod call;
@@ -172,6 +188,15 @@ impl<'a> Emitter<'a> {
                 std::collections::HashMap::new(),
             )
         };
+        let (returns_box_fns, returns_box_vars) =
+            if matches!(opts.version, leek_syntax::Version::V1) {
+                v1_box_returners(hir)
+            } else {
+                (
+                    std::collections::HashSet::new(),
+                    std::collections::HashSet::new(),
+                )
+            };
         Self {
             opts,
             hir,
@@ -190,6 +215,9 @@ impl<'a> Emitter<'a> {
             boxed_locals: std::cell::RefCell::new(std::collections::HashSet::new()),
             current_class: std::cell::Cell::new(None),
             var_ref_positions,
+            returns_box_fns,
+            returns_box_vars,
+            synthetic_default_decls: std::collections::HashSet::new(),
         }
     }
 
@@ -568,6 +596,17 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
                 // Restricted to a literal-rooted index chain so object / variable
                 // receivers (method calls, `obj['m']()`) keep their own cost.
                 Callee::Expr(e) => total += array_literal_index_call_cost(e),
+                // `recv.m(args)` — upstream `LeekFunctionCall.analyze` charges
+                // the callee *expression* (`operations += mExpression.
+                // getOperations()`), which for an object access is
+                // `1 + object.operations` (`LeekObjectAccess.analyze`). No
+                // extra per-call op. Builtin-class receivers
+                // (`Integer.parse(...)`) are exempt like the `Field` arm.
+                Callee::Method { receiver, .. } => {
+                    if !matches!(&receiver.kind, ExprKind::Name(NameRef::Builtin(_))) {
+                        total += 1 + expr_op_cost(receiver);
+                    }
+                }
                 _ => {}
             }
             total
@@ -955,7 +994,11 @@ pub(crate) fn builtin_fn_wrapper(name: &str, version: leek_syntax::Version) -> O
             v4_class,
             legacy_class,
         } => {
-            // `((<class>) values[0]).<name>[_v1_3](ai, values[1..])`
+            // `((<class>) load(values[0])).<name>[_v1_3](ai, load(values[1..]))`
+            // — args may arrive as bare `Box`es (v1 callers pass
+            // variable args boxed, mirroring upstream's
+            // `execute(fn, u_x)`), so unwrap via `AI.load` exactly
+            // like upstream's `Array_count_a(load(values[0]))`.
             let class = if matches!(version, leek_syntax::Version::V4) {
                 v4_class
             } else {
@@ -967,16 +1010,16 @@ pub(crate) fn builtin_fn_wrapper(name: &str, version: leek_syntax::Version) -> O
             } else {
                 ""
             };
-            let mut s = format!("return (({class}) values[0]).{name}{suffix}(ai");
+            let mut s = format!("return (({class}) AI.load(values[0])).{name}{suffix}(ai");
             for i in 1..arity {
                 // Higher-order builtins (`arrayMap`/`arrayFilter`/…)
                 // declare their callback parameter as
                 // `FunctionLeekValue`, not `Object`. Cast at the call
                 // site so javac can pick the right overload.
                 if i == 1 && takes_function_arg(name) {
-                    write!(s, ", (FunctionLeekValue) values[{i}]").unwrap();
+                    write!(s, ", (FunctionLeekValue) AI.load(values[{i}])").unwrap();
                 } else {
-                    write!(s, ", values[{i}]").unwrap();
+                    write!(s, ", AI.load(values[{i}])").unwrap();
                 }
             }
             s.push_str(");");
@@ -1224,91 +1267,86 @@ pub(crate) type CallerBoxInfo = (
     std::collections::HashMap<u32, Vec<bool>>,
 );
 
-/// v1 by-ref propagation analysis. A local passed as an argument at a `@`-ref
-/// parameter position that the callee *writes* (`function f(@a){ a += 1 }`, or a
-/// closure it returns that writes `a`) must be a runtime `Box` so the mutation
-/// reaches the caller's variable. Returns the set of such locals (seeded into
-/// `ref_boxes`) plus, for `var f = function(@a){…}` bindings, the written-`@`
-/// positions keyed by the var's def (so an `execute(f, …)` call can box the
-/// right argument).
+/// v1 by-ref propagation analysis. A local passed as an argument at ANY `@`-ref
+/// parameter position binds to a runtime `Box` at its declaration, so the
+/// callee can alias it (upstream boxes *every* v1 local; we only need the ones
+/// a `@` param might alias — the 2-arg Box ctor's runtime `ops(1)` replaces
+/// the plain decl's static `ops(init, 1)`, so plain decls stay
+/// charge-equivalent without boxing). Returns the set of such locals (seeded
+/// into `ref_boxes`) plus, for `var f = function(@a){…}` bindings, the `@`
+/// positions keyed by the var's def (so an `execute(f, …)` call can pass the
+/// bare box at the right argument).
+///
+/// Foreach bindings are exempt: `emit_foreach` declares them as plain
+/// `Object` slots with a static setup charge, so boxing them here would
+/// emit `.get()` reads against a non-Box declaration.
 pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
-    use leek_hir::{LambdaBody, LambdaExpr, Param};
+    use leek_hir::Param;
     use std::collections::{HashMap, HashSet};
 
-    // Does any write target one of `targets` (assignment l-value, ++/--)?
-    fn expr_writes(e: &Expr, targets: &HashSet<u32>, out: &mut HashSet<u32>) {
-        match &e.kind {
-            ExprKind::Binary(op, l, r) => {
-                if (matches!(op, BinaryOp::Assign) || op.compound_base().is_some())
-                    && let ExprKind::Name(NameRef::Local(id)) = &l.kind
-                    && targets.contains(&id.0)
-                {
-                    out.insert(id.0);
+    fn ref_positions(params: &[Param]) -> Vec<bool> {
+        params.iter().map(|p| p.is_by_ref).collect()
+    }
+
+    // Deep statement walker: visits every statement in `s`'s subtree
+    // INCLUDING statements inside lambda bodies (the stock HIR visitor
+    // treats `ExprKind::Lambda` as a leaf, but by-ref propagation has to
+    // see recursive `aux(copy, …)` calls *inside* the lambda that defines
+    // `aux` — that's where the `@`-aliased locals are declared).
+    fn walk_stmts_deep(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+        f(s);
+        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| walk_stmts_deep(c, f));
+        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| lambda_stmts_in_expr(e, f));
+    }
+    fn lambda_stmts_in_expr(e: &Expr, f: &mut dyn FnMut(&Stmt)) {
+        if let ExprKind::Lambda(l) = &e.kind {
+            match &l.body {
+                leek_hir::LambdaBody::Block(b) => {
+                    for s in &b.stmts {
+                        walk_stmts_deep(s, f);
+                    }
                 }
-                expr_writes(l, targets, out);
-                expr_writes(r, targets, out);
+                leek_hir::LambdaBody::Expr(inner) => lambda_stmts_in_expr(inner, f),
             }
-            ExprKind::Postfix(_, x) | ExprKind::Unary(_, x) => {
-                if let ExprKind::Name(NameRef::Local(id)) = &x.kind
-                    && targets.contains(&id.0)
+        }
+        leek_hir::visit::walk_expr_children(e, &mut |c| lambda_stmts_in_expr(c, f));
+    }
+
+    // `var f = function(@a){…}` bindings → the lambda's `@` positions, so a
+    // `f(b)` call resolves. Also the assign form (`var aux; aux =
+    // function(@a){…}` — the usual v1 recursion idiom). Store the owned
+    // `Vec<bool>` (not a reference) so it outlives the walk.
+    let mut var_lambda_pos: HashMap<u32, Vec<bool>> = HashMap::new();
+    fn collect_var_lambdas(s: &Stmt, m: &mut HashMap<u32, Vec<bool>>) {
+        match s {
+            Stmt::VarDecl(v) => {
+                if let Some(init) = &v.init
+                    && let ExprKind::Lambda(l) = &init.kind
                 {
-                    out.insert(id.0);
+                    m.insert(v.def.0, ref_positions(&l.params));
                 }
-                expr_writes(x, targets, out);
             }
-            // A nested closure can write a captured `@` param (`@a{ -> { a+=2 } }`)
-            // — `walk_expr_children` treats a lambda as a leaf, so descend here.
-            ExprKind::Lambda(l) => match &l.body {
-                LambdaBody::Expr(b) => expr_writes(b, targets, out),
-                LambdaBody::Block(b) => b.stmts.iter().for_each(|s| stmt_writes(s, targets, out)),
-            },
-            _ => leek_hir::visit::walk_expr_children(e, &mut |c| expr_writes(c, targets, out)),
-        }
-    }
-    fn stmt_writes(s: &Stmt, targets: &HashSet<u32>, out: &mut HashSet<u32>) {
-        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| expr_writes(e, targets, out));
-        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| stmt_writes(c, targets, out));
-    }
-    // The `@` param positions the callable *writes* — only a local reaching one
-    // of those must box (mutation must propagate). Non-mutated `@` positions are
-    // left unboxed: boxing them would also catch un-boxable for-loop variables.
-    fn mutated_ref_positions(params: &[Param], body: &[Stmt]) -> Vec<bool> {
-        let ref_defs: HashSet<u32> = params
-            .iter()
-            .filter(|p| p.is_by_ref)
-            .map(|p| p.def.0)
-            .collect();
-        if ref_defs.is_empty() {
-            return vec![false; params.len()];
-        }
-        let mut written = HashSet::new();
-        for s in body {
-            stmt_writes(s, &ref_defs, &mut written);
-        }
-        params
-            .iter()
-            .map(|p| p.is_by_ref && written.contains(&p.def.0))
-            .collect()
-    }
-    fn lambda_stmts(l: &LambdaExpr) -> &[Stmt] {
-        match &l.body {
-            LambdaBody::Block(b) => &b.stmts,
-            LambdaBody::Expr(_) => &[],
+            Stmt::Expr(e) => {
+                if let ExprKind::Binary(leek_hir::BinaryOp::Assign, lhs, rhs) = &e.kind
+                    && let ExprKind::Name(NameRef::Local(id)) = &lhs.kind
+                    && let ExprKind::Lambda(l) = &rhs.kind
+                {
+                    m.insert(id.0, ref_positions(&l.params));
+                }
+            }
+            _ => {}
         }
     }
 
-    // `var f = function(@a){…}` bindings → the lambda's written-`@` positions,
-    // so a `f(b)` call resolves. Store the owned `Vec<bool>` (not a reference) so
-    // it outlives the walk.
-    let mut var_lambda_pos: HashMap<u32, Vec<bool>> = HashMap::new();
-    fn collect_var_lambdas(s: &Stmt, m: &mut HashMap<u32, Vec<bool>>) {
-        if let Stmt::VarDecl(v) = s
-            && let Some(init) = &v.init
-            && let ExprKind::Lambda(l) = &init.kind
-        {
-            m.insert(v.def.0, mutated_ref_positions(&l.params, lambda_stmts(l)));
+    // Foreach bindings can't take the Box declaration shape (see doc above) —
+    // collect their defs so the marking pass skips them.
+    fn collect_foreach_binds(s: &Stmt, out: &mut HashSet<leek_hir::DefId>) {
+        if let Stmt::Foreach(fe) = s {
+            if let Some(k) = &fe.key {
+                out.insert(k.def);
+            }
+            out.insert(fe.value.def);
         }
-        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| collect_var_lambdas(c, m));
     }
 
     let mut roots: Vec<&[Stmt]> = vec![&hir.main];
@@ -1331,11 +1369,13 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
     }
     for stmts in &roots {
         for s in *stmts {
-            collect_var_lambdas(s, &mut var_lambda_pos);
+            walk_stmts_deep(s, &mut |s| collect_var_lambdas(s, &mut var_lambda_pos));
         }
     }
 
-    // Resolve a call's `@`-write positions, then mark local args there.
+    let mut foreach_binds: HashSet<leek_hir::DefId> = HashSet::new();
+
+    // Resolve a call's `@` positions, then mark local args there.
     let mut out: HashSet<leek_hir::DefId> = HashSet::new();
     let mark = |c: &leek_hir::Call, positions: &[bool], out: &mut HashSet<leek_hir::DefId>| {
         for (i, arg) in c.args.iter().enumerate() {
@@ -1356,10 +1396,7 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
         if let ExprKind::Call(c) = &e.kind {
             let positions = match &c.callee {
                 Callee::Function(NameRef::Function(fid)) => match hir.defs.get(fid.0 as usize) {
-                    Some(Def::Function(f)) => Some(mutated_ref_positions(
-                        &f.params,
-                        f.body.as_ref().map_or(&[], |b| &b.stmts),
-                    )),
+                    Some(Def::Function(f)) => Some(ref_positions(&f.params)),
                     _ => None,
                 },
                 Callee::Function(NameRef::Local(fid)) => var_lambda_pos.get(&fid.0).cloned(),
@@ -1367,6 +1404,38 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
             };
             if let Some(pos) = positions {
                 mark(c, &pos, out);
+            }
+            // `t[i](args)` — dynamically dispatched through
+            // `executeArrayAccess`, so the callee (and its `@` positions)
+            // is unknowable statically. Upstream passes every variable arg
+            // as its Box and the callee's `instanceof Box` binding decides
+            // aliasing (an `@` param aliases for free; a by-value param
+            // copies). Mark every local arg so the call site can hand over
+            // the box (charge-neutral for by-value callees — they copy the
+            // content either way).
+            if let Callee::Expr(inner) = &c.callee
+                && matches!(inner.kind, ExprKind::Index(..))
+            {
+                for arg in &c.args {
+                    if let ExprKind::Name(NameRef::Local(id)) = &arg.kind {
+                        out.insert(*id);
+                    }
+                }
+            }
+        }
+        // Descend into lambda bodies — recursive `aux(copy, …)` calls live
+        // inside the lambda assigned to `aux` (the visitor treats Lambda as
+        // a leaf, so we cross the boundary by hand).
+        if let ExprKind::Lambda(l) = &e.kind {
+            match &l.body {
+                leek_hir::LambdaBody::Block(b) => {
+                    for s in &b.stmts {
+                        walk_call_stmts(s, hir, var_lambda_pos, out, mark);
+                    }
+                }
+                leek_hir::LambdaBody::Expr(inner) => {
+                    walk_calls(inner, hir, var_lambda_pos, out, mark);
+                }
             }
         }
         leek_hir::visit::walk_expr_children(e, &mut |c| {
@@ -1389,10 +1458,177 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
     }
     for stmts in &roots {
         for s in *stmts {
+            walk_stmts_deep(s, &mut |s| collect_foreach_binds(s, &mut foreach_binds));
             walk_call_stmts(s, hir, &var_lambda_pos, &mut out, &mark);
         }
     }
+    for d in &foreach_binds {
+        out.remove(d);
+    }
     (out, var_lambda_pos)
+}
+
+/// v1 box-return analysis. Upstream boxes *every* v1 local, so a function or
+/// lambda whose `return` hands back a plain variable (or an array/object
+/// element — legacy array `get` returns the element's `Box`) returns a `Box`
+/// to its caller; `var x = f()` then compiles upstream to `new Box(ai, f())`
+/// whose 2-arg ctor clones Box inputs. We return raw (unboxed) values, so the
+/// store sites consult this set to add the equivalent `copy(...)` (see
+/// `v1_store_clone`). A return of a *call* propagates the callee's verdict
+/// (`return cellsInRange(10)` forwards the inner Box untouched), hence the
+/// fixpoint. Returns `(named-function defs, lambda-holding var defs)`, both
+/// keyed by `DefId.0` in their respective id spaces.
+pub(crate) fn v1_box_returners(
+    hir: &HirFile,
+) -> (
+    std::collections::HashSet<u32>,
+    std::collections::HashSet<u32>,
+) {
+    use std::collections::{HashMap, HashSet};
+
+    enum Dep {
+        Fn(u32),
+        Var(u32),
+    }
+    #[derive(Default)]
+    struct Ev {
+        direct: bool,
+        deps: Vec<Dep>,
+    }
+
+    fn expr_evidence(e: &Expr, ev: &mut Ev) {
+        match &e.kind {
+            // A variable (Box upstream) or an element read (legacy array
+            // `get` returns the element Box).
+            ExprKind::Name(NameRef::Local(_) | NameRef::Global(_))
+            | ExprKind::Field(..)
+            | ExprKind::Index(..) => ev.direct = true,
+            ExprKind::Call(c) => match &c.callee {
+                Callee::Function(NameRef::Function(fid)) => ev.deps.push(Dep::Fn(fid.0)),
+                Callee::Function(NameRef::Local(id)) => ev.deps.push(Dep::Var(id.0)),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    // Top-level returns of a body — recurse through control flow but NOT into
+    // nested lambdas (their returns belong to the lambda, not this callee).
+    fn stmt_evidence(s: &Stmt, ev: &mut Ev) {
+        if let Stmt::Return(Some(e)) = s {
+            expr_evidence(e, ev);
+        }
+        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| stmt_evidence(c, ev));
+    }
+    fn body_evidence(stmts: &[Stmt]) -> Ev {
+        let mut ev = Ev::default();
+        for s in stmts {
+            stmt_evidence(s, &mut ev);
+        }
+        ev
+    }
+    fn lambda_evidence(l: &leek_hir::LambdaExpr) -> Ev {
+        match &l.body {
+            leek_hir::LambdaBody::Block(b) => body_evidence(&b.stmts),
+            leek_hir::LambdaBody::Expr(e) => {
+                let mut ev = Ev::default();
+                expr_evidence(e, &mut ev);
+                ev
+            }
+        }
+    }
+
+    // Deep walkers (cross lambda boundaries) for *finding* the candidates —
+    // `var aux = function(){…}` bindings can live inside other lambdas.
+    fn walk_stmts_deep(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+        f(s);
+        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| walk_stmts_deep(c, f));
+        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| lambda_stmts_in_expr(e, f));
+    }
+    fn lambda_stmts_in_expr(e: &Expr, f: &mut dyn FnMut(&Stmt)) {
+        if let ExprKind::Lambda(l) = &e.kind {
+            match &l.body {
+                leek_hir::LambdaBody::Block(b) => {
+                    for s in &b.stmts {
+                        walk_stmts_deep(s, f);
+                    }
+                }
+                leek_hir::LambdaBody::Expr(inner) => lambda_stmts_in_expr(inner, f),
+            }
+        }
+        leek_hir::visit::walk_expr_children(e, &mut |c| lambda_stmts_in_expr(c, f));
+    }
+
+    let mut fn_ev: HashMap<u32, Ev> = HashMap::new();
+    let mut var_ev: HashMap<u32, Ev> = HashMap::new();
+
+    let mut roots: Vec<&[Stmt]> = vec![&hir.main];
+    for (i, d) in hir.defs.iter().enumerate() {
+        if let Def::Function(f) = d
+            && let Some(b) = &f.body
+        {
+            fn_ev.insert(i as u32, body_evidence(&b.stmts));
+            roots.push(&b.stmts);
+        }
+    }
+    let mut collect_var_lambda = |s: &Stmt| match s {
+        Stmt::VarDecl(v) => {
+            if let Some(init) = &v.init
+                && let ExprKind::Lambda(l) = &init.kind
+            {
+                var_ev.insert(v.def.0, lambda_evidence(l));
+            }
+        }
+        Stmt::Expr(e) => {
+            if let ExprKind::Binary(leek_hir::BinaryOp::Assign, lhs, rhs) = &e.kind
+                && let ExprKind::Name(NameRef::Local(id)) = &lhs.kind
+                && let ExprKind::Lambda(l) = &rhs.kind
+            {
+                var_ev.insert(id.0, lambda_evidence(l));
+            }
+        }
+        _ => {}
+    };
+    for stmts in &roots {
+        for s in *stmts {
+            walk_stmts_deep(s, &mut collect_var_lambda);
+        }
+    }
+
+    // Fixpoint over the call-forwarding deps (cycles settle at "no").
+    let mut fns: HashSet<u32> = fn_ev
+        .iter()
+        .filter(|(_, e)| e.direct)
+        .map(|(k, _)| *k)
+        .collect();
+    let mut vars: HashSet<u32> = var_ev
+        .iter()
+        .filter(|(_, e)| e.direct)
+        .map(|(k, _)| *k)
+        .collect();
+    loop {
+        let mut changed = false;
+        let resolved = |d: &Dep, fns: &HashSet<u32>, vars: &HashSet<u32>| match d {
+            Dep::Fn(id) => fns.contains(id),
+            Dep::Var(id) => vars.contains(id),
+        };
+        for (k, e) in &fn_ev {
+            if !fns.contains(k) && e.deps.iter().any(|d| resolved(d, &fns, &vars)) {
+                fns.insert(*k);
+                changed = true;
+            }
+        }
+        for (k, e) in &var_ev {
+            if !vars.contains(k) && e.deps.iter().any(|d| resolved(d, &fns, &vars)) {
+                vars.insert(*k);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (fns, vars)
 }
 
 pub(crate) fn ends_with_return(stmts: &[Stmt], emit_ops: bool) -> bool {

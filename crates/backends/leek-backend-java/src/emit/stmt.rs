@@ -1,8 +1,9 @@
 use leek_hir::{
-    DoWhileStmt, Expr, ExprKind, ForStmt, ForeachStmt, IfStmt, Literal, NameRef, Stmt, VarDecl,
-    WhileStmt,
+    Callee, DoWhileStmt, Expr, ExprKind, ForStmt, ForeachStmt, IfStmt, Literal, NameRef, Stmt,
+    VarDecl, WhileStmt,
 };
 
+use super::lambda::captured_by_nested_lambda_stmts;
 use super::traits::EmitStmt;
 use super::{Emitter, JavaWriter, is_pure_value_expr, is_terminator, is_valid_statement_expr};
 use crate::mangle;
@@ -58,19 +59,17 @@ impl EmitStmt for Emitter<'_> {
                 // tick `ops(1);` is emitted separately by the
                 // surrounding block-entry path (`emit_body`) — not
                 // by the return itself.
-                // At v1 a returned variable / field / index load from *inside a
-                // function or lambda* is deep-copied (`function(){ return r }`
-                // hands back a copy the caller can't alias-mutate — `v1_clone`,
-                // a no-op at v2+ and for non-load exprs). The main block's return
-                // is the program result with no caller to alias it, and the
-                // reference returns the boxed local directly (`return u_s`, no
-                // copy), so it isn't cloned — cloning there only over-charges ops.
-                let in_callable = self.in_function || self.lambda_depth.get() > 0;
-                let code = if in_callable {
-                    self.v1_clone(e)
-                } else {
-                    self.expr_to_string(e)
-                };
+                // Upstream NEVER copies on return (`LeekReturnInstruction`):
+                // a v1 function returns its boxed local bare (`return u_a;`)
+                // and the *caller* clones when storing the result into a new
+                // Box (the 2-arg ctor's `instanceof Box` path). Cloning here
+                // over-charged every `return <local array>` by a full
+                // 1+2·size clone (OPS_DRIFT L2442/L2986/L3153/L3180). Our
+                // plain locals return raw values; the callee's local dies at
+                // return, so the caller aliasing it is unobservable unless
+                // the callee retained another live reference (global /
+                // capture) — a pattern the parity suite would surface.
+                let code = self.expr_to_string(e);
                 let line = self.line_of(e.span);
                 if self.opts.emit_ops {
                     let cost = self.emit_cost(e);
@@ -160,7 +159,18 @@ impl Emitter<'_> {
         // and javac rejects with "might not have been initialized".
         let prev = self.initializing_def.replace(Some(v.def));
         let init = if let Some(e) = &v.init {
-            let raw = self.v1_clone_with_ops(e, 1);
+            // A synthetic default-param binding (spliced by
+            // `emit_default_overload`) charges only its default expression at
+            // v2+ — upstream emits `Object u_x = 5l; ops(0);`, no declaration
+            // tick. v1 keeps the +1 (the Box ctor's runtime charge).
+            let base = if self.synthetic_default_decls.contains(&v.def)
+                && !matches!(self.opts.version, leek_syntax::Version::V1)
+            {
+                0
+            } else {
+                1
+            };
+            let raw = self.v1_clone_with_ops(e, base);
             // A statically-typed scalar local coerces its initializer to the
             // declared type, mirroring upstream `compileConvert`: the runtime
             // is type-erased, so `integer b = a[1]` (real array) must store an
@@ -192,8 +202,27 @@ impl Emitter<'_> {
                 // the callee can alias and mutate it. Reads emit `.get()`,
                 // writes route through `Box` methods (see `write_name` /
                 // `write_assignment`); the call site passes the box for `@` args.
+                // The 2-arg Box ctor charges the decl's 1 op at runtime, so no
+                // `ops(init, 1)` wrapper here — a double charge otherwise. A
+                // non-zero init expression cost rides the 3-arg ctor (upstream:
+                // `new Box<Object>(AI.this, <init>, n)` charges 1+n).
+                let prev = self.initializing_def.replace(Some(v.def));
+                let (inner, cost) = match &v.init {
+                    Some(e) => (
+                        Self::coerce_decl(v.ty.as_ref(), self.v1_store_clone(e)),
+                        self.emit_cost(e),
+                    ),
+                    None => (Self::decl_default(v.ty.as_ref()), 0),
+                };
+                self.initializing_def.set(prev);
+                let ai = self.ai_this();
+                let ctor = if self.opts.emit_ops && cost > 0 {
+                    format!("new Box({ai}, {inner}, {cost})")
+                } else {
+                    format!("new Box({ai}, {inner})")
+                };
                 self.writer
-                    .add_line_at(&format!("Box {name} = new Box(this, {init});"), line);
+                    .add_line_at(&format!("Box {name} = {ctor};"), line);
             } else if self.boxed_locals.borrow().contains(&v.def) {
                 // Heap-box: a nested lambda captures-and-writes this local, so
                 // it's shared through a one-element `Object[]`. Reads/writes
@@ -265,10 +294,41 @@ impl Emitter<'_> {
         }
     }
 
-    /// [`Self::v1_clone`] wrapped in the `ops(value, n)` op-count overload (used
-    /// for a `var x = <init>` initializer).
-    fn v1_clone_with_ops(&self, e: &Expr, base_cost: u32) -> String {
+    /// [`Self::v1_clone`] plus the v1 *store-site* clone for calls. Upstream
+    /// boxes every v1 local, so a callee whose body `return`s a plain variable
+    /// hands its caller a `Box`; `var x = f()` compiles upstream to
+    /// `new Box(ai, f())` whose 2-arg ctor clones Box inputs. We return raw
+    /// values instead, so mirror that dynamic clone here: wrap the call in
+    /// `copy(...)` when the callee is in the `v1_box_returners` set.
+    /// Charge-identical (`copy` = upstream `LeekOperations.clone`, free for
+    /// scalars) and breaks the alias the caller must not observe
+    /// (OPS_DRIFT L2958/L2990/L3000/L3172/L3611).
+    pub(crate) fn v1_store_clone(&self, e: &Expr) -> String {
         let inner = self.v1_clone(e);
+        if matches!(self.opts.version, leek_syntax::Version::V1) && self.call_returns_box(e) {
+            return format!("copy({inner})");
+        }
+        inner
+    }
+
+    /// Whether `e` is a call whose result is a `Box` upstream (callee returns
+    /// a plain variable, directly or transitively). See [`super::v1_box_returners`].
+    fn call_returns_box(&self, e: &Expr) -> bool {
+        if let ExprKind::Call(c) = &e.kind {
+            match &c.callee {
+                Callee::Function(NameRef::Function(fid)) => self.returns_box_fns.contains(&fid.0),
+                Callee::Function(NameRef::Local(id)) => self.returns_box_vars.contains(&id.0),
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// [`Self::v1_store_clone`] wrapped in the `ops(value, n)` op-count
+    /// overload (used for a `var x = <init>` initializer).
+    fn v1_clone_with_ops(&self, e: &Expr, base_cost: u32) -> String {
+        let inner = self.v1_store_clone(e);
         if !self.opts.emit_ops {
             return inner;
         }
@@ -454,10 +514,25 @@ impl Emitter<'_> {
                     Some(e) => self.expr_with_ops(e, 1),
                     None => "null".into(),
                 };
-                // Box the loop variable too if a nested lambda captures-and-
-                // writes it, so its declaration matches the `[0]` accesses
-                // `write_name` emits elsewhere (consistency with `emit_var_decl`).
-                if self.boxed_locals.borrow().contains(&v.def) {
+                // A loop variable passed to a `@` param binds through a runtime
+                // `Box` like any other local (upstream declares it in the
+                // for-header: `for (var u_i = new Box<Object>(AI.this, 0l); …)`);
+                // the ctor charges the decl's 1 op, so no `ops(init, 1)` wrapper.
+                if self.ref_boxes.borrow().contains(&v.def) {
+                    let (inner, cost) = match &v.init {
+                        Some(e) => (self.v1_store_clone(e), self.emit_cost(e)),
+                        None => ("null".into(), 0),
+                    };
+                    let ai = self.ai_this();
+                    if self.opts.emit_ops && cost > 0 {
+                        format!("Box {name} = new Box({ai}, {inner}, {cost})")
+                    } else {
+                        format!("Box {name} = new Box({ai}, {inner})")
+                    }
+                } else if self.boxed_locals.borrow().contains(&v.def) {
+                    // Box the loop variable too if a nested lambda captures-and-
+                    // writes it, so its declaration matches the `[0]` accesses
+                    // `write_name` emits elsewhere (consistency with `emit_var_decl`).
                     format!("Object[] {name} = new Object[]{{{init_str}}}")
                 } else {
                     format!("Object {name} = {init_str}")
@@ -516,6 +591,24 @@ impl Emitter<'_> {
             self.writer.add_code("ops(1);");
         }
         self.writer.add_line(&format!("if (isIterable({ar})) {{"));
+        // A binding captured by a nested lambda in the body binds to a
+        // runtime `Box` (upstream: `final Wrapper<Object> u_x = new
+        // Wrapper<Object>(new Box(ai, null));` — we use a bare `final Box`,
+        // which has the same mutator surface, is charge-identical (the
+        // Wrapper's 1-arg ctor is free; the inner 2-arg Box ctor charges
+        // the slot's 1 op either way), and matches the `final Box` factory
+        // params of outlined lambdas). The anonymous class captures the
+        // final Box directly; reads go through `.get()` and writes through
+        // the Box mutators (routed via `ref_boxes`). The runtime ctor
+        // charge replaces the slot's share of the static setup charge
+        // below.
+        let body_slice = std::slice::from_ref(&*fe.body);
+        let key_captured = fe
+            .key
+            .as_ref()
+            .is_some_and(|k| k.is_new && captured_by_nested_lambda_stmts(body_slice, k.def));
+        let value_captured =
+            fe.value.is_new && captured_by_nested_lambda_stmts(body_slice, fe.value.def);
         // Only declare the binding when the foreach actually
         // introduces a new variable (`for (var x in …)` vs.
         // `for (x in …)` reusing an outer slot). Without this we'd
@@ -523,10 +616,26 @@ impl Emitter<'_> {
         if let Some(k) = &key_decl
             && fe.key.as_ref().is_none_or(|x| x.is_new)
         {
-            self.writer.add_line(&format!("Object {k} = null;"));
+            if key_captured {
+                let ai = self.ai_this();
+                self.writer
+                    .add_line(&format!("final Box {k} = new Box({ai}, null);"));
+                if let Some(kb) = &fe.key {
+                    self.ref_boxes.borrow_mut().insert(kb.def);
+                }
+            } else {
+                self.writer.add_line(&format!("Object {k} = null;"));
+            }
         }
         if fe.value.is_new {
-            self.writer.add_line(&format!("Object {value} = null;"));
+            if value_captured {
+                let ai = self.ai_this();
+                self.writer
+                    .add_line(&format!("final Box {value} = new Box({ai}, null);"));
+                self.ref_boxes.borrow_mut().insert(fe.value.def);
+            } else {
+                self.writer.add_line(&format!("Object {value} = null;"));
+            }
         }
         if self.opts.emit_ops {
             // Setup charge. Upstream totals are capture-independent
@@ -538,14 +647,16 @@ impl Emitter<'_> {
             // Wrapper, so charge statically instead.
             if fe.key.is_some() {
                 // ForeachKeyBlock: 1 per *declared* slot; a reused
-                // outer slot (`for (k : v in …)`) charges nothing.
-                let n = u32::from(fe.key.as_ref().is_some_and(|k| k.is_new))
-                    + u32::from(fe.value.is_new);
+                // outer slot (`for (k : v in …)`) charges nothing, and
+                // a captured slot pays its 1 op via the Box ctor above.
+                let n = u32::from(fe.key.as_ref().is_some_and(|k| k.is_new) && !key_captured)
+                    + u32::from(fe.value.is_new && !value_captured);
                 if n > 0 {
                     self.writer.add_code(&format!("ops({n});"));
                 }
-            } else {
-                // ForeachBlock: declared or reused both total 1.
+            } else if !value_captured {
+                // ForeachBlock: declared or reused both total 1
+                // (captured → Box ctor charges instead).
                 self.writer.add_code("ops(1);");
             }
         }
@@ -553,11 +664,20 @@ impl Emitter<'_> {
         self.writer.add_line(&format!("while ({it}.hasNext()) {{"));
         self.writer.add_line(&format!("var {entry} = {it}.next();"));
         if let Some(k) = &key_decl {
-            self.writer
-                .add_line(&format!("{k} = (Object) {entry}.getKey();"));
+            if key_captured {
+                self.writer.add_line(&format!("{k}.set({entry}.getKey());"));
+            } else {
+                self.writer
+                    .add_line(&format!("{k} = (Object) {entry}.getKey();"));
+            }
         }
-        self.writer
-            .add_line(&format!("{value} = (Object) {entry}.getValue();"));
+        if value_captured {
+            self.writer
+                .add_line(&format!("{value}.set({entry}.getValue());"));
+        } else {
+            self.writer
+                .add_line(&format!("{value} = (Object) {entry}.getValue();"));
+        }
         // Per-iteration tick. Value-only (`ForeachBlock`): one
         // unconditional `addCounter(1)` per iteration, plus at v1 a
         // second counter for a by-value iterator (the `set(...)` copy
@@ -617,6 +737,9 @@ impl Emitter<'_> {
             boxed_locals: std::cell::RefCell::new(self.boxed_locals.borrow().clone()),
             current_class: std::cell::Cell::new(self.current_class.get()),
             var_ref_positions: self.var_ref_positions.clone(),
+            returns_box_fns: self.returns_box_fns.clone(),
+            returns_box_vars: self.returns_box_vars.clone(),
+            synthetic_default_decls: self.synthetic_default_decls.clone(),
         };
         scratch.emit_stmts(&b.stmts);
         // Hand off any outlined-lambda helpers the scratch run

@@ -1103,6 +1103,25 @@ impl Emitter<'_> {
     /// builtin's tabulated cost; counting it would over-charge.
     pub(crate) fn emit_cost(&self, e: &Expr) -> u32 {
         super::expr_op_cost(e).saturating_sub(self.shadowed_overcharge(e))
+            + self.v1_pow_assign_surcharge(e)
+    }
+
+    /// Extra static cost for v1 `^=`: HIR lowers it to `BitXorAssign`
+    /// (version-agnostic), which [`super::binary_op_cost`] prices at 1 —
+    /// but at v1 the operator means power-assign (see
+    /// [`Self::compound_base_op`]), which upstream charges like `**=` (40).
+    fn v1_pow_assign_surcharge(&self, e: &Expr) -> u32 {
+        if !matches!(self.opts.version, leek_syntax::Version::V1) {
+            return 0;
+        }
+        let mut total = 0;
+        if matches!(&e.kind, ExprKind::Binary(BinaryOp::BitXorAssign, ..)) {
+            total += super::binary_op_cost(BinaryOp::PowAssign) - 1;
+        }
+        leek_hir::visit::walk_expr_children(e, &mut |c| {
+            total += self.v1_pow_assign_surcharge(c);
+        });
+        total
     }
 
     /// Emit a short-circuiting `&&` / `||`, distributing op cost into per-operand
@@ -1151,7 +1170,12 @@ impl Emitter<'_> {
         if !matches!(self.opts.version, leek_syntax::Version::V1) {
             return String::new();
         }
-        let n = params.iter().filter(|p| !p.is_by_ref).count();
+        // A param bound through a runtime `Box` (passed onward at a `@`
+        // position) pays its 1 op via the 2-arg Box ctor instead.
+        let n = params
+            .iter()
+            .filter(|p| !p.is_by_ref && !self.ref_boxes.borrow().contains(&p.def))
+            .count();
         if n > 0 {
             format!("ops({n});")
         } else {
