@@ -181,8 +181,13 @@ pub(crate) fn format_hir_expr(e: &leek_hir::Expr) -> String {
         ExprKind::Call(c) => {
             let callee = match &c.callee {
                 leek_hir::Callee::Function(n) => format!("{n:?}"),
-                leek_hir::Callee::Method { receiver, method } => {
-                    format!("{}.{}", format_hir_expr(receiver), method)
+                leek_hir::Callee::Method {
+                    receiver,
+                    method,
+                    optional,
+                } => {
+                    let q = if *optional { "?" } else { "" };
+                    format!("{}{q}.{}", format_hir_expr(receiver), method)
                 }
                 leek_hir::Callee::Expr(e) => format_hir_expr(e),
             };
@@ -194,7 +199,10 @@ pub(crate) fn format_hir_expr(e: &leek_hir::Expr) -> String {
                 .join(", ");
             format!("{callee}({args})")
         }
-        ExprKind::Field(b, name) => format!("{}.{name}", format_hir_expr(b)),
+        ExprKind::Field(b, name, optional) => {
+            let q = if *optional { "?" } else { "" };
+            format!("{}{q}.{name}", format_hir_expr(b))
+        }
         ExprKind::Index(b, i) => format!("{}[{}]", format_hir_expr(b), format_hir_expr(i)),
         ExprKind::Array(items) => {
             let xs = items

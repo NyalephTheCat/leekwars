@@ -16,8 +16,8 @@ use cranelift_module::{Linkage, Module};
 use leek_hir::DefId;
 use leek_mir::ir::{
     BasicBlock, BinOp, BlockId, Callee, CastKind, Const, FunctionKind, LocalDecl, LocalId,
-    LocalKind, MirFunction, MirProgram, Operand, Place, Rvalue, Statement, Terminator, UnOp,
-    Visibility,
+    LocalKind, MirFunction, MirProgram, Operand, Place, Rvalue, SetElem, Statement, Terminator,
+    UnOp, Visibility,
 };
 use leek_runtime::MathSig;
 use leek_types::Type;
@@ -671,7 +671,8 @@ pub fn classes_used_as_value(program: &MirProgram) -> Vec<String> {
                     // A class ref stored as a composite-literal element.
                     Statement::Assign(_, rv) => {
                         let elems: Vec<&Operand> = match rv {
-                            Rvalue::Array(es) | Rvalue::Set(es) => es.iter().collect(),
+                            Rvalue::Array(es) => es.iter().collect(),
+                            Rvalue::Set(es) => es.iter().flat_map(SetElem::operands).collect(),
                             Rvalue::Object(fs) => fs.iter().map(|(_, v)| v).collect(),
                             Rvalue::Map(kvs) => kvs.iter().flat_map(|(k, v)| [k, v]).collect(),
                             _ => Vec::new(),
@@ -1714,9 +1715,12 @@ fn call_result_ty(
                 Some(ValTy::Real)
             }
         }
-        // `abs` otherwise keeps the argument kind (real → real, else int).
+        // `abs` otherwise keeps the argument kind (real → real, dynamic →
+        // boxed `Ref` — a bigint's `abs` is a bigint and must stay boxed —
+        // else int).
         "abs" => match call.args.first().and_then(|op| operand_ty(op, tys)) {
             Some(ValTy::Real) => Some(ValTy::Real),
+            Some(ValTy::Ref) => Some(ValTy::Ref),
             _ => Some(ValTy::Int),
         },
         "signum" => Some(ValTy::Int),
@@ -1774,9 +1778,15 @@ fn const_bool(op: &Operand) -> Option<bool> {
 /// Whether a statement references a string-literal constant (which boxes
 /// into a handle and pulls in the composite shims).
 fn stmt_has_string_const(s: &Statement) -> bool {
-    // A string OR null literal boxes into a handle and pulls in the composite
-    // shims (box/unbox, and `leek_truthy` for `!null` / dynamic branches).
-    let is_str = |o: &Operand| matches!(o, Operand::Const(Const::String(_) | Const::Null));
+    // A string, null, or bigint literal boxes into a handle and pulls in the
+    // composite shims (box/unbox, `leek_truthy` for `!null` / dynamic
+    // branches, and `leek_builtinN` for a math builtin on a boxed arg).
+    let is_str = |o: &Operand| {
+        matches!(
+            o,
+            Operand::Const(Const::String(_) | Const::BigInt(_) | Const::Null)
+        )
+    };
     match s {
         Statement::Assign(_, rv) => match rv {
             Rvalue::Use(o) | Rvalue::UseFresh(o) | Rvalue::Unary(_, o) | Rvalue::Index(_, o) => {
@@ -2004,7 +2014,7 @@ fn operand_ty(op: &Operand, tys: &HashMap<LocalId, ValTy>) -> Option<ValTy> {
         Operand::Const(Const::Int(_)) => Some(ValTy::Int),
         Operand::Const(Const::Bool(_)) => Some(ValTy::Bool),
         Operand::Const(Const::Real(_)) => Some(ValTy::Real),
-        Operand::Const(Const::String(_) | Const::Null) => Some(ValTy::Ref),
+        Operand::Const(Const::String(_) | Const::BigInt(_) | Const::Null) => Some(ValTy::Ref),
     }
 }
 
@@ -2015,6 +2025,12 @@ fn pinned_valty(t: &Type) -> Option<ValTy> {
     match t {
         Type::Integer => Some(ValTy::Int),
         Type::Real => Some(ValTy::Real),
+        // A `big_integer` slot always holds a boxed `Value::BigInt` —
+        // pin it to `Ref` so inference can't narrow it to an unboxed
+        // int from its (int-constant) assignments. Likewise nullable
+        // (`Ref` holds null fine, and the store coercion still applies).
+        Type::BigInteger => Some(ValTy::Ref),
+        Type::Nullable(t) if matches!(t.as_ref(), Type::BigInteger) => Some(ValTy::Ref),
         // A nullable type can hold null, so it isn't a fixed scalar.
         _ => None,
     }
@@ -2193,6 +2209,7 @@ fn const_to_value(c: &Const, _version: u8) -> leek_runtime::Value {
         Const::Bool(b) => V::Bool(*b),
         Const::Int(i) => V::Int(*i),
         Const::Real(bits) => V::Real(f64::from_bits(*bits)),
+        Const::BigInt(s) => V::BigInt(std::rc::Rc::new(leek_runtime::big_from_decimal(s))),
         Const::String(s) => V::String(std::rc::Rc::new(s.clone())),
     }
 }
@@ -2216,8 +2233,14 @@ fn const_eval_rvalue(
         }
         Rvalue::Set(items) => {
             let mut s = leek_runtime::SetData::new();
-            for o in items {
-                s.insert(const_eval_operand(o, scratch, version)?);
+            for item in items {
+                match item {
+                    SetElem::One(o) => {
+                        s.insert(const_eval_operand(o, scratch, version)?);
+                    }
+                    // Range length depends on runtime bound values; don't const-fold.
+                    SetElem::Range(..) => return None,
+                }
             }
             Some(V::Set(Rc::new(RefCell::new(s))))
         }

@@ -113,17 +113,35 @@ impl super::Emitter<'_> {
                         // statically-incompatible types (e.g. a String
                         // literal where the user wrote `count('hello')`)
                         // without a javac "inconvertible types" error.
-                        // For `count`, dispatch on the receiver's
-                        // actual runtime type — Leek returns 0 when
-                        // count is called on a non-Array value (the
-                        // upstream uses a generic-helper for this).
+                        // For `count`, mirror upstream's generic helper
+                        // `Array_count_a`: convert via `toLegacyArray`/
+                        // `toArray`, which charges the 10000-op
+                        // WRONG_ARGUMENT_TYPE system log on a non-array
+                        // (v4 then throws → 0; v1–3 counts the empty
+                        // fallback array → 0). An inline ternary is NOT
+                        // equivalent: it would evaluate the receiver
+                        // twice and skip the error-log charge.
                         if let Some(receiver) = c.args.first() {
                             if name == "count" && c.args.len() == 1 {
-                                buf.push_str("((Object) ");
-                                self.write_expr(buf, receiver, true);
-                                buf.push_str(" instanceof GenericArrayLeekValue) ? (long) ((GenericArrayLeekValue) (Object) ");
-                                self.write_expr(buf, receiver, true);
-                                buf.push_str(").size() : 0l");
+                                let (val_class, conv) =
+                                    if matches!(self.opts.version, leek_syntax::Version::V4) {
+                                        ("ArrayLeekValue", "toArray")
+                                    } else {
+                                        ("LegacyArrayLeekValue", "toLegacyArray")
+                                    };
+                                // The helper is hoisted to the AI class
+                                // body, so bare `this` IS the AI there.
+                                self.hoist_member("Array_count_a", || {
+                                    format!(
+                                        "private long Array_count_a(Object a0) throws LeekRunException {{\n\
+                                         {val_class} x0; try {{ x0 = {conv}(1, a0); }} catch (ClassCastException e) {{ return 0l; }}\n\
+                                         return x0.count(this);\n\
+                                         }}"
+                                    )
+                                });
+                                buf.push_str("Array_count_a(");
+                                self.write_expr(buf, receiver, false);
+                                buf.push(')');
                                 return;
                             }
                             // The interval methods (`intervalMax`, …) live on
@@ -606,7 +624,11 @@ impl super::Emitter<'_> {
             Callee::Function(_) => {
                 buf.push_str("null");
             }
-            Callee::Method { receiver, method } => {
+            Callee::Method {
+                receiver,
+                method,
+                optional,
+            } => {
                 if let Some(cname) = self.class_ref_static_method(receiver, method) {
                     // `A.staticMethod(args)` — call the AI-level
                     // `<class>_<method>_<arity>` body directly.
@@ -653,8 +675,14 @@ impl super::Emitter<'_> {
                     // `callObjectAccess(receiver, "<leek name>", "u_<name>",
                     // null, args…)`, which resolves to the method registered on
                     // the value's `ClassLeekValue` (see
-                    // `emit_class_registration`).
-                    buf.push_str("callObjectAccess(");
+                    // `emit_class_registration`). `obj?.m(args)` (#2272) uses
+                    // the null-safe twin: null receiver -> null, no dispatch
+                    // (args still evaluated, like upstream).
+                    if *optional {
+                        buf.push_str("callObjectAccessNullSafe(");
+                    } else {
+                        buf.push_str("callObjectAccess(");
+                    }
                     self.write_expr(buf, receiver, false);
                     buf.push_str(", \"");
                     buf.push_str(method);

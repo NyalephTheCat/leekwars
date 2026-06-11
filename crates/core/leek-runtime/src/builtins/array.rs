@@ -345,8 +345,8 @@ pub(crate) fn dispatch_array(
         },
         ("sort" | "arraySort", 1) => sort_array(&args[0], None, host.version()),
         ("sort" | "arraySort", 2) => {
-            // Second arg can be `SORT_ASC`/`SORT_DESC`/`SORT_RANDOM`
-            // (an integer flag) or a comparator callback. We
+            // Second arg can be `SORT_ASC`/`SORT_DESC` (an integer
+            // flag) or a comparator callback. We
             // dispatch on the runtime value: callable values go
             // through the comparator path, everything else is the
             // mode flag.
@@ -381,6 +381,13 @@ pub(crate) fn dispatch_array(
         },
         ("min", 2) => min_max_pair(&args[0], &args[1], true),
         ("max", 2) => min_max_pair(&args[0], &args[1], false),
+        // `pow(big, big)` has an exact NumberClass overload upstream —
+        // same semantics as the `**` operator.
+        ("pow", 2)
+            if matches!(args[0], Value::BigInt(_)) || matches!(args[1], Value::BigInt(_)) =>
+        {
+            crate::eval::pow(&args[0], &args[1])
+        }
         ("pow", 2) => match (args[0].as_real(), args[1].as_real()) {
             (Some(a), Some(b)) => Value::Real(crate::leek_pow(a, b)),
             _ => Value::Null,
@@ -1150,7 +1157,8 @@ pub(crate) fn partition(
 /// the mutation (upstream's `sort` mutates and returns the array).
 ///
 /// `mode` is the second argument to `sort` — `SORT_ASC` (0,
-/// default), `SORT_DESC` (1), or `SORT_RANDOM` (2). Nulls collate
+/// default), `SORT_DESC` (1), or random (2 — upstream's internal
+/// `ArrayLeekValue.RANDOM`, reached via `shuffle`). Nulls collate
 /// to one end of the result, with the side depending on language
 /// version (v1: ASC→end, DESC→start; v2+: ASC→start, DESC→end).
 pub(crate) fn sort_array(arr: &Value, mode: Option<&Value>, version: u8) -> Value {
@@ -1161,7 +1169,7 @@ pub(crate) fn sort_array(arr: &Value, mode: Option<&Value>, version: u8) -> Valu
         .and_then(super::super::value::types::Value::as_int)
         .unwrap_or(0);
     if mode_int == 2 {
-        // SORT_RANDOM — Fisher-Yates with a deterministic seed
+        // Random mode — Fisher-Yates with a deterministic seed
         // derived from the length, since the corpus doesn't
         // probe distribution.
         let mut arr = a.borrow_mut();

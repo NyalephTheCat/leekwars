@@ -38,6 +38,11 @@ impl super::Emitter<'_> {
                 buf.push_str(&escape_string(s, self.opts.version_byte() >= 2));
                 buf.push('"');
             }
+            // Upstream `LeekBigInteger` codegen:
+            // `new BigIntegerValue(<ai>, "<decimal>")`.
+            Literal::BigInt(d) => {
+                write!(buf, "new BigIntegerValue({}, \"{d}\")", self.ai_this()).unwrap();
+            }
             Literal::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
             Literal::Null => buf.push_str("null"),
         }

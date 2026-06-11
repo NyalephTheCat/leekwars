@@ -587,6 +587,10 @@ pub(crate) fn json_encode_inner(
         Value::Int(i) => {
             let _ = write!(out, "{i}");
         }
+        // jsonEncode bypasses the display crop — full digits.
+        Value::BigInt(b) => {
+            let _ = write!(out, "{}", crate::value::big_full_decimal(b));
+        }
         Value::Real(r) => {
             if r.is_nan() || r.is_infinite() {
                 out.push_str("null");

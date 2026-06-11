@@ -224,12 +224,15 @@ pub(super) fn declare_imports(
                 _ => {}
             }
         }
-        // A `Branch` whose condition is an inline `Ref` const (`if (null)`, or
-        // a string literal) routes through the `leek_truthy` shim. A `Ref`
-        // *local* condition is already covered by `any_ref_local`; only the
-        // inline-const case needs flagging here.
+        // A `Branch` whose condition is an inline `Ref` const (`if (null)`, a
+        // string literal, or a bigint literal) routes through the
+        // `leek_truthy` shim. A `Ref` *local* condition is already covered by
+        // `any_ref_local`; only the inline-const case needs flagging here.
         if let Terminator::Branch { cond, .. } = &block.terminator
-            && matches!(cond, Operand::Const(Const::Null | Const::String(_)))
+            && matches!(
+                cond,
+                Operand::Const(Const::Null | Const::String(_) | Const::BigInt(_))
+            )
         {
             uses_composite = true;
         }
@@ -299,6 +302,10 @@ pub(super) fn declare_imports(
             // at runtime (relocatable), so declare their shims unconditionally.
             ("leek_box_null", &[], Some(i)),
             ("leek_const_string", &[i, i], Some(i)),
+            ("leek_const_bigint", &[i, i], Some(i)),
+            // Declared-`big_integer` slots coerce every store; a typed local
+            // can appear in any function, so the shim is unconditional too.
+            ("leek_to_bigint", &[i], Some(i)),
         ];
         for (sym, params, ret) in op_shims {
             let mut sig = m.make_signature();
@@ -437,6 +444,7 @@ pub(super) fn declare_imports(
             ("leek_map_put", &[i, i, i], None),
             ("leek_set_new", &[], Some(i)),
             ("leek_set_add", &[i, i], None),
+            ("leek_set_add_range", &[i, i, i], None),
             ("leek_object_new", &[], Some(i)),
             ("leek_instance_new", &[i, i], Some(i)),
             ("leek_global_get", &[i], Some(i)),

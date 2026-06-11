@@ -41,6 +41,8 @@ pub(crate) fn type_in_set(t: &Type, s: TypeSet) -> bool {
         Type::Any => true,
         Type::Integer => s.contains(TypeSet::INTEGER),
         Type::Real => s.contains(TypeSet::REAL),
+        // big_integer flows wherever the numeric family does.
+        Type::BigInteger => s.intersects(TypeSet::NUMERIC),
         Type::Boolean => s.contains(TypeSet::BOOLEAN),
         Type::String => s.contains(TypeSet::STRING),
         Type::Null | Type::Void => s.contains(TypeSet::NULL),

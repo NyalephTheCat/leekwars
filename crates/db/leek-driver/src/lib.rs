@@ -41,6 +41,9 @@ pub fn pipeline_for(config: &DriverConfig) -> Result<Pipeline, leek_recipes::Rec
 }
 
 /// Run the pipeline on `input`, render diagnostics, return the [`Run`].
+///
+/// When the pipeline resolved includes, diagnostics raised in included
+/// files render against those files' own text and path.
 pub fn run_with_reporter(
     pipeline: &Pipeline,
     input: Input,
@@ -49,7 +52,27 @@ pub fn run_with_reporter(
     reporter: &Reporter,
 ) -> DriverRun<'static> {
     let run = pipeline.run(input);
-    let had_error = reporter.emit_run(run.diagnostics(), source_text, file_label);
+    let had_error = match run.get::<leek_resolver::pipeline::IncludeGraphArtifact>() {
+        Some(graph) if !graph.includes.is_empty() => {
+            let labels: Vec<String> = graph
+                .includes
+                .iter()
+                .map(|inc| inc.path.display().to_string())
+                .collect();
+            let sources: Vec<leek_diagnostics::RunSource<'_>> = graph
+                .includes
+                .iter()
+                .zip(&labels)
+                .map(|(inc, label)| leek_diagnostics::RunSource {
+                    source: inc.source,
+                    text: &inc.text,
+                    label,
+                })
+                .collect();
+            reporter.emit_run_sources(run.diagnostics(), source_text, file_label, &sources)
+        }
+        _ => reporter.emit_run(run.diagnostics(), source_text, file_label),
+    };
     DriverRun { run, had_error }
 }
 
@@ -61,6 +84,19 @@ fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfi
     config.params.lints.pedantic |= project.manifest.lint.pedantic;
     config.params.lints.nursery |= project.manifest.lint.nursery;
     config
+}
+
+/// Build the `ResolveIncludes` step for a file: disk-folder I/O,
+/// `SourceId`s allocated sequentially from the entry's own id (the
+/// graph walker seeds the entry first, so it keeps `source_id` and
+/// each included file gets the next id).
+fn includes_step(path: &Path, source_id: leek_span::SourceId) -> Box<dyn leek_pipeline::Step> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    Box::new(leek_resolver::pipeline::ResolveIncludes::with_counter(
+        std::sync::Arc::new(leek_resolver::folder::DiskFolder),
+        canonical,
+        source_id.get(),
+    ))
 }
 
 /// Convenience: discover project, build reporter, run one file.
@@ -78,7 +114,12 @@ pub fn run_file(
     };
     let reporter =
         Reporter::new(config.color, config.format, lint).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let pipeline = pipeline_for(&merge_manifest_lints(project, config))?;
+    let merged = merge_manifest_lints(project, config);
+    let pipeline = leek_recipes::pipeline_with_includes(
+        merged.target,
+        includes_step(path, source_id),
+        &merged.params,
+    )?;
     let label = path.display().to_string();
     Ok(run_with_reporter(
         &pipeline,
@@ -117,7 +158,12 @@ pub fn run_file_timed(
     let reporter =
         Reporter::new(config.color, config.format, lint).map_err(|e| anyhow::anyhow!("{e}"))?;
     let merged = merge_manifest_lints(project, config);
-    let pipeline = leek_recipes::pipeline_timed(merged.target, &merged.params, sink)?;
+    let pipeline = leek_recipes::pipeline_with_includes_timed(
+        merged.target,
+        includes_step(path, source_id),
+        &merged.params,
+        sink,
+    )?;
     let label = path.display().to_string();
     Ok(run_with_reporter(
         &pipeline,

@@ -104,6 +104,8 @@ leek-bench        = { path = "crates/testing/leek-bench" }
 # External — kept small for the first slice. We'll add winnow, rowan, salsa,
 # etc. as the slices that need them land.
 clap        = { version = "4", features = ["derive"] }
+num-bigint  = "0.4"
+num-traits  = "0.2"
 clap_complete = "4"
 anyhow      = "1"
 bitflags    = "2"

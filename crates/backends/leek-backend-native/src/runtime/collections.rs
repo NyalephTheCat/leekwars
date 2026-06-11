@@ -157,6 +157,34 @@ pub extern "C" fn leek_set_add(set: *mut Value, elem: *mut Value) {
     }
 }
 
+/// Add the integer range `start..end` (inclusive, both directions) to a set
+/// literal under construction (#2335). Charges 1 op up front plus 1 op per
+/// element *inside* the loop, mirroring `AI.setLiteralRange` — the op budget
+/// bounds execution, so extreme bounds (`<MIN..MAX>`) can't exhaust host
+/// memory or overflow an `end - start` length computation.
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_set_add_range(set: *mut Value, start: *mut Value, end: *mut Value) {
+    let start = unsafe { val(start) }.to_long();
+    let end = unsafe { val(end) }.to_long();
+    super::leek_charge_ops(1);
+    if let Value::Set(s) = unsafe { val(set) } {
+        let mut s = s.borrow_mut();
+        let step: i64 = if start <= end { 1 } else { -1 };
+        let mut i = start;
+        loop {
+            super::leek_charge_ops(1);
+            if super::leek_op_budget_exceeded() != 0 {
+                return;
+            }
+            s.insert(Value::Int(i));
+            if i == end {
+                break;
+            }
+            i += step;
+        }
+    }
+}
+
 /// Build an interval value `[start..end]` from boxed endpoint handles
 /// (a null handle means an unbounded end). `flags` packs inclusivity and
 /// the `Infinity`-forces-real bits: bit0 start-inclusive, bit1

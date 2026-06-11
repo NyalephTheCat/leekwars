@@ -67,6 +67,9 @@ fn format_item_sequence_bounded(node: &SyntaxNode, allow_blanks: bool, skip_brac
     let mut pending: usize = 0;
     let mut saw_first = false;
     let mut started = !skip_braces;
+    // Tracks whether the previous emitted item was a function/class
+    // declaration, for `blank_line_between_functions`.
+    let mut prev_fnlike = false;
     // `// fmt: next <key> = <value>` pragmas queue here; the next
     // item formatted consumes them as one-shot push/pop overrides.
     let mut pending_next: Vec<(String, String)> = Vec::new();
@@ -114,11 +117,13 @@ fn format_item_sequence_bounded(node: &SyntaxNode, allow_blanks: bool, skip_brac
                     pending,
                     saw_first,
                     allow_blanks,
+                    /* force_blank = */ false,
                     token_doc(&t),
                 );
                 // Stray significant tokens don't consume `next`
                 // overrides — those wait for a real node child.
                 saw_first = true;
+                prev_fnlike = false;
                 pending = 0;
             }
             NodeOrToken::Node(child) => {
@@ -133,15 +138,23 @@ fn format_item_sequence_bounded(node: &SyntaxNode, allow_blanks: bool, skip_brac
                 // indent = …` that fired earlier in this sibling
                 // walker reaches the printer when this item renders.
                 let item_doc = super::wrap_with_active_opts(item_doc);
+                // `blank_line_between_functions`: force the separator
+                // on either side of a fn/class declaration up to a
+                // blank line (before its leading comments, if any).
+                let fnlike = matches!(child.kind(), S::FnDecl | S::ClassDecl);
+                let force_blank =
+                    (fnlike || prev_fnlike) && with_ctx(|cx| cx.opts.blank_line_between_functions);
                 emit_item(
                     &mut items,
                     &mut leading,
                     pending,
                     saw_first,
                     allow_blanks,
+                    force_blank,
                     item_doc,
                 );
                 saw_first = true;
+                prev_fnlike = fnlike;
                 pending = 0;
             }
         }
@@ -167,12 +180,17 @@ fn format_item_sequence(node: &SyntaxNode, allow_blanks: bool) -> Doc {
 
 /// Push one item, preceded by any pending leading comments and the
 /// appropriate separator. Mutates `leading` (drained).
+///
+/// `force_blank` lifts the separator *in front of the whole entry*
+/// (leading comments included) to a blank line — the
+/// `blank_line_between_functions` hook.
 fn emit_item(
     items: &mut Vec<Doc>,
     leading: &mut Vec<(Doc, usize, bool)>,
     newlines_before_item: usize,
     saw_first: bool,
     allow_blanks: bool,
+    force_blank: bool,
     item_doc: Doc,
 ) {
     // If the immediately-preceding leading entry is a doc comment,
@@ -188,7 +206,10 @@ fn emit_item(
     // Separator before the leading-comment block (or before the
     // item if there are no leading comments). For the very first
     // emitted item, no separator.
-    let first_leading_newlines = leading.first().map_or(effective_newlines, |x| x.1);
+    let mut first_leading_newlines = leading.first().map_or(effective_newlines, |x| x.1);
+    if force_blank {
+        first_leading_newlines = first_leading_newlines.max(2);
+    }
     if saw_first {
         items.push(separator(first_leading_newlines, allow_blanks));
     }

@@ -18,6 +18,7 @@ leek-resolver    = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-prelude     = { workspace = true }
 rowan            = { workspace = true }
+num-bigint       = { workspace = true }
 salsa            = { version = "0.26", optional = true }
 
 [features]

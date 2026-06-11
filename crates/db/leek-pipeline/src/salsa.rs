@@ -72,6 +72,13 @@ pub struct SourceFile {
     /// Experimental [`leek_span::FeatureFlags`] packed as a bitmask (a
     /// primitive, so no `salsa::Update` impl is needed on the flags type).
     pub flags_bits: u8,
+    /// Class names declared elsewhere in the program (other files of
+    /// the include closure / project). The parser treats these as
+    /// valid type heads — `lowercaseClassFromOtherFile x = …` —
+    /// mirroring upstream's program-wide `getDefinedClass` lookup.
+    /// Keep sorted + deduped so salsa's equality check is stable.
+    #[returns(ref)]
+    pub extra_classes: Vec<String>,
 }
 
 impl SourceFile {
@@ -100,6 +107,10 @@ pub struct ProjectFile {
     pub strict: bool,
     /// Experimental [`leek_span::FeatureFlags`] packed as a bitmask.
     pub flags_bits: u8,
+    /// Class names declared elsewhere in the project — see
+    /// [`SourceFile::extra_classes`].
+    #[returns(ref)]
+    pub extra_classes: Vec<String>,
 }
 
 impl ProjectFile {

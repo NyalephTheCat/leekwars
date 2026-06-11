@@ -209,6 +209,7 @@ impl Tx<'_, '_> {
         if let Some(Place::Local(id)) = dest {
             let target = self.var_tys[id.0 as usize];
             let v = self.coerce(res, res_ty, target)?;
+            let v = self.coerce_bigint_local(*id, v)?;
             self.b.def_var(self.vars[id.0 as usize], v);
         }
         Ok(())

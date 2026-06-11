@@ -237,6 +237,10 @@ pub enum SyntaxKind {
     ObjectExpr,
     /// `<a, b, c>` or `{a, b, c}` — set literal.
     SetExpr,
+    /// `a..b` element inside a set literal — expands to the inclusive
+    /// integer range at runtime (`<1..3>` → `<1, 2, 3>`, descending
+    /// allowed). Only ever a direct child of [`SetExpr`].
+    SetRangeElement,
     /// `(params) -> body` or `name -> body` — anonymous function.
     LambdaExpr,
     /// `new Class(args)`.

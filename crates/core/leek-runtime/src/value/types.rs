@@ -21,6 +21,10 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Real(f64),
+    /// Arbitrary-precision integer (`big_integer`, `2L` literals).
+    /// Immutable — shared via `Rc` like upstream's immutable
+    /// `BigIntegerValue` wrapper.
+    BigInt(Rc<num_bigint::BigInt>),
     String(Rc<String>),
     /// Mutable ordered list. Two `Value::Array` aliases sharing the
     /// same Rc see each other's writes.

@@ -9,7 +9,7 @@ use leek_syntax::pipeline::version_from_byte;
 use leek_syntax::version::Version;
 
 use crate::ast::{AstNode, SourceFile};
-use crate::{ParseResult, parse, parse_tokens_with, parse_with_features};
+use crate::parse_tokens_with_classes;
 
 /// The parser's green tree.
 #[derive(Debug, Clone)]
@@ -30,6 +30,18 @@ impl GreenTreeArtifact {
 pub struct AstArtifact(pub Option<SourceFile>);
 impl Artifact for AstArtifact {}
 
+/// Class names declared anywhere in the program — the include
+/// closure's `class IDENT` declarations. Published *before* the
+/// [`Parse`] step (by `leek-resolver`'s `ResolveIncludes`) so the
+/// entry parse can recognize a lowercase class from an included file
+/// as a type head (`testClass tc = …`), mirroring upstream's
+/// program-wide `getDefinedClass` lookup. Classes declared in the
+/// file being parsed are found by the parser's own token pre-scan
+/// and don't need this artifact.
+#[derive(Debug, Clone, Default)]
+pub struct KnownClassesArtifact(pub Vec<String>);
+impl Artifact for KnownClassesArtifact {}
+
 /// Shared parse outcome for a single source file (disk or buffer).
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
@@ -42,10 +54,31 @@ pub struct ParsedFile {
 /// and diagnostics. Used by include resolution and the project index
 /// so every file goes through the same parse path.
 pub fn parse_file(text: &str, source: leek_span::SourceId, version: Version) -> ParsedFile {
-    let ParseResult { green, diagnostics } = parse(text, source, version);
-    let ast = SourceFile::cast(SyntaxNode::new_root(green.clone()));
+    parse_file_with_classes(text, source, version, &[])
+}
+
+/// Like [`parse_file`] but with extra known class names from the rest
+/// of the program (see [`KnownClassesArtifact`]).
+pub fn parse_file_with_classes(
+    text: &str,
+    source: leek_span::SourceId,
+    version: Version,
+    extra_classes: &[String],
+) -> ParsedFile {
+    let lexed = leek_lexer::lex(text, source, version);
+    let mut result = parse_tokens_with_classes(
+        text,
+        source,
+        &lexed.tokens,
+        version,
+        crate::ParseFeatures::from_env(),
+        extra_classes,
+    );
+    let mut diagnostics = lexed.diagnostics;
+    diagnostics.append(&mut result.diagnostics);
+    let ast = SourceFile::cast(SyntaxNode::new_root(result.green.clone()));
     ParsedFile {
-        green,
+        green: result.green,
         ast,
         diagnostics,
     }
@@ -114,10 +147,35 @@ fn run_parse(cx: &Context<'_>) -> (GreenNode, Vec<Diagnostic>) {
     }
     let version = version_from_byte(cx.version_byte());
     let features = crate::ParseFeatures::from(cx.flags());
+    // Class names from the include closure, when a `ResolveIncludes`
+    // step ran ahead of us (see [`KnownClassesArtifact`]).
+    let empty: Vec<String> = Vec::new();
+    let extra_classes = cx
+        .get::<KnownClassesArtifact>()
+        .map_or(&empty[..], |a| &a.0[..]);
     let result = if let Some(tokens) = cx.get::<leek_lexer::pipeline::TokensArtifact>() {
-        parse_tokens_with(cx.text(), cx.source(), &tokens.0.tokens, version, features)
+        parse_tokens_with_classes(
+            cx.text(),
+            cx.source(),
+            &tokens.0.tokens,
+            version,
+            features,
+            extra_classes,
+        )
     } else {
-        parse_with_features(cx.text(), cx.source(), version, features)
+        let lexed = leek_lexer::lex(cx.text(), cx.source(), version);
+        let mut result = parse_tokens_with_classes(
+            cx.text(),
+            cx.source(),
+            &lexed.tokens,
+            version,
+            features,
+            extra_classes,
+        );
+        let mut diags = lexed.diagnostics;
+        diags.append(&mut result.diagnostics);
+        result.diagnostics = diags;
+        result
     };
     (result.green, result.diagnostics)
 }
@@ -148,7 +206,14 @@ pub fn parse_query(
     let version = version_from_byte(file.version_byte(db));
     let features =
         crate::ParseFeatures::from(leek_span::FeatureFlags::from_bits(file.flags_bits(db)));
-    let result = parse_tokens_with(text, source, &lex.tokens, version, features);
+    let result = parse_tokens_with_classes(
+        text,
+        source,
+        &lex.tokens,
+        version,
+        features,
+        file.extra_classes(db),
+    );
     ParseQueryResult {
         green: result.green,
         diagnostics: result.diagnostics,
@@ -166,7 +231,20 @@ pub fn parse_project_file_query(
     let version = version_from_byte(file.version_byte(db));
     let features =
         crate::ParseFeatures::from(leek_span::FeatureFlags::from_bits(file.flags_bits(db)));
-    let result = parse_with_features(file.text(db), file.source(db), version, features);
+    let text = file.text(db);
+    let source = file.source(db);
+    let lexed = leek_lexer::lex(text, source, version);
+    let mut result = parse_tokens_with_classes(
+        text,
+        source,
+        &lexed.tokens,
+        version,
+        features,
+        file.extra_classes(db),
+    );
+    let mut diags = lexed.diagnostics;
+    diags.append(&mut result.diagnostics);
+    result.diagnostics = diags;
     ParseQueryResult {
         green: result.green,
         diagnostics: result.diagnostics,

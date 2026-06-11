@@ -190,10 +190,13 @@ pub(crate) fn lambda_arity(node: &SyntaxNode) -> (u8, u8) {
 /// runtime / type-checker decides definitively. Used to flag
 /// obvious non-l-values like literals and arithmetic results.
 pub(crate) fn is_potential_lvalue(e: &Expr) -> bool {
-    matches!(
-        e,
-        Expr::Name(_) | Expr::Field(_) | Expr::Index(_) | Expr::Slice(_) | Expr::Paren(_)
-    )
+    match e {
+        // An optional access `a?.x` is never assignable (#2272) —
+        // upstream errors with `CANT_ASSIGN_VALUE`.
+        Expr::Field(f) => !f.is_optional(),
+        Expr::Name(_) | Expr::Index(_) | Expr::Slice(_) | Expr::Paren(_) => true,
+        _ => false,
+    }
 }
 
 /// True if the operator of a [`BinaryExpr`] is an assignment of any

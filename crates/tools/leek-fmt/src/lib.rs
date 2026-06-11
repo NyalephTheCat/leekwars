@@ -22,7 +22,10 @@ pub mod format;
 pub mod pipeline;
 pub mod printer;
 
-pub use leek_manifest::{BraceStyle, FormatOptions, IndentStyle, TrailingComma};
+pub use leek_manifest::{
+    BraceStyle, ControlBraces, FormatOptions, IndentStyle, LineEnding, OperatorPosition,
+    QuoteStyle, Semicolons, TrailingComma,
+};
 pub use pipeline::{Fmt, FormattedArtifact};
 
 #[cfg(feature = "salsa")]
@@ -41,7 +44,26 @@ pub fn format(green: &GreenNode, opts: &FormatOptions) -> String {
         off_regions: collect_off_regions(&root),
     };
     let doc = format::with_ctx_set(ctx, || format::format_source_file(&root));
-    printer::print(&doc, opts)
+    apply_line_ending(printer::print(&doc, opts), opts.line_ending)
+}
+
+/// Normalize the output's line terminators per [`LineEnding`].
+///
+/// The printer always emits `\n`; raw-passthrough regions (`// fmt:
+/// off`, error nodes) may carry `\r\n` from the source. Normalizing
+/// to `\n` first and then (for [`LineEnding::Crlf`]) expanding makes
+/// both paths land on the configured terminator — and keeps the
+/// transform idempotent.
+fn apply_line_ending(s: String, le: LineEnding) -> String {
+    let normalized = if s.contains('\r') {
+        s.replace("\r\n", "\n")
+    } else {
+        s
+    };
+    match le {
+        LineEnding::Lf => normalized,
+        LineEnding::Crlf => normalized.replace('\n', "\r\n"),
+    }
 }
 
 /// Scan trivia for `// fmt: off` / `// fmt: on` markers and return
@@ -298,7 +320,7 @@ pub fn format_range(
     };
     let raw = format::with_ctx_set(ctx, || {
         let doc = format::fmt_node(&target);
-        printer::print(&doc, opts)
+        apply_line_ending(printer::print(&doc, opts), opts.line_ending)
     });
 
     let base_col = leading_column(&source, target_start as usize);

@@ -78,6 +78,18 @@ impl Lexer<'_> {
                 self.pos = saved;
             }
         }
+        // `L` suffix — big_integer literal (`2L`, `1_000L`). Uppercase
+        // only (`5l` is INVALID_NUMBER upstream) and integer-only
+        // (`2.5L` invalid too); anything alphanumeric after the `L`
+        // (`5LL`) falls through to the bad-suffix diagnostic below.
+        if !is_real
+            && self.peek_at(0) == Some(b'L')
+            && !self
+                .peek_at(1)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            self.pos += 1;
+        }
         // Trailing letter immediately after the number — `12345r`,
         // `0_x_ff` etc. The user almost certainly meant a typed
         // literal or hex literal; emit INVALID_NUMBER spanning the
@@ -178,6 +190,16 @@ impl Lexer<'_> {
                     self.pos = saved;
                     break;
                 }
+                break;
+            } else if c == b'L'
+                && any_digit
+                && !self
+                    .peek_at(1)
+                    .is_some_and(|n| n.is_ascii_alphanumeric() || n == b'_')
+            {
+                // big_integer suffix (`0xFFL`, `0b101L`) — uppercase only;
+                // a lowercase `l` or trailing junk stays an invalid digit.
+                self.pos += 1;
                 break;
             } else if c.is_ascii_alphanumeric() {
                 if bad.is_none() {

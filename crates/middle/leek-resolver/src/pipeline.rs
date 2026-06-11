@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::SourceFile;
-use leek_parser::pipeline::{AstArtifact, parse_file};
+use leek_parser::pipeline::{AstArtifact, KnownClassesArtifact, parse_file_with_classes};
 use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 use leek_span::Span;
@@ -191,6 +191,21 @@ impl Step for ResolveIncludes {
 
         cx.emit_all(graph.diagnostics.iter().cloned());
 
+        // Collect every `class IDENT` name across the include closure
+        // (entry included) and publish it for the `Parse` step, which
+        // runs *after* this one when the pipeline is include-aware.
+        // Upstream resolves potential type words against the
+        // program-wide defined-class set, so the entry must parse
+        // `lowercaseClassFromInclude x = …` as a typed declaration.
+        let mut known_classes: Vec<String> = Vec::new();
+        for f in &graph.files {
+            let lexed = leek_lexer::lex(&f.text, f.source, f.version);
+            known_classes.extend(leek_parser::scan_class_names(&f.text, &lexed.tokens));
+        }
+        known_classes.sort();
+        known_classes.dedup();
+        cx.insert(KnownClassesArtifact(known_classes.clone()));
+
         // The walker returns every file in topological order, with
         // the entry last. Re-parse each included file so the lower
         // step has ready-to-use ASTs. The entry's own AST stays
@@ -208,7 +223,7 @@ impl Step for ResolveIncludes {
             {
                 continue;
             }
-            let parsed = parse_file(&text, source, version);
+            let parsed = parse_file_with_classes(&text, source, version, &known_classes);
             if let Some(sites) = graph.include_sites.get(&path) {
                 if parsed.ast.is_none() {
                     for site in sites {

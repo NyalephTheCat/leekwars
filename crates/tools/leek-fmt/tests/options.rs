@@ -730,3 +730,169 @@ fn combined_nondefault_config_is_idempotent() {
     let twice = fmt_with(&o, &once);
     assert_eq!(once, twice, "combined config must be idempotent");
 }
+
+// ---- quote_style ----
+
+#[test]
+fn quote_style_double_converts_and_rescapes() {
+    let mut o = opts();
+    o.quote_style = leek_fmt::QuoteStyle::Double;
+    let out = fmt_with(&o, "var s = 'it\\'s \"x\"';\n");
+    assert!(
+        out.contains("\"it's \\\"x\\\"\""),
+        "expected double-quoted literal with adjusted escapes, got: {out:?}"
+    );
+    assert_eq!(
+        out,
+        fmt_with(&o, &out),
+        "quote conversion must be idempotent"
+    );
+}
+
+#[test]
+fn quote_style_single_converts_and_rescapes() {
+    let mut o = opts();
+    o.quote_style = leek_fmt::QuoteStyle::Single;
+    let out = fmt_with(&o, "var s = \"it's \\\"x\\\"\";\n");
+    assert!(
+        out.contains("'it\\'s \"x\"'"),
+        "expected single-quoted literal with adjusted escapes, got: {out:?}"
+    );
+    assert_eq!(
+        out,
+        fmt_with(&o, &out),
+        "quote conversion must be idempotent"
+    );
+}
+
+#[test]
+fn quote_style_preserve_is_default() {
+    let out = fmt_with(&opts(), "var a = 'one';\nvar b = \"two\";\n");
+    assert!(
+        out.contains("'one'") && out.contains("\"two\""),
+        "got: {out:?}"
+    );
+}
+
+// ---- line_ending ----
+
+#[test]
+fn line_ending_crlf_terminates_every_line() {
+    let mut o = opts();
+    o.line_ending = leek_fmt::LineEnding::Crlf;
+    let out = fmt_with(&o, "function f() {\n    return 1;\n}\n");
+    assert!(out.contains("\r\n"), "expected CRLF, got: {out:?}");
+    assert!(
+        !out.replace("\r\n", "").contains('\n'),
+        "every newline must be CRLF, got: {out:?}"
+    );
+    assert_eq!(out, fmt_with(&o, &out), "crlf must be idempotent");
+}
+
+#[test]
+fn line_ending_lf_normalizes_crlf_input() {
+    let out = fmt_with(&opts(), "var x = 1;\r\nvar y = 2;\r\n");
+    assert!(!out.contains('\r'), "expected LF output, got: {out:?}");
+}
+
+// ---- operator_position ----
+
+#[test]
+fn operator_position_leading_breaks_before_operator() {
+    let mut o = opts();
+    o.operator_position = leek_fmt::OperatorPosition::Leading;
+    o.max_line_length = 30;
+    let out = fmt_with(&o, "var x = first_long_name + second_long_name;\n");
+    assert!(
+        out.contains("\n+ second_long_name"),
+        "expected operator to start the continuation line, got: {out:?}"
+    );
+}
+
+#[test]
+fn operator_position_trailing_is_default() {
+    let mut o = opts();
+    o.max_line_length = 30;
+    let out = fmt_with(&o, "var x = first_long_name + second_long_name;\n");
+    assert!(
+        out.contains("first_long_name +\n"),
+        "expected operator to end the first line, got: {out:?}"
+    );
+}
+
+// ---- method_chain_threshold ----
+
+#[test]
+fn long_method_chain_breaks_one_call_per_line() {
+    let mut o = opts();
+    o.max_line_length = 40;
+    let src = "result = builder.withAlpha(1).withBeta(2).withGamma(3).finish();\n";
+    let out = fmt_with(&o, src);
+    assert!(
+        out.contains("\n    .withBeta(2)\n    .withGamma(3)"),
+        "expected one call per line, got: {out:?}"
+    );
+    assert_eq!(out, fmt_with(&o, &out), "chain breaking must be idempotent");
+}
+
+#[test]
+fn short_method_chain_stays_flat() {
+    let out = fmt_with(&opts(), "result = a.b(1).c(2);\n");
+    assert!(
+        out.contains("a.b(1).c(2)"),
+        "short chain must stay flat, got: {out:?}"
+    );
+}
+
+#[test]
+fn method_chain_threshold_zero_disables_breaking() {
+    let mut o = opts();
+    o.method_chain_threshold = 0;
+    o.max_line_length = 40;
+    let src = "result = builder.withAlpha(1).withBeta(2).withGamma(3).finish();\n";
+    let out = fmt_with(&o, src);
+    assert!(
+        !out.contains("\n    ."),
+        "threshold 0 must never break chains, got: {out:?}"
+    );
+}
+
+// ---- blank_line_between_functions ----
+
+#[test]
+fn blank_line_forced_between_functions() {
+    let mut o = opts();
+    o.blank_line_between_functions = true;
+    let out = fmt_with(
+        &o,
+        "var a = 1;\nfunction f() {}\nfunction g() {}\nvar b = 2;\n",
+    );
+    assert!(
+        out.contains("var a = 1;\n\nfunction f() {}\n\nfunction g() {}\n\nvar b = 2;"),
+        "expected blank lines around each function, got: {out:?}"
+    );
+    assert_eq!(out, fmt_with(&o, &out), "must be idempotent");
+}
+
+#[test]
+fn blank_line_between_functions_goes_before_doc_comment() {
+    let mut o = opts();
+    o.blank_line_between_functions = true;
+    let out = fmt_with(&o, "var a = 1;\n/** doc */\nfunction f() {}\n");
+    assert!(
+        out.contains("var a = 1;\n\n/** doc */\nfunction f() {}"),
+        "blank goes before the doc comment, which stays attached, got: {out:?}"
+    );
+}
+
+#[test]
+fn blank_line_between_class_methods() {
+    let mut o = opts();
+    o.blank_line_between_functions = true;
+    let src = "class A {\n    x = 1\n    m() {}\n    n() {}\n}\n";
+    let out = fmt_with(&o, src);
+    assert!(
+        out.contains("m() {}\n\n    n() {}"),
+        "expected blank between methods, got: {out:?}"
+    );
+}

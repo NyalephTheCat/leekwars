@@ -1,8 +1,8 @@
 //! Rvalue emission: the per-rvalue dispatch plus literals, fields, intervals, slices, and indexing.
 
 use super::{
-    Const, DefId, InstBuilder, LocalId, NativeError, Operand, Rvalue, StackSlotData, StackSlotKind,
-    Tx, ValTy, Value, class_reflect, coerce_target_ty, program_writes_global,
+    Const, DefId, InstBuilder, LocalId, NativeError, Operand, Rvalue, SetElem, StackSlotData,
+    StackSlotKind, Tx, ValTy, Value, class_reflect, coerce_target_ty, program_writes_global,
     resolve_instance_method_value, resolve_static_field, resolve_static_method_value, rvalue_name,
     types, unsupported,
 };
@@ -365,18 +365,41 @@ impl Tx<'_, '_> {
         Ok((map, ValTy::Ref))
     }
 
-    /// Build a set literal: allocate, then box-and-add each element.
-    pub(super) fn set_literal(&mut self, items: &[Operand]) -> Result<(Value, ValTy), NativeError> {
-        // Set-literal construction costs 2 ops per element (interp `exec.rs`).
-        self.charge(2 * items.len() as u64)?;
+    /// Build a set literal: allocate, then box-and-add each element. A range
+    /// element `start..end` (#2335) expands at runtime via
+    /// `leek_set_add_range`, which charges per inserted element.
+    pub(super) fn set_literal(&mut self, items: &[SetElem]) -> Result<(Value, ValTy), NativeError> {
+        // Set-literal construction costs 2 ops per element — and per range
+        // *bound* (upstream `LeekSet.analyze`); the range expansion itself is
+        // charged dynamically inside the runtime shim.
+        let static_ops: u64 = items
+            .iter()
+            .map(|e| match e {
+                SetElem::One(_) => 2,
+                SetElem::Range(..) => 4,
+            })
+            .sum();
+        self.charge(static_ops)?;
         let new = self.imports.rt("leek_set_new")?;
         let add = self.imports.rt("leek_set_add")?;
+        let add_range = self.imports.rt("leek_set_add_range")?;
         let inst = self.b.ins().call(new, &[]);
         let set = self.b.inst_results(inst)[0];
-        for o in items {
-            let (v, t) = self.operand(o)?;
-            let elem = self.coerce(v, t, ValTy::Ref)?;
-            self.b.ins().call(add, &[set, elem]);
+        for item in items {
+            match item {
+                SetElem::One(o) => {
+                    let (v, t) = self.operand(o)?;
+                    let elem = self.coerce(v, t, ValTy::Ref)?;
+                    self.b.ins().call(add, &[set, elem]);
+                }
+                SetElem::Range(start, end) => {
+                    let (sv, st) = self.operand(start)?;
+                    let s = self.coerce(sv, st, ValTy::Ref)?;
+                    let (ev, et) = self.operand(end)?;
+                    let e = self.coerce(ev, et, ValTy::Ref)?;
+                    self.b.ins().call(add_range, &[set, s, e]);
+                }
+            }
         }
         Ok((set, ValTy::Ref))
     }

@@ -21,7 +21,10 @@ mod parse;
 mod types;
 
 pub use discover::{ManifestLoad, discover, load_from, load_str};
-pub use format::{BraceStyle, FormatOptions, IndentStyle, TrailingComma};
+pub use format::{
+    BraceStyle, ControlBraces, FormatOptions, IndentStyle, LineEnding, OperatorPosition,
+    QuoteStyle, Semicolons, TrailingComma,
+};
 pub use parse::{ManifestError, ManifestWarning};
 pub use types::{
     BackendKind, BackendSettings, BackendTable, JavaMode, LintTable, Manifest, PathsTable,

@@ -18,6 +18,8 @@ impl Checker {
                     return Type::Any;
                 };
                 match tok.kind() {
+                    // An `L`-suffixed integer literal (`2L`) is a big_integer.
+                    SyntaxKind::IntLiteral if tok.text().ends_with('L') => Type::BigInteger,
                     SyntaxKind::IntLiteral => Type::Integer,
                     SyntaxKind::RealLiteral => Type::Real,
                     SyntaxKind::StringLiteral => Type::String,
@@ -91,13 +93,23 @@ impl Checker {
             Expr::Set(s) => {
                 // Homogeneous element type, like array literals.
                 let mut elem: Option<Type> = None;
+                let join = |t: Type, elem: &mut Option<Type>| {
+                    *elem = Some(match elem.take() {
+                        Some(prev) => unify_types(&prev, &t),
+                        None => t,
+                    });
+                };
                 for child in s.syntax().children() {
-                    if let Some(e) = Expr::cast(child) {
+                    if child.kind() == SyntaxKind::SetRangeElement {
+                        // `start..end` expands to integers; still infer the
+                        // bound expressions for their own diagnostics.
+                        for bound in child.children().filter_map(Expr::cast) {
+                            self.infer_expr(&bound);
+                        }
+                        join(Type::Integer, &mut elem);
+                    } else if let Some(e) = Expr::cast(child) {
                         let t = self.infer_expr(&e);
-                        elem = Some(match elem {
-                            Some(prev) => unify_types(&prev, &t),
-                            None => t,
-                        });
+                        join(t, &mut elem);
                     }
                 }
                 Type::Set(Box::new(elem.unwrap_or(Type::Any)))

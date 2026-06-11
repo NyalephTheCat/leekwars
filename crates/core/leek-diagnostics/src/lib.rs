@@ -21,7 +21,7 @@ pub mod report;
 mod suggest;
 
 pub use render::{Renderer, Style};
-pub use report::{ColorWhen, LintLevels, MessageFormat, Reporter};
+pub use report::{ColorWhen, LintLevels, MessageFormat, Reporter, RunSource};
 pub use suggest::{best_match, suggest_similar};
 
 #[cfg(feature = "serde")]

@@ -457,7 +457,10 @@ impl Walker<'_> {
             // callee — the literal length flows into the callee's
             // size variable and the whole formula collapses to a
             // scalar.
-            ExprKind::Array(items) | ExprKind::Set(items) => {
+            ExprKind::Array(items) => Some(CostExpr::Const(items.len() as u64)),
+            // Range elements (`<a..b>`) have a dynamic expanded
+            // length — only count sets made of plain elements.
+            ExprKind::Set(items) if items.iter().all(|i| i.end.is_none()) => {
                 Some(CostExpr::Const(items.len() as u64))
             }
             ExprKind::Map(pairs) => Some(CostExpr::Const(pairs.len() as u64)),

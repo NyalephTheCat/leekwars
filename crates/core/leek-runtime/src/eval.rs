@@ -251,6 +251,7 @@ pub fn class_of(v: &Value) -> Value {
         Value::Bool(_) => Value::BuiltinClass("Boolean"),
         Value::Int(_) => Value::BuiltinClass("Integer"),
         Value::Real(_) => Value::BuiltinClass("Real"),
+        Value::BigInt(_) => Value::BuiltinClass("BigInteger"),
         Value::String(_) => Value::BuiltinClass("String"),
         Value::Array(_) => Value::BuiltinClass("Array"),
         Value::Map(_) => Value::BuiltinClass("Map"),
@@ -280,6 +281,7 @@ pub fn builtin_class_name(name: &str) -> Option<&'static str> {
         "Object" => "Object",
         "Number" => "Number",
         "Integer" => "Integer",
+        "BigInteger" => "BigInteger",
         "Real" => "Real",
         "Float" => "Float",
         "String" => "String",
@@ -329,6 +331,9 @@ pub fn construct_builtin_class(name: &str, args: Vec<Value>) -> Value {
                 .and_then(super::value::types::Value::as_int)
                 .unwrap_or(0),
         ),
+        // Upstream `new_bigintegerClass()` → `BigIntegerValue(ai, 0)`; an
+        // argument converts like `BigIntegerValue.valueOf`.
+        "BigInteger" => Value::BigInt(Rc::new(args.first().map(to_bigint).unwrap_or_default())),
         "Number" | "Real" | "Float" => Value::Real(
             args.first()
                 .and_then(super::value::types::Value::as_real)
@@ -587,6 +592,55 @@ pub fn value_as_concat_string(v: &Value) -> String {
     }
 }
 
+/// Convert any operand to a `BigInteger` the way upstream
+/// `BigIntegerValue.valueOf` does: bigints pass through, reals truncate
+/// exactly (BigDecimal, no i64 saturation), everything else goes through
+/// `longint`.
+fn to_bigint(v: &Value) -> num_bigint::BigInt {
+    match v {
+        Value::BigInt(b) => (**b).clone(),
+        Value::Real(f) => crate::value::bigint::f64_to_bigint(*f),
+        other => num_bigint::BigInt::from(other.to_long()),
+    }
+}
+
+/// The write coercion a `big_integer`-declared slot performs: any value
+/// becomes a `Value::BigInt` via [`to_bigint`] (reals truncate exactly).
+/// Null passes through (a typed slot's null write stays null) and an
+/// existing bigint is returned as-is.
+pub fn coerce_value_to_bigint(v: &Value) -> Value {
+    match v {
+        Value::Null => Value::Null,
+        Value::BigInt(_) => v.clone(),
+        other => Value::BigInt(Rc::new(to_bigint(other))),
+    }
+}
+
+/// Promote to exact BigInteger arithmetic when either operand is a
+/// big_integer — upstream checks this *before* the `Double` check, so
+/// `2L + 0.5` truncates the real instead of widening the bigint.
+fn bigint_binop(
+    l: &Value,
+    r: &Value,
+    op: impl FnOnce(num_bigint::BigInt, num_bigint::BigInt) -> num_bigint::BigInt,
+) -> Option<Value> {
+    if matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)) {
+        Some(Value::BigInt(Rc::new(op(to_bigint(l), to_bigint(r)))))
+    } else {
+        None
+    }
+}
+
+/// Upstream `intShift` — shift amounts clamp to the `int` range; a
+/// negative amount reverses the direction (Java `shiftLeft(-n)` ==
+/// `shiftRight(n)`). The right shift is arithmetic (floor), matching
+/// both Java and num-bigint.
+fn bigint_shift(v: num_bigint::BigInt, n: i64, left: bool) -> num_bigint::BigInt {
+    let n = n.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    let mag = usize::try_from(n.unsigned_abs()).unwrap_or(usize::MAX);
+    if left == (n >= 0) { v << mag } else { v >> mag }
+}
+
 fn numeric_op(
     l: &Value,
     r: &Value,
@@ -623,8 +677,8 @@ pub fn eq_for_version(l: &Value, r: &Value, version: u8) -> bool {
         let same_family = matches!(
             (l, r),
             (
-                Value::Int(_) | Value::Real(_),
-                Value::Int(_) | Value::Real(_)
+                Value::Int(_) | Value::Real(_) | Value::BigInt(_),
+                Value::Int(_) | Value::Real(_) | Value::BigInt(_)
             )
         ) || std::mem::discriminant(l) == std::mem::discriminant(r);
         if !same_family {
@@ -712,6 +766,7 @@ pub fn value_instanceof(value: &Value, class: &Value) -> bool {
                 | ("Interval", Value::Interval(_))
                 | ("Integer" | "Real" | "Float" | "Number", Value::Int(_))
                 | ("Real" | "Float" | "Number", Value::Real(_))
+                | ("BigInteger" | "Number", Value::BigInt(_))
                 | ("Class", Value::ClassRef(_, _) | Value::BuiltinClass(_))
         ),
         _ => false,
@@ -789,16 +844,19 @@ pub fn add(l: &Value, r: &Value) -> Value {
             }
             Value::Set(Rc::new(RefCell::new(out)))
         }
-        _ => numeric_op(l, r, i64::wrapping_add, |a, b| a + b),
+        _ => bigint_binop(l, r, |a, b| a + b)
+            .unwrap_or_else(|| numeric_op(l, r, i64::wrapping_add, |a, b| a + b)),
     }
 }
 
 pub fn sub(l: &Value, r: &Value) -> Value {
-    numeric_op(l, r, i64::wrapping_sub, |a, b| a - b)
+    bigint_binop(l, r, |a, b| a - b)
+        .unwrap_or_else(|| numeric_op(l, r, i64::wrapping_sub, |a, b| a - b))
 }
 
 pub fn mul(l: &Value, r: &Value) -> Value {
-    numeric_op(l, r, i64::wrapping_mul, |a, b| a * b)
+    bigint_binop(l, r, |a, b| a * b)
+        .unwrap_or_else(|| numeric_op(l, r, i64::wrapping_mul, |a, b| a * b))
 }
 
 pub fn div(l: &Value, r: &Value, version: u8) -> Value {
@@ -811,6 +869,16 @@ pub fn div(l: &Value, r: &Value, version: u8) -> Value {
 }
 
 pub fn int_div(l: &Value, r: &Value) -> Value {
+    // Upstream's `bigIntdiv` — exact quotient, truncated toward zero (Java
+    // `BigInteger.divide`, same as num-bigint `/`).
+    if matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)) {
+        let (a, b) = (to_bigint(l), to_bigint(r));
+        return if crate::value::bigint::big_is_zero(&b) {
+            Value::Null
+        } else {
+            Value::BigInt(Rc::new(a / b))
+        };
+    }
     let (a, b) = (l.to_long(), r.to_long());
     if b == 0 {
         Value::Null
@@ -820,6 +888,16 @@ pub fn int_div(l: &Value, r: &Value) -> Value {
 }
 
 pub fn rem(l: &Value, r: &Value) -> Value {
+    // `%` on big_integer is the *remainder* (sign follows the dividend),
+    // upstream `BigInteger.remainder` — same semantics as num-bigint `%`.
+    if matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)) {
+        let (a, b) = (to_bigint(l), to_bigint(r));
+        return if crate::value::bigint::big_is_zero(&b) {
+            Value::Null
+        } else {
+            Value::BigInt(Rc::new(a % b))
+        };
+    }
     if matches!(l, Value::Real(_)) || matches!(r, Value::Real(_)) {
         let (a, b) = (l.to_real(), r.to_real());
         if b == 0.0 {
@@ -838,6 +916,17 @@ pub fn rem(l: &Value, r: &Value) -> Value {
 }
 
 pub fn pow(l: &Value, r: &Value) -> Value {
+    // Upstream: `base.pow((int) longint(y))`; a negative exponent yields
+    // a fractional result truncated to bigint 0.
+    if matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)) {
+        let exp = r.to_long();
+        if exp < 0 {
+            return Value::BigInt(Rc::new(num_bigint::BigInt::ZERO));
+        }
+        return Value::BigInt(Rc::new(
+            to_bigint(l).pow(u32::try_from(exp).unwrap_or(u32::MAX)),
+        ));
+    }
     if matches!(l, Value::Real(_)) || matches!(r, Value::Real(_)) {
         Value::Real(l.to_real().powf(r.to_real()))
     } else {
@@ -886,16 +975,24 @@ pub fn ge(l: &Value, r: &Value) -> Value {
     cmp_bool(l, r, |o| !matches!(o, Ordering::Less))
 }
 
+// The bitwise family promotes too (upstream selects `bigAnd`/`bigOr`/…
+// at compile time when the static type is BIG_INT; we promote at runtime,
+// which agrees for every value a statically-typed program produces).
+// num-bigint uses the same two's-complement semantics as Java for
+// negative operands.
 pub fn bit_and(l: &Value, r: &Value) -> Value {
-    Value::Int(l.as_int().unwrap_or(0) & r.as_int().unwrap_or(0))
+    bigint_binop(l, r, |a, b| a & b)
+        .unwrap_or_else(|| Value::Int(l.as_int().unwrap_or(0) & r.as_int().unwrap_or(0)))
 }
 
 pub fn bit_or(l: &Value, r: &Value) -> Value {
-    Value::Int(l.as_int().unwrap_or(0) | r.as_int().unwrap_or(0))
+    bigint_binop(l, r, |a, b| a | b)
+        .unwrap_or_else(|| Value::Int(l.as_int().unwrap_or(0) | r.as_int().unwrap_or(0)))
 }
 
 pub fn bit_xor(l: &Value, r: &Value) -> Value {
-    Value::Int(l.as_int().unwrap_or(0) ^ r.as_int().unwrap_or(0))
+    bigint_binop(l, r, |a, b| a ^ b)
+        .unwrap_or_else(|| Value::Int(l.as_int().unwrap_or(0) ^ r.as_int().unwrap_or(0)))
 }
 
 /// `^=` desugar: POW-assign in v1, XOR-assign in v2+.
@@ -913,10 +1010,16 @@ pub fn xor(l: &Value, r: &Value) -> Value {
 }
 
 pub fn shl(l: &Value, r: &Value) -> Value {
+    if matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)) {
+        return Value::BigInt(Rc::new(bigint_shift(to_bigint(l), r.to_long(), true)));
+    }
     Value::Int(l.as_int().unwrap_or(0) << (r.as_int().unwrap_or(0) & 63))
 }
 
 pub fn shr(l: &Value, r: &Value) -> Value {
+    if matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)) {
+        return Value::BigInt(Rc::new(bigint_shift(to_bigint(l), r.to_long(), false)));
+    }
     Value::Int(l.as_int().unwrap_or(0) >> (r.as_int().unwrap_or(0) & 63))
 }
 
@@ -924,6 +1027,11 @@ pub fn shr(l: &Value, r: &Value) -> Value {
 // the shift, then back to `i64`, so both casts are deliberate bit ops.
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 pub fn ushr(l: &Value, r: &Value) -> Value {
+    // No unsigned shift exists for an arbitrary-width integer — upstream
+    // compiles `>>>` on BIG_INT to `bigShr` (arithmetic).
+    if matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)) {
+        return shr(l, r);
+    }
     Value::Int(((l.as_int().unwrap_or(0) as u64) >> (r.as_int().unwrap_or(0) & 63)) as i64)
 }
 
@@ -955,6 +1063,7 @@ pub fn neg(v: &Value) -> Value {
         // matches how `abs` already uses `wrapping_abs` in this crate.
         Value::Int(i) => Value::Int(i.wrapping_neg()),
         Value::Real(r) => Value::Real(-r),
+        Value::BigInt(b) => Value::BigInt(Rc::new(-(**b).clone())),
         Value::Bool(b) => Value::Int(if *b { -1 } else { 0 }),
         Value::Null => Value::Int(0),
         _ => Value::Null,
@@ -962,6 +1071,11 @@ pub fn neg(v: &Value) -> Value {
 }
 
 /// Bitwise NOT (`~x`) — operates on the integer view of the value.
+/// A big_integer stays exact (upstream `bigNot` — two's-complement
+/// `-x - 1`, same as num-bigint's `Not`).
 pub fn bit_not(v: &Value) -> Value {
+    if let Value::BigInt(b) = v {
+        return Value::BigInt(Rc::new(!(**b).clone()));
+    }
     Value::Int(!v.as_int().unwrap_or(0))
 }

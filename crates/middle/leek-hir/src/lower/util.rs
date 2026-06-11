@@ -203,6 +203,31 @@ pub(crate) fn parse_int_text(text: &str) -> i64 {
     }
 }
 
+/// Parse a big_integer literal's text (`2L` / `0xFFL` / `0b101L`, `_`
+/// separators allowed) into its canonical decimal digits. Any
+/// `IntLiteral` ending in `L` is a big_integer — `L` is never a valid
+/// base digit. Malformed text falls back to `0` like [`parse_int_text`].
+pub(crate) fn parse_bigint_text(text: &str) -> String {
+    let cleaned: String = text.chars().filter(|c| *c != '_').collect();
+    let cleaned = cleaned.strip_suffix('L').unwrap_or(&cleaned);
+    let (digits, radix) = if let Some(hex) = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+    {
+        (hex, 16)
+    } else if let Some(bin) = cleaned
+        .strip_prefix("0b")
+        .or_else(|| cleaned.strip_prefix("0B"))
+    {
+        (bin, 2)
+    } else {
+        (cleaned, 10)
+    };
+    num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
+        .unwrap_or_default()
+        .to_str_radix(10)
+}
+
 pub(crate) fn strip_string_quotes_and_unescape(text: &str) -> String {
     // Default (and historical) behavior — modern dialect, unescape
     // every standard sequence.

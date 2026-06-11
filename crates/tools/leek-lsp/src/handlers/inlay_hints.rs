@@ -143,6 +143,7 @@ fn format_type(ty: &Type) -> String {
         Type::Boolean => "boolean".into(),
         Type::Integer => "integer".into(),
         Type::Real => "real".into(),
+        Type::BigInteger => "big_integer".into(),
         Type::String => "string".into(),
         Type::Array(t) => format!("Array<{}>", format_type(t)),
         Type::Map(k, v) => format!("Map<{}, {}>", format_type(k), format_type(v)),

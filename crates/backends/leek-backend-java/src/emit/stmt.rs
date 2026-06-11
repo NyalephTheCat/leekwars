@@ -508,6 +508,13 @@ impl Emitter<'_> {
             self.writer
                 .add_line(&format!("final var {ar} = {iter_code};"));
         }
+        // The key:value form (`ForeachKeyBlock`) emits one tick BEFORE
+        // the `if (isIterable…)` (upstream: `addCounter(1)` precedes the
+        // `addLine(sb)` holding the whole construct); the value-only
+        // form (`ForeachBlock`) ticks inside the `if` instead.
+        if self.opts.emit_ops && fe.key.is_some() {
+            self.writer.add_code("ops(1);");
+        }
         self.writer.add_line(&format!("if (isIterable({ar})) {{"));
         // Only declare the binding when the foreach actually
         // introduces a new variable (`for (var x in …)` vs.
@@ -522,22 +529,24 @@ impl Emitter<'_> {
             self.writer.add_line(&format!("Object {value} = null;"));
         }
         if self.opts.emit_ops {
-            self.writer.add_code("ops(1);");
-            // A key:value foreach declares a *second* iterator var, charged for
-            // in setup beyond the value-only form. v1 boxes each *newly declared*
-            // var (`new Box(ai, null)`, 1 op apiece — so 2 for `var k : var x`,
-            // 1 when one slot is reused); v2+ adds a single `addCounter(1)` for
-            // the key declaration.
+            // Setup charge. Upstream totals are capture-independent
+            // because every variant costs 1 per slot at runtime when
+            // not statically ticked: v2+ declared → static `ops(1)`;
+            // v1 declared and captured-at-any-version → `new
+            // Box(ai, null)` / `Wrapper(new Box(ai, null))`, whose
+            // 2-arg Box ctor charges 1. We emit neither Box nor
+            // Wrapper, so charge statically instead.
             if fe.key.is_some() {
-                let n = if matches!(self.opts.version, leek_syntax::Version::V1) {
-                    u32::from(fe.key.as_ref().is_some_and(|k| k.is_new))
-                        + u32::from(fe.value.is_new)
-                } else {
-                    1
-                };
+                // ForeachKeyBlock: 1 per *declared* slot; a reused
+                // outer slot (`for (k : v in …)`) charges nothing.
+                let n = u32::from(fe.key.as_ref().is_some_and(|k| k.is_new))
+                    + u32::from(fe.value.is_new);
                 if n > 0 {
                     self.writer.add_code(&format!("ops({n});"));
                 }
+            } else {
+                // ForeachBlock: declared or reused both total 1.
+                self.writer.add_code("ops(1);");
             }
         }
         self.writer.add_line(&format!("var {it} = iterator({ar});"));
@@ -549,12 +558,23 @@ impl Emitter<'_> {
         }
         self.writer
             .add_line(&format!("{value} = (Object) {entry}.getValue();"));
-        // Per-iteration tick (upstream's `addCounter(1)` at line 190). At v1 a
-        // by-value declaration also pays a second counter alongside the
-        // `iterator.set(...)` (ForeachBlock line 187); a `@`-by-ref iterator is
-        // set through its `Box` and pays only the single counter.
+        // Per-iteration tick. Value-only (`ForeachBlock`): one
+        // unconditional `addCounter(1)` per iteration, plus at v1 a
+        // second counter for a by-value iterator (the `set(...)` copy
+        // path); a `@`-by-ref iterator is set through its `Box` and
+        // pays only the single counter. Key:value (`ForeachKeyBlock`):
+        // NO unconditional tick — v2+ charges nothing per iteration,
+        // v1 charges 1 per non-`@ref` slot (the copy-on-set path).
         if self.opts.emit_ops {
-            if matches!(self.opts.version, leek_syntax::Version::V1) && !fe.value.is_by_ref {
+            if fe.key.is_some() {
+                if matches!(self.opts.version, leek_syntax::Version::V1) {
+                    let n = u32::from(!fe.key.as_ref().is_some_and(|k| k.is_by_ref))
+                        + u32::from(!fe.value.is_by_ref);
+                    if n > 0 {
+                        self.writer.add_code(&format!("ops({n});"));
+                    }
+                }
+            } else if matches!(self.opts.version, leek_syntax::Version::V1) && !fe.value.is_by_ref {
                 self.writer.add_code("ops(1);ops(1);");
             } else {
                 self.writer.add_code("ops(1);");

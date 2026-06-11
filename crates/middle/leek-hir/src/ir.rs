@@ -360,8 +360,10 @@ pub enum ExprKind {
     Postfix(PostfixOp, Box<Expr>),
     /// `f(args)` or `obj.m(args)` — `callee` carries the resolution.
     Call(Box<Call>),
-    /// `obj.field` — read.
-    Field(Box<Expr>, String),
+    /// `obj.field` — read. The `bool` marks the optional form
+    /// `obj?.field` (#2272): null receiver yields null instead of an
+    /// error; each `?.` link guards only its own receiver.
+    Field(Box<Expr>, String, bool),
     /// `obj[index]`.
     Index(Box<Expr>, Box<Expr>),
     /// `obj[a:b:c]`.
@@ -370,8 +372,9 @@ pub enum ExprKind {
     Array(Vec<Expr>),
     /// `[k: v, k: v]` literal.
     Map(Vec<(Expr, Expr)>),
-    /// `{a, b, c}` / `<a, b, c>` set literal.
-    Set(Vec<Expr>),
+    /// `{a, b, c}` / `<a, b, c>` set literal. Elements are plain
+    /// expressions or inclusive integer ranges (see [`SetItem`]).
+    Set(Vec<SetItem>),
     /// `{f: v, …}` object literal — keys are identifiers.
     Object(Vec<(String, Expr)>),
     /// `cond ? then : else`.
@@ -384,6 +387,16 @@ pub enum ExprKind {
     New(NewExpr),
     /// Lambda / anonymous function.
     Lambda(LambdaExpr),
+}
+
+/// One set-literal element: a plain value (`end` is `None`) or an
+/// inclusive integer range `start..end` expanded at runtime
+/// (`<1..3>` → `<1, 2, 3>`, descending allowed — upstream #2335).
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetItem {
+    pub start: Expr,
+    pub end: Option<Expr>,
 }
 
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
@@ -402,8 +415,15 @@ pub struct Call {
 pub enum Callee {
     /// Bare function call: `foo(args)`.
     Function(NameRef),
-    /// `obj.m(args)`.
-    Method { receiver: Expr, method: String },
+    /// `obj.m(args)`. `optional` marks `obj?.m(args)` (#2272): a null
+    /// receiver yields null without dispatching — the arguments are
+    /// still evaluated first, as upstream's `callObjectAccessNullSafe`
+    /// receives them eagerly.
+    Method {
+        receiver: Expr,
+        method: String,
+        optional: bool,
+    },
     /// Arbitrary callable expression: `(some_expr)(args)`.
     Expr(Expr),
 }
@@ -478,6 +498,9 @@ pub enum NameRef {
 pub enum Literal {
     Int(i64),
     Real(f64),
+    /// `big_integer` literal (`2L`, `0xFFL`) — stored as its canonical
+    /// decimal digits so the variant stays hashable/salsa-friendly.
+    BigInt(String),
     String(String),
     Bool(bool),
     Null,

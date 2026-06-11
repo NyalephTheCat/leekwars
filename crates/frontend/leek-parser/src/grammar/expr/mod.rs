@@ -134,6 +134,23 @@ fn expr_bp_inner(p: &mut Parser, min_bp: u8) {
             continue;
         }
 
+        // Postfix `?.field`: optional member access (#2272). Only taken
+        // when an identifier-shaped name follows the `.` — otherwise the
+        // `?` is a ternary opener (`a ? .5 : b` keeps parsing as ternary,
+        // matching upstream's `? + DOT + STRING` lookahead).
+        if kind == S::Question
+            && CALL_BP >= min_bp
+            && p.nth(1) == S::Dot
+            && (p.nth(2) == S::Ident || p.nth(2).is_keyword())
+        {
+            p.start_node_at(cp, S::FieldExpr);
+            p.bump(); // '?'
+            p.bump(); // '.'
+            p.bump(); // field name
+            p.finish_node();
+            continue;
+        }
+
         // Postfix `.field`: member access.
         if kind == S::Dot && CALL_BP >= min_bp {
             p.start_node_at(cp, S::FieldExpr);

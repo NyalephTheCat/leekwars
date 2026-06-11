@@ -110,12 +110,54 @@ pub fn parse_tokens_with(
     version: Version,
     features: ParseFeatures,
 ) -> ParseResult {
+    parse_tokens_with_classes(text, source, tokens, version, features, &[])
+}
+
+/// Like [`parse_tokens_with`] but with extra *known class names* —
+/// classes declared in other files of the same program (the include
+/// closure). Upstream resolves a potential type word against the
+/// program-wide defined-class set (`eatPrimaryType` →
+/// `mMain.getDefinedClass(word)`), so `testClass tc = …` must parse as
+/// a typed declaration even when `testClass` is declared in an
+/// included file. Classes declared in *this* file are found by a
+/// token pre-scan and never need to be passed here.
+pub fn parse_tokens_with_classes(
+    text: &str,
+    source: SourceId,
+    tokens: &[Token],
+    version: Version,
+    features: ParseFeatures,
+    extra_classes: &[String],
+) -> ParseResult {
     let mut p = Parser::new(text, source, tokens, version, features);
+    for name in extra_classes {
+        p.known_classes.insert(name.clone());
+    }
     crate::grammar::source_file(&mut p);
     ParseResult {
         green: p.builder.finish(),
         diagnostics: p.diagnostics,
     }
+}
+
+/// Scan a token stream for `class IDENT` declarations and return the
+/// class names. Used both by the parser's own pre-scan and by callers
+/// that need the include closure's class set before parsing the entry
+/// file (the lexer is version-aware, so in v1 — no classes — `class`
+/// stays an `Ident` and the scan finds nothing).
+pub fn scan_class_names(text: &str, tokens: &[Token]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut prev_was_class = false;
+    for t in tokens {
+        if t.kind.is_trivia() {
+            continue;
+        }
+        if prev_was_class && t.kind == SyntaxKind::Ident {
+            names.push(text[t.span.range()].to_owned());
+        }
+        prev_was_class = t.kind == SyntaxKind::KwClass;
+    }
+    names
 }
 
 /// Parser state: a cursor over the lexer's token slice and a green-tree
@@ -139,6 +181,12 @@ pub(crate) struct Parser<'t> {
     pub(crate) gt_is_binary: bool,
     version: Version,
     features: ParseFeatures,
+    /// Names of classes the program is known to declare: pre-scanned
+    /// from this file's tokens (`class IDENT`), plus any names the
+    /// caller supplied for the include closure. Type-head lookahead
+    /// consults this so `lowercaseClass x = …` parses as a typed
+    /// declaration — mirroring upstream's `getDefinedClass` check.
+    pub(crate) known_classes: std::collections::HashSet<String>,
     /// Current recursion depth of the expression/type grammar. Guards
     /// against stack overflow on pathologically nested input (a real DoS
     /// vector for the LSP, which parses untrusted buffers on every
@@ -172,8 +220,16 @@ impl<'t> Parser<'t> {
             gt_is_binary: true,
             version,
             features,
+            known_classes: scan_class_names(text, tokens).into_iter().collect(),
             depth: 0,
         }
+    }
+
+    /// True if `name` is a class the program is known to declare —
+    /// in this file (token pre-scan) or in the include closure (names
+    /// supplied via [`parse_tokens_with_classes`]).
+    pub(crate) fn is_known_class(&self, name: &str) -> bool {
+        self.known_classes.contains(name)
     }
 
     /// Enter a recursive grammar production. Returns `true` if the depth

@@ -290,9 +290,28 @@ pub struct Test {
 
 #[derive(Debug, clap::Args)]
 pub struct Fmt {
+    /// Files or directories to format. Directories are walked for
+    /// `.leek` sources. Defaults to the project's src + tests dirs.
+    pub paths: Vec<PathBuf>,
+
     /// Don't write changes; exit non-zero if anything would change.
     #[arg(long)]
     pub check: bool,
+
+    /// Read source from stdin and write the formatted result to
+    /// stdout (implies no file writes; ignores `paths`).
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Print a unified diff of what would change instead of writing.
+    /// Exits non-zero if anything would change (like `--check`).
+    #[arg(long)]
+    pub diff: bool,
+
+    /// Override a `[format]` option for this run, e.g.
+    /// `--set quote_style=double`. Repeatable.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub set: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]

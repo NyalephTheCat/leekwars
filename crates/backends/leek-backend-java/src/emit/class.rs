@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 
 use leek_hir::{Field, Function, MethodDef};
 
+use super::lambda::captured_by_nested_lambda_stmts;
 use super::{ends_with_return, java_type_for, sanitize_ident};
 use crate::mangle;
 
@@ -61,7 +62,29 @@ impl<'a> super::Emitter<'a> {
                 // mutation inside doesn't touch the caller's array/map.
                 let _ = write!(acc, "var {body} = copy(p_{safe});");
             } else if exact {
-                let _ = write!(acc, "var u_{safe} = p_{safe};");
+                if p.is_by_ref {
+                    // `@x` at v2+ → alias a passed box, else box a copy
+                    // (upstream: `u_x = p_x instanceof Box ? p_x : new
+                    // Box(AI.this, LeekOperations.clone(p_x))`).
+                    let _ = write!(
+                        acc,
+                        "Box {body} = p_{safe} instanceof Box ? (Box) p_{safe} : new Box(this, copy(p_{safe}));"
+                    );
+                    self.ref_boxes.borrow_mut().insert(p.def);
+                } else if f
+                    .body
+                    .as_ref()
+                    .is_some_and(|b| captured_by_nested_lambda_stmts(&b.stmts, p.def))
+                {
+                    // Param captured by a nested closure → bind through a
+                    // runtime `Box` so writes propagate into the closure;
+                    // the 2-arg ctor charges the same 1 op as upstream's
+                    // `final var u_x = new Box<>(AI.this, p_x)`.
+                    let _ = write!(acc, "final Box {body} = new Box(this, p_{safe});");
+                    self.ref_boxes.borrow_mut().insert(p.def);
+                } else {
+                    let _ = write!(acc, "var u_{safe} = p_{safe};");
+                }
             }
             acc
         });

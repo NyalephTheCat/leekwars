@@ -11,7 +11,10 @@
 //! missing key keeps its default, so a partial or differently-shaped
 //! settings blob never breaks the server.
 
-use leek_fmt::{BraceStyle, FormatOptions, IndentStyle, TrailingComma};
+use leek_fmt::{
+    BraceStyle, ControlBraces, FormatOptions, IndentStyle, LineEnding, OperatorPosition,
+    QuoteStyle, Semicolons, TrailingComma,
+};
 use serde_json::Value;
 
 /// The server's view of client configuration.
@@ -125,6 +128,58 @@ fn apply_format(opts: &mut FormatOptions, fmt: &serde_json::Map<String, Value>) 
             _ => {}
         }
     }
+    if let Some(qs) = fmt.get("quoteStyle").and_then(Value::as_str) {
+        match qs.to_ascii_lowercase().as_str() {
+            "double" => opts.quote_style = QuoteStyle::Double,
+            "single" => opts.quote_style = QuoteStyle::Single,
+            "preserve" => opts.quote_style = QuoteStyle::Preserve,
+            _ => {}
+        }
+    }
+    if let Some(le) = fmt.get("lineEnding").and_then(Value::as_str) {
+        match le.to_ascii_lowercase().as_str() {
+            "lf" => opts.line_ending = LineEnding::Lf,
+            "crlf" => opts.line_ending = LineEnding::Crlf,
+            _ => {}
+        }
+    }
+    if let Some(op) = fmt.get("operatorPosition").and_then(Value::as_str) {
+        match op.to_ascii_lowercase().as_str() {
+            "trailing" => opts.operator_position = OperatorPosition::Trailing,
+            "leading" => opts.operator_position = OperatorPosition::Leading,
+            _ => {}
+        }
+    }
+    if let Some(n) = read_usize(fmt, "methodChainThreshold") {
+        opts.method_chain_threshold = n;
+    }
+    if let Some(b) = fmt
+        .get("blankLineBetweenFunctions")
+        .and_then(Value::as_bool)
+    {
+        opts.blank_line_between_functions = b;
+    }
+    if let Some(cb) = fmt.get("controlBraces").and_then(Value::as_str) {
+        match cb.to_ascii_lowercase().as_str() {
+            "always" => opts.control_braces = ControlBraces::Always,
+            "never" => opts.control_braces = ControlBraces::Never,
+            "preserve" => opts.control_braces = ControlBraces::Preserve,
+            _ => {}
+        }
+    }
+    if let Some(b) = fmt.get("removeRedundantParens").and_then(Value::as_bool) {
+        opts.remove_redundant_parens = b;
+    }
+    if let Some(sc) = fmt.get("semicolons").and_then(Value::as_str) {
+        match sc.to_ascii_lowercase().as_str() {
+            "always" => opts.semicolons = Semicolons::Always,
+            "preserve" => opts.semicolons = Semicolons::Preserve,
+            _ => {}
+        }
+    }
+    if let Some(b) = fmt.get("collapseElseIf").and_then(Value::as_bool) {
+        opts.collapse_else_if = b;
+    }
 }
 
 /// Read a non-negative integer setting as `usize` (ignoring values that
@@ -227,5 +282,47 @@ mod tests {
         assert!(s.format.space_before_colon);
         assert!(!s.format.space_after_colon);
         assert!(s.format.pad_line_comments);
+    }
+
+    #[test]
+    fn reads_layout_options() {
+        let s = Settings::from_value(&json!({
+            "format": {
+                "quoteStyle": "single",
+                "lineEnding": "crlf",
+                "operatorPosition": "leading",
+                "methodChainThreshold": 5,
+                "blankLineBetweenFunctions": true
+            }
+        }));
+        assert_eq!(s.format.quote_style, QuoteStyle::Single);
+        assert_eq!(s.format.line_ending, LineEnding::Crlf);
+        assert_eq!(s.format.operator_position, OperatorPosition::Leading);
+        assert_eq!(s.format.method_chain_threshold, 5);
+        assert!(s.format.blank_line_between_functions);
+    }
+
+    #[test]
+    fn reads_rewrite_options() {
+        let s = Settings::from_value(&json!({
+            "format": {
+                "controlBraces": "always",
+                "removeRedundantParens": true,
+                "semicolons": "always",
+                "collapseElseIf": true
+            }
+        }));
+        assert_eq!(s.format.control_braces, ControlBraces::Always);
+        assert!(s.format.remove_redundant_parens);
+        assert_eq!(s.format.semicolons, Semicolons::Always);
+        assert!(s.format.collapse_else_if);
+    }
+
+    #[test]
+    fn bad_layout_enum_values_keep_defaults() {
+        let s = Settings::from_value(&json!({
+            "format": { "quoteStyle": "fancy", "controlBraces": "sometimes" }
+        }));
+        assert_eq!(s.format, FormatOptions::default());
     }
 }

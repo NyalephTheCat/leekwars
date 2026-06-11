@@ -1,6 +1,6 @@
 use leek_hir::{
     BinaryOp, Callee, Def, Expr, ExprKind, IntervalExpr, Literal, NameRef, NewExpr, PostfixOp,
-    SliceExpr, UnaryOp,
+    SetItem, SliceExpr, UnaryOp,
 };
 use leek_types::Type;
 use std::fmt::Write as _;
@@ -181,15 +181,22 @@ impl EmitExpr for Emitter<'_> {
             ExprKind::Unary(op, x) => self.write_unary(buf, *op, x, parens_if_negative),
             ExprKind::Postfix(op, x) => self.write_postfix(buf, *op, x),
             ExprKind::Call(c) => self.write_call(buf, c),
-            ExprKind::Field(b, name) => {
+            ExprKind::Field(b, name, optional) => {
                 // `this.field` inside a class method reads the real Java field
                 // directly (the class is a `NativeObjectLeekValue` subclass with
                 // public fields). Any other base is `Object`-typed, so go
                 // through the reflective `getField(base, "name", null)`.
+                // `obj?.field` (#2272) goes through `getFieldNullSafe` instead
+                // (null receiver -> null), except the reflective `?.class`
+                // which upstream keeps on the plain path.
                 if self.is_own_instance_field(b, name) {
                     buf.push_str(&self.own_instance_field_ref(name));
                 } else {
-                    buf.push_str("getField(");
+                    if *optional && name != "class" {
+                        buf.push_str("getFieldNullSafe(");
+                    } else {
+                        buf.push_str("getField(");
+                    }
                     self.write_expr(buf, b, false);
                     buf.push_str(", \"");
                     buf.push_str(name);
@@ -808,7 +815,7 @@ impl Emitter<'_> {
         // base is `Object`-typed, so go through reflective
         // `setField(base, "field", v, null)` (assignable; the read-side
         // `getField` isn't).
-        if let ExprKind::Field(base, fname) = &l.kind {
+        if let ExprKind::Field(base, fname, _) = &l.kind {
             if self.is_own_instance_field(base, fname) {
                 // Direct Java field, qualified as `<Class>.this.<field>` (see
                 // `own_instance_field_ref`): dodges a same-named param shadow
@@ -1294,7 +1301,7 @@ impl Emitter<'_> {
     /// Whether `x` is an external (non-own-`this`) field l-value, needing the
     /// `field_*_eq` inc/dec path rather than a direct Java field assignment.
     fn is_external_field<'b>(&self, x: &'b Expr) -> Option<(&'b Expr, &'b str)> {
-        if let ExprKind::Field(base, fname) = &x.kind
+        if let ExprKind::Field(base, fname, _) = &x.kind
             && !self.is_own_instance_field(base, fname)
         {
             return Some((base, fname));
@@ -1516,17 +1523,43 @@ impl Emitter<'_> {
         buf.push(')');
     }
 
-    pub(crate) fn write_set(&self, buf: &mut String, items: &[Expr]) {
+    pub(crate) fn write_set(&self, buf: &mut String, items: &[SetItem]) {
+        if items.iter().all(|i| i.end.is_none()) {
+            // Common case: plain values only.
+            buf.push_str("new SetLeekValue(");
+            buf.push_str(&self.ai_this());
+            buf.push_str(", new Object[] { ");
+            for (i, it) in items.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                self.write_expr(buf, &it.start, false);
+            }
+            buf.push_str(" })");
+            return;
+        }
+        // With range element(s): build by chaining — each helper returns
+        // the set so elements nest, last element outermost (reference
+        // `LeekSet.writeJavaCode`).
+        for it in items.iter().rev() {
+            buf.push_str(if it.end.is_some() {
+                "setLiteralRange("
+            } else {
+                "setLiteralAdd("
+            });
+        }
         buf.push_str("new SetLeekValue(");
         buf.push_str(&self.ai_this());
-        buf.push_str(", new Object[] { ");
-        for (i, it) in items.iter().enumerate() {
-            if i > 0 {
+        buf.push(')');
+        for it in items {
+            buf.push_str(", ");
+            self.write_expr(buf, &it.start, false);
+            if let Some(end) = &it.end {
                 buf.push_str(", ");
+                self.write_expr(buf, end, false);
             }
-            self.write_expr(buf, it, false);
+            buf.push(')');
         }
-        buf.push_str(" })");
     }
 
     pub(crate) fn write_object(&self, buf: &mut String, fields: &[(String, Expr)]) {
@@ -1749,7 +1782,17 @@ impl Emitter<'_> {
         match class {
             // Collections build from the call args, just like a literal.
             "Array" => self.write_array(buf, args),
-            "Set" => self.write_set(buf, args),
+            "Set" => {
+                // Constructor args are plain elements — no range form here.
+                let items: Vec<SetItem> = args
+                    .iter()
+                    .map(|a| SetItem {
+                        start: a.clone(),
+                        end: None,
+                    })
+                    .collect();
+                self.write_set(buf, &items);
+            }
             // `Map()` / `Object()` take no positional elements — an empty one.
             "Map" => self.write_map(buf, &[]),
             "Object" => self.write_object(buf, &[]),

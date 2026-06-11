@@ -2,8 +2,8 @@
 
 use super::{
     BlockId, Const, InstBuilder, IntCC, LocalId, LocalKind, NativeError, Operand, Place, Rvalue,
-    Statement, Terminator, TrapCode, Tx, ValTy, map_value_valty, no_coalesce, receiver_class,
-    resolve_static_field, types, unsupported,
+    Statement, Terminator, TrapCode, Tx, Type, ValTy, Value, map_value_valty, no_coalesce,
+    receiver_class, resolve_static_field, types, unsupported,
 };
 
 impl Tx<'_, '_> {
@@ -109,6 +109,29 @@ impl Tx<'_, '_> {
         }
     }
 
+    /// If `id` is a `big_integer`-declared local (its var holds a boxed
+    /// `Ref`), coerce the value being stored into it to a `Value::BigInt`
+    /// via `leek_to_bigint` (reals truncate exactly, ints/bools convert,
+    /// null passes through) — mirroring upstream's declared-type write
+    /// coercion. Every other local passes the value through untouched.
+    pub(super) fn coerce_bigint_local(
+        &mut self,
+        id: LocalId,
+        v: Value,
+    ) -> Result<Value, NativeError> {
+        let is_bigint = match &self.mir_locals[id.0 as usize].ty {
+            Type::BigInteger => true,
+            Type::Nullable(t) => matches!(t.as_ref(), Type::BigInteger),
+            _ => false,
+        };
+        if !is_bigint || self.var_tys[id.0 as usize] != ValTy::Ref {
+            return Ok(v);
+        }
+        let f = self.imports.rt("leek_to_bigint")?;
+        let inst = self.b.ins().call(f, &[v]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
     pub(super) fn stmt(&mut self, s: &Statement) -> Result<(), NativeError> {
         match s {
             Statement::Assign(Place::Local(id), rv) => {
@@ -119,6 +142,7 @@ impl Tx<'_, '_> {
                 if self.cell_locals.contains(id) {
                     let (v, ty) = self.rvalue(rv)?;
                     let mut v = self.coerce(v, ty, ValTy::Ref)?;
+                    v = self.coerce_bigint_local(*id, v)?;
                     // v1 value semantics also apply to a captured cell local: a
                     // composite reassigned *into* the cell is copied (deep-clone)
                     // so it doesn't alias its source — UNLESS the value is freshly
@@ -172,8 +196,10 @@ impl Tx<'_, '_> {
                     _ => self.rvalue(rv)?,
                 };
                 // Coerce to the local's declared cranelift kind (e.g.
-                // `real x = 42` stores 42 as 42.0).
+                // `real x = 42` stores 42 as 42.0); a `big_integer` local
+                // additionally coerces the boxed value to a bigint.
                 let mut v = self.coerce(v, ty, target)?;
+                v = self.coerce_bigint_local(*id, v)?;
                 // v1 value semantics: assigning a composite to a *user*
                 // local copies it (deep-clone), unless the value is freshly
                 // produced (`UseFresh` — e.g. a builtin result) or the slot
@@ -407,7 +433,21 @@ impl Tx<'_, '_> {
             v = self.coerce(v, vt, gt)?;
             vt = gt;
         }
-        let val = self.coerce(v, vt, ValTy::Ref)?;
+        let mut val = self.coerce(v, vt, ValTy::Ref)?;
+        // A `big_integer`-declared global coerces every store, like a local.
+        let global_is_bigint = self.program.globals.iter().any(|g| {
+            g.name == name
+                && match &g.ty {
+                    Type::BigInteger => true,
+                    Type::Nullable(t) => matches!(t.as_ref(), Type::BigInteger),
+                    _ => false,
+                }
+        });
+        if global_is_bigint {
+            let f = self.imports.rt("leek_to_bigint")?;
+            let inst = self.b.ins().call(f, &[val]);
+            val = self.b.inst_results(inst)[0];
+        }
         self.b.ins().call(set, &[key, val]);
         Ok(())
     }

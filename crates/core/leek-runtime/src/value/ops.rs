@@ -31,6 +31,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
             Value::Real(f) => *f != 0.0 && !f.is_nan(),
+            Value::BigInt(b) => !super::bigint::big_is_zero(b),
             Value::String(s) => !s.is_empty(),
             Value::Array(a) => !a.borrow().is_empty(),
             Value::Map(m) => !m.borrow().is_empty(),
@@ -48,6 +49,7 @@ impl Value {
             Value::Bool(_) => "boolean",
             Value::Int(_) => "integer",
             Value::Real(_) => "real",
+            Value::BigInt(_) => "big_integer",
             Value::String(_) => "string",
             Value::Array(_) => "Array",
             Value::Map(_) => "Map",
@@ -71,6 +73,7 @@ impl Value {
             Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
             Value::Int(i) => Some(crate::int_to_real(*i)),
             Value::Real(f) => Some(*f),
+            Value::BigInt(b) => Some(super::bigint::big_to_f64(b)),
             Value::Cell(c) => c.borrow().as_real(),
             _ => None,
         }
@@ -82,6 +85,7 @@ impl Value {
             Value::Bool(b) => Some(i64::from(*b)),
             Value::Int(i) => Some(*i),
             Value::Real(f) => Some(crate::real_to_int(*f)),
+            Value::BigInt(b) => Some(super::bigint::big_to_i64_wrapping(b)),
             Value::Cell(c) => c.borrow().as_int(),
             _ => None,
         }
@@ -110,6 +114,9 @@ impl Value {
             Value::Bool(b) => i64::from(*b),
             Value::Int(i) => *i,
             Value::Real(f) => crate::real_to_int(*f),
+            // Upstream `longint(big)` is `BigInteger.longValue()` — the low
+            // 64 bits, wrapping (not saturating).
+            Value::BigInt(b) => super::bigint::big_to_i64_wrapping(b),
             Value::String(s) => match s.parse::<i64>() {
                 Ok(n) => n,
                 Err(_) => crate::len_as_int(s.len()),
@@ -138,6 +145,9 @@ impl Value {
     pub fn to_real(&self) -> f64 {
         match self {
             Value::Real(f) => *f,
+            // Exact-magnitude double (`BigInteger.doubleValue()`), NOT the
+            // wrapped low-64 view `to_long` would give.
+            Value::BigInt(b) => super::bigint::big_to_f64(b),
             other => crate::int_to_real(other.to_long()),
         }
     }
@@ -168,6 +178,13 @@ impl Value {
             // double when one is real.
             (Value::Int(a), Value::Real(b)) => crate::int_to_real(*a) == *b,
             (Value::Real(a), Value::Int(b)) => *a == crate::int_to_real(*b),
+            // big_integer `===` mirrors `==`: exact against integer-like
+            // operands, magnitude (double) against reals.
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
+            (Value::BigInt(a), Value::Int(b)) => **a == num_bigint::BigInt::from(*b),
+            (Value::Int(a), Value::BigInt(b)) => num_bigint::BigInt::from(*a) == **b,
+            (Value::BigInt(a), Value::Real(b)) => super::bigint::big_to_f64(a) == *b,
+            (Value::Real(a), Value::BigInt(b)) => *a == super::bigint::big_to_f64(b),
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
             (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
@@ -186,6 +203,22 @@ impl Value {
             (Value::Real(a), Value::Real(b)) => a.partial_cmp(b),
             (Value::Int(a), Value::Real(b)) => crate::int_to_real(*a).partial_cmp(b),
             (Value::Real(a), Value::Int(b)) => a.partial_cmp(&crate::int_to_real(*b)),
+            // Exact comparison between exact integers (upstream
+            // `bigCompare` via `compareIntegers`); a real operand falls
+            // back to double comparison.
+            (Value::BigInt(a), Value::BigInt(b)) => Some(a.cmp(b)),
+            (Value::BigInt(a), Value::Int(b)) => Some((**a).cmp(&num_bigint::BigInt::from(*b))),
+            (Value::Int(a), Value::BigInt(b)) => Some(num_bigint::BigInt::from(*a).cmp(b)),
+            (Value::BigInt(a), Value::Bool(b)) => {
+                Some((**a).cmp(&num_bigint::BigInt::from(i64::from(*b))))
+            }
+            (Value::Bool(a), Value::BigInt(b)) => {
+                Some(num_bigint::BigInt::from(i64::from(*a)).cmp(b))
+            }
+            (Value::BigInt(a), Value::Real(b)) => super::bigint::big_to_f64(a).partial_cmp(b),
+            (Value::Real(a), Value::BigInt(b)) => a.partial_cmp(&super::bigint::big_to_f64(b)),
+            (Value::BigInt(a), Value::Null) => Some((**a).cmp(&num_bigint::BigInt::ZERO)),
+            (Value::Null, Value::BigInt(b)) => Some(num_bigint::BigInt::ZERO.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
             // Bool ↔ Int/Real cross compare: true=1, false=0.
             (Value::Bool(a), Value::Int(b)) => i64::from(*a).partial_cmp(b),

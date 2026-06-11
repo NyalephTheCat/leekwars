@@ -30,6 +30,15 @@ pub struct LintLevels<'a> {
     pub allow: &'a [String],
 }
 
+/// One additional source file diagnostics may point into (an included
+/// file), for [`Reporter::emit_run_sources`].
+#[derive(Clone, Copy)]
+pub struct RunSource<'a> {
+    pub source: leek_span::SourceId,
+    pub text: &'a str,
+    pub label: &'a str,
+}
+
 /// Render config for one tool invocation.
 pub struct Reporter {
     severity: SeverityConfig,
@@ -72,7 +81,26 @@ impl Reporter {
         source_text: &str,
         file_label: &str,
     ) -> bool {
+        self.emit_run_sources(diagnostics, source_text, file_label, &[])
+    }
+
+    /// Like [`emit_run`](Self::emit_run), but with extra named sources
+    /// (included files) so a diagnostic raised in an included file
+    /// renders against *that* file's text and label instead of the
+    /// entry's. A diagnostic whose `SourceId` matches none of the
+    /// extras falls back to the entry text — the single-file behavior.
+    pub fn emit_run_sources(
+        &self,
+        diagnostics: &[Diagnostic],
+        source_text: &str,
+        file_label: &str,
+        extra_sources: &[RunSource<'_>],
+    ) -> bool {
         let line_table = LineTable::new(source_text);
+        let extra_tables: Vec<LineTable> = extra_sources
+            .iter()
+            .map(|s| LineTable::new(s.text))
+            .collect();
         let mut had_error = false;
         for diag in diagnostics {
             let mut adjusted = diag.clone();
@@ -81,9 +109,17 @@ impl Reporter {
             }
             match self.format {
                 MessageFormat::Human | MessageFormat::Junit => {
-                    let rendered =
-                        self.renderer
-                            .render(&adjusted, source_text, file_label, &line_table);
+                    let (text, label, table) = extra_sources
+                        .iter()
+                        .position(|s| s.source == adjusted.span.source)
+                        .map_or((source_text, file_label, &line_table), |i| {
+                            (
+                                extra_sources[i].text,
+                                extra_sources[i].label,
+                                &extra_tables[i],
+                            )
+                        });
+                    let rendered = self.renderer.render(&adjusted, text, label, table);
                     eprint!("{rendered}");
                 }
                 MessageFormat::Json => {

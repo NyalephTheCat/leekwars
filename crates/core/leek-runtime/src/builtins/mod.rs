@@ -386,7 +386,6 @@ const KNOWN_BUILTIN_NAMES: &[&str] = &[
     "sort",
     "SORT_ASC",
     "SORT_DESC",
-    "SORT_RANDOM",
     "split",
     "sqrt",
     "startsWith",

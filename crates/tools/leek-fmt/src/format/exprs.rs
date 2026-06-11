@@ -6,7 +6,8 @@ use leek_syntax::{SyntaxKind as S, SyntaxNode};
 use crate::doc::{Doc, concat, group, indent, line, softline, space, text};
 
 use super::{
-    child_nodes, comma_sep, fmt_node, is_trivia, token_text, trailing_comma_doc, with_ctx,
+    child_nodes, comma_sep, fmt_node, is_trivia, lone_child_node, parens_redundant_around,
+    token_text, trailing_comma_doc, with_ctx,
 };
 
 /// `LiteralExpr` / `NameRef` — leaf expressions, emit their tokens
@@ -54,7 +55,12 @@ pub(super) fn format_binary(node: &SyntaxNode) -> Doc {
     let op = op.unwrap_or_else(|| text("?"));
     let rhs = rhs.unwrap_or_else(|| text(""));
 
-    group(concat([lhs, space(), op, line(), rhs]))
+    // Both layouts render identically when flat (`a + b`); they only
+    // differ in where the operator lands when the group breaks.
+    match with_ctx(|cx| cx.opts.operator_position) {
+        crate::OperatorPosition::Trailing => group(concat([lhs, space(), op, line(), rhs])),
+        crate::OperatorPosition::Leading => group(concat([lhs, line(), op, space(), rhs])),
+    }
 }
 
 /// `OP operand` — prefix unary.
@@ -107,6 +113,12 @@ fn colon_doc() -> Doc {
 
 /// `( expr )`.
 pub(super) fn format_paren(node: &SyntaxNode) -> Doc {
+    if with_ctx(|cx| cx.opts.remove_redundant_parens)
+        && let Some(inner) = lone_child_node(node)
+        && parens_redundant_around(&inner)
+    {
+        return fmt_node(&inner);
+    }
     let inner: Vec<Doc> = child_nodes(node).map(|n| fmt_node(&n)).collect();
     let inner_doc = concat(inner);
     let on = with_ctx(|cx| cx.opts.space_inside_parens);
@@ -120,6 +132,9 @@ pub(super) fn format_paren(node: &SyntaxNode) -> Doc {
 
 /// `callee(args)`.
 pub(super) fn format_call(node: &SyntaxNode) -> Doc {
+    if let Some(chain) = try_format_method_chain(node) {
+        return chain;
+    }
     let mut callee: Option<Doc> = None;
     let mut arg_list: Option<Doc> = None;
     for child in child_nodes(node) {
@@ -132,16 +147,131 @@ pub(super) fn format_call(node: &SyntaxNode) -> Doc {
             }
         }
     }
-    let sep = if with_ctx(|cx| cx.opts.space_before_call_paren) {
+    concat([
+        callee.unwrap_or_else(|| text("")),
+        call_paren_sep(),
+        arg_list.unwrap_or_else(|| text("()")),
+    ])
+}
+
+/// Space (or nothing) between a callee and its `(`, per
+/// `space_before_call_paren`.
+fn call_paren_sep() -> Doc {
+    if with_ctx(|cx| cx.opts.space_before_call_paren) {
         crate::doc::space()
     } else {
         crate::doc::nil()
+    }
+}
+
+/// One `.member` link of a call chain: the `.name` tokens plus an
+/// optional argument list.
+struct ChainLink {
+    member: Doc,
+    args: Option<Doc>,
+}
+
+/// Fluent-chain layout: `a.b().c().d()` may break one call per line
+/// when it overflows —
+///
+/// ```text
+/// builder
+///     .with(x)
+///     .and(y)
+///     .finish()
+/// ```
+///
+/// Only kicks in for chains with at least
+/// [`FormatOptions::method_chain_threshold`] `.member` links
+/// (`0` disables breaking). Flat output is byte-identical to the
+/// non-chain layout, so short chains are unaffected.
+fn try_format_method_chain(node: &SyntaxNode) -> Option<Doc> {
+    let threshold = with_ctx(|cx| cx.opts.method_chain_threshold);
+    if threshold == 0 {
+        return None;
+    }
+
+    // Flatten `CallExpr(FieldExpr(CallExpr(FieldExpr(base…))))` into
+    // `base` + links, innermost-first.
+    let mut links: Vec<ChainLink> = Vec::new();
+    let mut current = node.clone();
+    let base = loop {
+        match current.kind() {
+            S::CallExpr => {
+                let mut callee: Option<SyntaxNode> = None;
+                let mut args: Option<SyntaxNode> = None;
+                for child in child_nodes(&current) {
+                    match child.kind() {
+                        S::ArgList => args = Some(child),
+                        _ if callee.is_none() => callee = Some(child),
+                        _ => {}
+                    }
+                }
+                let callee = callee?;
+                if callee.kind() != S::FieldExpr {
+                    // Innermost call (`f(x)` in `f(x).a().b()`) — the
+                    // chain's base.
+                    break current;
+                }
+                let (receiver, member) = split_field_expr(&callee)?;
+                links.push(ChainLink {
+                    member,
+                    args: Some(args.map_or_else(|| text("()"), |a| fmt_node(&a))),
+                });
+                current = receiver;
+            }
+            S::FieldExpr => {
+                // Plain member access inside the chain (`.length` in
+                // `a.items.pop()`).
+                let (receiver, member) = split_field_expr(&current)?;
+                links.push(ChainLink { member, args: None });
+                current = receiver;
+            }
+            _ => break current,
+        }
     };
-    concat([
-        callee.unwrap_or_else(|| text("")),
-        sep,
-        arg_list.unwrap_or_else(|| text("()")),
-    ])
+    if links.len() < threshold {
+        return None;
+    }
+
+    let base_doc = fmt_node(&base);
+    let mut tail: Vec<Doc> = Vec::with_capacity(links.len() * 2);
+    for link in links.into_iter().rev() {
+        tail.push(softline());
+        tail.push(link.member);
+        if let Some(args) = link.args {
+            tail.push(call_paren_sep());
+            tail.push(args);
+        }
+    }
+    Some(group(concat([base_doc, indent(1, concat(tail))])))
+}
+
+/// Split a `FieldExpr` into its receiver node and a `.name` doc.
+/// Returns `None` on malformed trees (error recovery) so the caller
+/// falls back to the plain layout.
+fn split_field_expr(field: &SyntaxNode) -> Option<(SyntaxNode, Doc)> {
+    let mut receiver: Option<SyntaxNode> = None;
+    let mut member: Vec<Doc> = Vec::new();
+    for el in field.children_with_tokens() {
+        match el {
+            NodeOrToken::Token(t) if is_trivia(&t) => {}
+            NodeOrToken::Token(t) => member.push(token_text(&t)),
+            NodeOrToken::Node(child) => {
+                if receiver.is_none() {
+                    receiver = Some(child);
+                } else {
+                    // A second node child means this isn't the simple
+                    // `recv.name` shape — bail out.
+                    return None;
+                }
+            }
+        }
+    }
+    if member.is_empty() {
+        return None;
+    }
+    Some((receiver?, concat(member)))
 }
 
 /// `(arg, arg, ...)`. Trailing-comma behavior follows
@@ -174,6 +304,14 @@ pub(super) fn format_set(node: &SyntaxNode) -> Doc {
     // choice by inspecting the first/last significant tokens.
     let (open, close) = pick_brackets(node, ('<', '>'), ('{', '}'));
     bracketed_list_with(node, open, close)
+}
+
+/// `start..end` — an integer-range element inside a set literal.
+pub(super) fn format_set_range_element(node: &SyntaxNode) -> Doc {
+    let mut bounds = child_nodes(node).map(|n| fmt_node(&n));
+    let start = bounds.next().unwrap_or_else(|| text(""));
+    let end = bounds.next().unwrap_or_else(|| text(""));
+    concat([start, text(".."), end])
 }
 
 /// `[k: v, …]` or `[:]` — map literal.

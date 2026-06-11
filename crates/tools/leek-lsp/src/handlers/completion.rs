@@ -726,6 +726,25 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"PI"), "labels missing PI: {labels:?}");
         assert!(labels.contains(&"INFINITY"), "labels missing INFINITY");
+        // Language-level constants from upstream `LeekConstants.java`
+        // (the COLOR_* family was once missing here — regression guard).
+        assert!(labels.contains(&"COLOR_RED"), "labels missing COLOR_RED");
+        assert!(
+            labels.contains(&"COLOR_GREEN"),
+            "labels missing COLOR_GREEN"
+        );
+        assert!(labels.contains(&"COLOR_BLUE"), "labels missing COLOR_BLUE");
+        assert!(
+            labels.contains(&"OPERATIONS_LIMIT"),
+            "labels missing OPERATIONS_LIMIT"
+        );
+        assert!(labels.contains(&"TYPE_MAP"), "labels missing TYPE_MAP");
+        // `SORT_RANDOM` is NOT a real LeekWars constant (upstream's
+        // random sort mode is internal to `shuffle`) — keep it out.
+        assert!(
+            !labels.contains(&"SORT_RANDOM"),
+            "SORT_RANDOM is not a real constant and must not be offered"
+        );
     }
 
     #[test]

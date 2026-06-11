@@ -17,12 +17,25 @@ use crate::parser::Parser;
 /// Defined here rather than reused from `leek-syntax::SyntaxKind`
 /// because in v1/v2 these are plain idents, not keywords.
 const PRIMITIVE_TYPE_NAMES: &[&str] = &[
-    "integer", "real", "string", "boolean", "void", "any", "null", "Array", "Map", "Set",
-    "Interval", "Object", "Function",
+    "integer",
+    "real",
+    "big_integer",
+    "string",
+    "boolean",
+    "void",
+    "any",
+    "null",
+    "Array",
+    "Map",
+    "Set",
+    "Interval",
+    "Object",
+    "Function",
     // Game-side common types — kept here so typed declarations using
     // them resolve, even though the type system proper treats them as
     // class names.
-    "Number", "Boolean",
+    "Number",
+    "Boolean",
 ];
 
 /// Cap for token-scan loops in lookaheads. Types in practice are short;
@@ -39,8 +52,20 @@ fn is_type_starter(p: &Parser, n: usize) -> bool {
         return false;
     }
     let text = p.nth_text(n);
+    // Any identifier can name a user class (`testClass tc = …`) in
+    // every version that has classes — upstream's `eatPrimaryType`
+    // resolves the word against the program's defined-class set, so
+    // casing is no signal. A pure shape heuristic ("IDENT IDENT must
+    // be a typed decl") is NOT viable: class bodies (`name part` =
+    // two untyped fields, `final a m(x) {…}` = field then method)
+    // and `global y` followed by an `x = …` statement are valid
+    // IDENT IDENT sequences of *independent* items. So we mirror
+    // upstream: only identifiers in the known declared-class set
+    // count. The set is pre-scanned from this file's tokens plus the
+    // include closure's (when the caller supplies it).
     PRIMITIVE_TYPE_NAMES.contains(&text)
         || text.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        || p.is_known_class(text)
 }
 
 /// Scan past a type starting at offset `i`, returning the next offset

@@ -26,6 +26,18 @@ pub extern "C" fn leek_coerce_scalar(h: *mut Value, kind: i64) -> *mut Value {
     handle(coerced)
 }
 
+/// Coerce a boxed value to `Value::BigInt` for a store into a
+/// `big_integer`-declared slot (null and existing bigints pass through
+/// unchanged) — the bigint counterpart of [`leek_coerce_scalar`].
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_to_bigint(h: *mut Value) -> *mut Value {
+    let v = unsafe { val(h) };
+    if matches!(v, Value::Null | Value::BigInt(_)) {
+        return h;
+    }
+    handle(leek_runtime::coerce_value_to_bigint(v))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn leek_box_int(i: i64) -> *mut Value {
     handle(Value::Int(i))
@@ -62,6 +74,25 @@ pub extern "C" fn leek_const_string(ptr: *const u8, len: i64) -> *mut Value {
         String::from_utf8_lossy(bytes).into_owned()
     };
     handle(Value::String(Rc::new(s)))
+}
+
+/// Build a `Value::BigInt` from `len` decimal-digit bytes at `ptr` — the
+/// big_integer twin of [`leek_const_string`] (the digits are MIR
+/// `Const::BigInt`'s canonical decimal form).
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
+#[unsafe(no_mangle)]
+pub extern "C" fn leek_const_bigint(ptr: *const u8, len: i64) -> *mut Value {
+    let digits = if len <= 0 || ptr.is_null() {
+        String::new()
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    handle(Value::BigInt(Rc::new(leek_runtime::big_from_decimal(
+        &digits,
+    ))))
 }
 
 #[unsafe(no_mangle)]

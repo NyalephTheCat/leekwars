@@ -25,5 +25,6 @@ pub mod ast;
 pub mod pipeline;
 
 pub use parser::{
-    ParseFeatures, ParseResult, parse, parse_tokens, parse_tokens_with, parse_with_features,
+    ParseFeatures, ParseResult, parse, parse_tokens, parse_tokens_with, parse_tokens_with_classes,
+    parse_with_features, scan_class_names,
 };

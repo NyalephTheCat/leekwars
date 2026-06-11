@@ -77,6 +77,8 @@ fn constant_truthiness(e: &Expr) -> Option<bool> {
             Literal::Null | Literal::Int(0) => Some(false),
             Literal::Int(_) => Some(true),
             Literal::Real(r) => Some(*r != 0.0),
+            // Canonical decimal digits — only zero is falsy.
+            Literal::BigInt(d) => Some(d != "0"),
             Literal::String(s) => Some(!s.is_empty()),
         },
         // `!const` flips. Recurse so `!false`, `!!true`, etc. all

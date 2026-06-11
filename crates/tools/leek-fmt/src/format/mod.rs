@@ -242,6 +242,7 @@ pub(crate) fn fmt_node(node: &SyntaxNode) -> Doc {
         S::CallExpr => exprs::format_call(node),
         S::ArrayExpr => exprs::format_array(node),
         S::SetExpr => exprs::format_set(node),
+        S::SetRangeElement => exprs::format_set_range_element(node),
         S::MapExpr => exprs::format_map(node),
         S::ObjectExpr => exprs::format_object(node),
         S::IndexExpr => exprs::format_index(node),
@@ -313,6 +314,65 @@ pub(crate) fn is_trivia(t: &SyntaxToken) -> bool {
     t.kind().is_trivia()
 }
 
+/// The single child node of `node`, or `None` if it has zero or
+/// several. Comment tokens inside also yield `None` — removing the
+/// node's delimiters would orphan them.
+pub(crate) fn lone_child_node(node: &SyntaxNode) -> Option<SyntaxNode> {
+    let has_comments = node
+        .children_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+        .any(|t| matches!(t.kind(), S::LineComment | S::BlockComment));
+    if has_comments {
+        return None;
+    }
+    let mut nodes = node.children();
+    let first = nodes.next()?;
+    if nodes.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+/// True if parentheses around `inner` can never affect parsing —
+/// `inner` is a primary expression (atoms, calls, indexing, field
+/// access, collection literals, or another paren). Operators
+/// (binary/unary/ternary/cast/lambda/`new`) are excluded: deciding
+/// those needs full precedence/associativity context.
+pub(crate) fn parens_redundant_around(inner: &SyntaxNode) -> bool {
+    matches!(
+        inner.kind(),
+        S::LiteralExpr
+            | S::NameRef
+            | S::ParenExpr
+            | S::CallExpr
+            | S::IndexExpr
+            | S::FieldExpr
+            | S::ArrayExpr
+            | S::MapExpr
+            | S::SetExpr
+            | S::ObjectExpr
+    )
+}
+
+/// With `remove_redundant_parens` on, peel `ParenExpr` layers off a
+/// node that is *already* delimited by its context (an `if`/`while`
+/// condition, a `return` operand): `((x && y))` → `x && y`. Returns
+/// the innermost non-paren expression, or `node` itself when the
+/// option is off / nothing to peel.
+pub(crate) fn peel_context_parens(node: &SyntaxNode) -> SyntaxNode {
+    if !with_ctx(|cx| cx.opts.remove_redundant_parens) {
+        return node.clone();
+    }
+    let mut current = node.clone();
+    while current.kind() == S::ParenExpr {
+        match lone_child_node(&current) {
+            Some(inner) => current = inner,
+            None => break,
+        }
+    }
+    current
+}
+
 /// Number of `\n` characters in `s`.
 pub(crate) fn count_newlines(s: &str) -> usize {
     s.bytes().filter(|b| *b == b'\n').count()
@@ -325,9 +385,68 @@ pub(crate) fn child_nodes(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode>
 
 /// Render the `text` of a significant token. Kept as a function so
 /// a future slice can do per-keyword canonicalization (e.g. `and` →
-/// `&&`) in one place.
+/// `&&`) in one place. Today it canonicalizes string-literal quotes
+/// per [`FormatOptions::quote_style`].
 pub(crate) fn token_text(t: &SyntaxToken) -> Doc {
+    if t.kind() == S::StringLiteral {
+        let style = with_ctx(|cx| cx.opts.quote_style);
+        return text(normalize_quotes(t.text(), style));
+    }
     text(t.text().to_string())
+}
+
+/// Rewrite a string literal's outer quotes to match `style`,
+/// adjusting escapes so the literal's runtime value is unchanged:
+/// the old quote char no longer needs its backslash, the new quote
+/// char gains one. All other escape sequences pass through verbatim.
+fn normalize_quotes(raw: &str, style: crate::QuoteStyle) -> String {
+    use crate::QuoteStyle;
+    let target = match style {
+        QuoteStyle::Preserve => return raw.to_string(),
+        QuoteStyle::Double => '"',
+        QuoteStyle::Single => '\'',
+    };
+    let mut chars = raw.chars();
+    let Some(open) = chars.next() else {
+        return raw.to_string();
+    };
+    // Not a quoted literal we understand, or already in the target
+    // style — emit as-is.
+    if (open != '"' && open != '\'') || open == target {
+        return raw.to_string();
+    }
+    let inner: Vec<char> = chars.collect();
+    let Some((&close, body)) = inner.split_last() else {
+        return raw.to_string();
+    };
+    if close != open {
+        return raw.to_string();
+    }
+
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push(target);
+    let mut iter = body.iter().copied();
+    while let Some(c) = iter.next() {
+        if c == '\\' {
+            match iter.next() {
+                // `\'` → `'` (or `\"` → `"`): the old quote no longer
+                // needs escaping inside the new quotes.
+                Some(esc) if esc == open => out.push(esc),
+                Some(esc) => {
+                    out.push('\\');
+                    out.push(esc);
+                }
+                None => out.push('\\'),
+            }
+        } else if c == target {
+            out.push('\\');
+            out.push(target);
+        } else {
+            out.push(c);
+        }
+    }
+    out.push(target);
+    out
 }
 
 /// Build the trailing-comma [`Doc`] for a multi-element list,

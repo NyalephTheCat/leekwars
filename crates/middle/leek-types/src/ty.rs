@@ -21,6 +21,8 @@ pub enum Type {
     Boolean,
     Integer,
     Real,
+    /// Arbitrary-precision integer (`big_integer`, `2L` literals).
+    BigInteger,
     String,
     /// `Array<T>`. Element type may be `Any`.
     Array(Box<Type>),
@@ -177,8 +179,13 @@ impl Type {
             (Type::Tuple(ms), Type::Array(el)) => ms.iter().all(|m| Type::assignable_to(m, el)),
             // Null is universally assignable in dynamic semantics.
             (Type::Null, _) | (_, Type::Null) => true,
-            // Integer ↔ Real cross is permitted (per type-system.md §5.1).
-            (Type::Integer, Type::Real) | (Type::Real, Type::Integer) => true,
+            // Numeric crosses are permitted (per type-system.md §5.1):
+            // Integer ↔ Real, and either into/out of `big_integer`
+            // (assignment to a `big_integer` slot coerces, truncating reals).
+            (
+                Type::Integer | Type::Real | Type::BigInteger,
+                Type::Integer | Type::Real | Type::BigInteger,
+            ) => true,
             // Composite outer-type match — ignore inner args.
             (Type::Array(_), Type::Array(_)) => true,
             (Type::Map(_, _), Type::Map(_, _)) => true,
@@ -292,8 +299,12 @@ pub(crate) fn unify_types(a: &Type, b: &Type) -> Type {
 /// String concatenation is handled by the caller before invoking
 /// this — `Plus` with a string operand short-circuits to String.
 pub(crate) fn promote_numeric(lhs: &Type, rhs: &Type) -> Type {
-    use Type::{Any, Boolean, Integer, Real};
+    use Type::{Any, BigInteger, Boolean, Integer, Real};
     match (lhs, rhs) {
+        // big_integer dominates every numeric mix — upstream's
+        // `BigIntegerValue` checks run before the `Double` check, so
+        // even `2L + 0.5` stays a (truncated) big_integer.
+        (BigInteger, _) | (_, BigInteger) => BigInteger,
         (Real, _) | (_, Real) => Real,
         (Integer, Integer) => Integer,
         (Integer, Boolean) | (Boolean, Integer) => Integer,
@@ -617,6 +628,7 @@ fn type_from_parts(name: &str, args: &[SyntaxNode]) -> Type {
     match lower.as_str() {
         "integer" | "int" => Type::Integer,
         "real" | "number" | "float" | "double" => Type::Real,
+        "big_integer" => Type::BigInteger,
         "boolean" | "bool" => Type::Boolean,
         "string" => Type::String,
         "null" => Type::Null,
@@ -698,6 +710,7 @@ pub(crate) fn type_from_name(name: &str) -> Type {
     match name.to_ascii_lowercase().as_str() {
         "integer" | "int" => Type::Integer,
         "real" | "number" | "float" | "double" => Type::Real,
+        "big_integer" => Type::BigInteger,
         "boolean" | "bool" => Type::Boolean,
         "string" => Type::String,
         "null" => Type::Null,
@@ -745,6 +758,7 @@ pub(crate) fn type_name(t: &Type) -> String {
         Type::Boolean => "boolean".into(),
         Type::Integer => "integer".into(),
         Type::Real => "real".into(),
+        Type::BigInteger => "big_integer".into(),
         Type::String => "string".into(),
         Type::Array(_) => "Array".into(),
         Type::Map(_, _) => "Map".into(),

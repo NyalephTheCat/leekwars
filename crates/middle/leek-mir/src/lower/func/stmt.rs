@@ -39,6 +39,7 @@ fn default_rvalue_for_type(ty: &Type) -> Option<Rvalue> {
         Type::Object => Rvalue::Object(Vec::new()),
         Type::Integer => Rvalue::Use(Operand::Const(Const::Int(0))),
         Type::Real => Rvalue::Use(Operand::Const(Const::Real(0.0f64.to_bits()))),
+        Type::BigInteger => Rvalue::Use(Operand::Const(Const::BigInt("0".into()))),
         Type::Boolean => Rvalue::Use(Operand::Const(Const::Bool(false))),
         Type::String => Rvalue::Use(Operand::Const(Const::String(String::new()))),
         _ => return None,

@@ -76,15 +76,63 @@ pub fn pipeline_hir_from_parse(params: &RecipeParams) -> Result<Pipeline, Recipe
 }
 
 /// Parse, resolve includes with `includes`, then lower HIR (multi-file path).
+///
+/// The includes step is sequenced *before* `Parse` (it only needs the
+/// entry text) so the entry parse can consume the include closure's
+/// class names ([`leek_parser::pipeline::KnownClassesArtifact`]) —
+/// `lowercaseClassFromInclude x = …` must parse as a typed declaration.
 pub fn pipeline_hir_with_includes(
     includes: Box<dyn leek_pipeline::Step>,
     params: &RecipeParams,
 ) -> Result<Pipeline, RecipeError> {
     let mut plan = leek_pipeline::RecipePlan::new();
-    plan.need::<AstArtifact>(params)?;
+    plan.need::<TokensArtifact>(params)?;
     plan.push_step(includes, &[TypeId::of::<IncludeGraphArtifact>()]);
+    plan.need::<AstArtifact>(params)?;
     plan.push_step(LowerHir::build(params), &[TypeId::of::<HirArtifact>()]);
     Ok(plan.build())
+}
+
+/// Like [`plan`], but with an include-resolution step sequenced after
+/// lexing and *before* parsing — the multi-file (project) front-end.
+/// See [`pipeline_hir_with_includes`] for why the ordering matters.
+pub fn plan_with_includes(
+    target: Target,
+    includes: Box<dyn leek_pipeline::Step>,
+    params: &RecipeParams,
+) -> Result<leek_pipeline::RecipePlan, RecipeError> {
+    let mut plan = leek_pipeline::RecipePlan::new();
+    plan.need::<TokensArtifact>(params)?;
+    plan.push_step(includes, &[TypeId::of::<IncludeGraphArtifact>()]);
+    match target {
+        Target::Tokens => {}
+        Target::Parsed => plan.need::<GreenTreeArtifact>(params)?,
+        Target::Resolved => plan.need::<ResolveArtifact>(params)?,
+        Target::TypeChecked => plan.need::<TypeCheckArtifact>(params)?,
+        Target::Hir => plan.need::<HirArtifact>(params)?,
+        Target::Linted => plan.need::<LintFindings>(params)?,
+        Target::Mir => plan.need::<MirArtifact>(params)?,
+    }
+    Ok(plan)
+}
+
+/// Build the [`plan_with_includes`] pipeline.
+pub fn pipeline_with_includes(
+    target: Target,
+    includes: Box<dyn leek_pipeline::Step>,
+    params: &RecipeParams,
+) -> Result<Pipeline, RecipeError> {
+    plan_with_includes(target, includes, params).map(leek_pipeline::RecipePlan::build)
+}
+
+/// Like [`pipeline_with_includes`], but records per-step durations into `sink`.
+pub fn pipeline_with_includes_timed(
+    target: Target,
+    includes: Box<dyn leek_pipeline::Step>,
+    params: &RecipeParams,
+    sink: &TimingSink,
+) -> Result<Pipeline, RecipeError> {
+    Ok(plan_with_includes(target, includes, params)?.build_timed(sink))
 }
 
 /// Formatting is separate because [`Fmt`] carries per-project options.

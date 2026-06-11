@@ -48,7 +48,7 @@ pub fn walk_expr_children(e: &Expr, f: &mut impl FnMut(&Expr)) {
                 f(arg);
             }
         }
-        ExprKind::Field(base, _) => f(base),
+        ExprKind::Field(base, ..) => f(base),
         ExprKind::Index(base, idx) => {
             f(base);
             f(idx);
@@ -59,9 +59,17 @@ pub fn walk_expr_children(e: &Expr, f: &mut impl FnMut(&Expr)) {
                 f(x);
             }
         }
-        ExprKind::Array(items) | ExprKind::Set(items) => {
+        ExprKind::Array(items) => {
             for it in items {
                 f(it);
+            }
+        }
+        ExprKind::Set(items) => {
+            for it in items {
+                f(&it.start);
+                if let Some(end) = &it.end {
+                    f(end);
+                }
             }
         }
         ExprKind::Map(pairs) => {
@@ -212,7 +220,7 @@ pub fn walk_expr_children_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
                 f(arg);
             }
         }
-        ExprKind::Field(base, _) => f(base),
+        ExprKind::Field(base, ..) => f(base),
         ExprKind::Index(base, idx) => {
             f(base);
             f(idx);
@@ -226,9 +234,17 @@ pub fn walk_expr_children_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
                 f(x);
             }
         }
-        ExprKind::Array(items) | ExprKind::Set(items) => {
+        ExprKind::Array(items) => {
             for it in items {
                 f(it);
+            }
+        }
+        ExprKind::Set(items) => {
+            for it in items {
+                f(&mut it.start);
+                if let Some(end) = &mut it.end {
+                    f(end);
+                }
             }
         }
         ExprKind::Map(pairs) => {

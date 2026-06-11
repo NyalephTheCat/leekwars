@@ -144,6 +144,12 @@ impl super::Emitter<'_> {
                 // to unwrap before the v1 value-semantics `copy`. Without the
                 // unwrap a boxed callee (`execute(box, …)`) silently yields null.
                 write!(buf, "var {pname} = copy(load({src}));").unwrap();
+            } else if captured_by_nested_lambda_body(&l.body, p.def) {
+                // Param captured by an inner lambda (`x -> y -> x + 1`) →
+                // bind through a runtime `Box`; the 2-arg ctor charges the
+                // same 1 op as upstream's `new Box<>(AI.this, p)` wrap.
+                write!(buf, "final Box {pname} = new Box(ai, {src});").unwrap();
+                self.ref_boxes.borrow_mut().insert(p.def);
             } else {
                 write!(buf, "var {pname} = {src};").unwrap();
             }
@@ -283,6 +289,13 @@ impl super::Emitter<'_> {
                 )
                 .unwrap();
                 self.ref_boxes.borrow_mut().insert(p.def);
+            } else if !matches!(self.opts.version, leek_syntax::Version::V1)
+                && captured_by_nested_lambda_stmts(&body.stmts, p.def)
+            {
+                // Param captured by an inner lambda → Box-bind (same shape
+                // and 1-op ctor charge as upstream's `new Box<>(AI.this, p)`).
+                write!(factory_buf, "final Box {pname} = new Box(ai, {src});").unwrap();
+                self.ref_boxes.borrow_mut().insert(p.def);
             } else {
                 write!(factory_buf, "var {pname} = {src};").unwrap();
             }
@@ -348,7 +361,7 @@ pub(crate) fn lambda_outer_captures(
                     expr(a, params, out, seen);
                 }
             }
-            ExprKind::Field(b, _) => expr(b, params, out, seen),
+            ExprKind::Field(b, ..) => expr(b, params, out, seen),
             ExprKind::Index(b, i) => {
                 expr(b, params, out, seen);
                 expr(i, params, out, seen);
@@ -365,9 +378,17 @@ pub(crate) fn lambda_outer_captures(
                     expr(x, params, out, seen);
                 }
             }
-            ExprKind::Array(items) | ExprKind::Set(items) => {
+            ExprKind::Array(items) => {
                 for i in items {
                     expr(i, params, out, seen);
+                }
+            }
+            ExprKind::Set(items) => {
+                for i in items {
+                    expr(&i.start, params, out, seen);
+                    if let Some(end) = &i.end {
+                        expr(end, params, out, seen);
+                    }
                 }
             }
             ExprKind::Map(pairs) => {
@@ -562,10 +583,13 @@ pub(crate) fn lambda_references_initializing_def(
             }
             ExprKind::Binary(_, l, r) => expr(l, def) || expr(r, def),
             ExprKind::Unary(_, x) | ExprKind::Postfix(_, x) => expr(x, def),
-            ExprKind::Field(b, _) => expr(b, def),
+            ExprKind::Field(b, ..) => expr(b, def),
             ExprKind::Index(b, i) => expr(b, def) || expr(i, def),
             ExprKind::Ternary(c, t, e_) => expr(c, def) || expr(t, def) || expr(e_, def),
-            ExprKind::Array(items) | ExprKind::Set(items) => items.iter().any(|i| expr(i, def)),
+            ExprKind::Array(items) => items.iter().any(|i| expr(i, def)),
+            ExprKind::Set(items) => items
+                .iter()
+                .any(|i| expr(&i.start, def) || i.end.as_ref().is_some_and(|e2| expr(e2, def))),
             ExprKind::Map(pairs) => pairs.iter().any(|(k, v)| expr(k, def) || expr(v, def)),
             ExprKind::Object(fields) => fields.iter().any(|(_, v)| expr(v, def)),
             ExprKind::Cast(b, _) => expr(b, def),
@@ -640,14 +664,15 @@ pub(crate) fn lambda_writes_to_outer(
                 };
                 from_callee || c.args.iter().any(|a| expr(a, captures))
             }
-            ExprKind::Field(b, _) => expr(b, captures),
+            ExprKind::Field(b, ..) => expr(b, captures),
             ExprKind::Index(b, i) => expr(b, captures) || expr(i, captures),
             ExprKind::Ternary(c, t, e_) => {
                 expr(c, captures) || expr(t, captures) || expr(e_, captures)
             }
-            ExprKind::Array(items) | ExprKind::Set(items) => {
-                items.iter().any(|i| expr(i, captures))
-            }
+            ExprKind::Array(items) => items.iter().any(|i| expr(i, captures)),
+            ExprKind::Set(items) => items.iter().any(|i| {
+                expr(&i.start, captures) || i.end.as_ref().is_some_and(|e2| expr(e2, captures))
+            }),
             ExprKind::Map(pairs) => pairs
                 .iter()
                 .any(|(k, v)| expr(k, captures) || expr(v, captures)),
@@ -696,6 +721,82 @@ pub(crate) fn lambda_writes_to_outer(
         b.stmts.iter().any(|s| stmt(s, captures))
     }
     block_walk(block, captures)
+}
+
+/// True when `def` is referenced anywhere inside `e`, descending through
+/// nested lambda bodies (unlike the capture walkers above, which treat a
+/// lambda as a leaf).
+fn refs_def_deep(e: &Expr, def: leek_hir::DefId) -> bool {
+    match &e.kind {
+        ExprKind::Name(NameRef::Local(id)) if *id == def => true,
+        ExprKind::Lambda(l) => match &l.body {
+            leek_hir::LambdaBody::Expr(b) => refs_def_deep(b, def),
+            leek_hir::LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_refs_def_deep(s, def)),
+        },
+        _ => {
+            // `walk_expr_children` doesn't surface a `Callee::Function`
+            // name (it's a NameRef, not a child Expr) — check it here so
+            // a captured first-class callable param (`a()`) is caught.
+            if let ExprKind::Call(c) = &e.kind
+                && matches!(&c.callee, leek_hir::Callee::Function(NameRef::Local(id)) if *id == def)
+            {
+                return true;
+            }
+            let mut found = false;
+            leek_hir::walk_expr_children(e, &mut |c| found = found || refs_def_deep(c, def));
+            found
+        }
+    }
+}
+
+fn stmt_refs_def_deep(s: &Stmt, def: leek_hir::DefId) -> bool {
+    let mut found = false;
+    leek_hir::walk_stmt_child_exprs(s, &mut |e| found = found || refs_def_deep(e, def));
+    if !found {
+        leek_hir::walk_stmt_child_stmts(s, &mut |c| found = found || stmt_refs_def_deep(c, def));
+    }
+    found
+}
+
+fn captured_in_expr(e: &Expr, def: leek_hir::DefId) -> bool {
+    if let ExprKind::Lambda(l) = &e.kind {
+        return match &l.body {
+            leek_hir::LambdaBody::Expr(b) => refs_def_deep(b, def),
+            leek_hir::LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_refs_def_deep(s, def)),
+        };
+    }
+    let mut found = false;
+    leek_hir::walk_expr_children(e, &mut |c| found = found || captured_in_expr(c, def));
+    found
+}
+
+/// True when a lambda nested anywhere inside `stmts` references `def`
+/// (at any lambda-nesting depth). Upstream boxes any function/lambda
+/// parameter captured by a nested closure — read *or* write — at the
+/// callee's entry (`final var u_a = new Box<>(AI.this, p_a)`); the
+/// 2-arg Box ctor charges 1 op per call, and writes through the box
+/// propagate into the closure. The emitter mirrors the binding for
+/// both value semantics and ops parity.
+pub(crate) fn captured_by_nested_lambda_stmts(stmts: &[Stmt], def: leek_hir::DefId) -> bool {
+    fn walk(s: &Stmt, def: leek_hir::DefId) -> bool {
+        let mut found = false;
+        leek_hir::walk_stmt_child_exprs(s, &mut |e| found = found || captured_in_expr(e, def));
+        if !found {
+            leek_hir::walk_stmt_child_stmts(s, &mut |c| found = found || walk(c, def));
+        }
+        found
+    }
+    stmts.iter().any(|s| walk(s, def))
+}
+
+/// [`captured_by_nested_lambda_stmts`] for a lambda's own body — its
+/// params get the same Box treatment when an inner lambda captures them
+/// (`x -> y -> x + 1` boxes `x` at the outer lambda's entry).
+pub(crate) fn captured_by_nested_lambda_body(body: &LambdaBody, def: leek_hir::DefId) -> bool {
+    match body {
+        LambdaBody::Expr(e) => captured_in_expr(e, def),
+        LambdaBody::Block(b) => captured_by_nested_lambda_stmts(&b.stmts, def),
+    }
 }
 
 /// Compute the file-wide set of VarDecl-declared locals that must be heap-boxed

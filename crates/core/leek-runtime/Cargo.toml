@@ -11,6 +11,9 @@ leek-hir = { workspace = true }
 # Op-cost / batch-multiplier catalog for the builtins (a pure data crate
 # with no leek dependencies of its own).
 leek-builtins = { workspace = true }
+# Arbitrary-precision integers (`2L` big_integer literals & arithmetic).
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
 
 [lints]
 workspace = true

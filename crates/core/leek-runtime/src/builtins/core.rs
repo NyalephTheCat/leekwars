@@ -15,6 +15,16 @@ pub(crate) fn dispatch_constant(name: &str) -> Option<Value> {
         "INFINITY" | "Infinity" => Value::Real(f64::INFINITY),
         "NAN" | "NaN" => Value::Real(f64::NAN),
         "E" => Value::Real(std::f64::consts::E),
+        // Engine limits and language-level fight/color constants —
+        // see upstream `runner/LeekConstants.java`.
+        "INSTRUCTIONS_LIMIT" => Value::Int(300_000),
+        "OPERATIONS_LIMIT" => Value::Int(20_000_000),
+        "CELL_EMPTY" => Value::Int(0),
+        "CELL_PLAYER" => Value::Int(1),
+        "CELL_OBSTACLE" => Value::Int(2),
+        "COLOR_RED" => Value::Int(0xFF_00_00),
+        "COLOR_GREEN" => Value::Int(0x00_FF_00),
+        "COLOR_BLUE" => Value::Int(0x00_00_FF),
         // Type tags upstream uses for `typeOf` — see
         // `runner/values/LeekValueType.java`.
         "TYPE_NULL" => Value::Int(0),
@@ -28,10 +38,10 @@ pub(crate) fn dispatch_constant(name: &str) -> Option<Value> {
         "TYPE_MAP" => Value::Int(8),
         "TYPE_SET" => Value::Int(9),
         "TYPE_INTERVAL" => Value::Int(10),
-        // Sort flags.
+        // Sort flags. (There is no `SORT_RANDOM` constant upstream —
+        // mode 2 is `ArrayLeekValue.RANDOM`, internal to `shuffle`.)
         "SORT_ASC" => Value::Int(0),
         "SORT_DESC" => Value::Int(1),
-        "SORT_RANDOM" => Value::Int(2),
         _ => return None,
     })
 }
@@ -49,6 +59,7 @@ pub(crate) fn dispatch_unary_math(name: &str, args: &[Value]) -> Option<Value> {
         "abs" => match a {
             Value::Int(i) => Value::Int(i.wrapping_abs()),
             Value::Real(r) => Value::Real(r.abs()),
+            Value::BigInt(b) => Value::BigInt(Rc::new(num_traits::Signed::abs(&**b))),
             Value::Bool(b) => Value::Int(i64::from(*b)),
             // `abs(null)` returns `0.0` (real, not int) — matches
             // upstream's `LeekFunctions.abs` return type promotion.
@@ -125,8 +136,17 @@ pub(crate) fn dispatch_unary_math(name: &str, args: &[Value]) -> Option<Value> {
         "trailingZeros" => Value::Int(i64::from(a.as_int()?.trailing_zeros())),
         "bitReverse" => Value::Int(a.as_int()?.reverse_bits()),
         "byteReverse" => Value::Int(a.as_int()?.swap_bytes()),
-        "binString" => Value::String(Rc::new(format!("{:b}", a.as_int()?))),
-        "hexString" => Value::String(Rc::new(format!("{:x}", a.as_int()?))),
+        // big_integer keeps full precision via `BigInteger.toString(radix)`
+        // (signed `-…` form, same as num-bigint's `to_str_radix`); the long
+        // versions use Java's unsigned-bits `toBinaryString`/`toHexString`.
+        "binString" => match a {
+            Value::BigInt(b) => Value::String(Rc::new(b.to_str_radix(2))),
+            _ => Value::String(Rc::new(format!("{:b}", a.as_int()?))),
+        },
+        "hexString" => match a {
+            Value::BigInt(b) => Value::String(Rc::new(b.to_str_radix(16))),
+            _ => Value::String(Rc::new(format!("{:x}", a.as_int()?))),
+        },
         // `realBits`/`bitsToReal` reinterpret the IEEE-754 bit pattern, so the
         // signed/unsigned casts are deliberate (no checked form applies).
         #[allow(clippy::cast_possible_wrap)]
@@ -142,7 +162,7 @@ pub(crate) fn dispatch_unary_math(name: &str, args: &[Value]) -> Option<Value> {
 pub(crate) fn type_tag(v: &Value) -> i64 {
     match v {
         Value::Null => 0,
-        Value::Int(_) | Value::Real(_) => 1,
+        Value::Int(_) | Value::Real(_) | Value::BigInt(_) => 1,
         Value::Bool(_) => 2,
         Value::String(_) => 3,
         Value::Array(_) => 4,

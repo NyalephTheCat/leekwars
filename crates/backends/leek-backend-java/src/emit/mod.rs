@@ -516,12 +516,23 @@ pub(crate) fn sanitize_ident(name: &str) -> String {
 /// literal and calling the result: 2 ops per index level (`executeArrayAccess`),
 /// but only when the index chain is rooted in an array literal. `0` otherwise.
 fn array_literal_index_call_cost(callee: &Expr) -> u32 {
+    // `[ … ][i](args)`: the array *literal* in callee position never
+    // gets an `ops(...)` wrapper of its own (the whole call becomes
+    // one `executeArrayAccess` expression), so its element cost
+    // (2/element, see `ExprKind::Array`) plus the index expressions'
+    // costs must be charged here. The index levels themselves are
+    // statically free — mirrors `LeekArrayAccess.analyze`. Restricted
+    // to a literal-rooted chain so object / variable receivers keep
+    // their own cost.
+    fn literal_rooted(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Index(base, _) => literal_rooted(base),
+            ExprKind::Array(_) => true,
+            _ => false,
+        }
+    }
     match &callee.kind {
-        ExprKind::Array(_) => 0,
-        ExprKind::Index(base, _) => match &base.kind {
-            ExprKind::Array(_) | ExprKind::Index(..) => 2 + array_literal_index_call_cost(base),
-            _ => 0,
-        },
+        ExprKind::Index(..) if literal_rooted(callee) => expr_op_cost(callee),
         _ => 0,
     }
 }
@@ -567,7 +578,7 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
         // ops wrapper. Instance/object field access keeps the
         // standard `1 + base.ops` formula from
         // `LeekObjectAccess.analyze`.
-        ExprKind::Field(b, _) => {
+        ExprKind::Field(b, ..) => {
             if matches!(&b.kind, ExprKind::Name(NameRef::Builtin(_))) {
                 0
             } else {
@@ -579,15 +590,28 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
         // (`ArrayLeekValue.READ_OPERATIONS`) on the read itself.
         // Mirrors upstream's `LeekArrayAccess.analyze`.
         ExprKind::Index(b, i) => expr_op_cost(b) + expr_op_cost(i),
+        // A slice (`a[i:j]`) has no static cost either — upstream's
+        // `LeekArrayAccess.analyze` only sums the operand costs; the
+        // `range*`/`rangeString*` runtime helpers self-charge.
         ExprKind::Slice(s) => {
-            1 + expr_op_cost(&s.base)
+            expr_op_cost(&s.base)
                 + s.start.as_deref().map_or(0, expr_op_cost)
                 + s.end.as_deref().map_or(0, expr_op_cost)
                 + s.step.as_deref().map_or(0, expr_op_cost)
         }
-        ExprKind::Array(items) | ExprKind::Set(items) => {
+        ExprKind::Array(items) => {
             // The reference charges 2 per element (allocation + put).
             items.iter().map(|e| 2 + expr_op_cost(e)).sum::<u32>()
+        }
+        ExprKind::Set(items) => {
+            // 2 per element expression — a range (`a..b`) charges both
+            // bounds (upstream `LeekSet.analyze`: `2 + ops` per bound).
+            items
+                .iter()
+                .map(|i| {
+                    2 + expr_op_cost(&i.start) + i.end.as_ref().map_or(0, |e2| 2 + expr_op_cost(e2))
+                })
+                .sum::<u32>()
         }
         ExprKind::Map(pairs) => pairs
             .iter()
@@ -692,7 +716,7 @@ pub(crate) fn is_pure_value_expr(e: &Expr) -> bool {
         &e.kind,
         ExprKind::Literal(_)
             | ExprKind::Name(_)
-            | ExprKind::Field(_, _)
+            | ExprKind::Field(..)
             | ExprKind::Index(_, _)
             | ExprKind::Slice(_)
             | ExprKind::Lambda(_)
@@ -959,17 +983,6 @@ pub(crate) fn builtin_fn_wrapper(name: &str, version: leek_syntax::Version) -> O
             s
         }
     };
-    // Charge the builtin's per-call op cost at wrapper entry —
-    // mirrors upstream's `writeAnonymousSystemFunctions` which
-    // emits `ops(<cost>);` ahead of the call. Without it the
-    // higher-order builtin (`arrayMap([1,2,3], cos)`) under-counts
-    // by `cost × n` ops.
-    let entry_charge = builtin_call_cost(name);
-    let body = if entry_charge > 0 {
-        format!("ops({entry_charge}); {body}")
-    } else {
-        body
-    };
     // Guard against being called with too few args — defensively
     // return null instead of NPEing on `values[i]`. Matches the
     // shape of upstream's lambda emission.
@@ -977,6 +990,20 @@ pub(crate) fn builtin_fn_wrapper(name: &str, version: leek_syntax::Version) -> O
         format!("if (values.length < {arity}) return null; {body}")
     } else {
         body
+    };
+    // Charge the builtin's per-call op cost at wrapper entry —
+    // mirrors upstream's `writeAnonymousSystemFunctions` which
+    // emits `ops(<cost>);` ahead of the call. The charge lands
+    // BEFORE the too-few-args guard (upstream: `ops(30); if
+    // (values.length < 1) return null; …`), so even a no-arg
+    // `[cos][0]()` invocation pays the cost. Without it the
+    // higher-order builtin (`arrayMap([1,2,3], cos)`) under-counts
+    // by `cost × n` ops.
+    let entry_charge = builtin_call_cost(name);
+    let guarded = if entry_charge > 0 {
+        format!("ops({entry_charge}); {guarded}")
+    } else {
+        guarded
     };
     Some(format!(
         "new FunctionLeekValue({arity}, \"#Function {name}\") {{ \
@@ -990,23 +1017,22 @@ pub(crate) fn builtin_fn_wrapper(name: &str, version: leek_syntax::Version) -> O
 /// `mangled` is `f_<name>`; `arity` is the function's declared
 /// parameter count.
 pub(crate) fn user_fn_wrapper(mangled: &str, arity: usize) -> String {
+    // Upstream's `ufunction_<name>` wrapper null-pads missing args
+    // and still calls (`f(values.length > 0 ? values[0] : null)`) —
+    // an early `return null` would skip the callee body entirely,
+    // dropping both its result and its op charges.
     let mut body = format!("return {mangled}(");
     for i in 0..arity {
         if i > 0 {
             body.push_str(", ");
         }
-        write!(body, "values[{i}]").unwrap();
+        write!(body, "values.length > {i} ? (Object) values[{i}] : null").unwrap();
     }
     body.push_str(");");
-    let guarded = if arity > 0 {
-        format!("if (values.length < {arity}) return null; {body}")
-    } else {
-        body
-    };
     format!(
         "new FunctionLeekValue({arity}) {{ \
          public Object run(AI ai, Object thiz, Object... values) \
-         throws LeekRunException {{ {guarded} }} }}"
+         throws LeekRunException {{ {body} }} }}"
     )
 }
 
@@ -1051,7 +1077,7 @@ pub(crate) fn collect_shadowed_builtins(
             ExprKind::Unary(_, x)
             | ExprKind::Postfix(_, x)
             | ExprKind::Cast(x, _)
-            | ExprKind::Field(x, _) => scan_expr(x, out),
+            | ExprKind::Field(x, ..) => scan_expr(x, out),
             ExprKind::Index(b, i) => {
                 scan_expr(b, out);
                 scan_expr(i, out);
@@ -1067,9 +1093,17 @@ pub(crate) fn collect_shadowed_builtins(
                     scan_expr(a, out);
                 }
             }
-            ExprKind::Array(items) | ExprKind::Set(items) => {
+            ExprKind::Array(items) => {
                 for e in items {
                     scan_expr(e, out);
+                }
+            }
+            ExprKind::Set(items) => {
+                for i in items {
+                    scan_expr(&i.start, out);
+                    if let Some(end) = &i.end {
+                        scan_expr(end, out);
+                    }
                 }
             }
             ExprKind::Map(pairs) => {

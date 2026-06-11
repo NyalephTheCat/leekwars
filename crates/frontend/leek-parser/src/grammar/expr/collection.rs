@@ -128,16 +128,31 @@ fn set_literal(p: &mut Parser) {
     p.start_node(S::SetExpr);
     p.bump(); // '{'
     if !p.at(S::RBrace) {
-        expr(p);
+        set_element(p);
         while p.eat(S::Comma) {
             if p.at(S::RBrace) {
                 break;
             }
-            expr(p);
+            set_element(p);
         }
     }
     p.expect(S::RBrace);
     p.finish_node();
+}
+
+/// One set-literal element: a plain expression, or an inclusive
+/// integer range `a..b` (`<1..3>` → `<1, 2, 3>`, descending allowed —
+/// upstream #2335). The range form wraps both bounds in a
+/// [`S::SetRangeElement`] node.
+fn set_element(p: &mut Parser) {
+    let cp = p.checkpoint();
+    expr(p);
+    if p.at(S::DotDot) {
+        p.start_node_at(cp, S::SetRangeElement);
+        p.bump(); // '..'
+        expr(p);
+        p.finish_node();
+    }
 }
 
 fn brace_first_sep_is_colon(p: &Parser) -> bool {
@@ -233,12 +248,12 @@ pub(super) fn angle_set_or_map(p: &mut Parser) {
         p.start_node(S::SetExpr);
         p.bump(); // '<'
         if !p.at(S::Gt) {
-            expr(p);
+            set_element(p);
             while p.eat(S::Comma) {
                 if p.at(S::Gt) {
                     break;
                 }
-                expr(p);
+                set_element(p);
             }
         }
         let _ = p.eat(S::Gt);

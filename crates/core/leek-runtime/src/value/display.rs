@@ -70,6 +70,18 @@ pub(super) fn loose_eq_inner(
             crate::int_to_real(*i) == *r
         }
         (Value::Bool(b), Value::Int(i)) | (Value::Int(i), Value::Bool(b)) => i64::from(*b) == *i,
+        // big_integer `==`: exact against integer-like operands
+        // (upstream `bigCompare`), magnitude (double) against reals.
+        (Value::BigInt(a), Value::BigInt(b)) => a == b,
+        (Value::BigInt(a), Value::Int(b)) | (Value::Int(b), Value::BigInt(a)) => {
+            **a == num_bigint::BigInt::from(*b)
+        }
+        (Value::BigInt(a), Value::Bool(b)) | (Value::Bool(b), Value::BigInt(a)) => {
+            **a == num_bigint::BigInt::from(i64::from(*b))
+        }
+        (Value::BigInt(a), Value::Real(r)) | (Value::Real(r), Value::BigInt(a)) => {
+            crate::value::bigint::big_to_f64(a) == *r
+        }
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Array(a), Value::Array(b)) => {
             let aa = a.borrow();
@@ -225,6 +237,7 @@ fn write_value_inner(
         Value::Bool(false) => f.write_str("false"),
         Value::Int(i) => write!(f, "{i}"),
         Value::Real(r) => write_real(f, *r),
+        Value::BigInt(b) => f.write_str(&super::bigint::big_display(b)),
         Value::String(s) => write_string_quoted(f, s),
         Value::Array(a) => {
             f.write_str("[")?;
@@ -656,6 +669,17 @@ pub fn key_repr(v: &Value) -> String {
             s
         }
         Value::Null => "null".into(),
+        // big_integer keys are distinct from integer keys upstream
+        // (`BigIntegerValue.equals` only matches other BigIntegerValue),
+        // so `5` and `5L` coexist in a map — hence the capital prefix.
+        // Uses the full decimal, not the cropped display form.
+        Value::BigInt(b) => {
+            let mut s = String::with_capacity(24);
+            s.push('I');
+            s.push(':');
+            let _ = write!(&mut s, "{}", super::bigint::big_full_decimal(b));
+            s
+        }
         // Composite keys — the Display call here might trip into a
         // self-referential map, so keep the cycle-aware writer.
         _ => {

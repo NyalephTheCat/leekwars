@@ -28,6 +28,7 @@ pub(crate) fn lit_to_const(lit: &Literal) -> Const {
     match lit {
         Literal::Int(i) => Const::Int(*i),
         Literal::Real(f) => Const::real(*f),
+        Literal::BigInt(s) => Const::BigInt(s.clone()),
         Literal::String(s) => Const::String(s.clone()),
         Literal::Bool(b) => Const::Bool(*b),
         Literal::Null => Const::Null,
@@ -335,7 +336,7 @@ pub(crate) fn walk_expr_captures(
                 walk_expr_captures(a, declared, captures, seen, needs_this);
             }
         }
-        ExprKind::Field(b, _) => walk_expr_captures(b, declared, captures, seen, needs_this),
+        ExprKind::Field(b, ..) => walk_expr_captures(b, declared, captures, seen, needs_this),
         ExprKind::Index(b, i) => {
             walk_expr_captures(b, declared, captures, seen, needs_this);
             walk_expr_captures(i, declared, captures, seen, needs_this);
@@ -352,9 +353,17 @@ pub(crate) fn walk_expr_captures(
                 walk_expr_captures(x, declared, captures, seen, needs_this);
             }
         }
-        ExprKind::Array(items) | ExprKind::Set(items) => {
+        ExprKind::Array(items) => {
             for x in items {
                 walk_expr_captures(x, declared, captures, seen, needs_this);
+            }
+        }
+        ExprKind::Set(items) => {
+            for x in items {
+                walk_expr_captures(&x.start, declared, captures, seen, needs_this);
+                if let Some(end) = &x.end {
+                    walk_expr_captures(end, declared, captures, seen, needs_this);
+                }
             }
         }
         ExprKind::Map(pairs) => {

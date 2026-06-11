@@ -356,6 +356,14 @@ impl FieldExpr {
             .filter_map(rowan::NodeOrToken::into_token)
             .find(|t| matches!(t.kind(), S::Ident | S::KwClass | S::KwSuper))
     }
+    /// True for the optional form `a?.b` (#2272) — the node carries
+    /// the `?` token before the dot.
+    pub fn is_optional(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|t| t.kind() == S::Question)
+    }
 }
 
 impl Block {

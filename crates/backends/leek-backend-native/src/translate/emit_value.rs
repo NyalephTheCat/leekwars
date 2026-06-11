@@ -163,6 +163,14 @@ impl Tx<'_, '_> {
             // A string literal: materialize its bytes in-binary and box them at
             // runtime (relocatable — see `const_string`).
             Operand::Const(Const::String(s)) => Ok((self.const_string(s)?, ValTy::Ref)),
+            // A big_integer literal: same scheme, but the decimal digits parse
+            // into an arbitrary-precision value (`leek_const_bigint`).
+            Operand::Const(Const::BigInt(s)) => {
+                let (ptr, lenv) = self.const_str_bytes(s);
+                let f = self.imports.rt("leek_const_bigint")?;
+                let inst = self.b.ins().call(f, &[ptr, lenv]);
+                Ok((self.b.inst_results(inst)[0], ValTy::Ref))
+            }
             // A null literal: build a fresh `Null` handle at runtime rather than
             // baking a pointer to the compiler process's null singleton.
             Operand::Const(Const::Null) => {
@@ -270,7 +278,7 @@ impl Tx<'_, '_> {
     pub(super) fn operand_is_ref(&self, op: &Operand) -> bool {
         match op {
             Operand::Local(id) => self.var_tys[id.0 as usize] == ValTy::Ref,
-            Operand::Const(Const::Null | Const::String(_)) => true,
+            Operand::Const(Const::Null | Const::String(_) | Const::BigInt(_)) => true,
             _ => false,
         }
     }

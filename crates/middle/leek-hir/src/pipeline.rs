@@ -159,12 +159,29 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         .get::<AstArtifact>()
         .and_then(|a| a.0.clone())
         .expect("LowerHir::run guards on AstArtifact presence outside the salsa path");
-    if let Some(graph) = cx.get::<IncludeGraphArtifact>() {
-        let includes: Vec<_> = graph
+    // Multi-file path — only when the include graph actually found
+    // included files; an entry without `include(...)` stays on the
+    // single-file path below (identical behavior, prelude handling
+    // included).
+    if let Some(graph) = cx.get::<IncludeGraphArtifact>()
+        && !graph.includes.is_empty()
+    {
+        let mut includes: Vec<_> = graph
             .includes
             .iter()
             .map(|inc| (inc.ast.clone(), inc.source, inc.path.clone()))
             .collect();
+        // Active library headers (e.g. leekwars) merge in as a
+        // synthetic front include: their bodiless signatures are
+        // pre-declared before every user file's, mirroring the
+        // single-file prelude path. No `include` statement resolves
+        // to the synthetic path, so it contributes no main block.
+        if let Some((prelude, prelude_src)) = parse_prelude(cx.flags().prelude) {
+            includes.insert(
+                0,
+                (prelude, prelude_src, std::path::PathBuf::from("<prelude>")),
+            );
+        }
         let (hir, diagnostics) = lower_files(
             (&ast, cx.source(), &graph.entry_path),
             &includes,

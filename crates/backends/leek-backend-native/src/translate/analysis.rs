@@ -7,7 +7,7 @@
 use super::classes::{aliased_class_locals, classref_locals, new_class_locals, receiver_class};
 use super::{
     Callee, Const, DefId, HashMap, HashSet, LocalId, MirFunction, MirProgram, Operand, Place,
-    Rvalue, Statement, Terminator,
+    Rvalue, SetElem, Statement, Terminator,
 };
 
 /// The set of `program.functions` indices that are lambda bodies — i.e.
@@ -817,7 +817,11 @@ pub(super) fn rvalue_mentions(r: &Rvalue, l: LocalId) -> bool {
         Rvalue::Field(x, _) => *x == l,
         Rvalue::Index(x, o) => *x == l || op_mentions(o, l),
         Rvalue::Slice(x, b) => *x == l || slice_bounds_mentions(b, l),
-        Rvalue::Array(ops) | Rvalue::Set(ops) => ops.iter().any(|o| op_mentions(o, l)),
+        Rvalue::Array(ops) => ops.iter().any(|o| op_mentions(o, l)),
+        Rvalue::Set(es) => es
+            .iter()
+            .flat_map(SetElem::operands)
+            .any(|o| op_mentions(o, l)),
         Rvalue::New { args, .. } => args.iter().any(|o| op_mentions(o, l)),
         Rvalue::Map(pairs) => pairs
             .iter()

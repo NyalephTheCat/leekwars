@@ -6,7 +6,7 @@ use leek_types::Type;
 
 use crate::ir::{
     BinaryOp, Call, Callee, Expr, ExprKind, IntervalExpr, LambdaBody, LambdaExpr, Literal, NameRef,
-    NewExpr, PostfixOp, SliceExpr, UnaryOp,
+    NewExpr, PostfixOp, SetItem, SliceExpr, UnaryOp,
 };
 
 use super::traits::LowerExpr;
@@ -37,7 +37,7 @@ impl LowerExpr for Lowerer {
                                 ty: Type::Any,
                                 span,
                             };
-                            ExprKind::Field(Box::new(this_expr), name.clone())
+                            ExprKind::Field(Box::new(this_expr), name.clone(), false)
                         } else if c.static_field_names.contains(name)
                             || c.static_method_names.contains(name)
                         {
@@ -50,7 +50,7 @@ impl LowerExpr for Lowerer {
                                 ty: Type::Any,
                                 span,
                             };
-                            ExprKind::Field(Box::new(class_expr), name.clone())
+                            ExprKind::Field(Box::new(class_expr), name.clone(), false)
                         } else if c.method_names.contains(name) {
                             // Bare reference to an instance method
                             // value — rewrite to `this.method`. The
@@ -61,7 +61,7 @@ impl LowerExpr for Lowerer {
                                 ty: Type::Any,
                                 span,
                             };
-                            ExprKind::Field(Box::new(this_expr), name.clone())
+                            ExprKind::Field(Box::new(this_expr), name.clone(), false)
                         } else {
                             ExprKind::Name(nr)
                         }
@@ -90,7 +90,7 @@ impl LowerExpr for Lowerer {
             AstExpr::Field(f) => {
                 let base = self.lower_expr_or_null(f.base(), span);
                 let field = f.field().map(|t| t.text().to_string()).unwrap_or_default();
-                ExprKind::Field(Box::new(base), field)
+                ExprKind::Field(Box::new(base), field, f.is_optional())
             }
             AstExpr::Map(m) => {
                 let mut pairs = Vec::new();
@@ -104,8 +104,24 @@ impl LowerExpr for Lowerer {
             AstExpr::Set(s) => ExprKind::Set(
                 s.syntax()
                     .children()
-                    .filter_map(AstExpr::cast)
-                    .map(|e| self.lower_expr(&e))
+                    .filter_map(|child| {
+                        if child.kind() == SyntaxKind::SetRangeElement {
+                            // `a..b` range element — both bounds are
+                            // expression children of the wrapper node.
+                            let mut bounds = child.children().filter_map(AstExpr::cast);
+                            let start = bounds.next()?;
+                            let end = bounds.next();
+                            Some(SetItem {
+                                start: self.lower_expr(&start),
+                                end: end.map(|e| self.lower_expr(&e)),
+                            })
+                        } else {
+                            AstExpr::cast(child).map(|e| SetItem {
+                                start: self.lower_expr(&e),
+                                end: None,
+                            })
+                        }
+                    })
                     .collect(),
             ),
             AstExpr::Object(o) => {
@@ -261,10 +277,16 @@ impl Lowerer {
         let text = tok.text();
         match tok.kind() {
             SyntaxKind::IntLiteral => {
-                // Strip underscore separators and parse — falls back
-                // to 0 if a bad-suffix lexer diagnostic already
-                // covered the case.
-                Literal::Int(super::util::parse_int_text(text))
+                // An `L` suffix marks a big_integer literal (`2L`,
+                // `0xFFL`) — kept as canonical decimal digits.
+                if text.ends_with('L') {
+                    Literal::BigInt(super::util::parse_bigint_text(text))
+                } else {
+                    // Strip underscore separators and parse — falls back
+                    // to 0 if a bad-suffix lexer diagnostic already
+                    // covered the case.
+                    Literal::Int(super::util::parse_int_text(text))
+                }
             }
             SyntaxKind::RealLiteral => {
                 let cleaned: String = text.chars().filter(|c| *c != '_').collect();
@@ -473,6 +495,7 @@ impl Lowerer {
                             Callee::Method {
                                 receiver,
                                 method: name.clone(),
+                                optional: false,
                             }
                         } else if matches_static {
                             let receiver = Expr {
@@ -483,6 +506,7 @@ impl Lowerer {
                             Callee::Method {
                                 receiver,
                                 method: name.clone(),
+                                optional: false,
                             }
                         } else {
                             Callee::Function(nr)
@@ -497,7 +521,11 @@ impl Lowerer {
             Some(AstExpr::Field(f)) => {
                 let receiver = self.lower_expr_or_null(f.base(), span);
                 let method = f.field().map(|t| t.text().to_string()).unwrap_or_default();
-                Callee::Method { receiver, method }
+                Callee::Method {
+                    receiver,
+                    method,
+                    optional: f.is_optional(),
+                }
             }
             Some(other) => Callee::Expr(self.lower_expr(&other)),
             None => Callee::Expr(self.null_expr(span)),

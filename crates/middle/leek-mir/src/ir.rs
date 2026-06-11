@@ -559,6 +559,27 @@ pub struct SliceBounds {
     pub step: Option<Operand>,
 }
 
+/// One set-literal element: a single value, or an inclusive integer
+/// range `start..end` expanded at runtime in insertion order
+/// (`<1..3>` → `<1, 2, 3>`, descending allowed — upstream #2335).
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetElem {
+    One(Operand),
+    Range(Operand, Operand),
+}
+
+impl SetElem {
+    /// All operands of this element, for generic operand scans.
+    pub fn operands(&self) -> impl Iterator<Item = &Operand> {
+        let (first, second) = match self {
+            Self::One(a) => (a, None),
+            Self::Range(a, b) => (a, Some(b)),
+        };
+        std::iter::once(first).chain(second)
+    }
+}
+
 /// An r-value — a (possibly nontrivial) value-producing operation.
 /// Every nested sub-expression is already a flat [`Operand`].
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
@@ -581,7 +602,7 @@ pub enum Rvalue {
     Slice(LocalId, SliceBounds),
     Array(Vec<Operand>),
     Map(Vec<(Operand, Operand)>),
-    Set(Vec<Operand>),
+    Set(Vec<SetElem>),
     Object(Vec<(String, Operand)>),
     /// `new ClassName(args)`. Args are flat operands.
     New {
@@ -675,6 +696,9 @@ pub enum Const {
     /// Stored as `f64::to_bits` so [`Const`] can be `Eq`/`Hash`able
     /// for the switch-arm table. Convert with [`Const::as_real`].
     Real(u64),
+    /// `big_integer` literal — canonical decimal digits (parsed into an
+    /// arbitrary-precision value at materialization time).
+    BigInt(String),
     String(String),
 }
 
@@ -688,6 +712,7 @@ impl std::hash::Hash for Const {
             Const::Bool(b) => b.hash(state),
             Const::Int(i) => i.hash(state),
             Const::Real(bits) => bits.hash(state),
+            Const::BigInt(s) => s.hash(state),
             Const::String(s) => s.hash(state),
         }
     }

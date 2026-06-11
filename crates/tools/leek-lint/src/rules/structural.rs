@@ -110,9 +110,12 @@ fn fp_expr(e: &Expr, o: &mut String) {
             }
             o.push(')');
         }
-        ExprKind::Field(b, name) => {
+        ExprKind::Field(b, name, optional) => {
             o.push('F');
             fp_expr(b, o);
+            if *optional {
+                o.push('?');
+            }
             let _ = write!(o, ".{name}");
         }
         ExprKind::Index(b, i) => {
@@ -146,7 +149,11 @@ fn fp_expr(e: &Expr, o: &mut String) {
         ExprKind::Set(v) => {
             o.push('T');
             for x in v {
-                fp_expr(x, o);
+                fp_expr(&x.start, o);
+                if let Some(end) = &x.end {
+                    o.push('.');
+                    fp_expr(end, o);
+                }
                 o.push(',');
             }
         }
@@ -233,9 +240,16 @@ fn fp_callee(c: &Callee, o: &mut String) {
             o.push('f');
             fp_name(n, o);
         }
-        Callee::Method { receiver, method } => {
+        Callee::Method {
+            receiver,
+            method,
+            optional,
+        } => {
             o.push('m');
             fp_expr(receiver, o);
+            if *optional {
+                o.push('?');
+            }
             let _ = write!(o, ".{method}");
         }
         Callee::Expr(e) => {
@@ -257,6 +271,9 @@ fn fp_lit(l: &Literal, o: &mut String) {
         }
         Literal::String(s) => {
             let _ = write!(o, "s{}:{s}", s.len());
+        }
+        Literal::BigInt(d) => {
+            let _ = write!(o, "I{d}");
         }
         Literal::Bool(b) => o.push(if *b { 'T' } else { 'F' }),
         Literal::Null => o.push('z'),

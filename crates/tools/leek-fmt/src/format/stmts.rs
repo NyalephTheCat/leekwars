@@ -3,11 +3,11 @@
 use leek_syntax::language::NodeOrToken;
 use leek_syntax::{SyntaxKind as S, SyntaxNode};
 
-use crate::doc::{Doc, concat, group, hardline, indent, softline, space, text};
+use crate::doc::{Doc, concat, group, hardline, indent, line, softline, space, text};
 
 use super::{
-    block_lead, child_nodes, comma_sep, count_newlines, fmt_node, format_raw, is_trivia, space_if,
-    token_text, with_ctx,
+    block_lead, child_nodes, comma_sep, count_newlines, fmt_node, format_raw, is_trivia,
+    lone_child_node, peel_context_parens, space_if, token_text, with_ctx,
 };
 
 // ---- Trivial passthroughs / utilities ----
@@ -30,6 +30,65 @@ fn body_lead(child: &SyntaxNode) -> Doc {
     }
 }
 
+/// Format a control-statement body (the `then` of an `if`, a loop
+/// body, …), separator included, honouring
+/// [`FormatOptions::control_braces`]:
+///
+/// - `always`: an unbraced body gains `{ … }`.
+/// - `never`: a `{ … }` around a lone *simple* statement
+///   (expression / `return` / `break` / `continue` — nothing that can
+///   re-bind a dangling `else`) is dropped; the statement stays on the
+///   header's line, or breaks onto its own indented line if too long.
+/// - `preserve`: the source's choice stands.
+fn format_ctrl_body(child: &SyntaxNode) -> Doc {
+    use crate::ControlBraces;
+    let policy = with_ctx(|cx| cx.opts.control_braces);
+    if child.kind() == S::Block {
+        if policy == ControlBraces::Never
+            && let Some(stmt) = block_lone_simple_stmt(child)
+        {
+            return group(indent(1, concat([line(), fmt_node(&stmt)])));
+        }
+        return concat([block_lead(), fmt_node(child)]);
+    }
+    if policy == ControlBraces::Always {
+        return concat([
+            block_lead(),
+            text("{"),
+            indent(1, concat([hardline(), fmt_node(child)])),
+            hardline(),
+            text("}"),
+        ]);
+    }
+    concat([space(), fmt_node(child)])
+}
+
+/// The lone *simple* statement inside `block`, if that's all it
+/// holds (no comments, no second statement). Simple means it can't
+/// capture a dangling `else` or carry its own block structure.
+fn block_lone_simple_stmt(block: &SyntaxNode) -> Option<SyntaxNode> {
+    let stmt = lone_child_node(block)?;
+    matches!(
+        stmt.kind(),
+        S::ExprStmt | S::ReturnStmt | S::BreakStmt | S::ContinueStmt
+    )
+    .then_some(stmt)
+}
+
+/// `;` to append when [`FormatOptions::semicolons`] is `always` and
+/// the statement lacked one. Statements sitting directly in a
+/// `for (…)` header are skipped — the header owns its `;` layout.
+fn maybe_semicolon(node: &SyntaxNode, saw_semi: bool) -> Doc {
+    use crate::Semicolons;
+    if saw_semi || with_ctx(|cx| cx.opts.semicolons) != Semicolons::Always {
+        return crate::doc::nil();
+    }
+    if node.parent().is_some_and(|p| p.kind() == S::ForStmt) {
+        return crate::doc::nil();
+    }
+    text(";")
+}
+
 pub(super) fn format_passthrough(node: &SyntaxNode) -> Doc {
     format_raw(node)
 }
@@ -37,14 +96,17 @@ pub(super) fn format_passthrough(node: &SyntaxNode) -> Doc {
 /// `break;` / `continue;` — keyword + optional semicolon.
 pub(super) fn format_simple_keyword_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
+    let mut saw_semi = false;
     for el in node.children_with_tokens() {
         if let Some(t) = el.as_token() {
             if is_trivia(t) {
                 continue;
             }
+            saw_semi |= t.kind() == S::Semicolon;
             parts.push(token_text(t));
         }
     }
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
@@ -100,6 +162,7 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
     let mut leading: Vec<Doc> = Vec::new();
     let mut between_newlines: usize = 0;
     let mut saw_first = false;
+    let mut prev_fnlike = false;
     let mut pending_next: Vec<(String, String)> = Vec::new();
 
     for el in node.children_with_tokens() {
@@ -122,13 +185,21 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
             }
             NodeOrToken::Token(_) => {}
             NodeOrToken::Node(child) => {
+                let fnlike = matches!(child.kind(), S::ClassMethod | S::ClassConstructor);
                 if saw_first {
-                    members.push(if between_newlines >= 2 {
+                    // `blank_line_between_functions` lifts the gap on
+                    // either side of a method/constructor to a blank.
+                    let force_blank = (fnlike || prev_fnlike)
+                        && with_ctx(|cx| {
+                            cx.opts.blank_line_between_functions && cx.opts.max_blank_lines >= 1
+                        });
+                    members.push(if between_newlines >= 2 || force_blank {
                         crate::doc::blank_line()
                     } else {
                         hardline()
                     });
                 }
+                prev_fnlike = fnlike;
                 for c in leading.drain(..) {
                     members.push(c);
                     members.push(hardline());
@@ -170,12 +241,16 @@ pub(super) fn format_class_field(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut emitted_anything = false;
     let mut seen_eq = false;
+    let mut saw_semi = false;
 
     for el in node.children_with_tokens() {
         match el {
             NodeOrToken::Token(t) if is_trivia(&t) => {}
             NodeOrToken::Token(t) => match t.kind() {
-                S::Semicolon => parts.push(text(";")),
+                S::Semicolon => {
+                    parts.push(text(";"));
+                    saw_semi = true;
+                }
                 S::Eq => {
                     parts.push(space());
                     parts.push(text("="));
@@ -207,6 +282,7 @@ pub(super) fn format_class_field(node: &SyntaxNode) -> Doc {
             }
         }
     }
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
@@ -346,34 +422,40 @@ pub(super) fn format_param(node: &SyntaxNode) -> Doc {
 /// `include("…");`
 pub(super) fn format_include_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
+    let mut saw_semi = false;
     for el in node.children_with_tokens() {
         if let Some(t) = el.as_token() {
             if is_trivia(t) {
                 continue;
             }
+            saw_semi |= t.kind() == S::Semicolon;
             match t.kind() {
                 S::KwInclude => parts.push(text("include")),
                 _ => parts.push(token_text(t)),
             }
         }
     }
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
 /// `import foo.bar;` / `import("foo.bar");`
 pub(super) fn format_import_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
+    let mut saw_semi = false;
     for el in node.children_with_tokens() {
         if let Some(t) = el.as_token() {
             if is_trivia(t) {
                 continue;
             }
+            saw_semi |= t.kind() == S::Semicolon;
             match t.kind() {
                 S::KwImport => parts.push(text("import")),
                 _ => parts.push(token_text(t)),
             }
         }
     }
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
@@ -382,6 +464,7 @@ pub(super) fn format_var_decl_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut last_was_space = true;
     let mut seen_eq = false;
+    let mut saw_semi = false;
 
     for el in node.children_with_tokens() {
         match el {
@@ -414,6 +497,7 @@ pub(super) fn format_var_decl_stmt(node: &SyntaxNode) -> Doc {
                 S::Semicolon => {
                     parts.push(text(";"));
                     last_was_space = false;
+                    saw_semi = true;
                 }
                 _ => {
                     if !last_was_space && !parts.is_empty() {
@@ -438,19 +522,25 @@ pub(super) fn format_var_decl_stmt(node: &SyntaxNode) -> Doc {
             }
         }
     }
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
 /// `expr;`.
 pub(super) fn format_expr_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
+    let mut saw_semi = false;
     for el in node.children_with_tokens() {
         match el {
             NodeOrToken::Token(t) if is_trivia(&t) => {}
-            NodeOrToken::Token(t) => parts.push(token_text(&t)),
+            NodeOrToken::Token(t) => {
+                saw_semi |= t.kind() == S::Semicolon;
+                parts.push(token_text(&t));
+            }
             NodeOrToken::Node(n) => parts.push(group(fmt_node(&n))),
         }
     }
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
@@ -459,6 +549,7 @@ pub(super) fn format_return_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = vec![text("return")];
     let mut emitted_question = false;
     let mut emitted_expr = false;
+    let mut saw_semi = false;
 
     for el in node.children_with_tokens() {
         match el {
@@ -470,7 +561,10 @@ pub(super) fn format_return_stmt(node: &SyntaxNode) -> Doc {
                     parts.push(text("?"));
                     emitted_question = true;
                 }
-                S::Semicolon => parts.push(text(";")),
+                S::Semicolon => {
+                    parts.push(text(";"));
+                    saw_semi = true;
+                }
                 _ => {
                     parts.push(space());
                     parts.push(token_text(&t));
@@ -478,13 +572,16 @@ pub(super) fn format_return_stmt(node: &SyntaxNode) -> Doc {
             },
             NodeOrToken::Node(child) => {
                 parts.push(space());
-                parts.push(group(fmt_node(&child)));
+                // `return (expr);` — the parens add nothing; the `;`
+                // (or EOL) already delimits the operand.
+                parts.push(group(fmt_node(&peel_context_parens(&child))));
                 emitted_expr = true;
                 emitted_question = true;
             }
         }
     }
     let _ = emitted_question;
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
@@ -534,15 +631,13 @@ pub(super) fn format_if_stmt(node: &SyntaxNode) -> Doc {
             },
             NodeOrToken::Node(child) => {
                 if !cond_seen && seen_lparen && !seen_rparen {
-                    parts.push(group(fmt_node(&child)));
+                    parts.push(group(fmt_node(&peel_context_parens(&child))));
                     cond_seen = true;
                 } else if !then_seen && seen_rparen && !seen_else {
-                    parts.push(body_lead(&child));
-                    parts.push(fmt_node(&child));
+                    parts.push(format_ctrl_body(&child));
                     then_seen = true;
                 } else if seen_else {
-                    parts.push(body_lead(&child));
-                    parts.push(fmt_node(&child));
+                    parts.push(format_else_branch(&child));
                     seen_else = false;
                     // Reset for potential subsequent `else if` continuation.
                     seen_kw_if = false;
@@ -557,6 +652,24 @@ pub(super) fn format_if_stmt(node: &SyntaxNode) -> Doc {
         }
     }
     concat(parts)
+}
+
+/// The body of an `else`. An `else if` continuation stays on the
+/// `else`'s line; with `collapse_else_if`, an `else { if … }` block
+/// holding exactly that `if` (and no comments) is flattened to the
+/// same shape. Everything else goes through [`format_ctrl_body`].
+fn format_else_branch(child: &SyntaxNode) -> Doc {
+    if child.kind() == S::IfStmt {
+        return concat([space(), fmt_node(child)]);
+    }
+    if with_ctx(|cx| cx.opts.collapse_else_if)
+        && child.kind() == S::Block
+        && let Some(inner) = lone_child_node(child)
+        && inner.kind() == S::IfStmt
+    {
+        return concat([space(), fmt_node(&inner)]);
+    }
+    format_ctrl_body(child)
 }
 
 /// `while (cond) body`.
@@ -583,11 +696,10 @@ pub(super) fn format_while_stmt(node: &SyntaxNode) -> Doc {
             },
             NodeOrToken::Node(child) => {
                 if !cond_seen && seen_lparen && !seen_rparen {
-                    parts.push(group(fmt_node(&child)));
+                    parts.push(group(fmt_node(&peel_context_parens(&child))));
                     cond_seen = true;
                 } else {
-                    parts.push(body_lead(&child));
-                    parts.push(fmt_node(&child));
+                    parts.push(format_ctrl_body(&child));
                 }
             }
         }
@@ -602,6 +714,7 @@ pub(super) fn format_do_while_stmt(node: &SyntaxNode) -> Doc {
     let mut seen_while = false;
     let mut seen_lparen = false;
     let mut seen_rparen = false;
+    let mut saw_semi = false;
     for el in node.children_with_tokens() {
         match el {
             NodeOrToken::Token(t) if is_trivia(&t) => {}
@@ -624,21 +737,24 @@ pub(super) fn format_do_while_stmt(node: &SyntaxNode) -> Doc {
                     parts.push(text(")"));
                     seen_rparen = true;
                 }
-                S::Semicolon => parts.push(text(";")),
+                S::Semicolon => {
+                    parts.push(text(";"));
+                    saw_semi = true;
+                }
                 _ => parts.push(token_text(&t)),
             },
             NodeOrToken::Node(child) => {
                 if seen_while {
-                    parts.push(group(fmt_node(&child)));
+                    parts.push(group(fmt_node(&peel_context_parens(&child))));
+                } else if emitted_do {
+                    parts.push(format_ctrl_body(&child));
                 } else {
-                    if emitted_do {
-                        parts.push(body_lead(&child));
-                    }
                     parts.push(fmt_node(&child));
                 }
             }
         }
     }
+    parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }
 
@@ -703,8 +819,7 @@ pub(super) fn format_for_stmt(node: &SyntaxNode) -> Doc {
                         parts.push(space());
                     }
                 } else {
-                    parts.push(body_lead(&child));
-                    parts.push(fmt_node(&child));
+                    parts.push(format_ctrl_body(&child));
                 }
             }
         }
@@ -784,8 +899,7 @@ pub(super) fn format_foreach_stmt(node: &SyntaxNode) -> Doc {
                     parts.push(fmt_node(&child));
                     last_was_space = false;
                 } else {
-                    parts.push(body_lead(&child));
-                    parts.push(fmt_node(&child));
+                    parts.push(format_ctrl_body(&child));
                     last_was_space = false;
                 }
             }

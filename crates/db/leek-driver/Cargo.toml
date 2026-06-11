@@ -11,6 +11,7 @@ leek-diagnostics = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-project     = { workspace = true }
 leek-recipes     = { workspace = true }
+leek-resolver    = { workspace = true }
 leek-span        = { workspace = true }
 anyhow           = { workspace = true }
 

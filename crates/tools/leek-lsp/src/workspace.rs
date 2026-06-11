@@ -81,6 +81,14 @@ pub struct Workspace {
     /// toggle). Mirrors the client's `leek` settings section; updated by
     /// `workspace/didChangeConfiguration` and the initial pull.
     pub settings: crate::settings::Settings,
+    /// Per-file `class IDENT` declarations, keyed by URI. The sorted
+    /// union feeds every salsa input's `extra_classes` so any file can
+    /// use any project class as a type head (`testClass tc = …`),
+    /// mirroring upstream's program-wide `getDefinedClass` lookup.
+    class_names: HashMap<Url, Vec<String>>,
+    /// Last union pushed into the salsa inputs — skip the (re-parse
+    /// triggering) input writes when an edit didn't change it.
+    class_union: Vec<String>,
 }
 
 impl Default for Workspace {
@@ -102,6 +110,8 @@ impl Default for Workspace {
             semantic_tokens_cache: HashMap::new(),
             next_result_id: 1,
             settings: crate::settings::Settings::default(),
+            class_names: HashMap::new(),
+            class_union: Vec::new(),
         }
     }
 }
@@ -111,12 +121,15 @@ impl Workspace {
         if let Some(path) = uri_to_path(&uri)
             && let Some(indexed) = self.indexed.remove(&path)
         {
+            let version_byte = indexed.source_file.version_byte(&self.db);
+            let source = indexed.source_file.source(&self.db);
+            let classes = Self::scan_classes(&text, source, version_byte);
             let line_table = LineTable::new(&text);
             let arc_text: Arc<str> = Arc::from(text.as_str());
             indexed.source_file.set_text(&mut self.db).to(text.clone());
             indexed.project_file.set_text(&mut self.db).to(text);
             self.docs.insert(
-                uri,
+                uri.clone(),
                 DocHandle {
                     source_file: indexed.source_file,
                     line_table,
@@ -124,12 +137,18 @@ impl Workspace {
                     version: 0,
                 },
             );
+            self.refresh_classes(&uri, Some(classes));
             return;
         }
 
         let source_id = self.alloc_source_id();
         let line_table = LineTable::new(&text);
         let arc_text: Arc<str> = Arc::from(text.as_str());
+        let classes = Self::scan_classes(
+            &text,
+            leek_span::SourceId::new(source_id).expect("non-zero SourceId"),
+            4,
+        );
         let source_file = SourceFile::new(
             &self.db,
             source_id,
@@ -137,9 +156,10 @@ impl Workspace {
             4,
             false,
             leek_pipeline::FeatureFlags::from_env().to_bits(),
+            self.class_union.clone(),
         );
         self.docs.insert(
-            uri,
+            uri.clone(),
             DocHandle {
                 source_file,
                 line_table,
@@ -147,6 +167,7 @@ impl Workspace {
                 version: 0,
             },
         );
+        self.refresh_classes(&uri, Some(classes));
     }
 
     /// Record the client's version number for an open document. Echoed
@@ -164,9 +185,13 @@ impl Workspace {
         let Some(doc) = self.docs.get_mut(uri) else {
             return;
         };
+        let source_file = doc.source_file;
         doc.line_table = LineTable::new(&new_text);
         doc.text = Arc::from(new_text.as_str());
-        doc.source_file.set_text(&mut self.db).to(new_text.clone());
+        let version_byte = source_file.version_byte(&self.db);
+        let source = source_file.source(&self.db);
+        let classes = Self::scan_classes(&new_text, source, version_byte);
+        source_file.set_text(&mut self.db).to(new_text.clone());
         if let Some(path) = uri_to_path(uri)
             && let Some(indexed) = self.indexed.get_mut(&path)
         {
@@ -174,6 +199,7 @@ impl Workspace {
             indexed.text = Arc::from(new_text.as_str());
             indexed.project_file.set_text(&mut self.db).to(new_text);
         }
+        self.refresh_classes(uri, Some(classes));
     }
 
     pub fn close(&mut self, uri: &Url) {
@@ -216,6 +242,8 @@ impl Workspace {
             }
             let arc_text: Arc<str> = Arc::from(loaded.text.as_str());
             let flags_bits = leek_pipeline::FeatureFlags::from_env().to_bits();
+            let classes = Self::scan_classes(&loaded.text, loaded.source, loaded.version_byte);
+            self.class_names.insert(uri.clone(), classes);
             let source_file = SourceFile::new(
                 &self.db,
                 loaded.source.get(),
@@ -223,6 +251,7 @@ impl Workspace {
                 loaded.version_byte,
                 loaded.strict,
                 flags_bits,
+                self.class_union.clone(),
             );
             let project_file = ProjectFile::new(
                 &self.db,
@@ -232,6 +261,7 @@ impl Workspace {
                 loaded.version_byte,
                 loaded.strict,
                 flags_bits,
+                self.class_union.clone(),
             );
             self.indexed.insert(
                 loaded.path.clone(),
@@ -246,6 +276,9 @@ impl Workspace {
             );
         }
         self.project = Some(index);
+        // One union rebuild after the whole tree is registered — this
+        // pushes every file's classes into every input.
+        self.rebuild_class_union();
     }
 
     /// Every file available for project-wide analysis: open docs plus
@@ -281,6 +314,61 @@ impl Workspace {
         let id = self.next_source_id;
         self.next_source_id += 1;
         id
+    }
+
+    /// Scan one file's `class IDENT` declarations (version-aware:
+    /// `class` only lexes as a keyword from v2 on).
+    fn scan_classes(text: &str, source: leek_span::SourceId, version_byte: u8) -> Vec<String> {
+        let version = leek_syntax::pipeline::version_from_byte(version_byte);
+        let lexed = leek_lexer::lex(text, source, version);
+        leek_parser::scan_class_names(text, &lexed.tokens)
+    }
+
+    /// Record `uri`'s class declarations and, if the project-wide
+    /// union changed, push it into every salsa input's
+    /// `extra_classes` (invalidating their parses). Pass `None` to
+    /// drop a removed file's contribution.
+    fn refresh_classes(&mut self, uri: &Url, names: Option<Vec<String>>) {
+        match names {
+            Some(n) => {
+                self.class_names.insert(uri.clone(), n);
+            }
+            None => {
+                self.class_names.remove(uri);
+            }
+        }
+        self.rebuild_class_union();
+    }
+
+    /// Recompute the union of all files' class names and push it into
+    /// the salsa inputs when it changed.
+    fn rebuild_class_union(&mut self) {
+        let mut union: Vec<String> = self
+            .class_names
+            .values()
+            .flat_map(|v| v.iter().cloned())
+            .collect();
+        union.sort();
+        union.dedup();
+        if union == self.class_union {
+            return;
+        }
+        self.class_union = union;
+        for doc in self.docs.values() {
+            doc.source_file
+                .set_extra_classes(&mut self.db)
+                .to(self.class_union.clone());
+        }
+        for indexed in self.indexed.values() {
+            indexed
+                .source_file
+                .set_extra_classes(&mut self.db)
+                .to(self.class_union.clone());
+            indexed
+                .project_file
+                .set_extra_classes(&mut self.db)
+                .to(self.class_union.clone());
+        }
     }
 
     /// Stash the semantic tokens just computed for `uri` under a fresh
@@ -319,6 +407,9 @@ impl Workspace {
         if let Some(handle) = self.docs.remove(old) {
             self.docs.insert(new.clone(), handle);
         }
+        if let Some(classes) = self.class_names.remove(old) {
+            self.class_names.insert(new.clone(), classes);
+        }
         self.semantic_tokens_cache.remove(old);
         if let (Some(old_path), Some(new_path)) = (uri_to_path(old), uri_to_path(new))
             && let Some(mut indexed) = self.indexed.remove(&old_path)
@@ -349,8 +440,14 @@ impl Workspace {
         };
         indexed.line_table = LineTable::new(&text);
         indexed.text = Arc::from(text.as_str());
-        indexed.source_file.set_text(&mut self.db).to(text.clone());
-        indexed.project_file.set_text(&mut self.db).to(text);
+        let source_file = indexed.source_file;
+        let project_file = indexed.project_file;
+        let version_byte = source_file.version_byte(&self.db);
+        let source = source_file.source(&self.db);
+        let classes = Self::scan_classes(&text, source, version_byte);
+        source_file.set_text(&mut self.db).to(text.clone());
+        project_file.set_text(&mut self.db).to(text);
+        self.refresh_classes(uri, Some(classes));
     }
 
     /// Drop all state for a deleted file.
@@ -360,6 +457,7 @@ impl Workspace {
         if let Some(path) = uri_to_path(uri) {
             self.indexed.remove(&path);
         }
+        self.refresh_classes(uri, None);
     }
 }
 

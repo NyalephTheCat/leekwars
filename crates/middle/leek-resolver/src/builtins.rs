@@ -283,10 +283,27 @@ pub const BUILTIN_FNS: &[BuiltinFn] = &[
 
 /// Bare names that are immutable builtin constants. Assignment to
 /// any of these emits `CANT_ASSIGN_VALUE` at every version.
+///
+/// The language-level set mirrors upstream `LeekConstants.java`
+/// (`Infinity`/`NaN` are the upstream spellings; `INFINITY`/`NAN` are
+/// kept as accepted aliases). Fight constants (`CHIP_*`, `WEAPON_*`,
+/// …) are *not* here — they arrive via [`register_builtin_constant`]
+/// when the `leekwars` library is loaded.
 pub const BUILTIN_CONSTANTS: &[&str] = &[
     "PI",
+    "E",
     "INFINITY",
+    "Infinity",
     "NAN",
+    "NaN",
+    "INSTRUCTIONS_LIMIT",
+    "OPERATIONS_LIMIT",
+    "CELL_EMPTY",
+    "CELL_PLAYER",
+    "CELL_OBSTACLE",
+    "COLOR_RED",
+    "COLOR_GREEN",
+    "COLOR_BLUE",
     "TYPE_NULL",
     "TYPE_BOOLEAN",
     "TYPE_NUMBER",
@@ -294,6 +311,10 @@ pub const BUILTIN_CONSTANTS: &[&str] = &[
     "TYPE_ARRAY",
     "TYPE_OBJECT",
     "TYPE_FUNCTION",
+    "TYPE_CLASS",
+    "TYPE_MAP",
+    "TYPE_SET",
+    "TYPE_INTERVAL",
     "USE_SUCCESS",
     "USE_FAILED",
     "USE_CRITICAL",
@@ -303,7 +324,6 @@ pub const BUILTIN_CONSTANTS: &[&str] = &[
     "USE_RESURRECT",
     "SORT_ASC",
     "SORT_DESC",
-    "SORT_RANDOM",
 ];
 
 /// `Class.Field` paths that name an immutable builtin constant.
@@ -630,8 +650,19 @@ pub const BUILTINS: &[&str] = &[
     "getStartTP",
     "getStartMP",
     "PI",
+    "E",
     "INFINITY",
+    "Infinity",
     "NAN",
+    "NaN",
+    "INSTRUCTIONS_LIMIT",
+    "OPERATIONS_LIMIT",
+    "CELL_EMPTY",
+    "CELL_PLAYER",
+    "CELL_OBSTACLE",
+    "COLOR_RED",
+    "COLOR_GREEN",
+    "COLOR_BLUE",
     "TYPE_NULL",
     "TYPE_BOOLEAN",
     "TYPE_NUMBER",
@@ -639,6 +670,10 @@ pub const BUILTINS: &[&str] = &[
     "TYPE_ARRAY",
     "TYPE_OBJECT",
     "TYPE_FUNCTION",
+    "TYPE_CLASS",
+    "TYPE_MAP",
+    "TYPE_SET",
+    "TYPE_INTERVAL",
     "USE_SUCCESS",
     "USE_FAILED",
     "USE_CRITICAL",
@@ -646,6 +681,8 @@ pub const BUILTINS: &[&str] = &[
     "USE_NOT_ENOUGH_TP",
     "USE_INVALID_POSITION",
     "USE_RESURRECT",
+    "SORT_ASC",
+    "SORT_DESC",
     "Number",
     "String",
     "Boolean",

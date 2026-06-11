@@ -10,7 +10,7 @@ use leek_types::Type;
 
 use crate::ir::{
     BinOp, CallExpr, Callee, CastKind, Const, IntervalRvalue, LocalId, LocalKind, Operand, Place,
-    Rvalue, SliceBounds, Statement, Terminator, UnOp,
+    Rvalue, SetElem, SliceBounds, Statement, Terminator, UnOp,
 };
 
 use super::util::{
@@ -31,13 +31,42 @@ impl FnLowerer<'_> {
             ExprKind::Unary(op, x) => self.lower_unary(*op, x, &e.ty, e.span),
             ExprKind::Postfix(op, x) => self.lower_postfix(*op, x, &e.ty, e.span),
             ExprKind::Call(c) => self.lower_call(c, &e.ty),
-            ExprKind::Field(base, name) => {
+            ExprKind::Field(base, name, optional) => {
                 let base_local = self.lower_expr_to_local(base);
                 let t = self.fresh_temp(e.ty.clone(), e.span);
-                self.push_stmt(Statement::Assign(
-                    Place::Local(t),
-                    Rvalue::Field(base_local, name.clone()),
-                ));
+                // `obj?.field` (#2272): null receiver short-circuits this
+                // link to null instead of reading the field. `?.class` is
+                // excluded like upstream (`getFieldNullSafe` is bypassed
+                // for the reflective `class` access).
+                if *optional && name != "class" {
+                    let read_bb = self.new_block();
+                    let null_bb = self.new_block();
+                    let join = self.new_block();
+                    let is_null = self.null_check(base_local, e.span);
+                    self.set_terminator(Terminator::Branch {
+                        cond: is_null,
+                        then_block: null_bb,
+                        else_block: read_bb,
+                    });
+                    self.resume(null_bb);
+                    self.push_stmt(Statement::Assign(
+                        Place::Local(t),
+                        Rvalue::Use(Operand::Const(Const::Null)),
+                    ));
+                    self.goto(join);
+                    self.resume(read_bb);
+                    self.push_stmt(Statement::Assign(
+                        Place::Local(t),
+                        Rvalue::Field(base_local, name.clone()),
+                    ));
+                    self.goto(join);
+                    self.resume(join);
+                } else {
+                    self.push_stmt(Statement::Assign(
+                        Place::Local(t),
+                        Rvalue::Field(base_local, name.clone()),
+                    ));
+                }
                 Operand::Local(t)
             }
             ExprKind::Index(base, idx) => {
@@ -81,7 +110,13 @@ impl FnLowerer<'_> {
             ExprKind::Set(items) => {
                 let ops = items
                     .iter()
-                    .map(|x| self.lower_expr_to_operand(x))
+                    .map(|x| match &x.end {
+                        Some(end) => SetElem::Range(
+                            self.lower_expr_to_operand(&x.start),
+                            self.lower_expr_to_operand(end),
+                        ),
+                        None => SetElem::One(self.lower_expr_to_operand(&x.start)),
+                    })
                     .collect();
                 let t = self.fresh_temp(e.ty.clone(), e.span);
                 self.push_stmt(Statement::Assign(Place::Local(t), Rvalue::Set(ops)));
@@ -701,7 +736,10 @@ impl FnLowerer<'_> {
                     .map_or_else(|| "?".into(), |d| d.name().to_string());
                 Place::Global(*def, name)
             }
-            ExprKind::Field(base, name) => {
+            // Optional access is never an l-value (upstream sets
+            // `isLeftValue = false` on the `?.` form) — the flag is
+            // ignored here and the write behaves like a plain access.
+            ExprKind::Field(base, name, _) => {
                 let base_local = self.lower_expr_to_local(base);
                 Place::Field(base_local, name.clone())
             }
@@ -853,6 +891,12 @@ impl FnLowerer<'_> {
     }
 
     pub(crate) fn lower_call(&mut self, call: &HirCall, ty: &Type) -> Operand {
+        // Set for `obj?.m(args)` (#2272): the receiver local to
+        // null-check after the arguments are evaluated (upstream's
+        // `callObjectAccessNullSafe` receives the args eagerly, so a
+        // null receiver still evaluates them — only dispatch is
+        // skipped).
+        let mut optional_recv = None;
         let callee = match &call.callee {
             HirCallee::Function(name) => match name {
                 NameRef::Function(def) => Callee::Function(*def),
@@ -944,8 +988,15 @@ impl FnLowerer<'_> {
                     Callee::Indirect(local)
                 }
             },
-            HirCallee::Method { receiver, method } => {
+            HirCallee::Method {
+                receiver,
+                method,
+                optional,
+            } => {
                 let recv = self.lower_expr_to_local(receiver);
+                if *optional {
+                    optional_recv = Some(recv);
+                }
                 Callee::Method {
                     receiver: recv,
                     method: method.clone(),
@@ -986,17 +1037,60 @@ impl FnLowerer<'_> {
         })
         .flatten();
         let t = self.fresh_temp(ty.clone(), call.span);
-        self.push_stmt(Statement::Call {
-            dest: Some(Place::Local(t)),
-            call: CallExpr {
-                callee,
-                args,
-                span: call.span,
-            },
-        });
-        if let Some(arg0) = writeback_arg0 {
-            self.push_stmt(Statement::ApplyPromotion(arg0));
+        let emit_call = |this: &mut Self| {
+            this.push_stmt(Statement::Call {
+                dest: Some(Place::Local(t)),
+                call: CallExpr {
+                    callee,
+                    args,
+                    span: call.span,
+                },
+            });
+            if let Some(arg0) = writeback_arg0 {
+                this.push_stmt(Statement::ApplyPromotion(arg0));
+            }
+        };
+        if let Some(recv) = optional_recv {
+            // `obj?.m(args)`: null receiver yields null, no dispatch.
+            let call_bb = self.new_block();
+            let null_bb = self.new_block();
+            let join = self.new_block();
+            let is_null = self.null_check(recv, call.span);
+            self.set_terminator(Terminator::Branch {
+                cond: is_null,
+                then_block: null_bb,
+                else_block: call_bb,
+            });
+            self.resume(null_bb);
+            self.push_stmt(Statement::Assign(
+                Place::Local(t),
+                Rvalue::Use(Operand::Const(Const::Null)),
+            ));
+            self.goto(join);
+            self.resume(call_bb);
+            emit_call(self);
+            self.goto(join);
+            self.resume(join);
+        } else {
+            emit_call(self);
         }
+        Operand::Local(t)
+    }
+
+    /// `local === null` as a fresh boolean temp — the receiver guard
+    /// for an optional-chaining link (`?.`). Identity comparison so no
+    /// value coercion is involved, matching upstream's Java-level
+    /// `value == null` reference check.
+    pub(crate) fn null_check(&mut self, local: LocalId, span: Span) -> Operand {
+        let t = self.fresh_temp(Type::Boolean, span);
+        self.push_stmt(Statement::Assign(
+            Place::Local(t),
+            Rvalue::Binary(
+                BinOp::IdentityEq,
+                Operand::Local(local),
+                Operand::Const(Const::Null),
+            ),
+        ));
         Operand::Local(t)
     }
 
