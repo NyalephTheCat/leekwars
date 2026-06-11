@@ -1,0 +1,22 @@
+// buff corpus: odd turns focus (1023, TP buff — usable immediately), haste
+// (1022, MP), fortress (1020, wisdom-scaled permanent max-life increase +
+// heal, ActionVitality logged even at 0 gain) then a pistol shot whose
+// costs sum to 8 against 6 base TP + the focus jet — whether it fires pins
+// the jet roll; even turns sage (1024, wisdom), brick (1025, resistance),
+// reflex (1021, agility — crit rolls) with a storm (1009) so the wisdom buff
+// shows in the life-steal amounts.
+var e = getNearestEnemy();
+if (getTurn() % 2 == 1) {
+	useChip(1023);
+	useChip(1022);
+	useChip(1020);
+	setWeapon(WEAPON_PISTOL);
+	moveToward(e, 4);
+	useWeapon(e);
+} else {
+	useChip(1024);
+	useChip(1025);
+	useChip(1021);
+	useChip(1009);
+	moveToward(e, 3);
+}

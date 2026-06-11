@@ -1,0 +1,43 @@
+// exotic-effect corpus, 4-turn cycle — every phase spends exactly 6 TP.
+//
+// Phase 1: mutation (1042: raw STR/AGI IRREDUCTIBLE + POWER/MAGIC) +
+// clarity (1043: raw SCIENCE/WISDOM/RESISTANCE — science makes the NEXT
+// science-scaled casts actually scale) + rupture (1045: vulnerability +
+// absolute vulnerability — negative shields amplify later damage) + toxin
+// (1037: aftereffect, applies at cast AND re-ticks at the target's turn
+// starts; its second line is the DEAD AllyKilledToAgility class).
+// Phase 2: bulwark (1044: raw shields + RAW_BUFF_MP/TP — the targetCount-
+// shaped formula, extra MP visibly changes pathing) + transfusion (1047:
+// nova vitality max-life bump WITHOUT heal, then raw heal into the new
+// headroom) + cataclysm (1040: nova erosion + caster-life-scaled life
+// damage) + reaper (1038: damage, then STEAL_LIFE on-caster heals by the
+// damage line's previousEffectTotalValue).
+// Phase 3: mirror (1014) + leech (1039: damage + STEAL_ABSOLUTE_SHIELD
+// on-caster) + purge (1046: TOTAL_DEBUFF — unlike unravel it reduces the
+// IRREDUCTIBLE mutation lines too) + transfusion.
+// Phase 0: cataclysm + reaper + toxin — the life damage lands while the
+// enemy's phase-3 mirror is still live, pinning the LIFE-damage return
+// path (computed AFTER the invincible zero, unlike direct damage).
+var e = getNearestEnemy();
+moveToward(e);
+var t = getTurn() % 4;
+if (t == 1) {
+	useChip(1042);
+	useChip(1043);
+	useChip(1045, e);
+	useChip(1037, e);
+} else if (t == 2) {
+	useChip(1044);
+	useChip(1047);
+	useChip(1040, e);
+	useChip(1038, e);
+} else if (t == 3) {
+	useChip(1014);
+	useChip(1039, e);
+	useChip(1046, e);
+	useChip(1047);
+} else {
+	useChip(1040, e);
+	useChip(1038, e);
+	useChip(1037, e);
+}

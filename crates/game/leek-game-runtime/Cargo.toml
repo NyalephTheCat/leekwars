@@ -7,7 +7,9 @@ license.workspace = true
 description = "Leek-wars fight engine: the fight builtins (getCell, getLife, …) operating through a GameHost, plus the reference world model (Fight, Entity) — the game-side equivalent of leek-runtime."
 
 [dependencies]
+bitflags     = { workspace = true }
 leek-runtime = { workspace = true }
+serde_json   = { workspace = true }
 
 [lints]
 workspace = true

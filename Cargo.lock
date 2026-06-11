@@ -1148,7 +1148,9 @@ dependencies = [
 name = "leek-game-runtime"
 version = "0.0.1"
 dependencies = [
+ "bitflags 2.11.1",
  "leek-runtime",
+ "serde_json",
 ]
 
 [[package]]
@@ -1162,6 +1164,7 @@ dependencies = [
  "leek-runtime",
  "leek-span",
  "leek-syntax",
+ "serde_json",
 ]
 
 [[package]]

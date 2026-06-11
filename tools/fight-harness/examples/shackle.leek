@@ -1,0 +1,9 @@
+// shackle corpus: ice (1015) shackles MP — the shackled enemy's pathing
+// visibly changes — and mud (1016) shackles TP — the enemy loses casts
+// immediately (its own 6-TP turn comes up short). Storm (1009) supplies
+// damage so fights can end before MAX_TURNS.
+var e = getNearestEnemy();
+useChip(1015, e);
+useChip(1016, e);
+useChip(1009);
+moveToward(e);

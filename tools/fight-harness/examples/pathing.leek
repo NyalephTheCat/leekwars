@@ -1,0 +1,18 @@
+// pure-movement corpus: odd turns chase the enemy (entity-aware A*), even
+// turns walk at the first obstacle cell on the map — moveTowardCell on an
+// unwalkable target goes through getValidCellsAroundObstacle + the
+// multi-goal A*. No combat: the fight ends as a MAX_TURNS draw.
+if (getTurn() % 2 == 1) {
+	moveToward(getNearestEnemy());
+} else {
+	var t = null;
+	for (var i = 0; i < 613; i++) {
+		if (isObstacle(i)) {
+			t = i;
+			break;
+		}
+	}
+	if (t != null) {
+		moveTowardCell(t);
+	}
+}

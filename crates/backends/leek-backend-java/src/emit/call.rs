@@ -513,19 +513,22 @@ impl super::Emitter<'_> {
                     } else if wants_real {
                         // Non-literal arg: route through Number
                         // coercion so any int / bool / null box
-                        // becomes a Double.
-                        buf.push_str("((Number) AI.load((Object) ");
+                        // becomes a Double. The operand parens keep a
+                        // leading unary minus from turning the cast
+                        // into a subtraction (`(Object) -1l`).
+                        buf.push_str("((Number) AI.load((Object) (");
                         self.write_expr(buf, a, false);
-                        buf.push_str(")).doubleValue()");
+                        buf.push_str("))).doubleValue()");
                     } else if wants_int && !arg_is_int_literal {
                         // A typed `integer` parameter coerces the arg to a long
                         // (`f(integer i); f(42.9)` → `42`), mirroring upstream's
                         // primitive-typed signature. An int literal is already
                         // long, so skip it; a real literal / expression goes
-                        // through `Number.longValue()`.
-                        buf.push_str("((Number) AI.load((Object) ");
+                        // through `Number.longValue()`. (Operand parens:
+                        // see the real case above.)
+                        buf.push_str("((Number) AI.load((Object) (");
                         self.write_expr(buf, a, false);
-                        buf.push_str(")).longValue()");
+                        buf.push_str("))).longValue()");
                     } else {
                         self.write_expr(buf, a, false);
                     }
@@ -735,21 +738,24 @@ impl super::Emitter<'_> {
         buf.push_str(&self.ai_this());
         for (i, a) in args.iter().enumerate() {
             buf.push_str(", ");
+            // The parens around the loaded operand keep a leading unary
+            // minus from turning the cast into a subtraction
+            // (`(Object) -1l` parses as `Object - 1l`).
             match params.get(i).cloned().flatten() {
                 Some(Type::Integer) => {
-                    buf.push_str("((Number) AI.load((Object) ");
+                    buf.push_str("((Number) AI.load((Object) (");
                     self.write_expr(buf, a, false);
-                    buf.push_str(")).longValue()");
+                    buf.push_str("))).longValue()");
                 }
                 Some(Type::Real) => {
-                    buf.push_str("((Number) AI.load((Object) ");
+                    buf.push_str("((Number) AI.load((Object) (");
                     self.write_expr(buf, a, false);
-                    buf.push_str(")).doubleValue()");
+                    buf.push_str("))).doubleValue()");
                 }
                 Some(Type::String) => {
-                    buf.push_str("((String) AI.load((Object) ");
+                    buf.push_str("((String) AI.load((Object) (");
                     self.write_expr(buf, a, false);
-                    buf.push_str("))");
+                    buf.push_str(")))");
                 }
                 _ => self.write_expr(buf, a, false),
             }

@@ -1,0 +1,58 @@
+// resurrection corpus — both leeks run this: summon bulbs that charge the
+// enemy and die, then raise them with the registered chip 84 (the real
+// CHIP_RESURRECTION id, overridden castable — see Harness.registerChips).
+//
+// Every turn, in order:
+// 1. (turn 1) resurrect the ALIVE enemy → USE_RESURRECT_INVALID_ENTITY
+//    (-6, ChipClass-level: no TP check, no RNG, no log), and an unknown
+//    entity id (-1) → -6 the same way.
+// 2. summon a kamikaze bulb in front — the bulbAI charges and lasers, so
+//    bulbs die to the enemy's fire and become resurrect targets.
+// 3. scan fids 2.. for MY dead bulbs (isSummon + getSummoner == me +
+//    getCell == null): first resurrect onto my OWN cell — occupied →
+//    USE_INVALID_TARGET (-1), NO RNG — then onto the free cell behind →
+//    success rolls exactly ONE crit getDouble, logs ActionUseChip +
+//    ActionResurrect, revives at half of the halved max life (full_life
+//    false: max(10, round(total×0.5×factor)), life = total/2) and
+//    re-inserts the bulb in the play order; the chip then sits on
+//    cooldown 4, so later attempts return -3 (AFTER the -4 position rung:
+//    canUseAttack comes first in the resurrectEntity ladder).
+// 4. move in, shoot.
+//
+// NO cross-turn globals — the Rust runner clears globals between turns
+// while Java persists them, so everything here is per-turn local.
+
+function bulbAI() {
+	if (!isSummon()) {
+		return null;
+	}
+	var e = getNearestEnemy();
+	moveToward(e);
+	useChip(1008, e); // laser — kamikaze, dies fast
+	return null;
+}
+
+var me = getEntity();
+var e = getNearestEnemy();
+var my = getCell();
+if (getTurn() == 1) {
+	setWeapon(WEAPON_PISTOL);
+	resurrect(e, my); // alive entity → -6, no RNG, no log
+	resurrect(-1, my); // unknown entity → -6, no RNG, no log
+}
+var front = getCellFromXY(getCellX(my) + 1, getCellY(my));
+if (front != null && !isObstacle(front)) {
+	summon(1048, front, bulbAI);
+}
+var back = getCellFromXY(getCellX(my) - 1, getCellY(my));
+for (var i = 2; i < 18; i++) {
+	if (isSummon(i) && getSummoner(i) == me && getCell(i) == null) {
+		if (back != null && !isObstacle(back)) {
+			resurrect(i, my); // my own cell is occupied → -1, no RNG
+			resurrect(i, back); // free cell → ladder + one crit draw
+		}
+		break;
+	}
+}
+moveToward(e);
+useWeapon(e);

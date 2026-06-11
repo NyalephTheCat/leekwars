@@ -1,0 +1,19 @@
+// debuff corpus: odd turns lay four shackles on the enemy — weaken (1026,
+// strength), numb (1027, agility), dull (1028, wisdom), hush (1029, magic —
+// value-only pin, our leeks have 0 magic) — plus venom (1001); even turns
+// unravel (1031) reduces every non-IRREDUCTIBLE effect on the enemy by
+// 40+10j percent (truncating cast; [304] updates / [303] removals, then
+// [306]) and cleanse (1030) carries [antidote, removeShackles] — clears own
+// poisons ([303]s + [307]) and shackles ([303]s + [308]).
+var e = getNearestEnemy();
+if (getTurn() % 2 == 1) {
+	useChip(1026, e);
+	useChip(1027, e);
+	useChip(1028, e);
+	useChip(1029, e);
+	useChip(1001, e);
+} else {
+	useChip(1031, e);
+	useChip(1030);
+}
+moveToward(e);

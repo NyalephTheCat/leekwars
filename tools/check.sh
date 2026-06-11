@@ -10,8 +10,8 @@
 #     workspace denies warnings here via `-D warnings`. (The leek-test-corpus
 #     build script prints an informational `cargo:warning` about extracted
 #     upstream cases; that is not a lint and is tolerated.)
-#   * leek-backend-java's test runs rewrite OPS_DRIFT.txt and JVM_PARITY.txt
-#     (under crates/backends/leek-backend-java/tests/snapshots/)
+#   * leek-backend-java's test runs rewrite OPS_DRIFT.txt, JVM_PARITY.txt and
+#     CORPUS_SUMMARY.txt (under crates/backends/leek-backend-java/tests/snapshots/)
 #     non-deterministically — several recorded programs use randInt, so op
 #     counts drift run-to-run. The gate reverts them afterwards so a check
 #     run never leaves churn in the working tree.
@@ -30,6 +30,13 @@ cargo fmt --all --check
 step "layer check (tools/check-layers.sh)"
 tools/check-layers.sh
 
+# Generated weapon/chip catalogs must match the upstream JSON (skipped when
+# the official-generator submodule isn't checked out).
+if [[ -d official-generator/leek-wars-generator/data ]]; then
+  step "weapon/chip catalog drift (tools/game-item-extract.sh --check)"
+  tools/game-item-extract.sh --check
+fi
+
 step "cargo clippy --workspace --all-targets (-D warnings)"
 cargo clippy --workspace --all-targets --quiet -- -D warnings
 
@@ -44,7 +51,7 @@ fi
 # The java-backend tests regenerate these snapshots with non-deterministic
 # op counts (randInt); revert them so the gate is side-effect free.
 SNAPSHOTS="crates/backends/leek-backend-java/tests/snapshots"
-for f in "$SNAPSHOTS/OPS_DRIFT.txt" "$SNAPSHOTS/JVM_PARITY.txt"; do
+for f in "$SNAPSHOTS/OPS_DRIFT.txt" "$SNAPSHOTS/JVM_PARITY.txt" "$SNAPSHOTS/CORPUS_SUMMARY.txt"; do
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
      && ! git diff --quiet -- "$f" 2>/dev/null; then
     step "reverting non-deterministic $f churn"

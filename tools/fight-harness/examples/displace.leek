@@ -1,0 +1,46 @@
+// displacement corpus: odd turns — magnet (1003) CIRCLE_3 attract pulls the
+// enemy in, glove (1004) CIRCLE_2 push+damage aimed at the cell behind them
+// (re-fetched: the attract moved them), swap (1018) log-silent permutation,
+// spring (1019) whose repel line is DEAD (empty EffectRepel) so only the
+// damage lands; even turns — blink (1006) first at the enemy's occupied
+// cell (invalid target: free, no RNG) then beside them, toward us
+// (cooldown 2, so half the valid recasts silently fail).
+var e = getNearestEnemy();
+if (getTurn() % 2 == 1) {
+	useChip(1003);
+	var ec = getCell(e);
+	if (ec != null) {
+		var mx = getCellX(getCell());
+		var my = getCellY(getCell());
+		var ex = getCellX(ec);
+		var ey = getCellY(ec);
+		var bx = ex + (ex > mx ? 1 : (ex < mx ? -1 : 0));
+		var by = ey + (ey > my ? 1 : (ey < my ? -1 : 0));
+		var c = getCellFromXY(bx, by);
+		if (c != null) {
+			useChipOnCell(1004, c);
+		}
+		var ec2 = getCell(e);
+		if (ec2 != null) {
+			useChipOnCell(1018, ec2);
+		}
+	}
+	useChip(1019, e);
+	moveToward(e, 3);
+} else {
+	var ec3 = getCell(e);
+	if (ec3 != null) {
+		useChipOnCell(1006, ec3);
+		var mx2 = getCellX(getCell());
+		var my2 = getCellY(getCell());
+		var ex2 = getCellX(ec3);
+		var ey2 = getCellY(ec3);
+		var ax = ex2 + (mx2 > ex2 ? 1 : (mx2 < ex2 ? -1 : 0));
+		var ay = ey2 + (my2 > ey2 ? 1 : (my2 < ey2 ? -1 : 0));
+		var c2 = getCellFromXY(ax, ay);
+		if (c2 != null) {
+			useChipOnCell(1006, c2);
+		}
+	}
+	moveToward(e);
+}

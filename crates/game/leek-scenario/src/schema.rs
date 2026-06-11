@@ -26,7 +26,10 @@ pub struct Scenario {
     pub max_turns: Option<u32>,
     /// Language version the AIs compile under (default 4).
     pub version: Option<u8>,
-    /// Strict-mode compile flag (default false).
+    /// Strict mode (default false): AIs compile strictly, and entities may
+    /// only equip items the engine fully simulates (an item with unmodeled
+    /// upstream effect types is rejected at load instead of skipped with a
+    /// fight-log warning).
     pub strict: Option<bool>,
     /// The arena.
     pub map: Option<MapSpec>,

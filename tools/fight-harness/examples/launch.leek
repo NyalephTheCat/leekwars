@@ -1,0 +1,48 @@
+// launch-geometry corpus: odd turns — laser (1008, LASER_LINE) fails
+// silently unless we're aligned, hook (1007) cast at our adjacent in-line
+// cell resolves the first entity on the ray (FIRST_IN_LINE) and pulls it
+// to the cast cell, then sidestep onto the enemy's row to get aligned at
+// range (or approach when out of range); even turns — javelin (1032,
+// launch 9) range-gates like a line chip but searches cast cells through
+// the generateMask path, comet (1033, launch 10) casts only on diagonals
+// with the len=max mask special case, both getCellToUseChip searches
+// feeding moveTowardCell, so a mask drift desyncs the whole fight.
+var e = getNearestEnemy();
+var ec = getCell(e);
+if (ec == null) {
+	return;
+}
+if (getTurn() % 2 == 1) {
+	useChip(1008, e);
+	var mx = getCellX(getCell());
+	var my = getCellY(getCell());
+	var ex = getCellX(ec);
+	var ey = getCellY(ec);
+	var ax = mx + (ex > mx ? 1 : (ex < mx ? -1 : 0));
+	var ay = my + (ey > my ? 1 : (ey < my ? -1 : 0));
+	var c = getCellFromXY(ax, ay);
+	if (c != null) {
+		useChipOnCell(1007, c);
+	}
+	useChip(1008, e);
+	var dist = (ex > mx ? ex - mx : mx - ex) + (ey > my ? ey - my : my - ey);
+	if (dist > 8) {
+		moveToward(e, 2);
+	} else {
+		var a = getCellFromXY(mx, ey);
+		if (a != null) {
+			moveTowardCell(a, 2);
+		}
+	}
+} else {
+	var c1 = getCellToUseChip(1032, e);
+	if (c1 != -1) {
+		moveTowardCell(c1);
+	}
+	useChip(1032, e);
+	var c2 = getCellToUseChip(1033, e);
+	if (c2 != -1) {
+		moveTowardCell(c2);
+	}
+	useChip(1033, e);
+}

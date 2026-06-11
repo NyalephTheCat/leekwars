@@ -1,0 +1,60 @@
+// summon corpus — both leeks run this, so bulbs from both teams trade
+// laser fire while the owners keep shooting.
+//
+// Every turn, in order:
+// 1. summon onto the ENEMY's cell — out of range early (-4), occupied
+//    later (-4), on team cooldown (-3), or out of TP (-2); every failed
+//    ladder draws NO RNG.
+// 2. summon onto the free cell behind us — success rolls exactly ONE crit
+//    getDouble (a crit bulb gets the 1.2× stat multiplier in its
+//    fight.leeks entry); the spawn chip then sits on TEAM cooldown 2, so
+//    later attempts that turn (and usually the next two) return -3.
+// 3. useChipOnCell with the SUMMON chip on the other side — when the
+//    cooldown and TP allow, this goes down the Fight.useChip intercept
+//    (BULB_WITHOUT_AI): the bulb spawns with NO AI function and idles.
+// 4. cure the eldest alive bulb (getSummons order = team-list order),
+//    move in, shoot.
+//
+// bulbAI runs through the OWNER's module with current = the bulb
+// (BulbAI.runIA) — it must not touch globals (Java would see the owner's,
+// the Rust runner clears them), so everything in it is local.
+
+function bulbAI() {
+	if (!isSummon()) {
+		return null;
+	}
+	var owner = getSummoner();
+	var e = getNearestEnemy();
+	// Older bulbs chase, younger bulbs hold the line — getBirthTurn
+	// parity drives observably different movement.
+	if (getBirthTurn() % 2 == 1) {
+		moveToward(e);
+	}
+	useChip(1008, e); // laser: line launch, silently misses unaligned
+	useChip(1011, owner); // cure the summoner (range 6)
+	return null;
+}
+
+var e = getNearestEnemy();
+if (getTurn() == 1) {
+	setWeapon(WEAPON_PISTOL);
+}
+var ec = getCell(e);
+if (ec != null) {
+	summon(1048, ec, bulbAI); // occupied / out of range → -4, no RNG
+}
+var my = getCell();
+var back = getCellFromXY(getCellX(my) - 1, getCellY(my));
+if (back != null && !isObstacle(back)) {
+	summon(1048, back, bulbAI);
+}
+var front = getCellFromXY(getCellX(my) + 1, getCellY(my));
+if (front != null && !isObstacle(front)) {
+	useChipOnCell(1048, front); // BULB_WITHOUT_AI idle bulb
+}
+var pets = getSummons();
+if (count(pets) > 0) {
+	useChip(1011, pets[0]);
+}
+moveToward(e);
+useWeapon(e);

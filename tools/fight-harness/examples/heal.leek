@@ -1,0 +1,17 @@
+// heal/area corpus: regen (1012) heal-over-time with cooldown-2 recasts
+// (remove-previous on a heal — and even-turn casts fail free), cure (1011)
+// instant heal capped to the missing life (at full life it still logs a 0
+// ActionHeal), then odd turns blessing (1010, non-stackable ALLIES-area
+// strength buff: a recast replaces the previous effect) + storm (1009,
+// ENEMIES area), even turns a storm double-cast. 6 TP exactly either way.
+var e = getNearestEnemy();
+useChip(1012);
+useChip(1011);
+if (getTurn() % 2 == 1) {
+	useChip(1010);
+	useChip(1009);
+} else {
+	useChip(1009);
+	useChip(1009);
+}
+moveToward(e, 3);
