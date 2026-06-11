@@ -281,8 +281,10 @@ pub(super) fn lambda_zero_param(p: &mut Parser) {
 }
 
 /// Detect `T x -> body` or `T x => body` (single typed bare
-/// parameter lambda). Type is a single token here — we don't
-/// support generics in this fast path.
+/// parameter lambda). The type may carry the modifiers `eatType`
+/// recognizes — generics (`Array<integer> x =>`), nullable
+/// (`integer? x =>`), and unions (`integer | string x =>`) —
+/// mirroring the upstream lambda fast-path (6d55b79).
 pub(super) fn looks_like_typed_bare_lambda(p: &Parser) -> bool {
     // First token must be a type-ish ident (or a type keyword)
     // and not followed by an arrow itself (`x -> body` is the
@@ -292,22 +294,27 @@ pub(super) fn looks_like_typed_bare_lambda(p: &Parser) -> bool {
     if !type_ish {
         return false;
     }
-    if p.nth(1) != S::Ident {
-        return false;
+    // Bare single-token type: `integer x =>`.
+    if p.nth(1) == S::Ident && matches!(p.nth(2), S::Arrow | S::FatArrow) {
+        return true;
     }
-    matches!(p.nth(2), S::Arrow | S::FatArrow)
+    // Modified type: scan the full type grammar, then require the
+    // param name + arrow. (The arrow requirement keeps ternaries like
+    // `integer ? a : b` and bitwise-ors like `a | b + 1` out.)
+    let Some(end) = scan_type_ahead(p, 0) else {
+        return false;
+    };
+    end > 1 && p.nth(end) == S::Ident && matches!(p.nth(end + 1), S::Arrow | S::FatArrow)
 }
 
-/// `T x -> body` — single typed bare-param lambda. The type
-/// token is consumed as an optional `TypeRef` child of the
-/// `Param` so HIR can pick it up.
+/// `T x -> body` — single typed bare-param lambda. The full type
+/// (with generic/nullable/union modifiers) is consumed as a
+/// `TypeRef` child of the `Param` so HIR can pick it up.
 pub(super) fn lambda_typed_bare(p: &mut Parser) {
     p.start_node(S::LambdaExpr);
     p.start_node(S::ParamList);
     p.start_node(S::Param);
-    p.start_node(S::TypeRef);
-    p.bump(); // type token
-    p.finish_node(); // TypeRef
+    crate::grammar::types::ty(p); // full type (TypeRef node)
     p.bump(); // ident (param name)
     p.finish_node(); // Param
     p.finish_node(); // ParamList

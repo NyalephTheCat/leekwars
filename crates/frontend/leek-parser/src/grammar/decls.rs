@@ -95,12 +95,16 @@ pub(super) fn param_list(p: &mut Parser) {
     let _ = p.expect(S::RParen);
 }
 
-/// `[@] [type] IDENT [= expr]`
+/// `[@] [type] [@] IDENT [= expr]` — the upstream grammar puts the
+/// type *before* the by-reference `@` (`function f(integer @iCell)`,
+/// WordCompiler: `eatType` → `@` → name); the leading-`@` order is
+/// kept for compatibility with what we already accepted.
 fn param(p: &mut Parser) {
     p.start_node(S::Param);
     let _ = p.eat(S::At); // legacy by-reference, deprecated in v≥2
-    if types::looks_like_type_then_name(p) {
+    if types::looks_like_type_then_name(p) || types::looks_like_type_then_ref_name(p) {
         types::ty(p);
+        let _ = p.eat(S::At); // upstream order: `integer @iCell`
     }
     let _ = p.expect(S::Ident);
     if p.eat(S::Eq) {

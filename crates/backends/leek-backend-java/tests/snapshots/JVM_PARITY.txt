@@ -1,7 +1,7 @@
-rust-emit JVM parity: 3403 cases
-✓ value: 3403/3403 (100.0%)
-✓ ops:   3261/3403 (95.8%)
+rust-emit JVM parity: 3443 cases
+✓ value: 3443/3443 (100.0%)
+✓ ops:   3274/3443 (95.1%)
 ✗ value mismatches: 0
-✗ ops drift:        142
+✗ ops drift:        169
 ✗ jvm errors:       0
 
