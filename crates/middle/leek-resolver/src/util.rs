@@ -24,16 +24,25 @@ pub(crate) fn strip_string_quotes(s: &str) -> String {
     s.to_string()
 }
 
-/// Collect loop-variable names declared via `var` in a foreach
-/// `for (var x in ...)` / `for (var x : var y in ...)` form. Only
-/// the `var`-prefixed bindings count as new declarations; bare
-/// `for (x in arr)` reuses an outer `x`.
+/// Collect loop-variable names declared in a foreach — either
+/// `var`-prefixed (`for (var x in ...)`) or explicitly typed
+/// (`for (Entity x in ...)`, where the type parses as a TypeRef
+/// node before the binding's Ident). Only those count as new
+/// declarations; bare `for (x in arr)` reuses an outer `x`.
 pub(crate) fn collect_foreach_var_names(fe: &ForeachStmt) -> Vec<String> {
     let mut out = Vec::new();
     let mut pending_var = false;
     let mut seen_in = false;
     for el in fe.syntax().children_with_tokens() {
-        let Some(t) = el.into_token() else { continue };
+        let t = match el {
+            rowan::NodeOrToken::Node(n) => {
+                if n.kind() == SyntaxKind::TypeRef && !seen_in {
+                    pending_var = true;
+                }
+                continue;
+            }
+            rowan::NodeOrToken::Token(t) => t,
+        };
         if t.kind() == SyntaxKind::KwIn {
             seen_in = true;
             continue;

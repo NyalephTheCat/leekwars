@@ -66,4 +66,29 @@ impl TypeTable {
             .filter(|t| t.span.start <= cursor_offset && cursor_offset < t.span.end)
             .min_by_key(|t| t.span.end - t.span.start)
     }
+
+    /// Return the smallest typed expression containing the whole byte
+    /// range `[start, end)` — for an expression *node* (e.g. a var
+    /// initializer) this is its own entry when one exists, never a
+    /// sub-expression. A point query (`smallest_at`) can't do this:
+    /// at the start offset of `fm.myLeek` the innermost entry is the
+    /// `fm` NameRef, not the field access.
+    pub fn spanning(&self, start: u32, end: u32) -> Option<&TypedExpr> {
+        // Candidates all have span.start <= start; the vector is
+        // sorted by span.start but duplicates exist (an expression
+        // and its first sub-expression share a start), so advance the
+        // binary-search cutoff past the run of equal starts.
+        let mut cutoff = match self.exprs.binary_search_by_key(&start, |t| t.span.start) {
+            Ok(i) => i + 1,
+            Err(i) => i,
+        };
+        while cutoff < self.exprs.len() && self.exprs[cutoff].span.start <= start {
+            cutoff += 1;
+        }
+        self.exprs[..cutoff]
+            .iter()
+            .rev()
+            .filter(|t| t.span.start <= start && end <= t.span.end)
+            .min_by_key(|t| t.span.end - t.span.start)
+    }
 }

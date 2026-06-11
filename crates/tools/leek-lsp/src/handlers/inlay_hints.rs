@@ -1,7 +1,9 @@
 //! `textDocument/inlayHint` — show inferred types inline after `var`
 //! declarations that have no annotation.
 
+use leek_parser::ast::{AstNode, Expr};
 use leek_resolver::SymbolKind;
+use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
 use tower_lsp::lsp_types as lsp;
 
@@ -19,6 +21,8 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
 
     let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>()?;
     let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
+    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
+    let root = SyntaxNode::new_root(green.clone());
 
     let from_offset = position_to_offset_local(doc, range.start);
     let to_offset = position_to_offset_local(doc, range.end);
@@ -39,11 +43,18 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
         {
             continue;
         }
-        // Look up the inferred type at the var's def site (typed by
-        // the checker via the initializer expression).
+        // Hints only apply to unannotated `var`/`global` declarations
+        // with an initializer — `Entity x = …` already states its
+        // type, and a foreach binding has no initializer expression.
+        let Some((init_start, init_end)) = initializer_range(&root, off) else {
+            continue;
+        };
+        // The checker's type for the initializer expression itself —
+        // a range query, so `fm.myLeek` yields the field access's
+        // type, not the type of the `fm` base it starts with.
         let inferred = type_art
             .table
-            .smallest_at(sym.def_span.end + 3) // best-effort: after `= `
+            .spanning(init_start, init_end)
             .map_or(Type::Any, |t| t.ty.clone());
         if matches!(inferred, Type::Any) {
             continue;
@@ -84,6 +95,44 @@ pub fn resolve(mut hint: lsp::InlayHint) -> lsp::InlayHint {
 
 fn position_to_offset_local(doc: &crate::documents::DocHandle, pos: lsp::Position) -> Option<u32> {
     crate::util::position::position_to_offset(doc.pos_map(), pos)
+}
+
+/// Byte range of the initializer expression for the declaration whose
+/// name token starts at `name_offset`. Returns `None` when the binding
+/// isn't a `var`/`global` declaration (e.g. a foreach loop variable),
+/// already has an explicit type annotation, or has no `= expr` part —
+/// no hint in any of those cases. Multi-declarations
+/// (`var a = 1, b = 'x'`) resolve each name to its own initializer.
+fn initializer_range(root: &SyntaxNode, name_offset: u32) -> Option<(u32, u32)> {
+    let name_tok = root.token_at_offset(name_offset.into()).right_biased()?;
+    let decl = name_tok.parent()?;
+    if decl.kind() != SyntaxKind::VarDeclStmt {
+        return None;
+    }
+    // A leading TypeRef annotates every name the statement declares.
+    if decl.children().any(|n| n.kind() == SyntaxKind::TypeRef) {
+        return None;
+    }
+    let mut seen_name = false;
+    for el in decl.children_with_tokens() {
+        match el {
+            leek_syntax::language::NodeOrToken::Token(t) => {
+                if t.text_range() == name_tok.text_range() {
+                    seen_name = true;
+                } else if seen_name && t.kind() == SyntaxKind::Comma {
+                    // Next declarator — this name had no initializer.
+                    return None;
+                }
+            }
+            leek_syntax::language::NodeOrToken::Node(n) => {
+                if seen_name && Expr::cast(n.clone()).is_some() {
+                    let r = n.text_range();
+                    return Some((r.start().into(), r.end().into()));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn format_type(ty: &Type) -> String {
@@ -171,6 +220,47 @@ mod tests {
             panic!("expected markup tooltip");
         };
         assert!(m.value.contains("integer"), "tooltip = {:?}", m.value);
+    }
+
+    #[test]
+    fn annotated_declaration_gets_no_hint() {
+        // `Entity x = …` already states its type — no hint, even when
+        // the checker has an inferred type for the initializer.
+        let (ws, uri) = ws_with("class Entity { cell = 1 }\nEntity x = new Entity()\n");
+        let hints = handle(&ws, &uri, whole_file()).expect("hints");
+        assert!(hints.is_empty(), "annotated decl must not hint: {hints:?}");
+    }
+
+    #[test]
+    fn field_access_initializer_hints_field_type() {
+        // Regression: the old point query at `def_span.end + 3` landed
+        // on the *base* of `fm.leek` and hinted the base's class
+        // (`: FM`) instead of the field's type.
+        let (ws, uri) = ws_with(
+            "class Entity { cell = 1 }\n\
+             class FM { Entity leek = new Entity() }\n\
+             var fm = new FM()\n\
+             var x = fm.leek\n",
+        );
+        let hints = handle(&ws, &uri, whole_file()).expect("hints");
+        let labels: Vec<String> = hints
+            .iter()
+            .map(|h| match &h.label {
+                lsp::InlayHintLabel::String(s) => s.clone(),
+                other @ lsp::InlayHintLabel::LabelParts(_) => format!("{other:?}"),
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l == ": Entity"),
+            "field-access RHS should hint the field type: {labels:?}"
+        );
+        // Exactly one `: FM` — the `var fm` hint. A second one means
+        // `var x` was hinted from the base instead of the field.
+        assert_eq!(
+            labels.iter().filter(|l| *l == ": FM").count(),
+            1,
+            "must not hint the base's class for `var x = fm.leek`: {labels:?}"
+        );
     }
 
     #[test]
