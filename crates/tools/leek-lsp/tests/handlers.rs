@@ -2660,3 +2660,188 @@ fn hover_var_inference_flows_into_return_expression() {
         "return expression over a real `var` should infer real, got: {v}"
     );
 }
+
+/// Chained member access: `fm.leek.<member>` — the receiver of the
+/// final access is the *intermediate* field's class (Entity), not the
+/// class of the chain's first link (FM).
+const CHAIN_SRC: &str = "\
+class Entity {\n\
+\u{20}   integer cell = 1\n\
+\u{20}   integer getCell() { return this.cell }\n\
+}\n\
+class FM {\n\
+\u{20}   Entity leek = new Entity()\n\
+}\n\
+var fm = new FM()\n\
+var x = fm.leek.cell\n\
+fm.leek.getCell()\n";
+
+#[test]
+fn hover_chained_field_access_resolves_declaration() {
+    // Regression: `base_class_name` used a point query at the base's
+    // *start*, landing on `fm` (class FM) instead of `fm.leek`
+    // (Entity) — the member branch failed and hover degraded to the
+    // bare inferred type with no field signature.
+    // 1st `cell` = field decl, 2nd = `this.cell`, 3rd = `fm.leek.cell`.
+    let v = hover_text(CHAIN_SRC, "cell", 3);
+    assert!(
+        v.contains("integer cell"),
+        "chained field access should resolve the field decl, got: {v}"
+    );
+}
+
+#[test]
+fn hover_chained_method_call_resolves_signature() {
+    // 2nd `getCell` is the chained call site `fm.leek.getCell()`.
+    let v = hover_text(CHAIN_SRC, "getCell", 2);
+    assert!(
+        v.contains("integer getCell()"),
+        "chained method call should resolve the method decl, got: {v}"
+    );
+}
+
+#[test]
+fn hover_chained_field_access_via_this() {
+    let src = "class Entity {\n  integer cell = 1\n}\nclass FM {\n  Entity leek = new Entity()\n  m() { return this.leek.cell }\n}\n";
+    let v = hover_text(src, "cell }", 1);
+    assert!(
+        v.contains("integer cell"),
+        "`this.leek.cell` should resolve through the chain, got: {v}"
+    );
+}
+
+#[test]
+fn hover_annotated_decl_name_shows_declared_type() {
+    // Hover on `myLeek` in `Entity myLeek = fm.leek` renders the
+    // annotated declaration, never a bare `any`.
+    let src = "class Entity {\n  integer cell = 1\n}\nclass FM {\n  Entity leek = new Entity()\n}\nvar fm = new FM()\nEntity myLeek = fm.leek\n";
+    let v = hover_text(src, "myLeek", 1);
+    assert!(
+        v.contains("Entity myLeek"),
+        "annotated decl hover should show the declared type, got: {v}"
+    );
+}
+
+#[test]
+fn hover_chained_method_return_receiver() {
+    // The chain link can be a method call: `fm.getLeek().cell` resolves
+    // the final field through the method\'s declared return type.
+    let src = "class Entity {\n  integer cell = 1\n}\nclass FM {\n  Entity leek = new Entity()\n  Entity getLeek() { return this.leek }\n}\nvar fm = new FM()\nvar x = fm.getLeek().cell\n";
+    let v = hover_text(src, "cell\n", 1);
+    assert!(
+        v.contains("integer cell"),
+        "method-return chain should resolve the field decl, got: {v}"
+    );
+}
+
+/// Position the cursor at the first byte of the `occ`-th occurrence
+/// of `needle`.
+fn needle_pos(src: &str, needle: &str, occ: usize) -> lsp::Position {
+    let mut idx = 0usize;
+    let mut start = 0usize;
+    for _ in 0..occ {
+        let found = src[idx..].find(needle).map(|p| idx + p).expect("needle");
+        start = found;
+        idx = found + needle.len();
+    }
+    let prefix = &src[..=start];
+    let line = u32::try_from(prefix.matches('\n').count()).unwrap();
+    let line_start = prefix.rfind('\n').map_or(0, |p| p + 1);
+    lsp::Position {
+        line,
+        character: u32::try_from(start - line_start).unwrap(),
+    }
+}
+
+/// Go-to-definition at the `occ`-th occurrence of `needle`,
+/// expecting a same-file scalar location.
+fn definition_at(src: &str, needle: &str, occ: usize) -> lsp::Location {
+    let resp =
+        definition::handle(&open(src), &url(), needle_pos(src, needle, occ)).expect("definition");
+    let lsp::GotoDefinitionResponse::Scalar(loc) = resp else {
+        panic!("expected scalar response");
+    };
+    loc
+}
+
+#[test]
+fn definition_on_member_field_jumps_to_field_decl() {
+    // Regression: the resolver records no references for member
+    // names, so go-to-definition on `fm.leek` / `.cell` did nothing.
+    // 3rd `cell` is the use in `var x = fm.leek.cell`; the decl name
+    // is the 1st occurrence.
+    let loc = definition_at(CHAIN_SRC, "cell", 3);
+    assert_eq!(loc.uri, url());
+    assert_eq!(needle_pos(CHAIN_SRC, "cell", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_member_method_jumps_to_method_decl() {
+    // 2nd `getCell` is the chained call site.
+    let loc = definition_at(CHAIN_SRC, "getCell", 2);
+    assert_eq!(needle_pos(CHAIN_SRC, "getCell", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_intermediate_chain_link_jumps_to_its_decl() {
+    // `leek` in `fm.leek.cell` (2nd occurrence) → the FM field decl
+    // name (1st occurrence).
+    let loc = definition_at(CHAIN_SRC, "leek", 2);
+    assert_eq!(needle_pos(CHAIN_SRC, "leek", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_inherited_and_static_members() {
+    let src = "\
+class Animal {\n\
+\u{20}   string name\n\
+\u{20}   string describe() { return this.name }\n\
+\u{20}   static Animal make(string n) { return new Animal() }\n\
+}\n\
+class Cat extends Animal {\n\
+}\n\
+var c = new Cat()\n\
+c.describe()\n\
+Animal.make(\"x\")\n";
+    // Inherited: `c.describe()` resolves through `extends` to Animal.
+    let loc = definition_at(src, "describe", 2);
+    assert_eq!(needle_pos(src, "describe", 1), loc.range.start);
+    // Static: `Animal.make` — the receiver is the class name itself.
+    let loc = definition_at(src, "make", 2);
+    assert_eq!(needle_pos(src, "make", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_this_member() {
+    let src = "\
+class Animal {\n\
+\u{20}   string name\n\
+\u{20}   string describe() { return this.name }\n\
+}\n";
+    let loc = definition_at(src, "name", 2);
+    assert_eq!(needle_pos(src, "name", 1), loc.range.start);
+}
+
+#[test]
+fn multi_declarator_inits_resolve_per_binding() {
+    // Regression: hover/typeDefinition's initializer lookup picked the
+    // *largest* typed expression in the whole decl statement, so every
+    // declarator in `var a = new A(), b = new B()` reported the type
+    // of whichever initializer happened to be biggest.
+    let src = "class Aaaaa {}\nclass Bb {}\nvar a = new Aaaaa(), b = new Bb()\n";
+    // Hover on each binding name shows its OWN class.
+    let a = hover_text(src, "a = new Aaaaa", 1);
+    assert!(a.contains("Aaaaa"), "hover on `a` should be Aaaaa: {a}");
+    let b = hover_text(src, "b = new Bb", 1);
+    assert!(
+        b.contains("Bb") && !b.contains("Aaaaa"),
+        "hover on `b` should be Bb, not the sibling's Aaaaa: {b}"
+    );
+    // typeDefinition on `b` jumps to `class Bb` (line 1), not `Aaaaa`.
+    let resp = type_definition::handle(&open(src), &url(), needle_pos(src, "b = new Bb", 1))
+        .expect("type definition");
+    let lsp::request::GotoTypeDefinitionResponse::Scalar(loc) = resp else {
+        panic!("expected scalar response");
+    };
+    assert_eq!(loc.range.start.line, 1, "expected `class Bb`: {loc:?}");
+}

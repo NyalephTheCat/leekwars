@@ -3,12 +3,15 @@
 
 use leek_complexity::analyze_file;
 use leek_hir::pipeline::HirArtifact;
-use leek_parser::ast::{AstNode, Expr, FieldExpr};
 use leek_span::Span;
-use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
 use tower_lsp::lsp_types as lsp;
 
+use super::member::{
+    enclosing_class_of, enclosing_decl_node, field_access_at, find_member_in_chain,
+    initializer_type, member_decl_name, node_covering,
+};
 use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
@@ -221,16 +224,12 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     }
     .or_else(|| {
         // Cursor on a var-decl name doesn't sit on a typed
-        // expression. If we have an enclosing decl node, fall
-        // back to the type of the init expression — the
-        // largest-cost entry inside the decl's text range.
-        symbol.as_ref().and_then(|sym| {
-            let decl = node_covering(&root, sym.full_span).and_then(|n| enclosing_decl_node(&n))?;
-            let r = decl.text_range();
-            let start = u32::from(r.start());
-            let end = u32::from(r.end());
-            init_expr_type(&type_art.table, start, end)
-        })
+        // expression. Fall back to the type of the binding's own
+        // initializer (declarator-aware, so a multi-declaration
+        // never borrows a sibling's init type).
+        symbol
+            .as_ref()
+            .and_then(|sym| initializer_type(&root, &type_art.table, sym.def_span.start))
     });
     if let Some(entry) = inferred {
         let ty = format_type(&entry.ty);
@@ -362,73 +361,6 @@ fn locate_symbol(
     (sym, None)
 }
 
-/// Pick the typed expression that best represents the "init"
-/// position of a var-decl / param-default — the largest typed
-/// expression contained inside `[decl_start, decl_end)`. We
-/// approximate "best" with "outermost expression in the range" so
-/// `var pet = new Cat()` returns the `new Cat()` typed entry
-/// rather than a nested sub-expression.
-fn init_expr_type(
-    table: &leek_types::TypeTable,
-    decl_start: u32,
-    decl_end: u32,
-) -> Option<&leek_types::TypedExpr> {
-    table
-        .exprs
-        .iter()
-        .filter(|e| e.span.start >= decl_start && e.span.end <= decl_end)
-        .max_by_key(|e| e.span.end - e.span.start)
-}
-
-/// Walk up the CST from `n` until we hit a node whose kind is a
-/// declaration we know how to render a signature for. The
-/// resolver records `full_span` as the identifier token only for
-/// top-level function/method symbols, so the smallest covering
-/// node lands on `Ident` rather than the enclosing FnDecl/etc.
-/// — this helper does the climb.
-fn enclosing_decl_node(n: &SyntaxNode) -> Option<SyntaxNode> {
-    let mut cur = Some(n.clone());
-    while let Some(node) = cur {
-        if matches!(
-            node.kind(),
-            SyntaxKind::FnDecl
-                | SyntaxKind::ClassDecl
-                | SyntaxKind::ClassMethod
-                | SyntaxKind::ClassConstructor
-                | SyntaxKind::ClassField
-                | SyntaxKind::VarDeclStmt
-                | SyntaxKind::Param
-        ) {
-            return Some(node);
-        }
-        cur = node.parent();
-    }
-    None
-}
-
-/// Find the smallest descendant of `root` whose token range fully
-/// contains `span`. Used to look up the CST declaration node for
-/// signature rendering.
-fn node_covering(root: &SyntaxNode, span: Span) -> Option<SyntaxNode> {
-    fn covers(n: &SyntaxNode, span: Span) -> bool {
-        let r = n.text_range();
-        u32::from(r.start()) <= span.start && span.end <= u32::from(r.end())
-    }
-    if !covers(root, span) {
-        return None;
-    }
-    // Walk down through the smallest covering child until we hit
-    // a node whose children no longer cover.
-    let mut current = root.clone();
-    loop {
-        let next = current.children().find(|c| covers(c, span));
-        match next {
-            Some(n) => current = n,
-            None => return Some(current),
-        }
-    }
-}
-
 fn format_type(ty: &Type) -> String {
     match ty {
         Type::Any => "any".into(),
@@ -517,29 +449,16 @@ fn infer_decl_type(sigs: &InferredSignatures, node: &SyntaxNode) -> Option<Strin
         }
         SyntaxKind::ClassMethod => {
             let name = member_decl_name(node)?;
-            let class = enclosing_class_name(node)?;
+            let class = enclosing_class_of(node)?;
             sigs.method_returns.get(&class)?.get(&name).and_then(known)
         }
         SyntaxKind::ClassField => {
             let name = member_decl_name(node)?;
-            let class = enclosing_class_name(node)?;
+            let class = enclosing_class_of(node)?;
             sigs.field_types.get(&class)?.get(&name).and_then(known)
         }
         _ => None,
     }
-}
-
-/// The name of the class enclosing `node` (walking up to the nearest
-/// `ClassDecl`), for member-type lookups.
-fn enclosing_class_name(node: &SyntaxNode) -> Option<String> {
-    let mut cur = node.parent();
-    while let Some(n) = cur {
-        if n.kind() == SyntaxKind::ClassDecl {
-            return member_decl_name(&n);
-        }
-        cur = n.parent();
-    }
-    None
 }
 
 /// The library-function name under the cursor, when the cursor sits on an
@@ -653,28 +572,9 @@ fn member_access_hover(
     signatures: &InferredSignatures,
     offset: u32,
 ) -> Option<(String, Span)> {
-    // Find the innermost FieldExpr whose `.field` token covers the cursor.
-    let mut best: Option<(SyntaxNode, SyntaxToken)> = None;
-    for node in root.descendants() {
-        if node.kind() != SyntaxKind::FieldExpr {
-            continue;
-        }
-        let Some(field) = FieldExpr::cast(node.clone()).and_then(|f| f.field()) else {
-            continue;
-        };
-        let r = field.text_range();
-        if u32::from(r.start()) <= offset && offset < u32::from(r.end()) {
-            let smaller = best
-                .as_ref()
-                .is_none_or(|(b, _)| node.text_range().len() < b.text_range().len());
-            if smaller {
-                best = Some((node.clone(), field));
-            }
-        }
-    }
-    let (field_node, field_tok) = best?;
-    let base = FieldExpr::cast(field_node).and_then(|f| f.base())?;
-    let class_name = base_class_name(root, resolve_art, table, &base)?;
+    let (field_expr, field_tok) = field_access_at(root, offset)?;
+    let base = field_expr.base()?;
+    let class_name = super::member::base_class_name(root, resolve_art, table, &base)?;
     let member = find_member_in_chain(root, &class_name, field_tok.text())?;
     let sig = signature_for_with(&member, &|n| infer_decl_type(signatures, n))?;
     let r = field_tok.text_range();
@@ -686,137 +586,4 @@ fn member_access_hover(
             u32::from(r.end()),
         ),
     ))
-}
-
-/// The class a member-access receiver denotes: a `ClassInstance` type
-/// from the type table (instances, `this`, `super`), the receiver
-/// variable's declared/inferred init type, or — for a static
-/// `Class.member` — the receiver name itself when it names a class.
-fn base_class_name(
-    root: &SyntaxNode,
-    resolve_art: Option<&leek_resolver::pipeline::ResolveArtifact>,
-    table: &leek_types::TypeTable,
-    base: &Expr,
-) -> Option<String> {
-    let start = u32::from(base.syntax().text_range().start());
-    if let Some(entry) = table.smallest_at(start)
-        && let Some(name) = class_name_of_type(&entry.ty)
-    {
-        return Some(name);
-    }
-    // A plain `var c = new Cat()` isn't recorded with a type at its use
-    // sites in non-strict mode, but its initializer *is* typed. Resolve
-    // the receiver to its declaration and read the init type.
-    if let Some(name) = receiver_class_via_decl(root, resolve_art, table, start) {
-        return Some(name);
-    }
-    // Static receiver: `Animal.make()` — `Animal` is a class name, not
-    // a typed value, so the type table reports `any`.
-    if let Expr::Name(nr) = base
-        && let Some(ident) = nr.ident()
-        && find_class_decl_by_name(root, ident.text()).is_some()
-    {
-        return Some(ident.text().to_string());
-    }
-    // `this.member` — fall back to the enclosing class from the CST when
-    // the type table has no instance entry (e.g. a mid-edit buffer).
-    if base
-        .syntax()
-        .first_token()
-        .is_some_and(|t| t.kind() == SyntaxKind::KwThis)
-    {
-        return enclosing_class_name(base.syntax());
-    }
-    None
-}
-
-/// Resolve a receiver variable to its declaration and read the class
-/// from the declaration's initializer type (`var c = new Cat()`).
-fn receiver_class_via_decl(
-    root: &SyntaxNode,
-    resolve_art: Option<&leek_resolver::pipeline::ResolveArtifact>,
-    table: &leek_types::TypeTable,
-    base_start: u32,
-) -> Option<String> {
-    let art = resolve_art?;
-    let r = art.table.reference_at(base_start)?;
-    let sym = art.table.symbol(r.target)?;
-    let decl = node_covering(root, sym.full_span).and_then(|n| enclosing_decl_node(&n))?;
-    let rng = decl.text_range();
-    let entry = init_expr_type(table, u32::from(rng.start()), u32::from(rng.end()))?;
-    class_name_of_type(&entry.ty)
-}
-
-/// Unwrap `Nullable`/`Array` wrappers down to a `ClassInstance` name.
-fn class_name_of_type(ty: &Type) -> Option<String> {
-    match ty {
-        Type::ClassInstance(n, _) => Some(n.clone()),
-        Type::Nullable(inner) | Type::Array(inner) => class_name_of_type(inner),
-        _ => None,
-    }
-}
-
-/// Walk `class_name` and its ancestors looking for a member named
-/// `member`. Returns the member's CST node (method / field /
-/// constructor) for signature rendering.
-fn find_member_in_chain(root: &SyntaxNode, class_name: &str, member: &str) -> Option<SyntaxNode> {
-    let mut current = Some(class_name.to_string());
-    for _ in 0..64 {
-        let cls = find_class_decl_by_name(root, &current?)?;
-        if let Some(m) = class_member_named(&cls, member) {
-            return Some(m);
-        }
-        current = class_parent_name_of(&cls);
-    }
-    None
-}
-
-/// Find a top-level `class <name>` declaration node.
-fn find_class_decl_by_name(root: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
-    root.descendants().find(|n| {
-        n.kind() == SyntaxKind::ClassDecl
-            && n.children_with_tokens()
-                .filter_map(leek_syntax::language::NodeOrToken::into_token)
-                .find(|t| t.kind() == SyntaxKind::Ident)
-                .is_some_and(|t| t.text() == name)
-    })
-}
-
-/// The `extends Parent` name on a class declaration, if any.
-fn class_parent_name_of(cls: &SyntaxNode) -> Option<String> {
-    let mut saw_extends = false;
-    for el in cls.children_with_tokens() {
-        if let Some(t) = el.into_token() {
-            if t.kind() == SyntaxKind::KwExtends {
-                saw_extends = true;
-            } else if saw_extends && t.kind() == SyntaxKind::Ident {
-                return Some(t.text().to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Find the class member (method / field / constructor) whose declared
-/// name is `name` within `cls`'s body.
-fn class_member_named(cls: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
-    let body = cls.children().find(|c| c.kind() == SyntaxKind::ClassBody)?;
-    body.children().find(|member| match member.kind() {
-        SyntaxKind::ClassConstructor => name == "constructor",
-        SyntaxKind::ClassMethod | SyntaxKind::ClassField => {
-            member_decl_name(member).as_deref() == Some(name)
-        }
-        _ => false,
-    })
-}
-
-/// The declared name of a class method/field — the first `Ident` token
-/// child. Any leading return/field type sits inside a `TypeRef` node,
-/// so its name isn't a direct token and won't be mistaken for this.
-fn member_decl_name(member: &SyntaxNode) -> Option<String> {
-    member
-        .children_with_tokens()
-        .filter_map(leek_syntax::language::NodeOrToken::into_token)
-        .find(|t| t.kind() == SyntaxKind::Ident)
-        .map(|t| t.text().to_string())
 }

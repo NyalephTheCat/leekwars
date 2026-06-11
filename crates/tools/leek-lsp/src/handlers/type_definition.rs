@@ -15,6 +15,7 @@ use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
 use tower_lsp::lsp_types as lsp;
 
+use super::member::{self, class_name_of_type};
 use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
@@ -61,13 +62,18 @@ pub fn handle(
             {
                 return Some(name);
             }
-            // Fallback: walk the CST up from `sym.def_span.start`
-            // to its enclosing `VarDeclStmt` (or method-param),
-            // then look at the largest non-Any type entry inside
-            // that node's text range. This catches the common
-            // `var c = expr` shape where the binding's full_span
-            // is just the ident.
+            // Fallback: the binding's own initializer expression.
+            // Declarator-aware — `var a = new A(), b = new B()` reads
+            // `new B()` for `b`, never a sibling's initializer.
             let cst_off = sym.def_span.start;
+            if let Some(entry) = member::initializer_type(&root, type_table, cst_off)
+                && let Some(name) = class_name_of_type(&entry.ty)
+            {
+                return Some(name);
+            }
+            // Last resort: the largest non-Any type entry inside the
+            // enclosing declaration node (params, class fields — the
+            // shapes initializer_type doesn't cover precisely).
             let parent_span = enclosing_decl_span(&root, cst_off);
             let (lo, hi) = parent_span.unwrap_or((sym.full_span.start, sym.full_span.end));
             type_table
@@ -126,15 +132,4 @@ fn type_of_symbol(hir: &leek_hir::HirFile, name: &str, kind: SymbolKind) -> Opti
         }
     }
     None
-}
-
-/// Walk through `Nullable` and `Array<T>` to find an underlying
-/// `ClassInstance(name)` if any.
-fn class_name_of_type(ty: &Type) -> Option<String> {
-    match ty {
-        Type::ClassInstance(n, _) => Some(n.clone()),
-        Type::Nullable(inner) => class_name_of_type(inner),
-        Type::Array(inner) => class_name_of_type(inner),
-        _ => None,
-    }
 }

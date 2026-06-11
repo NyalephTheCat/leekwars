@@ -509,4 +509,95 @@ mod index_tests {
             r.diagnostics
         );
     }
+
+    #[test]
+    fn typed_foreach_binding_declares_in_class_method() {
+        // `for (Entity e in …)` declares `e` just like `for (var e in …)`.
+        // The bug only surfaced inside class methods because that's the
+        // one place UNKNOWN_VARIABLE fires for plain identifiers.
+        let r = run("class Entity { cell = 1 }\n\
+             class FM {\n\
+               m() { for (Entity e in [new Entity()]) { var c = e.cell } }\n\
+             }\n");
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::UNKNOWN_VARIABLE),
+            "typed foreach binding should be declared: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn typed_foreach_binding_shadow_checked() {
+        // A typed foreach binding is a declaration, so it gets the same
+        // shadowing check as `for (var e in …)`.
+        let r = run("var e = 1\nfor (integer e in [1]) { }\n");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::VARIABLE_NAME_UNAVAILABLE),
+            "typed foreach binding shadowing an outer var should error: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn bare_foreach_binding_still_reuses_outer_var() {
+        // Control: `for (e in …)` without `var` or a type reuses the
+        // outer `e` — no declaration, no shadow error.
+        let r = run("var e = 1\nfor (e in [1]) { }\n");
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::VARIABLE_NAME_UNAVAILABLE),
+            "bare foreach binding must not be treated as a declaration: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn unresolved_super_method_unknown_errors() {
+        let r = run("class A { }\n\
+             class B extends A {\n\
+               m() { super.nope() }\n\
+             }\n");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::UNKNOWN_METHOD),
+            "missing super method should raise UNKNOWN_METHOD: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn unresolved_super_method_wrong_arity_errors() {
+        let r = run("class A { m(x) { return x } }\n\
+             class B extends A {\n\
+               m(x) { return super.m() }\n\
+             }\n");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "wrong-arity super call should raise INVALID_PARAMETER_COUNT: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn resolved_super_method_is_clean() {
+        let r = run("class A { m(x) { return x } }\n\
+             class B extends A {\n\
+               m(x) { return super.m(x) }\n\
+             }\n");
+        assert!(
+            !r.diagnostics.iter().any(|d| {
+                d.code == codes::UNKNOWN_METHOD || d.code == codes::INVALID_PARAMETER_COUNT
+            }),
+            "resolved super call must not error: {:?}",
+            r.diagnostics
+        );
+    }
 }

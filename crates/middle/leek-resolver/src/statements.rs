@@ -548,10 +548,11 @@ impl Resolver {
                 }
             }
         }
-        // Declare loop bindings. The `var` keyword distinguishes a
-        // new declaration from a reuse: `for (x in arr)` reuses an
-        // outer `x`, while `for (var x in arr)` declares a new one
-        // (and shadowing checks apply to the latter).
+        // Declare loop bindings. A `var` keyword or an explicit type
+        // (`for (Entity e in arr)` — a TypeRef node before the Ident)
+        // marks a new declaration: `for (x in arr)` reuses an outer
+        // `x`, while `for (var x in arr)` / `for (integer x in arr)`
+        // declare a new one (and shadowing checks apply to those).
         let mut seen_in = false;
         let mut pending_var = false;
         for el in fe.syntax().children_with_tokens() {
@@ -578,7 +579,11 @@ impl Resolver {
                     }
                     _ => {}
                 },
-                rowan::NodeOrToken::Node(_) => {}
+                rowan::NodeOrToken::Node(n) => {
+                    if n.kind() == SyntaxKind::TypeRef && !seen_in {
+                        pending_var = true;
+                    }
+                }
             }
         }
         // Body.

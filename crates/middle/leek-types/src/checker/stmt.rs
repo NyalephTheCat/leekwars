@@ -93,22 +93,31 @@ impl Checker {
     }
 
     pub(crate) fn check_var_decl(&mut self, v: &VarDeclStmt) {
-        let init = v.syntax().children().find_map(Expr::cast);
-        let init_ty = init.as_ref().map_or(Type::Any, |e| self.infer_expr(e));
-
-        // Track `x = []` / `x = [:]` (empty-literal initializers)
-        // for the strict-v4 index-assign check below.
-        let init_is_empty_collection = init.as_ref().is_some_and(|e| {
-            matches!(e, Expr::Array(a) if a.elements().next().is_none())
-                || matches!(e, Expr::Map(m)
-                    if m.syntax().children().find_map(Expr::cast).is_none())
-        });
-
-        let names: Vec<SyntaxToken> = v
-            .syntax()
-            .children_with_tokens()
-            .filter_map(rowan::NodeOrToken::into_token)
-            .filter(|t| t.kind() == SyntaxKind::Ident)
+        // Pair each declared name with its *own* initializer — a
+        // multi-declarator statement (`var a = new A(), b = new B()`)
+        // has one initializer expression per name, and inferring only
+        // the first would both mistype the siblings and skip
+        // diagnostics inside their initializers.
+        let mut decls: Vec<(SyntaxToken, Option<Expr>)> = Vec::new();
+        for el in v.syntax().children_with_tokens() {
+            match el {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
+                    decls.push((t, None));
+                }
+                rowan::NodeOrToken::Node(n) => {
+                    if let Some(e) = Expr::cast(n)
+                        && let Some(last) = decls.last_mut()
+                        && last.1.is_none()
+                    {
+                        last.1 = Some(e);
+                    }
+                }
+                rowan::NodeOrToken::Token(_) => {}
+            }
+        }
+        let init_tys: Vec<Option<Type>> = decls
+            .iter()
+            .map(|(_, init)| init.as_ref().map(|e| self.infer_expr(e)))
             .collect();
 
         // Two-mode declaration:
@@ -118,45 +127,45 @@ impl Checker {
         //   the initializer is `null`, since that unlocks the
         //   ASSIGNMENT_INCOMPATIBLE_TYPE pattern for indexing or
         //   compound-op on a null-bound var.
-        if let Some(type_ref) = v
+        let type_ref = v
             .syntax()
             .children()
-            .find(|n| n.kind() == SyntaxKind::TypeRef)
-        {
-            let declared = self.resolve_type_node(&type_ref);
-            for name in &names {
+            .find(|n| n.kind() == SyntaxKind::TypeRef);
+        let declared = type_ref.as_ref().map(|t| self.resolve_type_node(t));
+        for ((name, _), init_ty) in decls.iter().zip(&init_tys) {
+            if let Some(declared) = &declared {
                 self.declare(name.text(), declared.clone());
-            }
-        } else if matches!(init_ty, Type::Null) {
-            // Plain `var x = null` — null-binding tracked regardless
-            // of strict, since indexing and compound-assign checks
-            // already gate themselves on strict mode.
-            for name in &names {
+            } else if matches!(init_ty, Some(Type::Null)) {
+                // Plain `var x = null` — null-binding tracked regardless
+                // of strict, since indexing and compound-assign checks
+                // already gate themselves on strict mode.
                 self.declare(name.text(), Type::Null);
-            }
-        } else if (self.opts.strict || self.opts.seed_library) && !matches!(init_ty, Type::Any) {
-            // Under strict mode, even `var` declarations commit to their
-            // initializer's type — reassigning to an incompatible type
-            // errors. The LSP (`seed_library`) also commits the inferred
-            // type so hover/member-access see it (e.g. `var u = a / b`
-            // with real operands resolves `u` to `real`); the
-            // reassignment-incompatibility diagnostic stays strict-gated,
-            // so this only enriches inference, it doesn't add errors.
-            for name in &names {
-                self.declare(name.text(), init_ty.clone());
+            } else if (self.opts.strict || self.opts.seed_library)
+                && let Some(ty) = init_ty
+                && !matches!(ty, Type::Any)
+            {
+                // Under strict mode, even `var` declarations commit to their
+                // initializer's type — reassigning to an incompatible type
+                // errors. The LSP (`seed_library`) also commits the inferred
+                // type so hover/member-access see it (e.g. `var u = a / b`
+                // with real operands resolves `u` to `real`); the
+                // reassignment-incompatibility diagnostic stays strict-gated,
+                // so this only enriches inference, it doesn't add errors.
+                self.declare(name.text(), ty.clone());
             }
         }
-        let has_type_annotation = v
-            .syntax()
-            .children()
-            .any(|n| n.kind() == SyntaxKind::TypeRef);
-        if init_is_empty_collection
-            && !has_type_annotation
-            && self.opts.strict
-            && self.version == Version::V4
-        {
-            for name in &names {
-                self.empty_collection_vars.insert(name.text().to_string());
+        // Track `x = []` / `x = [:]` (empty-literal initializers)
+        // for the strict-v4 index-assign check.
+        if declared.is_none() && self.opts.strict && self.version == Version::V4 {
+            for (name, init) in &decls {
+                let empty = init.as_ref().is_some_and(|e| {
+                    matches!(e, Expr::Array(a) if a.elements().next().is_none())
+                        || matches!(e, Expr::Map(m)
+                            if m.syntax().children().find_map(Expr::cast).is_none())
+                });
+                if empty {
+                    self.empty_collection_vars.insert(name.text().to_string());
+                }
             }
         }
     }
