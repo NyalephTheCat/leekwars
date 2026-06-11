@@ -18,10 +18,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LEEK="$ROOT/official-generator/leek-wars-generator/leekscript"
 TOOL="$ROOT/tools/java-emitter"
+OVERLAY="$TOOL/overlay"
 MAIN_CLASSES="$TOOL/build/classes"
-TEST_CLASSES="$LEEK/build/test-classes"
+TEST_CLASSES="$TOOL/build/test-classes"
 RUNNER_OUT="$TOOL/build/runner"
 REFERENCE="${1:-$ROOT/crates/testing/leek-test-corpus/data/reference.tsv}"
+source "$TOOL/overlay.sh"
 
 GCACHE="$HOME/.gradle/caches/modules-2/files-2.1"
 JACKSON_DB=$(find "$GCACHE/tools.jackson.core/jackson-databind/3.0.3" -name "*.jar" ! -name "*-sources.jar" ! -name "*-javadoc.jar" | head -1)
@@ -47,7 +49,7 @@ mkdir -p "$TEST_CLASSES" "$RUNNER_OUT" "$(dirname "$REFERENCE")"
 CP_TEST="$MAIN_CLASSES:$JACKSON_DB:$JACKSON_CORE:$JACKSON_ANN:$JUNIT_API:$JUNIT_PLAT_COMM:$OPENTEST:$APIGUARDIAN"
 SOURCES=$(mktemp)
 trap 'rm -f "$SOURCES"' EXIT
-find "$LEEK/src/test/java" -name "*.java" > "$SOURCES"
+list_sources "$LEEK/src/test/java" "$OVERLAY/src/test/java" > "$SOURCES"
 javac -d "$TEST_CLASSES" -cp "$CP_TEST" --release 25 @"$SOURCES"
 
 # Compile the reference-generator main.

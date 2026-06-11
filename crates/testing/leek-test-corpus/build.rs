@@ -17,6 +17,11 @@ fn main() {
     let upstream: PathBuf = manifest_dir
         .join("../../..")
         .join("official-generator/leek-wars-generator/leekscript/src/test/java/test");
+    // Pristine-submodule instrumentation: shadows/extends the upstream
+    // test sources (see tools/java-emitter/overlay.sh).
+    let overlay: PathBuf = manifest_dir
+        .join("../../..")
+        .join("tools/java-emitter/overlay/src/test/java/test");
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/extract.rs");
@@ -24,13 +29,15 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../tools/java-emitter/generate-reference.sh");
     println!("cargo:rerun-if-changed=../../../tools/java-emitter/GenerateReference.java");
     println!("cargo:rerun-if-changed=../leek-test-driver/src/cases.rs");
-    if upstream.exists()
-        && let Ok(entries) = std::fs::read_dir(&upstream)
-    {
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().is_some_and(|x| x == "java") {
-                println!("cargo:rerun-if-changed={}", p.display());
+    for dir in [&upstream, &overlay] {
+        if dir.exists()
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "java") {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                }
             }
         }
     }
@@ -39,7 +46,7 @@ fn main() {
     let out_path = Path::new(&out_dir_path).join("upstream_cases.toml");
 
     let manifest = if upstream.exists() {
-        match extract::extract_all(&upstream) {
+        match extract::extract_all(&upstream, Some(&overlay)) {
             Ok(m) => m,
             Err(e) => {
                 println!("cargo:warning=upstream extraction failed: {e}");

@@ -190,23 +190,45 @@ const PREFIXES: &[HelperPrefix] = &[
 /// We skip past them looking for the real expectation.
 const CHAIN_SETTERS: &[&str] = &["debug", "max_ops", "max_ram"];
 
-/// Extract every `Test*.java` file in `dir` into one manifest.
-pub fn extract_all(dir: &Path) -> anyhow::Result<Manifest> {
+/// Extract every `Test*.java` file in `dir` into one manifest. Files
+/// in `overlay` (the pristine-submodule instrumentation under
+/// `tools/java-emitter/overlay/src/test/java/test`) shadow same-named
+/// upstream files and contribute their own — exactly the source set
+/// the `tools/java-emitter` scripts compile.
+pub fn extract_all(dir: &Path, overlay: Option<&Path>) -> anyhow::Result<Manifest> {
     let mut manifest = Manifest::empty();
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(Result::ok)
-        .filter(|e| {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            s.starts_with("Test") && s.ends_with(".java")
-        })
-        .collect();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let list_tests = |d: &Path| -> anyhow::Result<Vec<std::fs::DirEntry>> {
+        Ok(std::fs::read_dir(d)?
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                s.starts_with("Test") && s.ends_with(".java")
+            })
+            .collect())
+    };
+    // name -> path, overlay entries replacing upstream ones.
+    let mut files = std::collections::BTreeMap::new();
+    for entry in list_tests(dir)? {
+        files.insert(
+            entry.file_name().to_string_lossy().to_string(),
+            entry.path(),
+        );
+    }
+    if let Some(overlay) = overlay
+        && overlay.is_dir()
+    {
+        for entry in list_tests(overlay)? {
+            files.insert(
+                entry.file_name().to_string_lossy().to_string(),
+                entry.path(),
+            );
+        }
+    }
 
-    for entry in entries {
-        let name = entry.file_name().to_string_lossy().to_string();
+    for (name, path) in files {
         manifest.source_files.push(name.clone());
-        let text = std::fs::read_to_string(entry.path())?;
+        let text = std::fs::read_to_string(path)?;
         extract_file(&name, &text, &mut manifest);
     }
     manifest

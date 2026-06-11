@@ -11,9 +11,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LEEK="$ROOT/official-generator/leek-wars-generator/leekscript"
+OVERLAY="$ROOT/tools/java-emitter/overlay"
 OUT_DIR="$ROOT/tools/java-emitter/build"
 CLASSES="$OUT_DIR/classes"
 JAR="$OUT_DIR/leekscript-emitter.jar"
+source "$ROOT/tools/java-emitter/overlay.sh"
 
 # Resolve Jackson 3.0.3 + annotations from Gradle's cache. Bail
 # with an actionable message if the cache hasn't been populated yet.
@@ -48,7 +50,9 @@ CP="$JACKSON_DB:$JACKSON_CORE:$JACKSON_ANN"
 mkdir -p "$CLASSES"
 SOURCES=$(mktemp)
 trap 'rm -f "$SOURCES"' EXIT
-find "$LEEK/src/main/java" -name "*.java" > "$SOURCES"
+# Submodule sources + the EmitJava/RunEmittedJava drivers from the
+# overlay (the submodule working tree stays pristine).
+list_sources "$LEEK/src/main/java" "$OVERLAY/src/main/java" > "$SOURCES"
 
 echo "compiling $(wc -l < "$SOURCES") sources into $CLASSES" >&2
 javac -d "$CLASSES" -cp "$CP" --release 25 @"$SOURCES"
