@@ -2733,3 +2733,115 @@ fn hover_chained_method_return_receiver() {
         "method-return chain should resolve the field decl, got: {v}"
     );
 }
+
+/// Position the cursor at the first byte of the `occ`-th occurrence
+/// of `needle`.
+fn needle_pos(src: &str, needle: &str, occ: usize) -> lsp::Position {
+    let mut idx = 0usize;
+    let mut start = 0usize;
+    for _ in 0..occ {
+        let found = src[idx..].find(needle).map(|p| idx + p).expect("needle");
+        start = found;
+        idx = found + needle.len();
+    }
+    let prefix = &src[..=start];
+    let line = u32::try_from(prefix.matches('\n').count()).unwrap();
+    let line_start = prefix.rfind('\n').map_or(0, |p| p + 1);
+    lsp::Position {
+        line,
+        character: u32::try_from(start - line_start).unwrap(),
+    }
+}
+
+/// Go-to-definition at the `occ`-th occurrence of `needle`,
+/// expecting a same-file scalar location.
+fn definition_at(src: &str, needle: &str, occ: usize) -> lsp::Location {
+    let resp =
+        definition::handle(&open(src), &url(), needle_pos(src, needle, occ)).expect("definition");
+    let lsp::GotoDefinitionResponse::Scalar(loc) = resp else {
+        panic!("expected scalar response");
+    };
+    loc
+}
+
+#[test]
+fn definition_on_member_field_jumps_to_field_decl() {
+    // Regression: the resolver records no references for member
+    // names, so go-to-definition on `fm.leek` / `.cell` did nothing.
+    // 3rd `cell` is the use in `var x = fm.leek.cell`; the decl name
+    // is the 1st occurrence.
+    let loc = definition_at(CHAIN_SRC, "cell", 3);
+    assert_eq!(loc.uri, url());
+    assert_eq!(needle_pos(CHAIN_SRC, "cell", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_member_method_jumps_to_method_decl() {
+    // 2nd `getCell` is the chained call site.
+    let loc = definition_at(CHAIN_SRC, "getCell", 2);
+    assert_eq!(needle_pos(CHAIN_SRC, "getCell", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_intermediate_chain_link_jumps_to_its_decl() {
+    // `leek` in `fm.leek.cell` (2nd occurrence) → the FM field decl
+    // name (1st occurrence).
+    let loc = definition_at(CHAIN_SRC, "leek", 2);
+    assert_eq!(needle_pos(CHAIN_SRC, "leek", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_inherited_and_static_members() {
+    let src = "\
+class Animal {\n\
+\u{20}   string name\n\
+\u{20}   string describe() { return this.name }\n\
+\u{20}   static Animal make(string n) { return new Animal() }\n\
+}\n\
+class Cat extends Animal {\n\
+}\n\
+var c = new Cat()\n\
+c.describe()\n\
+Animal.make(\"x\")\n";
+    // Inherited: `c.describe()` resolves through `extends` to Animal.
+    let loc = definition_at(src, "describe", 2);
+    assert_eq!(needle_pos(src, "describe", 1), loc.range.start);
+    // Static: `Animal.make` — the receiver is the class name itself.
+    let loc = definition_at(src, "make", 2);
+    assert_eq!(needle_pos(src, "make", 1), loc.range.start);
+}
+
+#[test]
+fn definition_on_this_member() {
+    let src = "\
+class Animal {\n\
+\u{20}   string name\n\
+\u{20}   string describe() { return this.name }\n\
+}\n";
+    let loc = definition_at(src, "name", 2);
+    assert_eq!(needle_pos(src, "name", 1), loc.range.start);
+}
+
+#[test]
+fn multi_declarator_inits_resolve_per_binding() {
+    // Regression: hover/typeDefinition's initializer lookup picked the
+    // *largest* typed expression in the whole decl statement, so every
+    // declarator in `var a = new A(), b = new B()` reported the type
+    // of whichever initializer happened to be biggest.
+    let src = "class Aaaaa {}\nclass Bb {}\nvar a = new Aaaaa(), b = new Bb()\n";
+    // Hover on each binding name shows its OWN class.
+    let a = hover_text(src, "a = new Aaaaa", 1);
+    assert!(a.contains("Aaaaa"), "hover on `a` should be Aaaaa: {a}");
+    let b = hover_text(src, "b = new Bb", 1);
+    assert!(
+        b.contains("Bb") && !b.contains("Aaaaa"),
+        "hover on `b` should be Bb, not the sibling's Aaaaa: {b}"
+    );
+    // typeDefinition on `b` jumps to `class Bb` (line 1), not `Aaaaa`.
+    let resp = type_definition::handle(&open(src), &url(), needle_pos(src, "b = new Bb", 1))
+        .expect("type definition");
+    let lsp::request::GotoTypeDefinitionResponse::Scalar(loc) = resp else {
+        panic!("expected scalar response");
+    };
+    assert_eq!(loc.range.start.line, 1, "expected `class Bb`: {loc:?}");
+}

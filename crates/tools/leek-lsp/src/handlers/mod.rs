@@ -1,3 +1,4 @@
+pub(crate) mod member;
 mod mod_support;
 pub(crate) use mod_support::{
     cross_file_use_target, enclosing_class_name, find_top_level_decl, ident_name_at,

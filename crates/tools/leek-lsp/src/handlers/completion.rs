@@ -34,9 +34,9 @@
 use leek_resolver::SymbolKind;
 use leek_resolver::builtins::{BUILTIN_CONSTANTS, BUILTIN_FNS, BUILTINS, FINAL_BUILTIN_FIELDS};
 use leek_syntax::{SyntaxKind, SyntaxNode};
-use leek_types::Type;
 use tower_lsp::lsp_types as lsp;
 
+use super::member::{class_name_of_type, find_class_decl_by_name};
 use crate::util::position::position_to_offset;
 use crate::workspace::Workspace;
 use leek_ide::signature::signature_for;
@@ -269,17 +269,6 @@ fn push_class_members(cls_node: &SyntaxNode, items: &mut Vec<lsp::CompletionItem
     }
 }
 
-/// Walk through `Nullable`/`Array<T>` wrappers to a base
-/// `ClassInstance(name)`. Mirrors the helper in `type_definition.rs`.
-fn class_name_of_type(ty: &Type) -> Option<String> {
-    match ty {
-        Type::ClassInstance(n, _) => Some(n.clone()),
-        Type::Nullable(inner) => class_name_of_type(inner),
-        Type::Array(inner) => class_name_of_type(inner),
-        _ => None,
-    }
-}
-
 fn enclosing_class(root: &SyntaxNode) -> Option<SyntaxNode> {
     // The first ClassDecl whose range encloses … hmm, we don't have
     // the cursor here. Caller is in member mode AFTER `this.`, which
@@ -290,16 +279,6 @@ fn enclosing_class(root: &SyntaxNode) -> Option<SyntaxNode> {
     root.descendants()
         .filter(|n| n.kind() == SyntaxKind::ClassDecl)
         .last()
-}
-
-fn find_class_decl_by_name(root: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
-    root.descendants().find(|n| {
-        n.kind() == SyntaxKind::ClassDecl
-            && n.children_with_tokens()
-                .filter_map(leek_syntax::language::NodeOrToken::into_token)
-                .find(|t| t.kind() == SyntaxKind::Ident)
-                .is_some_and(|id| id.text() == name)
-    })
 }
 
 fn member_label(member: &SyntaxNode) -> Option<String> {

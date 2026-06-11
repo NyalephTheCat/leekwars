@@ -3,21 +3,26 @@
 //! highlight the parameter the user is currently typing.
 //!
 //! Resolution order for the callee:
-//!  1. Resolver hit for a user-declared function → render its
+//!  1. A member call (`recv.method(…)`) → resolve the receiver's
+//!     class via the type table and render the method's declaration
+//!     (inherited methods resolve through the `extends` chain).
+//!  2. Resolver hit for a user-declared function → render its
 //!     `FnDecl` CST node via [`signature_for`].
-//!  2. Otherwise, if the callee identifier matches a row in
+//!  3. Otherwise, if the callee identifier matches a row in
 //!     [`leek_resolver::builtins::BUILTIN_FNS`], render it as
 //!     `builtin name(arg1, arg2, ...)` using the arity table.
-//!  3. Otherwise, fall back to `name(...)` with no parameter list.
+//!  4. Otherwise, fall back to `name(...)` with no parameter list.
 //!
 //! Active parameter index = number of top-level commas in the
 //! ArgList that lie strictly before the cursor offset.
 
+use leek_parser::ast::{AstNode, FieldExpr};
 use leek_resolver::builtins::{BUILTIN_FNS, BuiltinFn};
 use leek_syntax::language::NodeOrToken;
 use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use tower_lsp::lsp_types as lsp;
 
+use super::member;
 use crate::util::position::position_to_offset;
 use crate::workspace::Workspace;
 use leek_ide::signature::signature_for;
@@ -26,7 +31,9 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     let doc = ws.doc(uri)?;
     let offset = position_to_offset(doc.pos_map(), pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
+    // TypeChecked (not just Resolved): a method callee needs the type
+    // table to resolve its receiver's class.
+    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::TypeChecked)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = SyntaxNode::new_root(green.clone());
 
@@ -35,18 +42,25 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     let arg_list = call.children().find(|c| c.kind() == SyntaxKind::ArgList)?;
     let active = active_param_index(&arg_list, offset);
 
-    // Find the callee NameRef → ident.
-    let callee = call.children().find(|c| c.kind() == SyntaxKind::NameRef)?;
-    let callee_ident = callee
-        .children_with_tokens()
-        .filter_map(leek_syntax::language::NodeOrToken::into_token)
-        .find(|t| t.kind() == SyntaxKind::Ident)?;
-    let callee_name = callee_ident.text().to_string();
-
-    // Render the signature. Try user fns first, then builtins.
-    let (label, parameters) = resolve_user_function(&run, &root, &callee_name)
-        .or_else(|| resolve_builtin(&callee_name))
-        .unwrap_or_else(|| (format!("{callee_name}(...)"), Vec::new()));
+    // Find the callee: a bare NameRef (`foo(…)`) or a member access
+    // (`recv.method(…)` — the callee is a FieldExpr).
+    let (label, parameters) = if let Some(callee) =
+        call.children().find(|c| c.kind() == SyntaxKind::NameRef)
+    {
+        let callee_ident = callee
+            .children_with_tokens()
+            .filter_map(leek_syntax::language::NodeOrToken::into_token)
+            .find(|t| t.kind() == SyntaxKind::Ident)?;
+        let callee_name = callee_ident.text().to_string();
+        // Render the signature. Try user fns first, then builtins.
+        resolve_user_function(&run, &root, &callee_name)
+            .or_else(|| resolve_builtin(&callee_name))
+            .unwrap_or_else(|| (format!("{callee_name}(...)"), Vec::new()))
+    } else if let Some(field_node) = call.children().find(|c| c.kind() == SyntaxKind::FieldExpr) {
+        resolve_method(&run, &root, &field_node)?
+    } else {
+        return None;
+    };
 
     let active_parameter = if parameters.is_empty() {
         None
@@ -141,6 +155,36 @@ fn resolve_user_function(
     let label = signature_for(&decl)?;
     let parameters = parameters_in_label(&label);
     Some((label, parameters))
+}
+
+/// Resolve a member call's callee (`recv.method(…)`): the receiver's
+/// class comes from the type table (with declaration/static/`this`
+/// fallbacks), then the method is looked up through the `extends`
+/// chain. Always returns *something* for a well-formed FieldExpr —
+/// an unresolvable method degrades to a `name(...)` placeholder.
+fn resolve_method(
+    run: &leek_pipeline::Run<'_>,
+    root: &SyntaxNode,
+    field_node: &SyntaxNode,
+) -> Option<(String, Vec<lsp::ParameterInformation>)> {
+    let f = FieldExpr::cast(field_node.clone())?;
+    let field_tok = f.field()?;
+    let name = field_tok.text().to_string();
+    let member_node = run
+        .get::<leek_types::pipeline::TypeCheckArtifact>()
+        .and_then(|type_art| {
+            let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>();
+            let base = f.base()?;
+            let class = member::base_class_name(root, resolve_art, &type_art.table, &base)?;
+            member::find_member_in_chain(root, &class, &name)
+        });
+    match member_node.as_ref().and_then(signature_for) {
+        Some(label) => {
+            let parameters = parameters_in_label(&label);
+            Some((label, parameters))
+        }
+        None => Some((format!("{name}(...)"), Vec::new())),
+    }
 }
 
 /// Find the `FnDecl` whose declared name token reads `name`.
@@ -326,5 +370,88 @@ add(1, 2)\n";
         let src = "var x = 1\n";
         let (ws, uri) = ws_with(src);
         assert!(handle(&ws, &uri, pos(0, 5)).is_none());
+    }
+
+    /// Classes + a member call site per resolution shape the method
+    /// branch must handle: direct receiver, chained receiver,
+    /// inherited method, static `Class.method`.
+    const METHOD_SRC: &str = "\
+class Entity {\n\
+\u{20}   integer cell = 1\n\
+\u{20}   integer moveTo(integer cell, boolean fast) { return cell }\n\
+}\n\
+class Leek extends Entity {\n\
+\u{20}   static Leek make(string name) { return new Leek() }\n\
+}\n\
+class FM {\n\
+\u{20}   Entity leek = new Entity()\n\
+}\n\
+var fm = new FM()\n\
+var l = new Leek()\n\
+l.moveTo(1, true)\n\
+fm.leek.moveTo(2, false)\n\
+Leek.make(\"a\")\n";
+
+    /// Cursor just after the `(` on the 0-based line whose text
+    /// starts with `prefix`.
+    fn help_after(src: &str, line: u32, prefix: &str) -> lsp::SignatureHelp {
+        let (ws, uri) = ws_with(src);
+        let col = u32::try_from(prefix.len()).unwrap();
+        handle(&ws, &uri, pos(line, col)).expect("signature")
+    }
+
+    #[test]
+    fn method_call_shows_method_signature() {
+        // Regression: the FieldExpr callee was unhandled — member
+        // calls silently produced no signature help at all.
+        let help = help_after(METHOD_SRC, 12, "l.moveTo(");
+        let sig = &help.signatures[0];
+        assert!(
+            sig.label.contains("moveTo(integer cell, boolean fast)"),
+            "got: {}",
+            sig.label
+        );
+        assert_eq!(sig.parameters.as_ref().unwrap().len(), 2);
+        assert_eq!(help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn chained_method_call_resolves_intermediate_class() {
+        let help = help_after(METHOD_SRC, 13, "fm.leek.moveTo(2, ");
+        let sig = &help.signatures[0];
+        assert!(
+            sig.label.contains("moveTo(integer cell, boolean fast)"),
+            "got: {}",
+            sig.label
+        );
+        assert_eq!(help.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn inherited_method_resolves_through_extends_chain() {
+        // `l` is a Leek; `moveTo` is declared on Entity.
+        let help = help_after(METHOD_SRC, 12, "l.moveTo(");
+        assert!(help.signatures[0].label.contains("moveTo"));
+    }
+
+    #[test]
+    fn static_method_call_resolves_via_class_name_receiver() {
+        let help = help_after(METHOD_SRC, 14, "Leek.make(");
+        let sig = &help.signatures[0];
+        assert!(
+            sig.label.contains("make(string name)"),
+            "got: {}",
+            sig.label
+        );
+        assert_eq!(sig.parameters.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unresolvable_method_falls_back_to_placeholder() {
+        let src = "var v = 1\nv.noSuchMethod(1, 2)\n";
+        let (ws, uri) = ws_with(src);
+        let col = u32::try_from("v.noSuchMethod(".len()).unwrap();
+        let help = handle(&ws, &uri, pos(1, col)).expect("signature");
+        assert!(help.signatures[0].label.contains("noSuchMethod(...)"));
     }
 }
