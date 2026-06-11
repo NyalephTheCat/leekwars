@@ -32,6 +32,14 @@ impl FnLowerer<'_> {
             ExprKind::Postfix(op, x) => self.lower_postfix(*op, x, &e.ty, e.span),
             ExprKind::Call(c) => self.lower_call(c, &e.ty),
             ExprKind::Field(base, name, optional) => {
+                // Upstream `LeekObjectAccess.analyze` charges 1 op per field
+                // access (the base's own cost bubbles from its lowering) —
+                // except on a builtin class reference (`Real.MIN_VALUE`),
+                // which the reference folds to a bare `getField(...)` with
+                // no ops wrapper.
+                if !matches!(&base.kind, ExprKind::Name(NameRef::Builtin(_))) {
+                    self.push_stmt(Statement::Charge(1));
+                }
                 let base_local = self.lower_expr_to_local(base);
                 let t = self.fresh_temp(e.ty.clone(), e.span);
                 // `obj?.field` (#2272): null receiver short-circuits this
@@ -43,6 +51,9 @@ impl FnLowerer<'_> {
                     let null_bb = self.new_block();
                     let join = self.new_block();
                     let is_null = self.null_check(base_local, e.span);
+                    // The `?.` link's null test costs 1 op (flow-control
+                    // charge; the native backend's branches are free).
+                    self.push_stmt(Statement::Charge(1));
                     self.set_terminator(Terminator::Branch {
                         cond: is_null,
                         then_block: null_bb,
@@ -123,10 +134,16 @@ impl FnLowerer<'_> {
                 Operand::Local(t)
             }
             ExprKind::Object(pairs) => {
-                let kv = pairs
+                let kv: Vec<_> = pairs
                     .iter()
                     .map(|(k, v)| (k.clone(), self.lower_expr_to_operand(v)))
                     .collect();
+                // Upstream's `ObjectLeekValue` constructor self-charges 1 op
+                // per field at runtime; the literal site is the constructor
+                // site, so the equivalent static charge lands here.
+                if !kv.is_empty() {
+                    self.push_stmt(Statement::Charge(kv.len() as u64));
+                }
                 let t = self.fresh_temp(e.ty.clone(), e.span);
                 self.push_stmt(Statement::Assign(Place::Local(t), Rvalue::Object(kv)));
                 Operand::Local(t)
@@ -136,6 +153,10 @@ impl FnLowerer<'_> {
             }
             ExprKind::Interval(iv) => self.lower_interval(iv, &e.ty, e.span),
             ExprKind::Cast(inner, _ty) => {
+                // An explicit `as` cast charges 1 op (the runtime
+                // conversion) on top of the operand's own cost — mirrors
+                // the reference emitter's `ExprKind::Cast` static cost.
+                self.push_stmt(Statement::Charge(1));
                 let v = self.lower_expr_to_operand(inner);
                 let t = self.fresh_temp(e.ty.clone(), e.span);
                 self.push_stmt(Statement::Assign(
@@ -423,6 +444,9 @@ impl FnLowerer<'_> {
         let rhs_bb = self.new_block();
         let false_bb = self.new_block();
         let join = self.new_block();
+        // The short-circuit test costs 1 op (flow-control charge; the
+        // native backend's branches themselves are free).
+        self.push_stmt(Statement::Charge(1));
         self.set_terminator(Terminator::Branch {
             cond: l_val,
             then_block: rhs_bb,
@@ -476,6 +500,9 @@ impl FnLowerer<'_> {
         let true_bb = self.new_block();
         let rhs_bb = self.new_block();
         let join = self.new_block();
+        // The short-circuit test costs 1 op (flow-control charge; the
+        // native backend's branches themselves are free).
+        self.push_stmt(Statement::Charge(1));
         self.set_terminator(Terminator::Branch {
             cond: l_val,
             then_block: true_bb,
@@ -520,6 +547,9 @@ impl FnLowerer<'_> {
         ));
         let rhs_bb = self.new_block();
         let join = self.new_block();
+        // The `??` null test costs 1 op (flow-control charge; the
+        // native backend's branches themselves are free).
+        self.push_stmt(Statement::Charge(1));
         self.set_terminator(Terminator::Branch {
             cond: Operand::Local(is_null),
             then_block: rhs_bb,
@@ -582,7 +612,12 @@ impl FnLowerer<'_> {
                 Operand::Local(t)
             }
         } else {
-            self.lower_expr_to_operand(rhs)
+            let v = self.lower_expr_to_operand(rhs);
+            // Plain `=` re-assignment costs 1 op (upstream's
+            // `binary_op_cost(Assign)`); compound assigns charge via
+            // their base `Rvalue::Binary` op instead.
+            self.push_stmt(Statement::Charge(1));
+            v
         };
         // Read back from the place after the assign so that
         // - failed writes (assignment to a null base,
@@ -658,6 +693,9 @@ impl FnLowerer<'_> {
         ));
         let rhs_bb = self.new_block();
         let join = self.new_block();
+        // The `??=` null test costs 1 op (flow-control charge; the
+        // native backend's branches themselves are free).
+        self.push_stmt(Statement::Charge(1));
         self.set_terminator(Terminator::Branch {
             cond: Operand::Local(is_null),
             then_block: rhs_bb,
@@ -740,6 +778,12 @@ impl FnLowerer<'_> {
             // `isLeftValue = false` on the `?.` form) — the flag is
             // ignored here and the write behaves like a plain access.
             ExprKind::Field(base, name, _) => {
+                // Field access in l-value position keeps its 1-op static
+                // charge (`LeekObjectAccess.analyze` — the LHS expression's
+                // cost is part of the assignment's ops wrapper upstream).
+                if !matches!(&base.kind, ExprKind::Name(NameRef::Builtin(_))) {
+                    self.push_stmt(Statement::Charge(1));
+                }
                 let base_local = self.lower_expr_to_local(base);
                 Place::Field(base_local, name.clone())
             }
@@ -993,6 +1037,15 @@ impl FnLowerer<'_> {
                 method,
                 optional,
             } => {
+                // Upstream `LeekFunctionCall.analyze` charges the callee
+                // expression of a method call: an object access costs
+                // `1 + receiver.ops` (the receiver's cost bubbles from its
+                // own lowering, leaving the flat 1 here). Builtin-class
+                // receivers (`Integer.parse(...)`) are exempt, like the
+                // `Field` arm.
+                if !matches!(&receiver.kind, ExprKind::Name(NameRef::Builtin(_))) {
+                    self.push_stmt(Statement::Charge(1));
+                }
                 let recv = self.lower_expr_to_local(receiver);
                 if *optional {
                     optional_recv = Some(recv);
@@ -1056,6 +1109,9 @@ impl FnLowerer<'_> {
             let null_bb = self.new_block();
             let join = self.new_block();
             let is_null = self.null_check(recv, call.span);
+            // The `?.` link's null test costs 1 op (flow-control
+            // charge; the native backend's branches are free).
+            self.push_stmt(Statement::Charge(1));
             self.set_terminator(Terminator::Branch {
                 cond: is_null,
                 then_block: null_bb,
@@ -1107,6 +1163,9 @@ impl FnLowerer<'_> {
         let then_bb = self.new_block();
         let else_bb = self.new_block();
         let join = self.new_block();
+        // The ternary's condition test costs 1 op (flow-control
+        // charge; the native backend's branches are free).
+        self.push_stmt(Statement::Charge(1));
         self.set_terminator(Terminator::Branch {
             cond: c,
             then_block: then_bb,

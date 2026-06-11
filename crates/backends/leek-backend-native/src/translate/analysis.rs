@@ -814,8 +814,9 @@ pub(super) fn rvalue_mentions(r: &Rvalue, l: LocalId) -> bool {
         | Rvalue::Cast(_, o)
         | Rvalue::MakeForeachIter(o) => op_mentions(o, l),
         Rvalue::Binary(_, a, b) => op_mentions(a, l) || op_mentions(b, l),
-        Rvalue::Field(x, _) => *x == l,
+        Rvalue::Field(x, _) | Rvalue::ForeachLen(x) => *x == l,
         Rvalue::Index(x, o) => *x == l || op_mentions(o, l),
+        Rvalue::Synthetic(inner) => rvalue_mentions(inner, l),
         Rvalue::Slice(x, b) => *x == l || slice_bounds_mentions(b, l),
         Rvalue::Array(ops) => ops.iter().any(|o| op_mentions(o, l)),
         Rvalue::Set(es) => es
@@ -861,7 +862,7 @@ pub(super) fn stmt_mentions(s: &Statement, l: LocalId) -> bool {
                 || callee_mentions(&call.callee, l)
                 || call.args.iter().any(|o| op_mentions(o, l))
         }
-        Statement::Charge(_) => false,
+        Statement::Charge(_) | Statement::ChargeVersioned { .. } => false,
         Statement::ApplyPromotion(x) => *x == l,
     }
 }

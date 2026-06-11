@@ -22,6 +22,80 @@ pub(crate) fn expr_forces_real(e: &Expr) -> bool {
     }
 }
 
+/// True when `def` is referenced anywhere inside `e`, descending through
+/// nested lambda bodies (unlike [`captured_in_expr`], which treats a lambda
+/// as a leaf until it finds one).
+fn refs_def_deep(e: &Expr, def: DefId) -> bool {
+    match &e.kind {
+        ExprKind::Name(NameRef::Local(id)) if *id == def => true,
+        ExprKind::Lambda(l) => match &l.body {
+            leek_hir::LambdaBody::Expr(b) => refs_def_deep(b, def),
+            leek_hir::LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_refs_def_deep(s, def)),
+        },
+        _ => {
+            // `walk_expr_children` doesn't surface a `Callee::Function`
+            // name (it's a NameRef, not a child Expr) — check it here so
+            // a captured first-class callable param (`a()`) is caught.
+            if let ExprKind::Call(c) = &e.kind
+                && matches!(&c.callee, leek_hir::Callee::Function(NameRef::Local(id)) if *id == def)
+            {
+                return true;
+            }
+            let mut found = false;
+            leek_hir::walk_expr_children(e, &mut |c| found = found || refs_def_deep(c, def));
+            found
+        }
+    }
+}
+
+fn stmt_refs_def_deep(s: &Stmt, def: DefId) -> bool {
+    let mut found = false;
+    leek_hir::walk_stmt_child_exprs(s, &mut |e| found = found || refs_def_deep(e, def));
+    if !found {
+        leek_hir::walk_stmt_child_stmts(s, &mut |c| found = found || stmt_refs_def_deep(c, def));
+    }
+    found
+}
+
+fn captured_in_expr(e: &Expr, def: DefId) -> bool {
+    if let ExprKind::Lambda(l) = &e.kind {
+        return match &l.body {
+            leek_hir::LambdaBody::Expr(b) => refs_def_deep(b, def),
+            leek_hir::LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_refs_def_deep(s, def)),
+        };
+    }
+    let mut found = false;
+    leek_hir::walk_expr_children(e, &mut |c| found = found || captured_in_expr(c, def));
+    found
+}
+
+/// True when a lambda nested anywhere inside `stmts` references `def`.
+/// Upstream binds any function/lambda parameter captured by a nested
+/// closure through a runtime `Box` at the callee's entry; the 2-arg Box
+/// ctor charges 1 op per call. Mirrors the Java backend's
+/// `captured_by_nested_lambda_stmts` so the static charge matches.
+pub(crate) fn captured_by_nested_lambda_stmts(stmts: &[Stmt], def: DefId) -> bool {
+    fn walk(s: &Stmt, def: DefId) -> bool {
+        let mut found = false;
+        leek_hir::walk_stmt_child_exprs(s, &mut |e| found = found || captured_in_expr(e, def));
+        if !found {
+            leek_hir::walk_stmt_child_stmts(s, &mut |c| found = found || walk(c, def));
+        }
+        found
+    }
+    stmts.iter().any(|s| walk(s, def))
+}
+
+/// [`captured_by_nested_lambda_stmts`] for a lambda's own body — its
+/// params get the same Box treatment when an inner lambda captures them
+/// (`x -> y -> x + 1` boxes `x` at the outer lambda's entry).
+pub(crate) fn captured_by_nested_lambda_body(body: &leek_hir::LambdaBody, def: DefId) -> bool {
+    match body {
+        leek_hir::LambdaBody::Expr(e) => captured_in_expr(e, def),
+        leek_hir::LambdaBody::Block(b) => captured_by_nested_lambda_stmts(&b.stmts, def),
+    }
+}
+
 // ---- Helpers ----
 
 pub(crate) fn lit_to_const(lit: &Literal) -> Const {

@@ -237,6 +237,11 @@ impl Tx<'_, '_> {
             // by the binary/branch/builtin sites). The interpreter executes
             // these; native must too, or its op count comes up short.
             Statement::Charge(n) => self.charge(*n),
+            // Version-split charge (foreach per-iteration tick): the
+            // version is static here, so it folds to a plain charge.
+            Statement::ChargeVersioned { v1, vn } => {
+                self.charge(if self.lang.version <= 1 { *v1 } else { *vn })
+            }
             // v1-v3 LegacyArray promotion: a mutating builtin (`push` in v1;
             // `assocSort`/`keySort`/`assocReverse`/`removeElement` in v1-v3)
             // may morph a dense array into a sparse map and stash the new
@@ -488,12 +493,13 @@ impl Tx<'_, '_> {
                 then_block,
                 else_block,
             } => {
-                // A conditional branch costs 1 op (interp `exec.rs` `If` step —
-                // the if/while/and/or flow-control cost), charged before the
-                // condition is evaluated.
-                self.charge(1)?;
-                // Flush the block's coalesced charge (including this branch op)
-                // before the budget check so the check observes the full count.
+                // Conditional-branch op charges live in MIR lowering (an
+                // explicit `Statement::Charge(1)` at if/ternary/and/or/`??`/
+                // `?.`/switch sites; loops tick once per *body entry* instead,
+                // matching the Java oracle), so the branch itself is free here.
+                //
+                // Flush the block's coalesced charge before the budget check so
+                // the check observes the full count.
                 self.flush_charge()?;
                 // Back-edge budget check: a branch is the only way to re-enter a
                 // block, so checking here bounds every loop. Stops an unbounded

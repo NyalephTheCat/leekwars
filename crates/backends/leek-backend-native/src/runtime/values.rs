@@ -215,7 +215,20 @@ pub extern "C" fn leek_value_binop(
         return handle(Value::Null);
     };
     let (l, r) = (unsafe { val(a) }, unsafe { val(b) });
-    handle(apply_binop(op, l, r, version as u8))
+    handle(apply_binop_charged(op, l, r, version as u8))
+}
+
+/// [`apply_binop`] plus the dynamic string-concat charge — the shim-side
+/// entry so every boxed `Add` meters upstream's concat cost (number→string
+/// conversion + per-char surcharge) exactly once. The pure [`apply_binop`]
+/// stays charge-free for the compile-time const-evaluator.
+fn apply_binop_charged(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
+    match op {
+        BinOp::Add => super::state::charge_concat(l, r),
+        BinOp::Eq | BinOp::Ne => super::state::charge_eq(l, r),
+        _ => {}
+    }
+    apply_binop(op, l, r, v)
 }
 
 /// Like [`leek_value_binop`] but the RIGHT operand is an integer *constant*
@@ -233,7 +246,7 @@ pub extern "C" fn leek_value_binop_cir(
         return handle(Value::Null);
     };
     let l = unsafe { val(a) };
-    handle(apply_binop(op, l, &Value::Int(c), version as u8))
+    handle(apply_binop_charged(op, l, &Value::Int(c), version as u8))
 }
 
 /// Mirror of [`leek_value_binop_cir`] for a LEFT integer constant
@@ -249,7 +262,7 @@ pub extern "C" fn leek_value_binop_cil(
         return handle(Value::Null);
     };
     let r = unsafe { val(b) };
-    handle(apply_binop(op, &Value::Int(c), r, version as u8))
+    handle(apply_binop_charged(op, &Value::Int(c), r, version as u8))
 }
 
 /// `real`-typed counterparts of [`leek_value_binop_cir`] / `_cil`: the
@@ -267,7 +280,7 @@ pub extern "C" fn leek_value_binop_crr(
         return handle(Value::Null);
     };
     let l = unsafe { val(a) };
-    handle(apply_binop(op, l, &Value::Real(c), version as u8))
+    handle(apply_binop_charged(op, l, &Value::Real(c), version as u8))
 }
 
 /// Left-`real`-operand mirror of [`leek_value_binop_crr`].
@@ -282,7 +295,7 @@ pub extern "C" fn leek_value_binop_crl(
         return handle(Value::Null);
     };
     let r = unsafe { val(b) };
-    handle(apply_binop(op, &Value::Real(c), r, version as u8))
+    handle(apply_binop_charged(op, &Value::Real(c), r, version as u8))
 }
 
 /// Pure dispatch of a [`BinOp`] onto the shared `leek_runtime` operators —

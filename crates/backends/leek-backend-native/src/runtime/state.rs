@@ -6,7 +6,6 @@
 use super::{
     CLASS_CTOR_THUNK, CLASS_PARENT, CLASS_REFLECT, CLASS_STRING_METHOD, DISPATCH, ENFORCE_BUDGET,
     GLOBALS, NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELDS, STATIC_INIT, STRICT,
-    val,
 };
 use leek_runtime::{Rng, Value};
 use std::collections::{HashMap, HashSet};
@@ -55,15 +54,61 @@ pub extern "C" fn leek_op_budget_exceeded() -> i64 {
     i64::from(OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get))
 }
 
-/// Charge the per-character surcharge for a string concatenation result. The
-/// interpreter charges `result.chars().count()` on top of the `Add` op cost
-/// when an `Add` produced a string (`exec.rs`); the native `Add` boxed path
-/// calls this with the result so a `.ops` count over string concat matches.
-/// A non-string result (e.g. `array + array`) charges nothing.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_charge_concat(result: *mut Value) {
-    if let Value::String(s) = unsafe { val(result) } {
-        leek_charge_ops(s.chars().count() as i64);
+/// Charge upstream's string-concatenation cost (`AI.add` string branch):
+/// rendering each operand ticks 3 ops for a number (`string(Long)` /
+/// `doubleToString` both charge 3), then the concatenation itself charges
+/// `len(s1) + len(s2)` in UTF-16 code units (Java `String.length()`).
+/// Called by the `leek_value_binop*` shims before dispatching an `Add`
+/// where either side is a string; anything else charges nothing.
+pub(super) fn charge_concat(l: &Value, r: &Value) {
+    if !(matches!(l, Value::String(_)) || matches!(r, Value::String(_))) {
+        return;
+    }
+    let conv = |v: &Value| match v {
+        Value::Int(_) | Value::Real(_) => 3i64,
+        _ => 0,
+    };
+    let len = |v: &Value| match v {
+        Value::String(s) => s.encode_utf16().count() as i64,
+        other => leek_runtime::value_as_concat_string(other)
+            .encode_utf16()
+            .count() as i64,
+    };
+    leek_charge_ops(conv(l) + conv(r) + len(l) + len(r));
+}
+
+/// Charge upstream's `AI.eq` string costs (`neq` delegates to `eq`):
+/// comparing two strings ticks `min(len1, len2)`; comparing a number
+/// against a string parses it, ticking `len(s)` — except the trivial
+/// literals (`"true"`/`"false"`/`"0"`/`""`, and `"1"` against an exact 1)
+/// which short-circuit before the parse and charge nothing. Lengths in
+/// UTF-16 code units (Java `String.length()`). Every other operand mix
+/// (bools, arrays, functions) charges nothing at this level.
+pub(super) fn charge_eq(l: &Value, r: &Value) {
+    let utf16 = |s: &str| s.encode_utf16().count() as i64;
+    match (l, r) {
+        (Value::String(a), Value::String(b)) => {
+            leek_charge_ops(utf16(a).min(utf16(b)));
+        }
+        (Value::String(s), Value::Int(_) | Value::Real(_))
+        | (Value::Int(_) | Value::Real(_), Value::String(s)) => {
+            let n = if let Value::Int(i) = if matches!(l, Value::String(_)) { r } else { l } {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    *i as f64
+                }
+            } else if let Value::Real(x) = if matches!(l, Value::String(_)) { r } else { l } {
+                *x
+            } else {
+                return;
+            };
+            match s.as_str() {
+                "true" | "false" | "0" | "" => {}
+                "1" if n == 1.0 => {}
+                _ => leek_charge_ops(utf16(s)),
+            }
+        }
+        _ => {}
     }
 }
 

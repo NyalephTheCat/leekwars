@@ -136,6 +136,11 @@ pub(super) fn dispatch_call_value(
             if args.is_empty() && leek_runtime::needs_at_least_one_arg(name) {
                 return Value::Null;
             }
+            // Charge the builtin's op cost like the direct-call shims
+            // (`leek_builtinN`) do; over budget → skip the dispatch.
+            if charge_builtin_ops(name, &args, i64::from(host.version())) {
+                return Value::Null;
+            }
             match leek_runtime::call_builtin(host, name, &args) {
                 Ok(v) => v,
                 Err(_) => Value::Null,

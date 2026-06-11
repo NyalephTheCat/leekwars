@@ -337,6 +337,18 @@ impl Tx<'_, '_> {
         // the boxed `leek_value_binop` path, which measures the result at
         // runtime; no `.ops` corpus case exercises string concat.
         self.charge(op.op_cost())?;
+        self.binary_uncharged(op, l, r)
+    }
+
+    /// [`Self::binary`] without the op charge — for compiler-synthesized
+    /// ops (the foreach machinery's `pos < len` test and `pos + 1` step),
+    /// whose upstream equivalents never tick the budget.
+    pub(super) fn binary_uncharged(
+        &mut self,
+        op: BinOp,
+        l: &Operand,
+        r: &Operand,
+    ) -> Result<(Value, ValTy), NativeError> {
         // v1 real division by a statically-zero divisor yields `null`, not
         // `±∞` — produce a boxed-null `Ref` (so `8 / 0 === null` is true and
         // `0 / 0 === NaN` is false), rather than emitting an infinity v1
@@ -399,13 +411,10 @@ impl Tx<'_, '_> {
                 let inst = self.b.ins().call(binop, &[code, a, b, ver]);
                 self.b.inst_results(inst)[0]
             };
-            // String concat charges 1 op per result char on top of the `Add`
-            // node cost (interp `exec.rs`). The shim no-ops for non-string
-            // results (e.g. `array + array`).
-            if matches!(op, BinOp::Add) {
-                let concat = self.imports.rt("leek_charge_concat")?;
-                self.b.ins().call(concat, &[res]);
-            }
+            // String concat's dynamic surcharge (number→string conversion +
+            // per-char cost) is metered inside the `leek_value_binop*` shims
+            // themselves (`apply_binop_charged`), where both operand values
+            // are visible — nothing extra to emit here.
             return Ok((res, ValTy::Ref));
         }
 
@@ -563,6 +572,12 @@ impl Tx<'_, '_> {
     }
 
     pub(super) fn unary(&mut self, op: UnOp, x: &Operand) -> Result<(Value, ValTy), NativeError> {
+        // Upstream's emitter charges 1 op per source-level unary operator,
+        // except `+x` and `@x` which are free (`unary_op_cost`). Charged
+        // before evaluation, mirroring `binary`.
+        if matches!(op, UnOp::Neg | UnOp::Not | UnOp::BitNot) {
+            self.charge(1)?;
+        }
         let (v, ty) = self.operand(x)?;
         if ty == ValTy::Ref {
             match op {

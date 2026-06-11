@@ -7,10 +7,7 @@ use leek_hir::{
 };
 use leek_types::Type;
 
-use crate::ir::{
-    BinOp, BlockId, CallExpr, Callee, Const, LocalKind, Operand, Place, Rvalue, Statement,
-    Terminator,
-};
+use crate::ir::{BinOp, BlockId, Const, LocalKind, Operand, Place, Rvalue, Statement, Terminator};
 
 use super::util::{collect_lambda_captures, infer_simple_init_ty};
 use super::{FnLowerer, LoopCtx};
@@ -78,6 +75,9 @@ impl FnLowerer<'_> {
             Stmt::Foreach(fe) => self.lower_foreach(fe),
             Stmt::Break(_) => {
                 if let Some(ctx) = self.loop_stack.last().copied() {
+                    // Upstream `LeekBreakInstruction` prepends `addCounter(1)`
+                    // — a taken `break` costs 1 op.
+                    self.push_stmt(Statement::Charge(1));
                     self.goto(ctx.break_target);
                 } else {
                     self.errors.push(convert::lowering_unsupported(
@@ -88,6 +88,8 @@ impl FnLowerer<'_> {
             }
             Stmt::Continue(_) => {
                 if let Some(ctx) = self.loop_stack.last().copied() {
+                    // Like `break`: upstream charges 1 op per taken `continue`.
+                    self.push_stmt(Statement::Charge(1));
                     self.goto(ctx.continue_target);
                 } else {
                     self.errors.push(convert::lowering_unsupported(
@@ -125,8 +127,14 @@ impl FnLowerer<'_> {
                 // Upstream charges 1 op for the assignment/store of a
                 // `var`/`global x = e` declaration (`ops(e, 1)`).
                 self.push_stmt(Statement::Charge(1));
-            } else if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
-                self.push_stmt(Statement::Assign(Place::Global(v.def, v.name.clone()), rv));
+            } else {
+                // An uninitialized declaration still stores its default
+                // (`ops(default, 1)` upstream) — the 1-op store applies
+                // with or without an explicit initializer.
+                self.push_stmt(Statement::Charge(1));
+                if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
+                    self.push_stmt(Statement::Assign(Place::Global(v.def, v.name.clone()), rv));
+                }
             }
             return;
         }
@@ -196,11 +204,17 @@ impl FnLowerer<'_> {
                     Rvalue::Use(Operand::Local(id)),
                 ));
             }
-        } else if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
-            // Typed local with no initializer defaults to its type's
-            // value (container → empty, scalar → zero), matching the
-            // upstream "typed slots are never null" rule.
-            self.push_stmt(Statement::Assign(Place::Local(id), rv));
+        } else {
+            // An uninitialized declaration still stores its default
+            // (`ops(default, 1)` upstream) — the 1-op store applies with
+            // or without an explicit initializer.
+            self.push_stmt(Statement::Charge(1));
+            if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
+                // Typed local with no initializer defaults to its type's
+                // value (container → empty, scalar → zero), matching the
+                // upstream "typed slots are never null" rule.
+                self.push_stmt(Statement::Assign(Place::Local(id), rv));
+            }
         }
     }
 
@@ -214,6 +228,13 @@ impl FnLowerer<'_> {
         let then_bb = self.new_block();
         let else_bb = self.new_block();
         let join_bb = self.new_block();
+        // The `if` condition test costs 1 op (flow-control charge;
+        // the native backend's branches themselves are free). A `soft`
+        // if is the desugared `return? x` — upstream emits its null
+        // test without an `ops()` tick, so it stays free here too.
+        if !i.soft {
+            self.push_stmt(Statement::Charge(1));
+        }
         self.set_terminator(Terminator::Branch {
             cond,
             then_block: then_bb,
@@ -247,6 +268,10 @@ impl FnLowerer<'_> {
         });
 
         self.resume(body_bb);
+        // Loops tick 1 op per *body entry* (the Java oracle charges on
+        // entering the body, N times for N iterations — NOT on each
+        // header check, which would be N+1).
+        self.push_stmt(Statement::Charge(1));
         self.loop_stack.push(LoopCtx {
             continue_target: header,
             break_target: exit,
@@ -264,6 +289,8 @@ impl FnLowerer<'_> {
         let exit = self.new_block();
         self.goto(body_bb);
         self.resume(body_bb);
+        // 1 op per body entry — see `lower_while`.
+        self.push_stmt(Statement::Charge(1));
         self.loop_stack.push(LoopCtx {
             continue_target: cond_bb,
             break_target: exit,
@@ -306,6 +333,10 @@ impl FnLowerer<'_> {
         }
 
         self.resume(body_bb);
+        // 1 op per body entry — see `lower_while`. Charged even with no
+        // condition (`for (;;)`): the iteration tick is what bounds the
+        // loop against the op budget.
+        self.push_stmt(Statement::Charge(1));
         self.loop_stack.push(LoopCtx {
             continue_target: step_bb,
             break_target: exit,
@@ -335,20 +366,35 @@ impl FnLowerer<'_> {
             Place::Local(iter_local),
             Rvalue::MakeForeachIter(iter_val),
         ));
+        // Charge model (mirrors upstream's `ForeachBlock` /
+        // `ForeachKeyBlock`, see the Java backend's `emit_foreach`):
+        // the key:value form ticks 1 op before the iterability check,
+        // then setup charges 1 per *declared* slot (key form) or a
+        // flat 1 (value form, declared or reused). Captured slots pay
+        // their 1 op via a runtime Box ctor upstream — totals are
+        // capture-independent, so we fold it into the static charge.
+        // Upstream skips the setup charge when the iterated value is
+        // not iterable; we charge unconditionally (a foreach over a
+        // non-iterable is the only shape that differs).
+        let setup = if let Some(k) = &fe.key {
+            self.push_stmt(Statement::Charge(1));
+            u64::from(k.is_new) + u64::from(fe.value.is_new)
+        } else {
+            1
+        };
+        if setup > 0 {
+            self.push_stmt(Statement::Charge(setup));
+        }
         let pos_local = self.fresh_temp(Type::Integer, fe.span);
         self.push_stmt(Statement::Assign(
             Place::Local(pos_local),
             Rvalue::Use(Operand::Const(Const::Int(0))),
         ));
         let len_local = self.fresh_temp(Type::Integer, fe.span);
-        self.push_stmt(Statement::Call {
-            dest: Some(Place::Local(len_local)),
-            call: CallExpr {
-                callee: Callee::Builtin("count".into()),
-                args: vec![Operand::Local(iter_local)],
-                span: fe.span,
-            },
-        });
+        self.push_stmt(Statement::Assign(
+            Place::Local(len_local),
+            Rvalue::ForeachLen(iter_local),
+        ));
 
         // Declare key/value user locals so body references resolve.
         let key_local = fe.key.as_ref().map(|k| {
@@ -375,16 +421,18 @@ impl FnLowerer<'_> {
         let exit = self.new_block();
         self.goto(header);
 
-        // header: cond = pos < len; if cond then body else exit
+        // header: cond = pos < len; if cond then body else exit.
+        // The test is synthesized machinery — `Synthetic` so it never
+        // ticks the budget (upstream's `hasNext()` is free).
         self.resume(header);
         let cond = self.fresh_temp(Type::Boolean, fe.span);
         self.push_stmt(Statement::Assign(
             Place::Local(cond),
-            Rvalue::Binary(
+            Rvalue::Synthetic(Box::new(Rvalue::Binary(
                 BinOp::Lt,
                 Operand::Local(pos_local),
                 Operand::Local(len_local),
-            ),
+            ))),
         ));
         self.set_terminator(Terminator::Branch {
             cond: Operand::Local(cond),
@@ -393,23 +441,52 @@ impl FnLowerer<'_> {
         });
 
         // body: pair = iter[pos]; key = pair[0]; value = pair[1];
-        // <user body>; goto step
+        // <user body>; goto step. The pair reads are synthesized
+        // (upstream's `next()` / `getKey()` / `getValue()` are free);
+        // the explicit per-iteration tick below is the only charge.
         self.resume(body_bb);
         let pair_local = self.fresh_temp(Type::Any, fe.span);
         self.push_stmt(Statement::Assign(
             Place::Local(pair_local),
-            Rvalue::Index(iter_local, Operand::Local(pos_local)),
+            Rvalue::Synthetic(Box::new(Rvalue::Index(
+                iter_local,
+                Operand::Local(pos_local),
+            ))),
         ));
         if let Some(key) = key_local {
             self.push_stmt(Statement::Assign(
                 Place::Local(key),
-                Rvalue::Index(pair_local, Operand::Const(Const::Int(0))),
+                Rvalue::Synthetic(Box::new(Rvalue::Index(
+                    pair_local,
+                    Operand::Const(Const::Int(0)),
+                ))),
             ));
         }
         self.push_stmt(Statement::Assign(
             Place::Local(value_local),
-            Rvalue::Index(pair_local, Operand::Const(Const::Int(1))),
+            Rvalue::Synthetic(Box::new(Rvalue::Index(
+                pair_local,
+                Operand::Const(Const::Int(1)),
+            ))),
         ));
+        // Per-iteration tick. Value form: 1 op, except v1's by-value
+        // copy-on-set path which pays 2 (`@ref` skips the copy → 1).
+        // Key:value form: v2+ charges nothing, v1 charges 1 per
+        // non-`@ref` slot.
+        let (v1, vn) = if let Some(k) = &fe.key {
+            (u64::from(!k.is_by_ref) + u64::from(!fe.value.is_by_ref), 0)
+        } else if fe.value.is_by_ref {
+            (1, 1)
+        } else {
+            (2, 1)
+        };
+        if v1 == vn {
+            if v1 > 0 {
+                self.push_stmt(Statement::Charge(v1));
+            }
+        } else {
+            self.push_stmt(Statement::ChargeVersioned { v1, vn });
+        }
         self.loop_stack.push(LoopCtx {
             continue_target: step_bb,
             break_target: exit,
@@ -418,16 +495,17 @@ impl FnLowerer<'_> {
         self.loop_stack.pop();
         self.goto(step_bb);
 
-        // step: pos += 1; goto header
+        // step: pos += 1; goto header. Synthetic — the increment is
+        // loop machinery, not a user `+`.
         self.resume(step_bb);
         let new_pos = self.fresh_temp(Type::Integer, fe.span);
         self.push_stmt(Statement::Assign(
             Place::Local(new_pos),
-            Rvalue::Binary(
+            Rvalue::Synthetic(Box::new(Rvalue::Binary(
                 BinOp::Add,
                 Operand::Local(pos_local),
                 Operand::Const(Const::Int(1)),
-            ),
+            ))),
         ));
         self.push_stmt(Statement::Assign(
             Place::Local(pos_local),
@@ -491,6 +569,9 @@ impl FnLowerer<'_> {
                 Rvalue::Binary(BinOp::Eq, Operand::Local(disc_local), case),
             ));
             let next_bb = self.new_block();
+            // Each case test costs 1 op (flow-control charge; the
+            // native backend's branches themselves are free).
+            self.push_stmt(Statement::Charge(1));
             self.set_terminator(Terminator::Branch {
                 cond: Operand::Local(cmp),
                 then_block: body_bb,

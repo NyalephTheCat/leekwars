@@ -28,6 +28,79 @@ pub use array::{deep_clone_for_v1, take_pending_promotion};
 pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
     let total = builtin_cost(name);
 
+    // Upstream-exact `arrayMap` (read from `LegacyArrayLeekValue.
+    // arrayMap_v1_3` / `ArrayLeekValue.arrayMap`): every generation
+    // charges `ops(1 + 2·size)` up front; building the v1-3 result then
+    // pays one `getOrCreate` miss per element (5 + √size_after / 3 — the
+    // same create cost as an index write), while the v4 result `add`s
+    // for free. Callback invocations charge through the call path
+    // itself, so they're not metered here. This replaces the blanket
+    // 30/element batch multiplier the generated catalog assigns.
+    if name == "arrayMap" {
+        let n = args.first().map_or(0, |v| match v {
+            Value::Array(a) => a.borrow().len() as u64,
+            Value::Map(m) => m.borrow().len() as u64,
+            _ => 0,
+        });
+        let mut total = total.saturating_add(1 + 2 * n);
+        if version <= 3 {
+            for size_after in 1..=n {
+                #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+                let isqrt = (size_after as f64).sqrt() as u64;
+                total = total.saturating_add(5 + isqrt / 3);
+            }
+        }
+        return total;
+    }
+
+    // Upstream-exact string builtins (`StringClass.java`): each charges a
+    // dynamic `ops(...)` derived from the input's length — in UTF-16 code
+    // units, matching Java's `String.length()` — on top of the declared
+    // catalog cost (e.g. `length` is catalogued at 15 and its impl ticks 1
+    // more, so a call costs 16 total).
+    if let Some(Value::String(s)) = args.first() {
+        let len = s.encode_utf16().count() as u64;
+        let extra = match name {
+            "length" => Some(1),
+            // Haystack scans: `1 + len/10`.
+            "contains" | "indexOf" => Some(1 + len / 10),
+            // Worst-case output bound: every char replaced by `replace`.
+            "replace" => {
+                let rep = match args.get(2) {
+                    Some(Value::String(r)) => r.encode_utf16().count() as u64,
+                    _ => 0,
+                };
+                Some((len.saturating_mul(rep.max(1))).max(1))
+            }
+            // Full-input walks: `1 + len`.
+            "split" | "toLower" | "toUpper" | "startsWith" | "endsWith" => Some(1 + len),
+            // `1 + copied/10` where `copied` is the slice the call extracts.
+            "substring" => {
+                let start = args
+                    .get(1)
+                    .and_then(super::value::types::Value::as_int)
+                    .unwrap_or(0);
+                let copied =
+                    if let Some(l) = args.get(2).and_then(super::value::types::Value::as_int) {
+                        u64::try_from(l.max(0)).unwrap_or(0)
+                    } else {
+                        len.saturating_sub(u64::try_from(start.max(0)).unwrap_or(u64::MAX))
+                    };
+                Some(1 + copied / 10)
+            }
+            _ => None,
+        };
+        if let Some(extra) = extra {
+            return total.saturating_add(extra);
+        }
+    }
+    // `string(n)` renders a number: upstream `AI.string(Object)` ticks 3 for
+    // a `Long` and `doubleToString` ticks 3 for a `Double`; other inputs
+    // (booleans, strings, null) render for free.
+    if name == "string" && matches!(args.first(), Some(Value::Int(_) | Value::Real(_))) {
+        return total.saturating_add(3);
+    }
+
     // `range(lo, hi)` allocates `hi - lo + 1` integers, but the size lives in
     // the numeric args, not a container in `arg[0]`, so it isn't in the batch
     // catalog. Meter it explicitly: the interpreter charges this cost *before*
@@ -130,9 +203,12 @@ fn batch_op_multiplier(name: &str) -> Option<u64> {
     leek_builtins::batch_multiplier_u64(name)
 }
 
-/// Per-call op cost — shared catalog; default 1 op when not listed.
-pub(crate) fn builtin_cost(name: &str) -> u64 {
-    leek_builtins::op_cost_u64(name)
+/// Per-call op cost — shared catalog; default 0 ops when not listed,
+/// matching upstream's Java emitter (`ops(...)` is only added for
+/// builtins with an explicit catalog cost). Public so backends that
+/// inline builtins (native) can charge the same static cost.
+pub fn builtin_cost(name: &str) -> u64 {
+    u64::from(leek_builtins::op_cost_emit(name))
 }
 
 // ---- Constants ----

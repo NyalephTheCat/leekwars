@@ -284,6 +284,7 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_field_set_slot", leek_field_set_slot as *const u8),
         ("leek_set_index_int", leek_set_index_int as *const u8),
         ("leek_index_int", leek_index_int as *const u8),
+        ("leek_index_int_raw", leek_index_int_raw as *const u8),
         ("leek_array_get_int", leek_array_get_int as *const u8),
         ("leek_array_get_real", leek_array_get_real as *const u8),
         ("leek_value_set_index", leek_value_set_index as *const u8),
@@ -324,6 +325,7 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_value_binop_crr", leek_value_binop_crr as *const u8),
         ("leek_value_binop_crl", leek_value_binop_crl as *const u8),
         ("leek_foreach_iter", leek_foreach_iter as *const u8),
+        ("leek_foreach_len", leek_foreach_len as *const u8),
         ("leek_class_of", leek_class_of as *const u8),
         ("leek_class_super", leek_class_super as *const u8),
         (
@@ -340,6 +342,5 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
             "leek_op_budget_exceeded",
             leek_op_budget_exceeded as *const u8,
         ),
-        ("leek_charge_concat", leek_charge_concat as *const u8),
     ]
 }

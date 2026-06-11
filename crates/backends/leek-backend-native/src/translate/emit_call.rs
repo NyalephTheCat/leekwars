@@ -521,6 +521,10 @@ impl Tx<'_, '_> {
             };
             cl_args.push(v);
         }
+        // Static per-call cost from the shared catalog (`sqrt` 8, `sin` 30,
+        // …), mirroring the Java emitter's `builtin_call_cost`. The generic
+        // (boxed-arg) path charges the same cost at runtime instead.
+        self.charge(leek_runtime::builtin_cost(name))?;
         let inst = self.b.ins().call(fref, &cl_args);
         let res = self.b.inst_results(inst)[0];
         let res_ty = match sig {
@@ -550,6 +554,7 @@ impl Tx<'_, '_> {
         // still skip.
         if ty == ValTy::Ref {
             if name == "abs" && matches!(args.first(), Some(Operand::Const(Const::Null))) {
+                self.charge(leek_runtime::builtin_cost(name))?;
                 return if self.lang.version <= 1 {
                     Ok((self.b.ins().iconst(types::I64, 0), ValTy::Int))
                 } else {
@@ -559,8 +564,12 @@ impl Tx<'_, '_> {
             if matches!(args.first(), Some(Operand::Const(Const::Null))) {
                 return Err(unsupported(format!("{name}(null) — real/int result")));
             }
+            // Runtime-charged via `charge_builtin_ops` in the shim.
             return self.generic_builtin(name, args);
         }
+        // Static per-call cost (`abs` 2; `signum` uncatalogued → 0), as the
+        // Java emitter charges via `builtin_call_cost`.
+        self.charge(leek_runtime::builtin_cost(name))?;
         match name {
             "abs" => match ty {
                 ValTy::Real => Ok((self.b.ins().fabs(v), ValTy::Real)),
@@ -607,6 +616,13 @@ impl Tx<'_, '_> {
         if at == ValTy::Ref || bt == ValTy::Ref {
             return self.generic_builtin(if want_min { "min" } else { "max" }, args);
         }
+        // min/max are uncatalogued upstream → 0 ops; charge the shared
+        // catalog cost anyway so a future catalog change stays in sync.
+        self.charge(leek_runtime::builtin_cost(if want_min {
+            "min"
+        } else {
+            "max"
+        }))?;
         if at == ValTy::Real || bt == ValTy::Real {
             let a = self.coerce(a, at, ValTy::Real)?;
             let b = self.coerce(b, bt, ValTy::Real)?;
@@ -631,6 +647,8 @@ impl Tx<'_, '_> {
 
     /// `count(x)` — element count of an array/map/set/string handle.
     pub(super) fn count_call(&mut self, args: &[Operand]) -> Result<(Value, ValTy), NativeError> {
+        // Catalog cost (`count` → 1), as the Java emitter charges statically.
+        self.charge(leek_runtime::builtin_cost("count"))?;
         let count = self.imports.rt("leek_count")?;
         let (v, t) = match args.first() {
             Some(op) => self.operand(op)?,
@@ -651,6 +669,9 @@ impl Tx<'_, '_> {
         if args.len() != 2 {
             return Err(unsupported("push: expected 2 args"));
         }
+        // Catalog cost (`push` → 2), as the Java emitter charges statically;
+        // the shim adds the legacy per-insert cost on top for v1-3.
+        self.charge(leek_runtime::builtin_cost("push"))?;
         let push = self.imports.rt("leek_array_push")?;
         let null = self.imports.rt("leek_box_null")?;
         let (arr, at) = self.operand(&args[0])?;
@@ -666,7 +687,11 @@ impl Tx<'_, '_> {
             let inst = self.b.ins().call(f, &[elem]);
             elem = self.b.inst_results(inst)[0];
         }
-        self.b.ins().call(push, &[arr, elem]);
+        let ver = self
+            .b
+            .ins()
+            .iconst(types::I64, i64::from(self.lang.version));
+        self.b.ins().call(push, &[arr, elem, ver]);
         let inst = self.b.ins().call(null, &[]);
         Ok((self.b.inst_results(inst)[0], ValTy::Ref))
     }

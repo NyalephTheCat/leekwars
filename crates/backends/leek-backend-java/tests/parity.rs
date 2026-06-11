@@ -33,11 +33,12 @@ use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 use similar::{ChangeTag, TextDiff};
 
-/// Per-snippet op budget for the snapshot cross-check. Generous
-/// enough for the arithmetic / loop fixtures the curated suite
-/// captures, but small enough that 3.7k cases finish in seconds —
-/// a runaway interp loop is bounded by this.
-const SNAPSHOT_OP_LIMIT: u64 = 100_000;
+/// Per-snippet op budget for the snapshot cross-check. The heaviest
+/// corpus rows legitimately charge ~13.6M ops (the 500×200 randInt
+/// string-building loops), so the ceiling sits well above that; a
+/// genuinely runaway loop is still bounded — the native JIT burns
+/// through the budget in well under the worker timeout.
+const SNAPSHOT_OP_LIMIT: u64 = 100_000_000;
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -391,6 +392,7 @@ fn corpus_value_matches_snapshot() {
     let mut ops_match = 0u32;
     let mut ops_mismatch = 0u32;
     let mut mismatches = String::new();
+    let mut ops_diffs: Vec<(usize, u8, String, i64, u64, u64)> = Vec::new();
 
     for (lineno, line) in contents.lines().enumerate() {
         let trimmed = line.trim();
@@ -431,6 +433,16 @@ fn corpus_value_matches_snapshot() {
                         ops_match += 1;
                     } else if expected_ops != u64::MAX {
                         ops_mismatch += 1;
+                        let delta =
+                            i64::try_from(ops).unwrap() - i64::try_from(expected_ops).unwrap();
+                        ops_diffs.push((
+                            lineno + 1,
+                            version_byte,
+                            code.clone(),
+                            delta,
+                            expected_ops,
+                            ops,
+                        ));
                     }
                 } else {
                     value_mismatch += 1;
@@ -460,6 +472,20 @@ fn corpus_value_matches_snapshot() {
                 }
             }
         }
+    }
+
+    // Per-case ops drift detail (native runtime counter vs the JVM
+    // snapshot's ops column) — sidecar so the summary stays scannable.
+    {
+        let mut drift_report = String::new();
+        ops_diffs.sort_by_key(|(_, _, _, d, _, _)| -d.abs());
+        for (lineno, v, code, delta, exp, got) in &ops_diffs {
+            let _ = writeln!(
+                drift_report,
+                "L{lineno}: v{v} delta={delta:+} expected={exp} got={got} code={code:?}"
+            );
+        }
+        let _ = fs::write(snapshots_dir().join("NATIVE_OPS_DRIFT.txt"), drift_report);
     }
 
     let report = format!(
@@ -542,7 +568,7 @@ fn run_via_interp(code: &str, version_byte: u8) -> InterpOutcome {
             Err(_) => InterpOutcome::Err("panic during interp".into()),
         });
     });
-    match rx.recv_timeout(std::time::Duration::from_millis(2_000)) {
+    match rx.recv_timeout(std::time::Duration::from_millis(10_000)) {
         Ok(outcome) => outcome,
         Err(_) => InterpOutcome::Err("timeout".into()),
     }

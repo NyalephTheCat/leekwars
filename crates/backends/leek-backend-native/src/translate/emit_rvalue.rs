@@ -17,6 +17,8 @@ impl Tx<'_, '_> {
             Rvalue::Index(base, idx) => self.index(*base, idx),
             Rvalue::Slice(base, bounds) => self.slice(*base, bounds),
             Rvalue::MakeForeachIter(op) => self.foreach_iter(op),
+            Rvalue::ForeachLen(base) => self.foreach_len(*base),
+            Rvalue::Synthetic(inner) => self.synthetic(inner),
             Rvalue::Map(pairs) => self.map_literal(pairs),
             Rvalue::Set(items) => self.set_literal(items),
             Rvalue::Interval(iv) => self.interval(iv),
@@ -351,16 +353,28 @@ impl Tx<'_, '_> {
         &mut self,
         pairs: &[(Operand, Operand)],
     ) -> Result<(Value, ValTy), NativeError> {
+        // The Java emitter charges 2 ops per pair statically; v1–3 legacy
+        // assoc arrays additionally pay `initTable` (`max(8, capacity) / 5`,
+        // capacity = key+value slots) at construction. The per-pair insert
+        // cost is charged by the `leek_map_put` shim.
+        self.charge(2 * pairs.len() as u64)?;
+        if self.lang.version <= 3 && !pairs.is_empty() {
+            self.charge(8.max(2 * pairs.len() as u64) / 5)?;
+        }
         let new = self.imports.rt("leek_map_new")?;
         let put = self.imports.rt("leek_map_put")?;
         let inst = self.b.ins().call(new, &[]);
         let map = self.b.inst_results(inst)[0];
+        let ver = self
+            .b
+            .ins()
+            .iconst(types::I64, i64::from(self.lang.version));
         for (k, v) in pairs {
             let (kv, kt) = self.operand(k)?;
             let key = self.coerce(kv, kt, ValTy::Ref)?;
             let (vv, vt) = self.operand(v)?;
             let val = self.coerce(vv, vt, ValTy::Ref)?;
-            self.b.ins().call(put, &[map, key, val]);
+            self.b.ins().call(put, &[map, key, val, ver]);
         }
         Ok((map, ValTy::Ref))
     }
@@ -415,6 +429,45 @@ impl Tx<'_, '_> {
         Ok((self.b.inst_results(inst)[0], ValTy::Ref))
     }
 
+    /// Length of a foreach snapshot — the synthesized loop bound.
+    /// Uncharged (upstream's `hasNext()` is free).
+    pub(super) fn foreach_len(&mut self, base: LocalId) -> Result<(Value, ValTy), NativeError> {
+        let f = self.imports.rt("leek_foreach_len")?;
+        let (v, t) = self.local_value(base)?;
+        let h = self.coerce(v, t, ValTy::Ref)?;
+        let inst = self.b.ins().call(f, &[h]);
+        Ok((self.b.inst_results(inst)[0], ValTy::Int))
+    }
+
+    /// A compiler-synthesized rvalue: evaluates exactly like the inner
+    /// rvalue but charges no ops. Only the shapes the foreach lowering
+    /// synthesizes get dedicated uncharged paths (an int-indexed read,
+    /// a binary op); anything else falls back to the normal — charged —
+    /// emission.
+    pub(super) fn synthetic(&mut self, inner: &Rvalue) -> Result<(Value, ValTy), NativeError> {
+        match inner {
+            Rvalue::Binary(op, l, r) => self.binary_uncharged(*op, l, r),
+            Rvalue::Index(base, idx) => {
+                let (i, it) = self.operand(idx)?;
+                if it == ValTy::Int && !self.classref_locals.contains_key(base) {
+                    let arr = {
+                        let (v, base_ty) = self.local_value(*base)?;
+                        self.coerce(v, base_ty, ValTy::Ref)?
+                    };
+                    let ver = self
+                        .b
+                        .ins()
+                        .iconst(types::I64, i64::from(self.lang.version));
+                    let get = self.imports.rt("leek_index_int_raw")?;
+                    let inst = self.b.ins().call(get, &[arr, i, ver]);
+                    return Ok((self.b.inst_results(inst)[0], ValTy::Ref));
+                }
+                self.index(*base, idx)
+            }
+            other => self.rvalue(other),
+        }
+    }
+
     /// Build an array literal: allocate, then box-and-push each element.
     /// Composite support is v4-only (v1–v3 arrays are value-typed, which
     /// this aliasing handle model doesn't reproduce).
@@ -422,14 +475,26 @@ impl Tx<'_, '_> {
         &mut self,
         elems: &[Operand],
     ) -> Result<(Value, ValTy), NativeError> {
+        // The Java emitter charges 2 ops per element statically; v1–3 legacy
+        // arrays additionally pay `initTable` (`max(8, n) / 5`) when built
+        // from a non-empty element list. The per-element insert cost is
+        // charged by the `leek_array_push` shim.
+        self.charge(2 * elems.len() as u64)?;
+        if self.lang.version <= 3 && !elems.is_empty() {
+            self.charge(8.max(elems.len() as u64) / 5)?;
+        }
         let new = self.imports.rt("leek_array_new")?;
         let push = self.imports.rt("leek_array_push")?;
         let inst = self.b.ins().call(new, &[]);
         let arr = self.b.inst_results(inst)[0];
+        let ver = self
+            .b
+            .ins()
+            .iconst(types::I64, i64::from(self.lang.version));
         for op in elems {
             let (v, t) = self.operand(op)?;
             let boxed = self.coerce(v, t, ValTy::Ref)?;
-            self.b.ins().call(push, &[arr, boxed]);
+            self.b.ins().call(push, &[arr, boxed, ver]);
         }
         Ok((arr, ValTy::Ref))
     }

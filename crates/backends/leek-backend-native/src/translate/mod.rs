@@ -429,6 +429,13 @@ fn param_value_only(f: &MirFunction, id: LocalId) -> bool {
                         return false;
                     }
                     Rvalue::MakeForeachIter(o) if op_is(o) => return false,
+                    Rvalue::ForeachLen(l) if *l == id => return false,
+                    // Synthetic wraps foreach machinery (whose bases are
+                    // always compiler temps, never params) — refuse
+                    // conservatively on any mention.
+                    Rvalue::Synthetic(inner) if analysis::rvalue_mentions(inner, id) => {
+                        return false;
+                    }
                     Rvalue::MakeLambda { captures, .. } if captures.iter().any(op_is) => {
                         return false;
                     }
@@ -1927,6 +1934,8 @@ fn rvalue_name(rv: &Rvalue) -> &'static str {
         Rvalue::New { .. } => "new",
         Rvalue::Interval(_) => "interval",
         Rvalue::MakeForeachIter(_) => "foreach-iter",
+        Rvalue::ForeachLen(_) => "foreach-len",
+        Rvalue::Synthetic(inner) => rvalue_name(inner),
         Rvalue::MakeLambda { .. } => "make-lambda",
         Rvalue::FunctionRef(_) => "function-ref",
         Rvalue::GlobalRef(..) => "global-ref",
@@ -2004,6 +2013,9 @@ fn rvalue_ty(rv: &Rvalue, tys: &HashMap<LocalId, ValTy>) -> Option<ValTy> {
         // it on coercion).
         | Rvalue::Cast(..)
         | Rvalue::MakeForeachIter(_) => Some(ValTy::Ref),
+        // The synthesized foreach loop bound is a raw integer.
+        Rvalue::ForeachLen(_) => Some(ValTy::Int),
+        Rvalue::Synthetic(inner) => rvalue_ty(inner, tys),
         _ => None,
     }
 }

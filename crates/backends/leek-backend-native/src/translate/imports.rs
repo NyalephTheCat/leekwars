@@ -198,6 +198,8 @@ pub(super) fn declare_imports(
                     | Rvalue::Index(..)
                     | Rvalue::Slice(..)
                     | Rvalue::MakeForeachIter(_)
+                    | Rvalue::ForeachLen(_)
+                    | Rvalue::Synthetic(_)
                     | Rvalue::Map(_)
                     | Rvalue::Set(_)
                     | Rvalue::Interval(_)
@@ -286,7 +288,6 @@ pub(super) fn declare_imports(
         let op_shims: &[(&'static str, &[ClType], Option<ClType>)] = &[
             ("leek_charge_ops", &[i], None),
             ("leek_op_budget_exceeded", &[], Some(i)),
-            ("leek_charge_concat", &[i], None),
             // Scalar box/unbox: a typed function can need a scalar↔handle
             // coercion (e.g. an `-> integer` function whose body yields a
             // boxed value) even when the `uses_composite` heuristic is off, so
@@ -410,7 +411,7 @@ pub(super) fn declare_imports(
             // Scalar box/unbox (`leek_box_int` etc.) are declared
             // unconditionally above; `leek_box_null` stays here (composite).
             ("leek_array_new", &[], Some(i)),
-            ("leek_array_push", &[i, i], None),
+            ("leek_array_push", &[i, i, i], None),
             ("leek_value_index", &[i, i, i], Some(i)),
             // Field reads with the name passed unboxed (`ptr`,`len`,`ver`):
             // `_get` returns a handle (saves the key box); `_int`/`_real` return
@@ -437,11 +438,14 @@ pub(super) fn declare_imports(
             // pair return an unboxed scalar (also skip boxing the result) for a
             // read flowing into a scalar-typed slot.
             ("leek_index_int", &[i, i, i], Some(i)),
+            // Uncharged variant for compiler-synthesized reads (the
+            // foreach machinery's `iter[pos]` / `pair[0|1]`).
+            ("leek_index_int_raw", &[i, i, i], Some(i)),
             ("leek_array_get_int", &[i, i, i], Some(i)),
             ("leek_array_get_real", &[i, i, i], Some(types::F64)),
             ("leek_value_set_index", &[i, i, i, i], None),
             ("leek_map_new", &[], Some(i)),
-            ("leek_map_put", &[i, i, i], None),
+            ("leek_map_put", &[i, i, i, i], None),
             ("leek_set_new", &[], Some(i)),
             ("leek_set_add", &[i, i], None),
             ("leek_set_add_range", &[i, i, i], None),
@@ -474,6 +478,7 @@ pub(super) fn declare_imports(
             ("leek_value_binop_crr", &[i, i, types::F64, i], Some(i)),
             ("leek_value_binop_crl", &[i, types::F64, i, i], Some(i)),
             ("leek_foreach_iter", &[i], Some(i)),
+            ("leek_foreach_len", &[i], Some(i)),
             ("leek_class_of", &[i], Some(i)),
             ("leek_class_super", &[i], Some(i)),
             ("leek_construct_builtin", &[i, i, i], Some(i)),

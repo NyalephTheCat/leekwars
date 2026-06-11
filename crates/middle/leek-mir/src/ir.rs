@@ -479,6 +479,13 @@ pub enum Statement {
     /// Op-budget tick lowered from [`leek_hir::Stmt::Charge`]. A
     /// backend that doesn't enforce a budget can skip these.
     Charge(u64),
+    /// Op-budget tick whose amount depends on the language version:
+    /// v1 charges `v1` ops, v2+ charges `vn`. MIR itself is
+    /// version-agnostic, so version-split costs — the foreach
+    /// per-iteration tick differs between v1's copy-on-set and
+    /// v2+'s plain set — resolve to a constant at emission, where
+    /// the backend knows the version.
+    ChargeVersioned { v1: u64, vn: u64 },
     /// Drain the interpreter's "pending v1-v3 LegacyArray
     /// promotion" side-channel into the given local. Emitted
     /// after builtins that may morph their first arg from an
@@ -618,6 +625,17 @@ pub enum Rvalue {
     /// stay generic over the source type (array / map / set /
     /// string / interval / object).
     MakeForeachIter(Operand),
+    /// Length of a foreach snapshot (a [`Rvalue::MakeForeachIter`]
+    /// result) — the synthesized loop bound. Uncharged: walking the
+    /// snapshot is a compiler implementation detail whose upstream
+    /// equivalents (`iterator()` / `hasNext()`) never tick the
+    /// budget.
+    ForeachLen(LocalId),
+    /// A compiler-synthesized rvalue: evaluates exactly like the
+    /// inner rvalue but charges no ops. Wraps the foreach loop
+    /// machinery (the `pos < len` test, the `pos + 1` step, the
+    /// snapshot pair reads) whose upstream equivalents are free.
+    Synthetic(Box<Rvalue>),
     /// Construct a closure value. `function_idx` indexes into
     /// `MirProgram.functions` — the lambda's body lives there with
     /// `captures.len()` extra parameter slots prepended to its
@@ -819,7 +837,10 @@ impl BinOp {
             BinOp::Mul => 2,
             BinOp::Div | BinOp::IntDiv | BinOp::Mod => 5,
             BinOp::Pow => 40,
-            BinOp::CompoundXor => 40, // v1 POW-assign worst case
+            // Upstream's emitter keys the charge on the *operator token*:
+            // `^=` costs 1 even in v1, where its semantics are POW-assign
+            // (only the spelled-out `**`/`**=` carry the 40-op power cost).
+            BinOp::CompoundXor => 1,
             BinOp::In | BinOp::NotIn => 2,
             _ => 1,
         }

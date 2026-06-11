@@ -8,10 +8,13 @@ use leek_types::Type;
 
 use crate::ir::{
     FunctionKind, LocalKind, MirClass, MirField, MirFunction, MirGlobal, MirMethod, MirProgram,
-    Terminator,
+    Statement, Terminator,
 };
 
-use super::util::{lower_visibility, placeholder_function};
+use super::util::{
+    captured_by_nested_lambda_body, captured_by_nested_lambda_stmts, lower_visibility,
+    placeholder_function,
+};
 use super::{FnLowerer, MethodCtx, PendingLambda, ProgramCtx};
 
 impl<'a> ProgramCtx<'a> {
@@ -175,6 +178,22 @@ impl<'a> ProgramCtx<'a> {
             fl.local_map.insert(p.def, id);
             fl.params.push(id);
         }
+        // Param-binding charges, per call — same model as `lower_function`:
+        // v1 binds every by-value lambda param through the 2-arg Box ctor
+        // (1 op each); v2+ boxes only params captured by an inner lambda.
+        // `@`-ref params alias the caller's box (no charge).
+        let v1_boxes = lam.params.iter().filter(|p| !p.is_by_ref).count() as u64;
+        let vn_boxes = lam
+            .params
+            .iter()
+            .filter(|p| !p.is_by_ref && captured_by_nested_lambda_body(&lam.body, p.def))
+            .count() as u64;
+        if v1_boxes > 0 || vn_boxes > 0 {
+            fl.push_stmt(Statement::ChargeVersioned {
+                v1: v1_boxes,
+                vn: vn_boxes,
+            });
+        }
         match &lam.body {
             leek_hir::LambdaBody::Block(b) => {
                 fl.lower_block_stmts(&b.stmts);
@@ -241,6 +260,23 @@ impl<'a> ProgramCtx<'a> {
             }
             fl.local_map.insert(p.def, id);
             fl.params.push(id);
+        }
+        // Param-binding charges, per call: at v1 every by-value param binds
+        // through a `new Box(ai, …)` whose 2-arg ctor costs 1 op (upstream
+        // also emits the equivalent static `ops(n)` for plain params); at
+        // v2+ only params captured by a nested lambda get boxed. `@`-ref
+        // params alias the caller's box — no charge either way.
+        let v1_boxes = f.params.iter().filter(|p| !p.is_by_ref).count() as u64;
+        let vn_boxes = f
+            .params
+            .iter()
+            .filter(|p| !p.is_by_ref && captured_by_nested_lambda_stmts(&body.stmts, p.def))
+            .count() as u64;
+        if v1_boxes > 0 || vn_boxes > 0 {
+            fl.push_stmt(Statement::ChargeVersioned {
+                v1: v1_boxes,
+                vn: vn_boxes,
+            });
         }
         fl.lower_block_stmts(&body.stmts);
         fl.close_with_implicit_return(body.span);
