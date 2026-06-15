@@ -478,3 +478,375 @@ return x + y\n",
     let main = find(&r, "<main>");
     assert!(matches!(main.big_o, BigO::Constant));
 }
+
+// ─── class methods ─────────────────────────────────────────────────
+
+#[test]
+fn class_method_body_is_analysed() {
+    // A method that loops over an array parameter is linear, and is
+    // reported under its `Class.method` key (methods used to be
+    // skipped entirely).
+    let r = analyze(
+        "\
+class Vec {\n\
+    public total(arr) {\n\
+        var t = 0\n\
+        for (var x in arr) { t = t + x }\n\
+        return t\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Vec.total");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn this_method_call_is_substituted() {
+    // `this.total(arr)` resolves to `Vec.total` (via the enclosing
+    // class) and substitutes its linear formula — twice — so `twice`
+    // stays linear rather than collapsing to Unknown.
+    let r = analyze(
+        "\
+class Vec {\n\
+    public total(arr) {\n\
+        var t = 0\n\
+        for (var x in arr) { t = t + x }\n\
+        return t\n\
+    }\n\
+    public twice(arr) {\n\
+        return this.total(arr) + this.total(arr)\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Vec.twice");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn unique_method_name_resolves_across_instances() {
+    // `w.run(arr)` — `w` is an untyped param, so the receiver class is
+    // unknown, but exactly one class defines `run`, so the unique-name
+    // fallback resolves it and substitutes the linear formula.
+    let r = analyze(
+        "\
+class Worker {\n\
+    public run(arr) {\n\
+        for (var x in arr) {}\n\
+        return 0\n\
+    }\n\
+}\n\
+function dispatch(w, arr) {\n\
+    return w.run(arr)\n\
+}\n",
+    );
+    let f = find(&r, "dispatch");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn class_methods_do_not_leak_bodiless_artifacts() {
+    // Lowering emits a bodiless `Function` per method; it must not
+    // surface as a spurious top-level `O(1)` entry beside the real
+    // `Class.method` one.
+    let r = analyze(
+        "\
+class Vec {\n\
+    public total(arr) { return count(arr) }\n\
+}\n",
+    );
+    assert!(
+        r.iter().any(|c| c.name == "Vec.total"),
+        "method missing: {:?}",
+        r.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    assert!(
+        !r.iter().any(|c| c.name == "total"),
+        "bodiless artifact leaked: {:?}",
+        r.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+}
+
+// ─── field-size tracking ───────────────────────────────────────────
+
+#[test]
+fn method_looping_over_a_field_is_linear_in_that_field() {
+    // `foreach (c in this.cells)` — the field is the loop bound, so the
+    // method is linear in the field's size (named after the field).
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> cells = []\n\
+    public sumCells() {\n\
+        var t = 0\n\
+        for (var c in this.cells) { t = t + c }\n\
+        return t\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Grid.sumCells");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "cells"),
+        other => panic!("expected O(cells), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn count_of_a_field_drives_a_for_loop_bound() {
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> cells = []\n\
+    public walk() {\n\
+        for (var i = 0; i < count(this.cells); i++) {}\n\
+        return 0\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Grid.walk");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "cells"),
+        other => panic!("expected O(cells), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn field_size_substitutes_into_a_callee() {
+    // `helper(this.cells)` — the field size flows into the callee's
+    // parameter formula, so the method inherits O(cells).
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> cells = []\n\
+    public run() {\n\
+        return helper(this.cells)\n\
+    }\n\
+}\n\
+function helper(arr) {\n\
+    for (var x in arr) {}\n\
+    return 0\n\
+}\n",
+    );
+    let m = find(&r, "Grid.run");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "cells"),
+        other => panic!("expected O(cells), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn nested_loops_over_two_fields_are_a_product() {
+    // The previously-`O(?)` nested-field case now resolves to a product
+    // of the two field sizes — even the un-annotated inner field, since
+    // iterating it implies a container.
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> rows = []\n\
+    public cols = []\n\
+    public area() {\n\
+        for (var r in this.rows) {\n\
+            for (var c in this.cols) {}\n\
+        }\n\
+        return 0\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Grid.area");
+    let label = m.big_o.render();
+    assert!(label.contains("rows"), "got {label}");
+    assert!(label.contains("cols"), "got {label}");
+    assert!(label.contains('·') || label.contains('*'), "got {label}");
+}
+
+#[test]
+fn field_of_another_object_parameter_resolves() {
+    // `bag.items` where `bag` is a (here untyped) parameter — not
+    // `this` — resolves to a field-path size variable off that param.
+    let r = analyze(
+        "\
+function total(bag) {\n\
+    var t = 0\n\
+    for (var x in bag.items) { t = t + x }\n\
+    return t\n\
+}\n",
+    );
+    let f = find(&r, "total");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "bag.items"),
+        other => panic!("expected O(bag.items), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn field_path_composes_through_a_call() {
+    // The callee loops over `obj.items` (a field off its own param);
+    // the caller passes `thing`, so the field path retargets onto the
+    // argument → O(thing.items).
+    let r = analyze(
+        "\
+function sumField(obj) {\n\
+    for (var x in obj.items) {}\n\
+    return 0\n\
+}\n\
+function driver(thing) {\n\
+    return sumField(thing)\n\
+}\n",
+    );
+    let f = find(&r, "driver");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "thing.items"),
+        other => panic!(
+            "expected O(thing.items), got {other:?}\nformula = {}",
+            f.formula
+        ),
+    }
+}
+
+#[test]
+fn nested_field_chain_resolves() {
+    let r = analyze(
+        "\
+class Board {\n\
+    public grid = []\n\
+    public scan() {\n\
+        for (var r in this.grid.rows) {}\n\
+        return 0\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Board.scan");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "grid.rows"),
+        other => panic!("expected O(grid.rows), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+// ─── globals & local aliases ───────────────────────────────────────
+
+#[test]
+fn global_is_a_size_root() {
+    let r = analyze(
+        "\
+global data = []\n\
+function run() {\n\
+    for (var x in data) {}\n\
+    return 0\n\
+}\n",
+    );
+    let f = find(&r, "run");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "data"),
+        other => panic!("expected O(data), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn local_alias_resolves_to_its_origin() {
+    // `var xs = bag.items` then looping `xs` is linear in `bag.items`.
+    let r = analyze(
+        "\
+function run(bag) {\n\
+    var xs = bag.items\n\
+    for (var x in xs) {}\n\
+    return 0\n\
+}\n",
+    );
+    let f = find(&r, "run");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "bag.items"),
+        other => panic!("expected O(bag.items), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn reassigned_local_is_not_aliased() {
+    // `xs` is reassigned after binding `arr`, so it can't be treated as
+    // a stable alias — the loop bound is unknown rather than O(arr).
+    let r = analyze(
+        "\
+function run(arr) {\n\
+    var xs = arr\n\
+    xs = []\n\
+    for (var x in xs) {}\n\
+    return 0\n\
+}\n",
+    );
+    let f = find(&r, "run");
+    assert!(matches!(f.big_o, BigO::Unknown), "got {:?}", f.big_o);
+}
+
+#[test]
+fn method_receiver_tracked_through_local_new() {
+    // Both classes define `process`, so the unique-name fallback is
+    // ambiguous — only tracking `c = new Cat()` resolves the receiver.
+    // Cat.process is linear; Dog.process is constant; so a correct
+    // resolution makes `go` linear in `items`.
+    let r = analyze(
+        "\
+class Cat {\n\
+    public process(arr) {\n\
+        for (var x in arr) {}\n\
+        return 0\n\
+    }\n\
+}\n\
+class Dog {\n\
+    public process(arr) { return 0 }\n\
+}\n\
+function go(items) {\n\
+    var c = new Cat()\n\
+    return c.process(items)\n\
+}\n",
+    );
+    let f = find(&r, "go");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "items"),
+        other => panic!("expected O(items), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+// ─── native functions called as methods ────────────────────────────
+
+#[test]
+fn native_method_sort_is_n_log_n() {
+    // `arr.sort()` — method syntax for the native sort — contributes
+    // the same `n · log n` the free-function `sort(arr)` does.
+    let r = analyze(
+        "\
+function ordered(arr) {\n\
+    arr.sort()\n\
+    return arr\n\
+}\n",
+    );
+    let f = find(&r, "ordered");
+    match &f.big_o {
+        BigO::NLogN(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr · log arr), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn uncurated_native_uses_catalog_growth() {
+    // `arrayClone` has no curated shape but carries a `batch_mult` in
+    // the builtin catalog → linear. Proves the catalog fallback wires
+    // a real cost in instead of silently costing zero.
+    let r = analyze(
+        "\
+function dup(arr) {\n\
+    return arrayClone(arr)\n\
+}\n",
+    );
+    let f = find(&r, "dup");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula),
+    }
+}

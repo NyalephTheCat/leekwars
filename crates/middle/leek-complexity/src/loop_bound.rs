@@ -14,12 +14,27 @@
 //! When we can't recognise a pattern we return
 //! [`LoopBound::Unknown`] with a short reason for diagnostics.
 
+use std::collections::{HashMap, HashSet};
+
 use leek_hir::{
-    BinaryOp, Block, Callee, Expr, ExprKind, ForStmt, ForeachStmt, NameRef, PostfixOp, Stmt,
-    UnaryOp, VarDecl, WhileStmt,
+    BinaryOp, Block, Callee, DefId, Expr, ExprKind, Flow, ForStmt, ForeachStmt, NameRef, PostfixOp,
+    Stmt, UnaryOp, VarDecl, Visit, Visitable, WhileStmt,
 };
 
 use crate::cost_expr::{CostExpr, SizeVar};
+
+/// Per-function name resolution tables the size resolver consults.
+/// Built once per analysed function/method body.
+pub struct LocalIndex<'a> {
+    /// `DefId → name` for top-level globals (so `count(g)` / `g.field`
+    /// resolve to a global-rooted size variable).
+    pub globals: &'a HashMap<DefId, String>,
+    /// `DefId → resolved location` for locals that alias a size
+    /// location (`var x = bag.items`), so reads of `x` resolve to the
+    /// same place. Reassigned locals are excluded (see
+    /// [`build_size_env`]).
+    pub locals: &'a HashMap<DefId, SizeVar>,
+}
 
 /// A recognised loop iteration count, expressed in terms of size
 /// variables of the enclosing function's parameters.
@@ -55,11 +70,12 @@ impl LoopBound {
     }
 }
 
-/// Context passed to bound recognisers: a lookup from `DefId` to
-/// "is this DefId a parameter, and if so, which index?". The
+/// Context passed to bound recognisers and the size resolver: the
+/// parameter table plus the per-body global / local-alias index. The
 /// analyser fills this in before walking each function.
 pub struct BoundContext<'a> {
     pub params: &'a dyn ParamIndex,
+    pub names: &'a LocalIndex<'a>,
 }
 
 /// Tiny abstraction so callers can fill in the param table.
@@ -187,42 +203,198 @@ fn bound_from_condition(
 /// Convert an `Expr` representing the loop's bound into a
 /// [`LoopBound`]. Recognises:
 /// - integer literal → `Const`
-/// - `Name(Local(p))` where p is a parameter → `Size(p)`
-/// - `count(p)` / `length(p)` where p is a parameter → `Size(p)`
+/// - any size location ([`resolve_size_var`]) → `Size`
 fn bound_from_value_expr(e: &Expr, ctx: &BoundContext) -> Option<LoopBound> {
     if let Some(n) = literal_uint(e) {
         return Some(LoopBound::Const(n));
     }
-    if let ExprKind::Name(NameRef::Local(id)) = &e.kind
-        && let Some((idx, name)) = ctx.params.lookup(*id)
-    {
-        return Some(LoopBound::Size(SizeVar::new(idx, name)));
-    }
-    if let Some(size) = bound_from_iter_expr(e, ctx) {
-        return Some(LoopBound::Size(size));
-    }
-    None
+    resolve_size_var(e, ctx).map(LoopBound::Size)
 }
 
-/// `count(p)` / `length(p)` / a parameter name → its SizeVar.
+/// `count(x)` / a parameter name / a `this.field` access → its SizeVar.
 fn bound_from_iter_expr(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
+    resolve_size_var(e, ctx)
+}
+
+/// Resolve `e` to the [`SizeVar`] of the value it denotes — the central
+/// "what is this thing's size?" routine shared by loop bounds and
+/// call-site argument sizing.
+///
+/// It unwraps `count`/`length`/`size`/`mapSize`, then walks an access
+/// path down to a *stable root*: a parameter, a global, `this`, or a
+/// local that aliases one of those. So it covers a bare parameter
+/// (`arr`), a global (`count(g)`), a field off `this` / a parameter /
+/// a global (`this.cells`, `obj.cells`, `g.rows`), nested chains
+/// (`this.grid.rows`), and locals bound to any of these
+/// (`var x = bag.items; … x …`).
+///
+/// Returns `None` when the size can't be tied to a stable root — an
+/// untracked local, a computed expression, or `this` itself (an object,
+/// not a sized container).
+pub(crate) fn resolve_size_var(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
+    // `count(x)` / `length(x)` / … → size of `x`.
+    if let ExprKind::Call(call) = &e.kind
+        && let Callee::Function(NameRef::Builtin(name)) = &call.callee
+        && matches!(name.as_str(), "count" | "length" | "size" | "mapSize")
+    {
+        return resolve_size_var(call.args.first()?, ctx);
+    }
+    let loc = resolve_location(e, ctx)?;
+    // A bare object root (`this`) isn't a sized container — only a field
+    // path off it is. A bare parameter or global *is* the container.
+    if loc.source.path.is_empty() && matches!(loc.source.root, crate::cost_expr::SizeRoot::This) {
+        return None;
+    }
+    Some(loc)
+}
+
+/// Walk an access path (`a.b.c`) down to its root, returning the
+/// location as a [`SizeVar`]. Roots are a parameter, a global,
+/// `this`/`super`/`class`, or a local aliasing one of those; anything
+/// else (an untracked local, a call result, …) yields `None`.
+fn resolve_location(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
     match &e.kind {
         ExprKind::Name(NameRef::Local(id)) => {
-            let (idx, name) = ctx.params.lookup(*id)?;
-            Some(SizeVar::new(idx, name))
-        }
-        ExprKind::Call(call) => {
-            let Callee::Function(NameRef::Builtin(name)) = &call.callee else {
-                return None;
-            };
-            if !matches!(name.as_str(), "count" | "length" | "size" | "mapSize") {
-                return None;
+            if let Some((idx, name)) = ctx.params.lookup(*id) {
+                Some(SizeVar::new(idx, name))
+            } else {
+                // A local that aliases a size location.
+                ctx.names.locals.get(id).cloned()
             }
-            let arg = call.args.first()?;
-            bound_from_iter_expr(arg, ctx)
+        }
+        ExprKind::Name(NameRef::Global(id)) => {
+            let name = ctx.names.globals.get(id)?;
+            Some(SizeVar::global(id.0, name.clone()))
+        }
+        ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_) => {
+            Some(SizeVar::this_object())
+        }
+        ExprKind::Field(receiver, field, _) => {
+            let base = resolve_location(receiver, ctx)?;
+            Some(base.with_field(field))
         }
         _ => None,
     }
+}
+
+// ─── per-body local environment ─────────────────────────────────────
+
+/// Build the local-alias table for `stmts`: each `var x = <init>` whose
+/// initializer resolves to a size location maps `x`'s `DefId` to that
+/// location, so later reads of `x` resolve to the same place. Locals
+/// that are reassigned anywhere in the body are excluded (their value —
+/// and thus their size — is no longer pinned to the initializer).
+pub(crate) fn build_size_env(
+    stmts: &[Stmt],
+    params: &dyn ParamIndex,
+    globals: &HashMap<DefId, String>,
+) -> HashMap<DefId, SizeVar> {
+    let reassigned = assigned_locals(stmts);
+    let mut env: HashMap<DefId, SizeVar> = HashMap::new();
+    let mut builder = SizeEnvBuilder {
+        params,
+        globals,
+        reassigned: &reassigned,
+        env: &mut env,
+    };
+    for s in stmts {
+        let _ = s.walk(&mut builder);
+    }
+    env
+}
+
+struct SizeEnvBuilder<'a> {
+    params: &'a dyn ParamIndex,
+    globals: &'a HashMap<DefId, String>,
+    reassigned: &'a HashSet<DefId>,
+    env: &'a mut HashMap<DefId, SizeVar>,
+}
+
+impl Visit<Stmt> for SizeEnvBuilder<'_> {
+    fn visit(&mut self, s: &Stmt) -> Flow {
+        if let Stmt::VarDecl(v) = s
+            && let Some(init) = &v.init
+            && !self.reassigned.contains(&v.def)
+        {
+            // Resolve against the partial env built so far (so chains
+            // like `var a = bag.items; var b = a` work), then record.
+            let loc = {
+                let ctx = BoundContext {
+                    params: self.params,
+                    names: &LocalIndex {
+                        globals: self.globals,
+                        locals: self.env,
+                    },
+                };
+                resolve_location(init, &ctx)
+            };
+            if let Some(loc) = loc {
+                self.env.insert(v.def, loc);
+            }
+        }
+        Flow::Walk
+    }
+}
+impl Visit<Block> for SizeEnvBuilder<'_> {}
+impl Visit<Expr> for SizeEnvBuilder<'_> {}
+
+/// Collect the `DefId`s of locals assigned (after declaration) anywhere
+/// in `stmts` — via `=`/compound assignment or `++`/`--`. Such locals
+/// can't be treated as stable aliases of their initializer.
+fn assigned_locals(stmts: &[Stmt]) -> HashSet<DefId> {
+    let mut out = HashSet::new();
+    let mut finder = AssignFinder { out: &mut out };
+    for s in stmts {
+        let _ = s.walk(&mut finder);
+    }
+    out
+}
+
+struct AssignFinder<'a> {
+    out: &'a mut HashSet<DefId>,
+}
+
+impl Visit<Expr> for AssignFinder<'_> {
+    fn visit(&mut self, e: &Expr) -> Flow {
+        match &e.kind {
+            ExprKind::Binary(op, lhs, _) if is_assign_op(*op) => {
+                if let Some(id) = local_def_of(lhs) {
+                    self.out.insert(id);
+                }
+            }
+            ExprKind::Unary(UnaryOp::PreInc | UnaryOp::PreDec, inner)
+            | ExprKind::Postfix(PostfixOp::PostInc | PostfixOp::PostDec, inner) => {
+                if let Some(id) = local_def_of(inner) {
+                    self.out.insert(id);
+                }
+            }
+            _ => {}
+        }
+        Flow::Walk
+    }
+}
+impl Visit<Block> for AssignFinder<'_> {}
+impl Visit<Stmt> for AssignFinder<'_> {}
+
+fn is_assign_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Assign
+            | BinaryOp::AddAssign
+            | BinaryOp::SubAssign
+            | BinaryOp::MulAssign
+            | BinaryOp::DivAssign
+            | BinaryOp::IntDivAssign
+            | BinaryOp::ModAssign
+            | BinaryOp::PowAssign
+            | BinaryOp::BitAndAssign
+            | BinaryOp::BitOrAssign
+            | BinaryOp::BitXorAssign
+            | BinaryOp::ShiftLAssign
+            | BinaryOp::ShiftRAssign
+            | BinaryOp::UShiftRAssign
+            | BinaryOp::NullCoalesceAssign
+    )
 }
 
 fn literal_uint(e: &Expr) -> Option<u64> {

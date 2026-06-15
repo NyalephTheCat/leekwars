@@ -1,7 +1,9 @@
-//! `miku analyze` — per-function complexity table.
+//! `miku analyze` — per-function / per-method complexity table.
 //!
-//! Lowers each source file to HIR, runs [`leek_complexity::analyze_file`],
-//! and prints a per-function summary:
+//! Runs the `leek-recipes` [`Complexity`](leek_recipes::Target::Complexity)
+//! pipeline over each source file (which lowers to HIR and runs
+//! `leek-complexity`'s [`Analyze`](leek_complexity::pipeline::Analyze)
+//! step) and prints a per-item summary:
 //!
 //! ```text
 //! src/main.leek
@@ -17,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use leek_complexity::{Complexity, analyze_file};
-use leek_hir::pipeline::HirArtifact;
+use leek_complexity::Complexity;
+use leek_complexity::pipeline::ComplexityArtifact;
 use leek_pipeline::Input;
 use leek_span::SourceId;
 
@@ -45,19 +47,20 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let (src, _text) = project.pipeline_input(source, path)?;
         let input = Input::from(src);
-        let pipeline =
-            leek_recipes::pipeline(leek_recipes::Target::Hir, &leek_recipes::driver_params())
-                .expect("recipe");
+        let pipeline = leek_recipes::pipeline(
+            leek_recipes::Target::Complexity,
+            &leek_recipes::driver_params(),
+        )
+        .expect("recipe");
         let result = pipeline.run(input);
-        let Some(hir_artifact) = result.get::<HirArtifact>() else {
+        let Some(report) = result.get::<ComplexityArtifact>() else {
             eprintln!(
-                "miku analyze: failed to lower {} to HIR",
+                "miku analyze: failed to analyze {}",
                 display_relative(&project.root, path).display(),
             );
             continue;
         };
-        let report = analyze_file(&hir_artifact.0);
-        print_report(&project.root, path, &report, args.formula, quiet);
+        print_report(&project.root, path, &report.0, args.formula, quiet);
     }
 
     Ok(ExitCode::SUCCESS)

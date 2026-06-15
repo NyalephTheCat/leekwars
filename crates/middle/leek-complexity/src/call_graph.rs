@@ -14,20 +14,28 @@
 use std::collections::{HashMap, HashSet};
 
 use leek_hir::{
-    Block, Callee, Def, DefId, Expr, ExprKind, Flow, HirFile, NameRef, Stmt, Visit, Visitable,
+    Block, Callee, Def, DefId, Expr, ExprKind, Flow, HirFile, NameRef, Stmt, Type, Visit,
+    Visitable,
 };
 
-/// Resolved call graph for the functions defined in one
-/// [`HirFile`]. Keyed by function name (a function symbol is
-/// uniquely identified by its name within a single file).
+/// Resolved call graph for the functions and methods defined in one
+/// [`HirFile`]. Free functions are keyed by name; methods by a
+/// `Class.method` qualified name (a symbol is uniquely identified by
+/// that key within a single file).
 #[derive(Debug, Default)]
 pub struct CallGraph {
-    /// All function names in declaration order.
+    /// All node keys (function names + `Class.method`) in
+    /// declaration order.
     pub names: Vec<String>,
-    /// `name → set of called function names`. Only user-fn callees
-    /// land here; builtins / dynamic dispatch are recorded
+    /// `node → set of called node keys`. Only user-fn / user-method
+    /// callees land here; builtins / dynamic dispatch are recorded
     /// separately on the analysis side.
     pub edges: HashMap<String, HashSet<String>>,
+    /// `method name → classes that define a method by that name`.
+    /// Drives method-call resolution (receiver type, then a
+    /// unique-name fallback). Shared with the analyser so both build
+    /// the same edges and substitutions.
+    pub method_owners: HashMap<String, Vec<String>>,
 }
 
 /// Result of cycle detection + ordering.
@@ -41,39 +49,238 @@ pub struct GraphOrder {
     pub recursive: HashSet<String>,
 }
 
-/// Build a call graph from `hir`. Records edges only for
-/// `Callee::Function(NameRef::Function(_))` — bare user-function
-/// calls. Method calls and dynamic-expression calls are not
-/// represented (the analyser handles those as Unknown at the call
-/// site).
+/// Build a call graph from `hir`. Records edges for
+/// `Callee::Function(NameRef::Function(_))` (bare user-function
+/// calls) and for `Callee::Method` calls that resolve to a user
+/// method (via the receiver's class, then a unique-method-name
+/// fallback — see [`resolve_method_qualified`]). Dynamic-expression
+/// calls and unresolvable method calls are not represented (the
+/// analyser handles those as Unknown at the call site).
 pub fn build(hir: &HirFile) -> CallGraph {
     let mut names = Vec::new();
     let mut def_to_name: HashMap<DefId, String> = HashMap::new();
     let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut method_owners: HashMap<String, Vec<String>> = HashMap::new();
 
+    // Pass 1: register every node (function + method) so edges can
+    // reference forward-declared callees.
     for (idx, def) in hir.defs.iter().enumerate() {
-        if let Def::Function(f) = def {
-            let id = DefId(u32::try_from(idx).expect("more than u32::MAX defs"));
-            def_to_name.insert(id, f.name.clone());
-            names.push(f.name.clone());
-            edges.insert(f.name.clone(), HashSet::new());
+        match def {
+            Def::Function(f) if is_real_function(f) => {
+                let id = DefId(u32::try_from(idx).expect("more than u32::MAX defs"));
+                def_to_name.insert(id, f.name.clone());
+                names.push(f.name.clone());
+                edges.insert(f.name.clone(), HashSet::new());
+            }
+            Def::Class(c) => {
+                for m in &c.methods {
+                    let q = qualified(&c.name, &m.name);
+                    names.push(q.clone());
+                    edges.insert(q, HashSet::new());
+                    method_owners
+                        .entry(m.name.clone())
+                        .or_default()
+                        .push(c.name.clone());
+                }
+            }
+            _ => {}
         }
     }
 
+    // Pass 2: collect edges out of each node's body.
     for def in &hir.defs {
-        if let Def::Function(f) = def {
-            let entry = edges.entry(f.name.clone()).or_default();
-            if let Some(body) = &f.body {
-                let mut collector = CalleeCollector {
-                    def_to_name: &def_to_name,
-                    out: entry,
-                };
-                let _ = body.walk(&mut collector);
+        match def {
+            Def::Function(f) if is_real_function(f) => {
+                if let Some(body) = &f.body {
+                    collect_into(&mut edges, &f.name, body, &def_to_name, &method_owners, None);
+                }
+            }
+            Def::Class(c) => {
+                for m in &c.methods {
+                    if let Some(body) = &m.body {
+                        let key = qualified(&c.name, &m.name);
+                        collect_into(
+                            &mut edges,
+                            &key,
+                            body,
+                            &def_to_name,
+                            &method_owners,
+                            Some(c.name.as_str()),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    CallGraph {
+        names,
+        edges,
+        method_owners,
+    }
+}
+
+/// `Class.method` node key.
+pub(crate) fn qualified(class: &str, method: &str) -> String {
+    format!("{class}.{method}")
+}
+
+/// A `Function` def worth treating as a real callable: it has a body,
+/// or it's a signature-backed function (carries backend directives).
+///
+/// Lowering emits a *bodiless, directive-less* `Function` for every
+/// class method (a resolution artifact) alongside the `Class` def that
+/// actually owns it. Those would otherwise show up as spurious `O(1)`
+/// entries; the method is analysed through its `Class.method` node
+/// instead, so we skip them here.
+pub(crate) fn is_real_function(f: &leek_hir::Function) -> bool {
+    f.body.is_some() || !f.backend_directives.is_empty()
+}
+
+/// Walk one node's `body`, collecting its user-fn / user-method
+/// callee edges into `edges[key]`.
+fn collect_into(
+    edges: &mut HashMap<String, HashSet<String>>,
+    key: &str,
+    body: &Block,
+    def_to_name: &HashMap<DefId, String>,
+    method_owners: &HashMap<String, Vec<String>>,
+    current_class: Option<&str>,
+) {
+    let class_env = build_class_env(&body.stmts, current_class);
+    let mut out = HashSet::new();
+    let mut collector = CalleeCollector {
+        def_to_name,
+        method_owners,
+        current_class,
+        class_env: &class_env,
+        out: &mut out,
+    };
+    let _ = body.walk(&mut collector);
+    if let Some(entry) = edges.get_mut(key) {
+        entry.extend(out);
+    }
+}
+
+/// Resolve a `receiver.method(args)` call to the `Class.method` node
+/// key of the user method it dispatches to, or `None` if it can't be
+/// pinned to a user method.
+///
+/// Resolution, in order:
+/// 1. The receiver's class — `this`/`super`/`class` use the enclosing
+///    `current_class`; `new C()` uses `C`; otherwise the receiver
+///    expression's [`Type::ClassInstance`] (when type info is present).
+///    If that class defines `method`, use it.
+/// 2. Otherwise, if exactly one class in the file defines `method`,
+///    use that one (a best-effort fallback for when the receiver type
+///    is unknown — e.g. an untyped `Any` parameter).
+pub(crate) fn resolve_method_qualified(
+    receiver: &Expr,
+    method: &str,
+    current_class: Option<&str>,
+    class_env: &HashMap<DefId, String>,
+    method_owners: &HashMap<String, Vec<String>>,
+) -> Option<String> {
+    let owners = method_owners.get(method)?;
+    if owners.is_empty() {
+        return None;
+    }
+    let chosen = match receiver_class(receiver, current_class, class_env) {
+        // Receiver class known and it defines the method — exact hit.
+        Some(c) if owners.iter().any(|o| o == &c) => c,
+        // Class unknown, or known but not a direct owner (e.g. an
+        // inherited method): fall back to a unique owner if there is
+        // exactly one.
+        _ if owners.len() == 1 => owners[0].clone(),
+        _ => return None,
+    };
+    Some(qualified(&chosen, method))
+}
+
+/// Best-effort class of a method receiver. Reliable for `this`/`super`,
+/// `new C()`, and a local tracked back to one of those (`var c = new
+/// Cat()`); otherwise reads the receiver's static type (often `Any`
+/// before type-checking, in which case this returns `None`).
+fn receiver_class(
+    receiver: &Expr,
+    current_class: Option<&str>,
+    class_env: &HashMap<DefId, String>,
+) -> Option<String> {
+    match &receiver.kind {
+        ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_) => {
+            current_class.map(str::to_string)
+        }
+        ExprKind::New(n) => Some(n.class.clone()),
+        ExprKind::Name(NameRef::Local(id)) => class_env
+            .get(id)
+            .cloned()
+            .or_else(|| class_name_of_type(&receiver.ty)),
+        _ => class_name_of_type(&receiver.ty),
+    }
+}
+
+fn class_name_of_type(ty: &Type) -> Option<String> {
+    match ty {
+        Type::ClassInstance(name, _) => Some(name.clone()),
+        Type::Nullable(inner) => class_name_of_type(inner),
+        _ => None,
+    }
+}
+
+// ─── per-body local → class environment ─────────────────────────────
+
+/// Track which class each local holds, for receiver resolution. Maps a
+/// local's `DefId` to a class name when its declaration pins it down:
+/// `C x = …` (typed), `var x = new C()`, `var x = this`, or `var x = y`
+/// where `y` is itself tracked. Built per function/method body.
+pub(crate) fn build_class_env(stmts: &[Stmt], current_class: Option<&str>) -> HashMap<DefId, String> {
+    let mut env: HashMap<DefId, String> = HashMap::new();
+    let mut builder = ClassEnvBuilder {
+        current_class,
+        env: &mut env,
+    };
+    for s in stmts {
+        let _ = s.walk(&mut builder);
+    }
+    env
+}
+
+struct ClassEnvBuilder<'a> {
+    current_class: Option<&'a str>,
+    env: &'a mut HashMap<DefId, String>,
+}
+
+impl Visit<Stmt> for ClassEnvBuilder<'_> {
+    fn visit(&mut self, s: &Stmt) -> Flow {
+        if let Stmt::VarDecl(v) = s {
+            let class = class_name_of_type(v.ty.as_ref().unwrap_or(&Type::Any)).or_else(|| {
+                v.init
+                    .as_ref()
+                    .and_then(|init| expr_class(init, self.current_class, self.env))
+            });
+            if let Some(class) = class {
+                self.env.insert(v.def, class);
             }
         }
+        Flow::Walk
     }
+}
+impl Visit<Block> for ClassEnvBuilder<'_> {}
+impl Visit<Expr> for ClassEnvBuilder<'_> {}
 
-    CallGraph { names, edges }
+/// The class an initializer expression yields, if statically known.
+fn expr_class(e: &Expr, current_class: Option<&str>, env: &HashMap<DefId, String>) -> Option<String> {
+    match &e.kind {
+        ExprKind::New(n) => Some(n.class.clone()),
+        ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_) => {
+            current_class.map(str::to_string)
+        }
+        ExprKind::Name(NameRef::Local(id)) => {
+            env.get(id).cloned().or_else(|| class_name_of_type(&e.ty))
+        }
+        _ => class_name_of_type(&e.ty),
+    }
 }
 
 /// Run cycle detection + reverse-post-order topo sort on `graph`.
@@ -234,26 +441,46 @@ fn dfs_finish<'a>(
 
 // ─── callee collection ─────────────────────────────────────────────
 
-/// Walks a function body and records every direct call to another
-/// *user* function (by name). Builtins and unresolved names are
-/// ignored. The default [`Visitor`] recursion descends into lambda
-/// bodies and parameter defaults, so callees buried in a lambda are
-/// still attributed to the enclosing function.
+/// Walks a function/method body and records every direct call to
+/// another *user* function or method (by node key). Builtins and
+/// unresolved names are ignored. The default [`Visitor`] recursion
+/// descends into lambda bodies and parameter defaults, so callees
+/// buried in a lambda are still attributed to the enclosing node.
 struct CalleeCollector<'a> {
     def_to_name: &'a HashMap<DefId, String>,
+    method_owners: &'a HashMap<String, Vec<String>>,
+    current_class: Option<&'a str>,
+    class_env: &'a HashMap<DefId, String>,
     out: &'a mut HashSet<String>,
 }
 
 impl Visit<Expr> for CalleeCollector<'_> {
     fn visit(&mut self, e: &Expr) -> Flow {
-        if let ExprKind::Call(c) = &e.kind
-            && let Callee::Function(NameRef::Function(def_id)) = &c.callee
-            && let Some(name) = self.def_to_name.get(def_id)
-        {
-            self.out.insert(name.clone());
+        if let ExprKind::Call(c) = &e.kind {
+            match &c.callee {
+                Callee::Function(NameRef::Function(def_id)) => {
+                    if let Some(name) = self.def_to_name.get(def_id) {
+                        self.out.insert(name.clone());
+                    }
+                }
+                Callee::Method {
+                    receiver, method, ..
+                } => {
+                    if let Some(q) = resolve_method_qualified(
+                        receiver,
+                        method,
+                        self.current_class,
+                        self.class_env,
+                        self.method_owners,
+                    ) {
+                        self.out.insert(q);
+                    }
+                }
+                _ => {}
+            }
         }
         // Keep descending — including into lambda bodies, so callees buried
-        // in a lambda are attributed to the enclosing function.
+        // in a lambda are attributed to the enclosing node.
         Flow::Walk
     }
 }

@@ -5,6 +5,7 @@
 
 use std::any::TypeId;
 
+use leek_complexity::pipeline::ComplexityArtifact;
 use leek_fmt::FormatOptions;
 use leek_fmt::pipeline::{Fmt, FormattedArtifact};
 use leek_hir::pipeline::{HirArtifact, LowerHir};
@@ -35,6 +36,9 @@ pub enum Target {
     Linted,
     /// MIR.
     Mir,
+    /// HIR + per-function / per-method complexity report
+    /// (`miku analyze`, `miku doc`).
+    Complexity,
 }
 
 /// Plan/build a pipeline for `target` using recipe metadata + `params`.
@@ -55,6 +59,7 @@ pub fn plan(
         Target::Hir => plan_for::<HirArtifact>(params),
         Target::Linted => plan_for::<LintFindings>(params),
         Target::Mir => plan_for::<MirArtifact>(params),
+        Target::Complexity => plan_for::<ComplexityArtifact>(params),
     }
 }
 
@@ -112,6 +117,7 @@ pub fn plan_with_includes(
         Target::Hir => plan.need::<HirArtifact>(params)?,
         Target::Linted => plan.need::<LintFindings>(params)?,
         Target::Mir => plan.need::<MirArtifact>(params)?,
+        Target::Complexity => plan.need::<ComplexityArtifact>(params)?,
     }
     Ok(plan)
 }

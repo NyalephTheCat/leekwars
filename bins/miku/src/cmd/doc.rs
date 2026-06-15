@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use leek_complexity::{Complexity, analyze_file};
-use leek_hir::pipeline::HirArtifact;
+use leek_complexity::Complexity;
+use leek_complexity::pipeline::ComplexityArtifact;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
 use leek_ide::signature::signature_for;
 use leek_parser::pipeline::GreenTreeArtifact;
@@ -60,14 +60,16 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         let source_id = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let (src, text) = project.pipeline_input(source_id, path)?;
         let input = Input::from(src);
-        let pipeline =
-            leek_recipes::pipeline(leek_recipes::Target::Hir, &leek_recipes::driver_params())
-                .expect("recipe");
+        let pipeline = leek_recipes::pipeline(
+            leek_recipes::Target::Complexity,
+            &leek_recipes::driver_params(),
+        )
+        .expect("recipe");
         let result = pipeline.run(input);
-        let Some(hir_artifact) = result.get::<HirArtifact>() else {
+        let Some(report) = result.get::<ComplexityArtifact>() else {
             if !quiet {
                 eprintln!(
-                    "miku doc: skipping {} (no HIR)",
+                    "miku doc: skipping {} (no complexity report)",
                     rel(&project.root, path).display()
                 );
             }
@@ -78,9 +80,7 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         };
         let root = SyntaxNode::new_root(parse.0.clone());
 
-        let complexities = analyze_file(&hir_artifact.0);
-
-        let items = collect_items(&root, &text, &complexities);
+        let items = collect_items(&root, &text, &report.0);
         let out_name = file_html_name(&rel(&project.root, path));
         pages.push(Page {
             rel_source: rel(&project.root, path),
