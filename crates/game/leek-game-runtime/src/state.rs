@@ -106,8 +106,62 @@ pub const LOG_SSTANDARD: i32 = 6;
 pub const LOG_SWARNING: i32 = 7;
 /// `FarmerLog.BULB_WITHOUT_AI`.
 pub const FARMER_LOG_BULB_WITHOUT_AI: i32 = 1005;
+/// `FarmerLog.LOADOUT_NOT_FOUND` — `setLoadout` with an unknown loadout name.
+pub const FARMER_LOG_LOADOUT_NOT_FOUND: i32 = 1006;
+/// `FarmerLog.SET_LOADOUT_OUT_OF_HOOK` — `setLoadout` called outside the
+/// `beforeFight()` hook.
+pub const FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK: i32 = 1007;
+/// `FarmerLog.ACTION_DENIED_IN_HOOK` — a combat/movement action attempted
+/// during a `beforeFight()`/`afterFight()` hook.
+pub const FARMER_LOG_ACTION_DENIED_IN_HOOK: i32 = 1008;
+/// `FarmerLog.LOADOUT_FORGOTTEN_ALREADY_EQUIPPED` — a loadout listed forgotten
+/// weapons but every candidate was already claimed by a teammate.
+pub const FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED: i32 = 1009;
+/// `FarmerLog.SET_LOADOUT_NO_RESTAT_POTION` — `setLoadout` wanted to restat
+/// but the farmer had no restat potion left.
+pub const FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION: i32 = 1010;
 /// `Error.HELP_PAGE_LINK.ordinal()`.
 pub const ERROR_HELP_PAGE_LINK: i32 = 113;
+
+/// `EntityAI.HookPhase` — which lifecycle hook (if any) the running AI is
+/// inside. Combat/movement actions are gated while a hook is active, and
+/// `setLoadout` is only valid during [`HookPhase::BeforeFight`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookPhase {
+    /// Not in a hook — ordinary turn execution.
+    #[default]
+    None,
+    /// Inside `beforeFight()`, run before the first turn.
+    BeforeFight,
+    /// Inside `afterFight()`, run after the winner is computed.
+    AfterFight,
+}
+
+/// One named fight loadout (`state/FightLoadout.java`): the weapons, chips and
+/// final stats a leek switches to via `setLoadout(name)` inside `beforeFight`.
+#[derive(Debug, Clone, Default)]
+pub struct FightLoadout {
+    pub name: String,
+    /// Weapon template ids equipped by this loadout.
+    pub weapons: Vec<i32>,
+    /// Ordered forgotten-weapon candidates: at apply time the first one not
+    /// already claimed by a teammate of the same farmer wins (sticky on the
+    /// one currently equipped if it appears here).
+    pub forgotten_weapons: Vec<i32>,
+    /// Chip template ids granted by this loadout.
+    pub chips: Vec<i32>,
+    /// Final characteristics: `STAT_*` id → value.
+    pub stats: BTreeMap<usize, i32>,
+}
+
+/// `Entity.LoadoutApplyResult` — the outcome of [`State::apply_loadout`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoadoutApplyResult {
+    /// Picked forgotten weapon id (or `None` — no candidates, or all reserved).
+    pub chosen_forgotten: Option<i32>,
+    /// The loadout listed forgotten candidates but none were available.
+    pub no_forgotten_available: bool,
+}
 
 /// One fighting entity — the fight-relevant core of `Entity.java`, scoped to
 /// leeks (no summons / turrets / chests yet). Mutations that need the rest
@@ -179,6 +233,11 @@ pub struct Fighter {
     pub birth_turn: i32,
     /// `mSkin` — bulbs carry their template id; leeks default to 0.
     pub skin: i32,
+
+    /// Named loadouts (`mLoadouts`) this entity can switch to with
+    /// `setLoadout(name)` during `beforeFight()`. Empty for leeks without
+    /// configured loadouts and for summons.
+    pub loadouts: HashMap<String, FightLoadout>,
 }
 
 impl Fighter {
@@ -217,7 +276,13 @@ impl Fighter {
             summoner: None,
             birth_turn: 0,
             skin: 0,
+            loadouts: HashMap::new(),
         }
+    }
+
+    /// `Entity.addLoadout(loadout)` — register a named loadout.
+    pub fn add_loadout(&mut self, loadout: FightLoadout) {
+        self.loadouts.insert(loadout.name.clone(), loadout);
     }
 
     /// `Entity.isSummon()` — true for bulbs.
@@ -570,6 +635,10 @@ pub struct WeaponSpec {
     pub area: Area,
     /// The attack's effect lines (`Attack.getEffects()`).
     pub effects: Vec<EffectParams>,
+    /// `Weapon.isForgotten()` — a per-farmer unique "forgotten" weapon, which
+    /// `apply_loadout` treats specially (stickiness + teammate reservation).
+    /// `false` for ordinary weapons.
+    pub forgotten: bool,
 }
 
 /// The use-rules, effects and cooldown data of a chip template
@@ -702,6 +771,18 @@ pub struct State {
     /// last-action-id key → entries appended while that action was current.
     /// Serialized into the Outcome's `logs` object by `build_outcome`.
     pub farmer_logs: BTreeMap<i64, BTreeMap<usize, Vec<Value>>>,
+    /// `EntityAI` hook phase the running AI is inside (`None` during ordinary
+    /// turns). Gates combat actions and `setLoadout`; see [`HookPhase`].
+    pub hook_phase: HookPhase,
+    /// `Fight.mWinteam` — the winning team index, `-1` until
+    /// [`State::compute_winner`] runs at fight end (so `getWinner()` reads
+    /// `-1` during the fight and the result inside `afterFight()`).
+    pub win_team: i32,
+    /// `State.mRestatPotionsAvailable` — restat potions a farmer can still
+    /// spend on a `setLoadout` stat change. Farmer id → remaining count.
+    pub restat_potions_available: HashMap<i64, i32>,
+    /// `State.mRestatPotionsConsumed` — restat potions spent, per farmer.
+    pub restat_potions_consumed: HashMap<i64, i32>,
 }
 
 impl State {
@@ -728,7 +809,46 @@ impl State {
             leek_snapshots: Vec::new(),
             map_snapshot: Value::Null,
             farmer_logs: BTreeMap::new(),
+            hook_phase: HookPhase::None,
+            win_team: -1,
+            restat_potions_available: HashMap::new(),
+            restat_potions_consumed: HashMap::new(),
         }
+    }
+
+    /// `EntityAI.isInBeforeFightHook()`.
+    #[must_use]
+    pub fn is_in_before_fight_hook(&self) -> bool {
+        self.hook_phase == HookPhase::BeforeFight
+    }
+
+    /// `EntityAI.isInHook()` — inside a `beforeFight`/`afterFight` hook.
+    #[must_use]
+    pub fn is_in_hook(&self) -> bool {
+        self.hook_phase != HookPhase::None
+    }
+
+    /// `State.setRestatPotionsAvailable(farmer, count)`.
+    pub fn set_restat_potions_available(&mut self, farmer: i64, count: i32) {
+        self.restat_potions_available.insert(farmer, count);
+    }
+
+    /// `State.getRestatPotionsAvailable(farmer)` — 0 when none set.
+    #[must_use]
+    pub fn restat_potions_available(&self, farmer: i64) -> i32 {
+        self.restat_potions_available.get(&farmer).copied().unwrap_or(0)
+    }
+
+    /// `State.consumeRestatPotion(farmer)` — spend one potion; `true` if one
+    /// was available, `false` when the stock is empty.
+    pub fn consume_restat_potion(&mut self, farmer: i64) -> bool {
+        let available = self.restat_potions_available(farmer);
+        if available <= 0 {
+            return false;
+        }
+        self.restat_potions_available.insert(farmer, available - 1);
+        *self.restat_potions_consumed.entry(farmer).or_insert(0) += 1;
+        true
     }
 
     /// `State.addEntity(team, entity)` — assign the next fid, creating teams
@@ -1043,6 +1163,104 @@ impl State {
     #[must_use]
     pub fn duration(&self) -> i32 {
         self.order.turn()
+    }
+
+    /// `Entity.getLoadout(name)` — a clone of the entity's named loadout, or
+    /// `None` if it has no loadout by that name.
+    #[must_use]
+    pub fn get_loadout(&self, fid: usize, name: &str) -> Option<FightLoadout> {
+        self.fighters[fid].loadouts.get(name).cloned()
+    }
+
+    /// `Entity.loadoutStatsDiffer(loadout)` — true if at least one of the
+    /// loadout's final stats differs from the entity's current base stats.
+    #[must_use]
+    pub fn loadout_stats_differ(&self, fid: usize, loadout: &FightLoadout) -> bool {
+        loadout
+            .stats
+            .iter()
+            .any(|(&id, &value)| self.fighters[fid].base_stats.get(id) != value)
+    }
+
+    /// `Weapon.isForgotten()` for a template id (false for unknown weapons).
+    #[must_use]
+    fn is_forgotten_weapon(&self, weapon_id: i32) -> bool {
+        self.weapon_specs.get(&weapon_id).is_some_and(|w| w.forgotten)
+    }
+
+    /// `Entity.applyLoadout(loadout, reservedForgotten, applyStats)` — swap the
+    /// entity onto a loadout: clear current weapons/chips, optionally apply the
+    /// loadout's stats, resolve the forgotten weapon (sticky on the currently
+    /// equipped one, else the first non-reserved candidate), then re-equip the
+    /// loadout's (valid) weapons and chips and reset life to the new max.
+    pub fn apply_loadout(
+        &mut self,
+        fid: usize,
+        loadout: &FightLoadout,
+        reserved_forgotten: &std::collections::HashSet<i32>,
+        apply_stats: bool,
+    ) -> LoadoutApplyResult {
+        // Snapshot the currently-equipped forgotten weapon (at most one) before
+        // clearing — needed for the sticky check below.
+        let current_forgotten = self.fighters[fid]
+            .weapons
+            .iter()
+            .copied()
+            .find(|&w| self.is_forgotten_weapon(w));
+
+        self.fighters[fid].weapons.clear();
+        self.fighters[fid].chips.clear();
+        self.fighters[fid].weapon = None;
+
+        if apply_stats {
+            for (&id, &value) in &loadout.stats {
+                self.fighters[fid].base_stats.set(id, value);
+            }
+        }
+
+        // Resolve which forgotten weapon (if any) this leek ends up with.
+        let mut chosen_forgotten = None;
+        let alts = &loadout.forgotten_weapons;
+        if !alts.is_empty() {
+            if let Some(cur) = current_forgotten
+                && alts.contains(&cur)
+                && !reserved_forgotten.contains(&cur)
+            {
+                chosen_forgotten = Some(cur);
+            } else {
+                chosen_forgotten = alts
+                    .iter()
+                    .copied()
+                    .find(|alt| !reserved_forgotten.contains(alt));
+            }
+        }
+        let no_forgotten_available = !alts.is_empty() && chosen_forgotten.is_none();
+
+        for &weapon_id in &loadout.weapons {
+            if self.weapon_specs.contains_key(&weapon_id) {
+                self.fighters[fid].weapons.push(weapon_id);
+            }
+        }
+        if let Some(weapon_id) = chosen_forgotten
+            && self.weapon_specs.contains_key(&weapon_id)
+        {
+            self.fighters[fid].weapons.push(weapon_id);
+        }
+        for &chip_id in &loadout.chips {
+            if self.chip_specs.contains_key(&chip_id) {
+                self.fighters[fid].chips.insert(chip_id);
+            }
+        }
+
+        let total = self.fighters[fid].base_stats.get(STAT_LIFE);
+        self.fighters[fid].total_life = total;
+        self.fighters[fid].initial_life = total;
+        self.fighters[fid].life = total;
+
+        LoadoutApplyResult {
+            chosen_forgotten,
+            no_forgotten_available,
+        }
     }
 
     // ── Movement ─────────────────────────────────────────────────────────────
@@ -1924,5 +2142,157 @@ mod tests {
         assert_eq!(f.tp(), 2);
         f.buff_stats.update(STAT_TP, 3);
         assert_eq!(f.tp(), 5);
+    }
+
+    // ── Hooks / loadouts (beforeFight / afterFight / setLoadout / getWinner) ──
+
+    use super::{
+        Area, FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_LOADOUT_NOT_FOUND,
+        FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, FightLoadout, HookPhase, STAT_STRENGTH, State,
+        WeaponSpec,
+    };
+    use crate::official_builtins::call_official_builtin;
+    use leek_runtime::Value as RtValue;
+
+    /// A LeekScript string value argument.
+    fn rt_str(s: &str) -> RtValue {
+        RtValue::String(std::rc::Rc::new(s.to_string()))
+    }
+
+    fn weapon_37() -> WeaponSpec {
+        WeaponSpec {
+            id: 37,
+            cost: 3,
+            min_range: 1,
+            max_range: 7,
+            launch_type: 1,
+            needs_los: true,
+            max_uses: -1,
+            area: Area::SingleCell,
+            effects: Vec::new(),
+            forgotten: false,
+        }
+    }
+
+    /// A minimal 1v1 world: two leeks (fids 0/1, farmers 10/20), pistol 37
+    /// registered. Entities aren't placed / ordered — enough for the
+    /// hook/loadout dispatch paths.
+    fn mini_state() -> State {
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, 500);
+        stats.set(STAT_TP, 6);
+        stats.set(STAT_STRENGTH, 100);
+        let mut s = State::new(1);
+        let mut a = Fighter::new(0, 1, "A".into(), 0, stats.clone());
+        a.farmer = 10;
+        a.weapons = vec![37];
+        let mut b = Fighter::new(0, 2, "B".into(), 0, stats);
+        b.farmer = 20;
+        s.add_entity(0, a);
+        s.add_entity(1, b);
+        s.weapon_specs.insert(37, weapon_37());
+        s
+    }
+
+    /// True if any system-log entry for `farmer` carries the given key (the
+    /// 4th element of the `[fid, type, trace, key, params?]` log array).
+    fn logged(s: &State, farmer: i64, key: i32) -> bool {
+        s.farmer_logs.get(&farmer).is_some_and(|by_action| {
+            by_action.values().flatten().any(|entry| {
+                entry.as_array().and_then(|a| a.get(3)) == Some(&serde_json::json!(key))
+            })
+        })
+    }
+
+    /// `applyLoadout` clears the old kit, applies stats, re-equips, and resets
+    /// life to the new max.
+    #[test]
+    fn apply_loadout_swaps_kit_and_resets_life() {
+        let mut s = mini_state();
+        let mut loadout = FightLoadout {
+            name: "power".into(),
+            weapons: vec![37],
+            ..Default::default()
+        };
+        loadout.stats.insert(STAT_LIFE, 1000);
+        loadout.stats.insert(STAT_STRENGTH, 300);
+        let res = s.apply_loadout(0, &loadout, &std::collections::HashSet::new(), true);
+        assert!(res.chosen_forgotten.is_none());
+        assert_eq!(s.fighters[0].weapons, vec![37]);
+        assert_eq!(s.fighters[0].base_stats.get(STAT_LIFE), 1000);
+        assert_eq!(s.fighters[0].base_stats.get(STAT_STRENGTH), 300);
+        assert_eq!(s.fighters[0].life, 1000);
+        assert_eq!(s.fighters[0].total_life, 1000);
+    }
+
+    /// Restat potions decrement, then bottom out at 0.
+    #[test]
+    fn restat_potion_consumed_until_empty() {
+        let mut s = mini_state();
+        s.set_restat_potions_available(10, 1);
+        assert!(s.consume_restat_potion(10));
+        assert!(!s.consume_restat_potion(10));
+        assert_eq!(s.restat_potions_consumed.get(&10), Some(&1));
+    }
+
+    /// `setLoadout` outside any hook is refused with `SET_LOADOUT_OUT_OF_HOOK`.
+    #[test]
+    fn set_loadout_out_of_hook_is_denied() {
+        let mut s = mini_state();
+        let r = call_official_builtin(&mut s, 0, "setLoadout", &[rt_str("power")]);
+        assert!(matches!(r, RtValue::Bool(false)));
+        assert!(logged(&s, 10, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK));
+    }
+
+    /// Inside `beforeFight`, an unknown loadout warns `LOADOUT_NOT_FOUND`.
+    #[test]
+    fn set_loadout_unknown_name_warns() {
+        let mut s = mini_state();
+        s.hook_phase = HookPhase::BeforeFight;
+        let r = call_official_builtin(&mut s, 0, "setLoadout", &[rt_str("nope")]);
+        assert!(matches!(r, RtValue::Bool(false)));
+        assert!(logged(&s, 10, FARMER_LOG_LOADOUT_NOT_FOUND));
+    }
+
+    /// Inside `beforeFight`, a configured loadout applies (spending a restat
+    /// potion) and reports success.
+    #[test]
+    fn set_loadout_applies_in_before_fight() {
+        let mut s = mini_state();
+        s.set_restat_potions_available(10, 1);
+        let mut loadout = FightLoadout {
+            name: "power".into(),
+            weapons: vec![37],
+            ..Default::default()
+        };
+        loadout.stats.insert(STAT_LIFE, 1000);
+        s.fighters[0].add_loadout(loadout);
+        s.hook_phase = HookPhase::BeforeFight;
+        let r = call_official_builtin(&mut s, 0, "setLoadout", &[rt_str("power")]);
+        assert!(matches!(r, RtValue::Bool(true)));
+        assert_eq!(s.fighters[0].life, 1000);
+        assert_eq!(s.restat_potions_consumed.get(&10), Some(&1));
+    }
+
+    /// Combat actions are denied during a hook (here `afterFight`), logging
+    /// `ACTION_DENIED_IN_HOOK`.
+    #[test]
+    fn combat_denied_during_hook() {
+        let mut s = mini_state();
+        s.hook_phase = HookPhase::AfterFight;
+        let r = call_official_builtin(&mut s, 0, "useWeapon", &[RtValue::Int(2)]);
+        assert!(matches!(r, RtValue::Int(-1)));
+        assert!(logged(&s, 10, FARMER_LOG_ACTION_DENIED_IN_HOOK));
+    }
+
+    /// `getWinner` reads the stored winning team.
+    #[test]
+    fn get_winner_reads_stored_team() {
+        let mut s = mini_state();
+        s.win_team = 1;
+        assert!(matches!(
+            call_official_builtin(&mut s, 0, "getWinner", &[]),
+            RtValue::Int(1)
+        ));
     }
 }

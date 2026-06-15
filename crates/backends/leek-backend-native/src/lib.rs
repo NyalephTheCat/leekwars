@@ -264,6 +264,7 @@ fn compile_entry(
                 opts.debug_hooks,
                 opts.link_game,
                 false,
+                &opts.hook_roots,
             )?;
             let bytes = module
                 .finish()
@@ -309,6 +310,7 @@ fn compile_entry(
                 opts.debug_hooks,
                 opts.link_game,
                 false,
+                &opts.hook_roots,
             )?;
             module
                 .finalize_definitions()
@@ -578,6 +580,7 @@ pub fn compile_object_with_meta(
         opts.debug_hooks,
         opts.link_game,
         /* external_uniform */ true,
+        &opts.hook_roots,
     )?;
     let bytes = module
         .finish()
@@ -631,6 +634,10 @@ fn define_program<M: Module>(
     // startup. The JIT passes `false` (addresses come from `FuncId`, names /
     // linkage are irrelevant).
     external_uniform: bool,
+    // Top-level zero-arg functions to force-compile as roots and register for
+    // indirect invocation (the fight `beforeFight`/`afterFight` hooks). Matched
+    // by name; never referenced from `main`, so they need explicit seeding.
+    hook_roots: &[String],
 ) -> Result<
     (
         cranelift_module::FuncId,
@@ -660,6 +667,23 @@ fn define_program<M: Module>(
     let ctor_thunk_classes: std::collections::HashSet<u32> = class_thunks.keys().copied().collect();
     let thunk_idxs: Vec<usize> = class_thunks.values().copied().collect();
     translate::extend_reachable_for_thunks(program, &thunk_idxs, &mut reachable);
+
+    // Hook roots (`beforeFight`/`afterFight`): top-level zero-arg user functions
+    // invoked by the generator, never by the AI body. Pull each (and its
+    // callees) into reachability so it compiles; it's wired into `user_fn_idx`
+    // below so a `Function::User` value can dispatch to it.
+    let hook_idxs: Vec<usize> = hook_roots
+        .iter()
+        .filter_map(|name| {
+            program.functions.iter().position(|f| {
+                f.kind == FunctionKind::User
+                    && f.owning_class.is_none()
+                    && f.params.is_empty()
+                    && &f.name == name
+            })
+        })
+        .collect();
+    translate::extend_reachable_with(program, &hook_idxs, &mut reachable);
 
     // `string()` display overrides: a constructed class whose instance can be
     // the top-level result needs its `string()` method force-compiled +
@@ -809,6 +833,13 @@ fn define_program<M: Module>(
         program,
         &reachable_indices,
     ));
+    // Hook roots: register `DefId → idx` so `Function::User(hook)` resolves
+    // through `dispatch_call_value` (uniform-compiled below via `value_methods`).
+    for &idx in &hook_idxs {
+        if let Some(d) = program.functions[idx].def_id {
+            user_fn_idx.insert(d.0, idx);
+        }
+    }
     for &idx in user_fn_idx.values() {
         value_methods.insert(idx);
     }

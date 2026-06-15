@@ -81,6 +81,13 @@ pub struct NativeOptions {
     /// a runaway loop fault. Read the charged total with
     /// [`crate::ops_used`] after [`crate::run`].
     pub op_limit: u64,
+    /// Names of top-level zero-arg functions to force-compile as roots even
+    /// when nothing in `main` references them, and register so a
+    /// [`Function::User`](leek_runtime::value::Function::User) value can invoke
+    /// them through [`crate::run_call`]. This is how the fight generator runs
+    /// the `beforeFight()` / `afterFight()` lifecycle hooks: they're never
+    /// called from the AI body, so reachability would otherwise prune them.
+    pub hook_roots: Vec<String>,
 }
 
 impl Default for NativeOptions {
@@ -104,6 +111,7 @@ impl NativeOptions {
             debug_hooks: false,
             link_game: false,
             op_limit: u64::MAX,
+            hook_roots: Vec::new(),
         }
     }
 
@@ -120,6 +128,7 @@ impl NativeOptions {
             debug_hooks: false,
             link_game: false,
             op_limit: u64::MAX,
+            hook_roots: Vec::new(),
         }
     }
 
@@ -151,6 +160,13 @@ impl NativeOptions {
     /// Set the operation budget (see [`op_limit`](Self::op_limit)).
     pub fn with_op_limit(mut self, limit: u64) -> Self {
         self.op_limit = limit;
+        self
+    }
+
+    /// Force the named top-level zero-arg functions to compile as roots and
+    /// register for indirect invocation (see [`hook_roots`](Self::hook_roots)).
+    pub fn with_hook_roots(mut self, roots: Vec<String>) -> Self {
+        self.hook_roots = roots;
         self
     }
 }

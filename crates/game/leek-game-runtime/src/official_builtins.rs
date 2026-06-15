@@ -13,8 +13,10 @@ use leek_runtime::Value;
 
 use crate::attack::{EffectType, EntityState};
 use crate::state::{
-    ChipSpec, ERROR_HELP_PAGE_LINK, FARMER_LOG_BULB_WITHOUT_AI, LOG_SSTANDARD, LOG_SWARNING, State,
-    USE_RESURRECT_INVALID_ENTITY,
+    ChipSpec, ERROR_HELP_PAGE_LINK, FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
+    FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED, FARMER_LOG_LOADOUT_NOT_FOUND,
+    FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, LOG_SSTANDARD,
+    LOG_SWARNING, State, USE_RESURRECT_INVALID_ENTITY,
 };
 
 /// Dispatch one official fight function for the entity `current` (the fid
@@ -34,8 +36,10 @@ pub fn call_official_builtin(
     // just ends, no AI-error log. The Rust runtimes have no abort channel
     // through the AI, so the observably-identical port is to no-op every
     // game call once the caster is dead — nothing a dead entity calls logs
-    // an action in Java either.
-    if state.fighters[current].is_dead() {
+    // an action in Java either. During a `beforeFight`/`afterFight` hook no
+    // turn is active, so this no-op doesn't apply: the hook runs (with
+    // `mEntity = mInitialEntity`) and per-function gating handles the rest.
+    if !state.is_in_hook() && state.fighters[current].is_dead() {
         return Value::Null;
     }
 
@@ -47,6 +51,9 @@ pub fn call_official_builtin(
         "getNearestEnemy" => Value::Int(nearest_enemy(state, current)),
         "moveToward" => {
             // moveToward(leek_id[, pm_to_use]) — pm defaults to -1 (all MP).
+            if deny_during_hook(state, current, "moveToward") {
+                return Value::Int(0);
+            }
             let pm = args.get(1).map_or(-1, Value::to_long);
             Value::Int(state.move_toward(current, int_arg(0), pm))
         }
@@ -54,9 +61,14 @@ pub fn call_official_builtin(
             // moveTowardCell(cell_id[, pm_to_use]) — pm defaults to the
             // entity's MP (the Java overload passes getMP() explicitly;
             // the state clamps to MP either way).
+            if deny_during_hook(state, current, "moveTowardCell") {
+                return Value::Int(0);
+            }
             let pm = args.get(1).map_or(-1, Value::to_long);
             Value::Int(state.move_toward_cell(current, int_arg(0), pm))
         }
+        "getWinner" => Value::Int(i64::from(state.win_team)),
+        "setLoadout" => Value::Bool(set_loadout(state, current, args)),
 
         // ---- FieldClass ----
         // The AI-visible x axis is shifted: `getCellFromXY(x, y)` looks up
@@ -85,17 +97,30 @@ pub fn call_official_builtin(
 
         // ---- EntityClass ----
         "getCell" => get_cell(state, current, args.first()),
-        "setWeapon" => Value::Bool(set_weapon(state, current, int_arg(0))),
+        "setWeapon" => {
+            if deny_during_hook(state, current, "setWeapon") {
+                return Value::Bool(false);
+            }
+            Value::Bool(set_weapon(state, current, int_arg(0)))
+        }
         // isStatic([entity]) — no arg (or null) means self; a non-entity
         // argument is false (Java's `instanceof Number` + lookup-miss paths).
         "isStatic" => Value::Bool(is_static(state, current, args.first())),
 
         // ---- WeaponClass ----
-        "useWeapon" => Value::Int(use_weapon(state, current, int_arg(0))),
+        "useWeapon" => {
+            if deny_during_hook(state, current, "useWeapon") {
+                return Value::Int(-1);
+            }
+            Value::Int(use_weapon(state, current, int_arg(0)))
+        }
 
         // ---- ChipClass ----
         "useChip" => {
             // useChip(chip_id[, leek_id]) — the target defaults to self.
+            if deny_during_hook(state, current, "useChip") {
+                return Value::Int(-1);
+            }
             #[allow(clippy::cast_possible_wrap)]
             let target = args.get(1).map_or(current as i64, Value::to_long);
             Value::Int(use_chip(state, current, int_arg(0), target))
@@ -103,6 +128,9 @@ pub fn call_official_builtin(
         "useChipOnCell" => {
             // useChipOnCell(chip_id, cell_id) — equipped chip + valid cell,
             // straight to `State.useChip` at that cell.
+            if deny_during_hook(state, current, "useChipOnCell") {
+                return Value::Int(-1);
+            }
             Value::Int(use_chip_on_cell(state, current, int_arg(0), int_arg(1)))
         }
         "getCellToUseChip" => {
@@ -146,6 +174,103 @@ pub fn call_official_builtin(
 
         _ => Value::Null,
     }
+}
+
+/// The combat/movement gate shared by `WeaponClass`/`ChipClass`/`FightClass`/
+/// `EntityClass`: during a `beforeFight()`/`afterFight()` hook no turn is
+/// active, so an action that would consume TP/MP or trigger effects is
+/// refused with an `ACTION_DENIED_IN_HOOK` warning. Returns `true` when the
+/// caller should bail with its "denied" value.
+fn deny_during_hook(state: &mut State, current: usize, func_name: &str) -> bool {
+    if state.is_in_hook() {
+        state.add_system_log(
+            current,
+            LOG_SWARNING,
+            FARMER_LOG_ACTION_DENIED_IN_HOOK,
+            Some(&[func_name]),
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// `FightClass.setLoadout(name[, changeStats])` — only valid inside the
+/// `beforeFight()` hook. Looks up the named loadout on the running entity and
+/// applies it (weapons/chips, and stats when `changeStats` and they differ,
+/// spending a restat potion). Forgotten weapons already worn by teammates of
+/// the same farmer are reserved so they aren't duplicated. Mirrors the exact
+/// check order and warning paths of `FightClass.setLoadout`.
+fn set_loadout(state: &mut State, current: usize, args: &[Value]) -> bool {
+    if !state.is_in_before_fight_hook() {
+        state.add_system_log(
+            current,
+            LOG_SWARNING,
+            FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK,
+            Some(&[]),
+        );
+        return false;
+    }
+    // `ai.string(nameObject)` — the bare LeekScript string of the argument.
+    let name = match args.first() {
+        Some(Value::String(s)) => s.to_string(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+    // `ai.bool(changeStats)` — defaults to the 1-arg overload's `true`.
+    let change_stats = args.get(1).is_none_or(Value::is_truthy);
+
+    let Some(loadout) = state.get_loadout(current, &name) else {
+        state.add_system_log(
+            current,
+            LOG_SWARNING,
+            FARMER_LOG_LOADOUT_NOT_FOUND,
+            Some(&[&name]),
+        );
+        return false;
+    };
+
+    // Forgotten weapons are unique per farmer: collect those already equipped
+    // on other entities of the same farmer so we don't duplicate them here.
+    let farmer = state.fighters[current].farmer;
+    let mut reserved_forgotten: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    if farmer > 0 {
+        for fid in 0..state.fighters.len() {
+            if fid == current || state.fighters[fid].farmer != farmer {
+                continue;
+            }
+            let worn: Vec<i32> = state.fighters[fid].weapons.clone();
+            for w in worn {
+                if state.weapon_specs.get(&w).is_some_and(|s| s.forgotten) {
+                    reserved_forgotten.insert(w);
+                }
+            }
+        }
+    }
+
+    // Pre-check whether the stats actually differ so we don't waste a potion
+    // on an identical loadout.
+    let mut apply_stats = change_stats && state.loadout_stats_differ(current, &loadout);
+    if apply_stats && !state.consume_restat_potion(farmer) {
+        apply_stats = false;
+        state.add_system_log(
+            current,
+            LOG_SWARNING,
+            FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION,
+            Some(&[&name]),
+        );
+    }
+
+    let result = state.apply_loadout(current, &loadout, &reserved_forgotten, apply_stats);
+    if result.no_forgotten_available {
+        state.add_system_log(
+            current,
+            LOG_SWARNING,
+            FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED,
+            Some(&[&name]),
+        );
+    }
+    true
 }
 
 /// `FightClass.getNearestEnemy` — nearest by **squared Euclidean** distance

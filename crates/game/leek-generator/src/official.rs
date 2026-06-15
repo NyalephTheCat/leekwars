@@ -21,16 +21,16 @@ pub use leek_game_runtime::attack::{
     Area, EffectModifiers, EffectParams, EffectTargets, EffectType,
 };
 pub use leek_game_runtime::state::{
-    BulbTemplate, ChipSpec, Fighter, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE, STAT_MP,
-    STAT_RESISTANCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
+    BulbTemplate, ChipSpec, Fighter, FightLoadout, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE,
+    STAT_MP, STAT_RESISTANCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
 };
 
 use leek_backend_native::{NativeError, NativeOptions, ops_used};
 use leek_game_runtime::official_builtins::call_official_builtin;
 use leek_game_runtime::outcome::build_outcome;
-use leek_game_runtime::state::{BeginTurn, MAX_TURNS};
-use leek_hir::HirFile;
-use leek_runtime::Value;
+use leek_game_runtime::state::{BeginTurn, HookPhase, MAX_TURNS};
+use leek_hir::{Def, DefId, HirFile};
+use leek_runtime::{Function, Value};
 
 /// Bridges the native backend's game hook to the official builtins: every
 /// fight function the running AI calls is dispatched against the shared
@@ -85,6 +85,56 @@ fn run_bulb_ai(
     result.map(|_| ops_used())
 }
 
+/// A `Function::User` value for the top-level zero-arg function named `name`
+/// in `hir`, or `None` when the AI defines no such function — the port of
+/// `EntityAI.hasHook(name)` / `findHookMethod`. The `DefId` is the function's
+/// index into `HirFile::defs`, which the native backend resolves through
+/// `user_fn_idx` once `hook_roots` has force-compiled it.
+fn find_hook(hir: &HirFile, name: &str) -> Option<Value> {
+    hir.defs.iter().enumerate().find_map(|(i, def)| match def {
+        Def::Function(f) if f.name == name && f.params.is_empty() => {
+            u32::try_from(i)
+                .ok()
+                .map(|id| Value::Function(Function::User(DefId(id))))
+        }
+        _ => None,
+    })
+}
+
+/// `Fight.runHooks(name, phase)` — invoke the `name` hook of every entity that
+/// defines it, in deterministic turn order. Each hook runs with the fight's
+/// [`HookPhase`] set (so `setLoadout` is allowed and combat actions are gated)
+/// and the AI's `current` entity installed. Hook operations are NOT charged to
+/// the entity (`runHook` doesn't feed `statistics`), matching the reference.
+fn run_hooks(
+    state: &Rc<RefCell<State>>,
+    ais: &HashMap<usize, std::sync::Arc<HirFile>>,
+    opts: &NativeOptions,
+    phase: HookPhase,
+    hook_name: &str,
+) -> Result<(), NativeError> {
+    let fids = state.borrow().order.fids().to_vec();
+    let hook_opts = opts
+        .clone()
+        .with_hook_roots(vec![hook_name.to_string()]);
+    for fid in fids {
+        let Some(hir) = ais.get(&fid) else { continue };
+        let Some(hook_fn) = find_hook(hir, hook_name) else {
+            continue;
+        };
+        state.borrow_mut().hook_phase = phase;
+        leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+            state: Rc::clone(state),
+            current: fid,
+        })));
+        let result = leek_backend_native::run_call(hir, &hook_opts, &hook_fn, Vec::new());
+        leek_backend_native::set_game_runtime(None);
+        state.borrow_mut().hook_phase = HookPhase::None;
+        result?;
+    }
+    Ok(())
+}
+
 /// `Fight.startFight(true)` + Outcome assembly: run the official turn loop
 /// over `state` (already populated with entities and weapon specs, but not
 /// yet `init()`ed), executing each entity's compiled AI from `ais` (keyed by
@@ -109,11 +159,14 @@ pub fn run_official_fight(
     // `Actions.addOpsAndTimes(state.statistics)`.
     let mut total_ops: HashMap<usize, u64> = HashMap::new();
 
-    {
-        let mut s = state.borrow_mut();
-        s.init();
-        s.record_initial_state();
-    }
+    state.borrow_mut().init();
+
+    // `Fight.startFight`: the `beforeFight()` hooks run after init but before
+    // the initial-state snapshot, so any `setLoadout()` they apply is reflected
+    // in the report's max-life / displayed stats.
+    run_hooks(&state, ais, opts, HookPhase::BeforeFight, "beforeFight")?;
+
+    state.borrow_mut().record_initial_state();
 
     loop {
         {
@@ -159,16 +212,25 @@ pub fn run_official_fight(
         }
     }
 
-    let mut s = state.borrow_mut();
-    for (&fid, &ops) in &total_ops {
-        let fid = i64::try_from(fid).expect("fid fits in i64");
-        let ops = i64::try_from(ops).unwrap_or(i64::MAX);
-        s.actions.add_ops(fid, ops);
+    {
+        let mut s = state.borrow_mut();
+        for (&fid, &ops) in &total_ops {
+            let fid = i64::try_from(fid).expect("fid fits in i64");
+            let ops = i64::try_from(ops).unwrap_or(i64::MAX);
+            s.actions.add_ops(fid, ops);
+        }
+        // `Fight.java` removes every invocation from its team *before*
+        // `computeWinner` and `getDeadReport` — summons never appear in either.
+        s.remove_all_invocations();
+        // Store the winner so `getWinner()` reads the result inside `afterFight`.
+        let winner = s.compute_winner(true);
+        s.win_team = winner;
     }
-    // `Fight.java` removes every invocation from its team *before*
-    // `computeWinner` and `getDeadReport` — summons never appear in either.
-    s.remove_all_invocations();
-    let winner = s.compute_winner(true);
+
+    // `afterFight()` hooks run after the winner is computed.
+    run_hooks(&state, ais, opts, HookPhase::AfterFight, "afterFight")?;
+
+    let s = state.borrow();
     Ok(build_outcome(
         &s.leek_snapshots,
         &s.map,
@@ -177,7 +239,7 @@ pub fn run_official_fight(
         &s.fighters,
         farmers,
         &s.farmer_logs,
-        winner,
+        s.win_team,
         s.duration(),
     ))
 }
