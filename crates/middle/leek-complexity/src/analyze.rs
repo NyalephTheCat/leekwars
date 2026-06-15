@@ -33,14 +33,16 @@
 use std::collections::{HashMap, HashSet};
 
 use leek_hir::{
-    Block, Callee, Def, DefId, Expr, ExprKind, Function, HirFile, LambdaBody, NameRef, Stmt,
+    Block, Callee, Def, DefId, Expr, ExprKind, Function, HirFile, LambdaBody, NameRef, Param, Stmt,
 };
 
+use crate::big_o::big_o;
 use crate::call_graph;
 use crate::cost_expr::{CostExpr, SizeVar};
 use crate::loop_bound::{
     BoundContext, LoopBound, ParamIndex, bound_of_for, bound_of_foreach, bound_of_while,
 };
+use crate::native;
 
 /// Per-statement / per-expression cost constants. Aligned with
 /// `leek-charge::ChargeOpts::default()` (`per_stmt = per_expr = 1`)
@@ -48,13 +50,13 @@ use crate::loop_bound::{
 /// builtin costs.
 const PER_STMT: u64 = 1;
 const PER_EXPR: u64 = 1;
-const BUILTIN_CALL: u64 = 1;
 const USER_CALL_OVERHEAD: u64 = 2;
 const RETURN: u64 = 1;
 const LOOP_HEADER: u64 = 1;
 
 /// Result of analysing one user function.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Complexity {
     pub name: String,
     pub params: Vec<ParamInfo>,
@@ -62,44 +64,82 @@ pub struct Complexity {
     pub big_o: crate::big_o::BigO,
 }
 
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamInfo {
     pub name: String,
     pub size_var: Option<SizeVar>,
 }
 
-/// Analyse every user function in `hir`. See module doc for the
-/// substitution + ordering story.
+/// One analysable unit — a free function or a class method. Holds
+/// borrows into the `HirFile` plus the display/registry key and the
+/// enclosing class (so `this.m()` resolves inside method bodies).
+struct Unit<'a> {
+    /// Display + registry key: a function name, or `Class.method`.
+    key: String,
+    params: &'a [Param],
+    body: &'a Option<Block>,
+    /// Enclosing class for a method; `None` for a free function.
+    class: Option<&'a str>,
+}
+
+/// Analyse every user function and class method in `hir`. See module
+/// doc for the substitution + ordering story.
 pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     let graph = call_graph::build(hir);
     let ordering = call_graph::order(&graph);
 
     let mut registry: HashMap<String, Complexity> = HashMap::new();
-    let mut name_to_function: HashMap<String, &Function> = HashMap::new();
+    let mut units: HashMap<String, Unit> = HashMap::new();
     let mut def_to_name: HashMap<DefId, String> = HashMap::new();
     for (idx, def) in hir.defs.iter().enumerate() {
-        if let Def::Function(f) = def {
-            name_to_function.insert(f.name.clone(), f);
-            def_to_name.insert(
-                DefId(u32::try_from(idx).expect("more than u32::MAX defs")),
-                f.name.clone(),
-            );
+        match def {
+            Def::Function(f) if call_graph::is_real_function(f) => {
+                def_to_name.insert(
+                    DefId(u32::try_from(idx).expect("more than u32::MAX defs")),
+                    f.name.clone(),
+                );
+                units.insert(
+                    f.name.clone(),
+                    Unit {
+                        key: f.name.clone(),
+                        params: &f.params,
+                        body: &f.body,
+                        class: None,
+                    },
+                );
+            }
+            Def::Class(c) => {
+                for m in &c.methods {
+                    let key = call_graph::qualified(&c.name, &m.name);
+                    units.insert(
+                        key.clone(),
+                        Unit {
+                            key,
+                            params: &m.params,
+                            body: &m.body,
+                            class: Some(c.name.as_str()),
+                        },
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
-    // Non-recursive functions, callees-first.
+    // Non-recursive nodes, callees-first.
     for name in &ordering.topo {
-        if let Some(f) = name_to_function.get(name) {
-            let c = analyze_with(f, &registry, &ordering.recursive, &def_to_name);
+        if let Some(u) = units.get(name) {
+            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph);
             registry.insert(name.clone(), c);
         }
     }
-    // Recursive functions — registered last with their own name
-    // marked recursive so user-call substitution from THEIR body
-    // back to a same-cycle peer falls through to Unknown.
+    // Recursive nodes — registered last with their own key marked
+    // recursive so a user-call substitution from THEIR body back to a
+    // same-cycle peer falls through to Unknown.
     for name in &ordering.recursive {
-        if let Some(f) = name_to_function.get(name) {
-            let c = analyze_with(f, &registry, &ordering.recursive, &def_to_name);
+        if let Some(u) = units.get(name) {
+            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph);
             registry.insert(name.clone(), c);
         }
     }
@@ -111,11 +151,13 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
         registry: &registry,
         recursive: &ordering.recursive,
         def_to_name: &def_to_name,
+        method_owners: &graph.method_owners,
         ctx: &ctx,
         analysing: None,
+        analysing_class: None,
     };
     let main_formula = walker.walk_stmts(&hir.main).simplify();
-    let main_big_o = crate::big_o::big_o(&main_formula);
+    let main_big_o = big_o(&main_formula);
 
     let mut out = Vec::new();
     out.push(Complexity {
@@ -124,11 +166,23 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
         formula: main_formula,
         big_o: main_big_o,
     });
+    // Emit functions and methods in declaration order.
     for def in &hir.defs {
-        if let Def::Function(f) = def
-            && let Some(c) = registry.get(&f.name)
-        {
-            out.push(c.clone());
+        match def {
+            Def::Function(f) if call_graph::is_real_function(f) => {
+                if let Some(c) = registry.get(&f.name) {
+                    out.push(c.clone());
+                }
+            }
+            Def::Class(c) => {
+                for m in &c.methods {
+                    let key = call_graph::qualified(&c.name, &m.name);
+                    if let Some(cx) = registry.get(&key) {
+                        out.push(cx.clone());
+                    }
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -139,18 +193,26 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
 /// [`analyze_file`] for the substitution-enabled path.
 pub fn analyze_function(f: &Function) -> Complexity {
     let registry: HashMap<String, Complexity> = HashMap::new();
+    let graph = call_graph::CallGraph::default();
     let recursive: HashSet<String> = HashSet::new();
     let def_to_name: HashMap<DefId, String> = HashMap::new();
-    analyze_with(f, &registry, &recursive, &def_to_name)
+    let unit = Unit {
+        key: f.name.clone(),
+        params: &f.params,
+        body: &f.body,
+        class: None,
+    };
+    analyze_unit(&unit, &registry, &recursive, &def_to_name, &graph)
 }
 
-fn analyze_with(
-    f: &Function,
+fn analyze_unit(
+    u: &Unit,
     registry: &HashMap<String, Complexity>,
     recursive: &HashSet<String>,
     def_to_name: &HashMap<DefId, String>,
+    graph: &call_graph::CallGraph,
 ) -> Complexity {
-    let params: Vec<ParamInfo> = f
+    let params: Vec<ParamInfo> = u
         .params
         .iter()
         .enumerate()
@@ -159,23 +221,25 @@ fn analyze_with(
             size_var: param_size_var(u32::try_from(i).expect("more than u32::MAX params"), p),
         })
         .collect();
-    let pmap = ParamMap::from_params(&f.params);
+    let pmap = ParamMap::from_params(u.params);
     let ctx = BoundContext { params: &pmap };
     let walker = Walker {
         registry,
         recursive,
         def_to_name,
+        method_owners: &graph.method_owners,
         ctx: &ctx,
-        analysing: Some(f.name.as_str()),
+        analysing: Some(u.key.as_str()),
+        analysing_class: u.class,
     };
-    let body_cost = match &f.body {
+    let body_cost = match u.body {
         Some(b) => walker.walk_block(b),
         None => CostExpr::Const(0),
     };
     let formula = CostExpr::sum(vec![CostExpr::Const(USER_CALL_OVERHEAD), body_cost]).simplify();
-    let big_o = crate::big_o::big_o(&formula);
+    let big_o = big_o(&formula);
     Complexity {
-        name: f.name.clone(),
+        name: u.key.clone(),
         params,
         formula,
         big_o,
@@ -236,11 +300,18 @@ struct Walker<'a> {
     /// [`analyze_function`] path where user calls are always
     /// Unknown anyway.
     def_to_name: &'a HashMap<DefId, String>,
+    /// `method name → owning classes` — drives method-call
+    /// resolution. Shared with the call graph so edges and
+    /// substitutions agree.
+    method_owners: &'a HashMap<String, Vec<String>>,
     ctx: &'a BoundContext<'a>,
-    /// Name of the function currently being analysed (so calls
-    /// from inside a recursive function to one of its same-cycle
-    /// peers stay `Unknown`).
+    /// Registry key of the node currently being analysed (so calls
+    /// from inside a recursive node to one of its same-cycle peers
+    /// stay `Unknown`).
     analysing: Option<&'a str>,
+    /// Enclosing class of the node being analysed (so `this.m()`
+    /// resolves to the right class); `None` outside a method body.
+    analysing_class: Option<&'a str>,
 }
 
 impl Walker<'_> {
@@ -376,7 +447,7 @@ impl Walker<'_> {
         match &c.callee {
             Callee::Function(NameRef::Builtin(name)) => {
                 let growth = self.builtin_growth(name, &c.args);
-                CostExpr::sum(vec![CostExpr::Const(BUILTIN_CALL), args_c, growth])
+                CostExpr::sum(vec![CostExpr::Const(native::base_cost(name)), args_c, growth])
             }
             Callee::Function(NameRef::Function(def_id)) => {
                 // Look the callee up in the registry — its name is
@@ -389,12 +460,9 @@ impl Walker<'_> {
                 };
                 CostExpr::sum(vec![CostExpr::Const(USER_CALL_OVERHEAD), args_c, cost])
             }
-            Callee::Method { receiver, .. } => CostExpr::sum(vec![
-                CostExpr::Const(USER_CALL_OVERHEAD),
-                self.walk_expr(receiver),
-                args_c,
-                CostExpr::Unknown("method call (no type-aware lookup yet)"),
-            ]),
+            Callee::Method {
+                receiver, method, ..
+            } => self.method_call_cost(receiver, method, &c.args, args_c),
             Callee::Expr(callee_e) => CostExpr::sum(vec![
                 CostExpr::Const(USER_CALL_OVERHEAD),
                 self.walk_expr(callee_e),
@@ -405,6 +473,67 @@ impl Walker<'_> {
             // extra cost beyond their arguments.
             Callee::Function(_) => args_c,
         }
+    }
+
+    /// Cost of an `obj.method(args)` call. Resolves, in order, to a
+    /// user method (via [`call_graph::resolve_method_qualified`]), a
+    /// native builtin invoked through method syntax (`arr.sort()`),
+    /// or — when neither pins down — [`CostExpr::Unknown`].
+    fn method_call_cost(
+        &self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Expr],
+        args_c: CostExpr,
+    ) -> CostExpr {
+        let recv_c = self.walk_expr(receiver);
+        // 1. A user method we've analysed.
+        if let Some(q) = call_graph::resolve_method_qualified(
+            receiver,
+            method,
+            self.analysing_class,
+            self.method_owners,
+        ) {
+            let cost = self.user_call_cost(&q, args);
+            return CostExpr::sum(vec![
+                CostExpr::Const(USER_CALL_OVERHEAD),
+                recv_c,
+                args_c,
+                cost,
+            ]);
+        }
+        // 2. A native builtin called as a method: the receiver is the
+        //    container (`arr.sort()`, `s.substring(...)`).
+        if native::is_native(method) {
+            let growth = self.native_method_growth(method, receiver, args);
+            return CostExpr::sum(vec![
+                CostExpr::Const(native::base_cost(method)),
+                recv_c,
+                args_c,
+                growth,
+            ]);
+        }
+        // 3. Genuinely unresolved (untyped receiver, no matching
+        //    user method or builtin).
+        CostExpr::sum(vec![
+            CostExpr::Const(USER_CALL_OVERHEAD),
+            recv_c,
+            args_c,
+            CostExpr::Unknown("method call (unresolved receiver)"),
+        ])
+    }
+
+    /// Growth of a native builtin invoked as a method — the receiver
+    /// counts as the first (container) argument.
+    fn native_method_growth(&self, name: &str, receiver: &Expr, args: &[Expr]) -> CostExpr {
+        if native::is_hof(name) {
+            let arr_size = self.size_or_zero(Some(receiver));
+            let body_cost = self.hof_body_cost(args.first());
+            return CostExpr::product(vec![arr_size, body_cost]);
+        }
+        let mut sizes = vec![self.size_or_zero(Some(receiver))];
+        sizes.extend(args.iter().map(|a| self.size_or_zero(Some(a))));
+        native::native_growth(name, &sizes)
     }
 
     fn callee_name_for(&self, def_id: DefId) -> Option<String> {
@@ -465,9 +594,7 @@ impl Walker<'_> {
             }
             ExprKind::Map(pairs) => Some(CostExpr::Const(pairs.len() as u64)),
             ExprKind::Call(call) => match &call.callee {
-                Callee::Function(NameRef::Builtin(b))
-                    if matches!(b.as_str(), "count" | "length" | "size" | "mapSize") =>
-                {
+                Callee::Function(NameRef::Builtin(b)) if native::is_size_query(b) => {
                     let arg = call.args.first()?;
                     self.arg_size_expr(arg)
                 }
@@ -477,37 +604,16 @@ impl Walker<'_> {
         }
     }
 
+    /// Growth contribution of a free-function builtin call. Higher-
+    /// order builtins walk their lambda body here (it needs the
+    /// caller context); everything else defers to the catalog-backed
+    /// [`native::native_growth`].
     fn builtin_growth(&self, name: &str, args: &[Expr]) -> CostExpr {
-        let first_size = || self.size_or_zero(args.first());
-        let second_size = || self.size_or_zero(args.get(1));
-
-        // Higher-order builtins: if the second arg is a Lambda,
-        // we walk its body in the same caller context and pair it
-        // with count(arr).
-        if is_hof(name) {
-            return self.hof_growth(name, args);
+        if native::is_hof(name) {
+            return self.hof_growth(args);
         }
-
-        match name {
-            "reverse" | "arrayReverse" | "shuffle" | "arrayShuffle" | "subArray" | "arraySlice"
-            | "fill" | "indexOf" | "lastIndexOf" | "search" | "contains" | "inArray" | "join"
-            | "stringJoin" | "stringReverse" | "arrayFlatten" | "flatten" | "arrayDistinct"
-            | "arrayUnique" | "arrayKeys" | "arrayValues" | "entries" | "mapKeys" | "mapValues"
-            | "arrayCopy" | "clone" | "arrayMax" | "arrayMin" | "arrayCount" | "arrayProduct"
-            | "arrayAvg" | "arrayAdd" => first_size(),
-
-            "concat" | "arrayConcat" => CostExpr::sum(vec![first_size(), second_size()]),
-
-            "sort" | "arraySort" | "intervalSort" => {
-                CostExpr::product(vec![first_size(), CostExpr::Log(Box::new(first_size()))])
-            }
-
-            "arrayIntersect" | "arrayUnion" | "arrayDifference" => {
-                CostExpr::product(vec![first_size(), second_size()])
-            }
-
-            _ => CostExpr::Const(0),
-        }
+        let sizes: Vec<CostExpr> = args.iter().map(|a| self.size_or_zero(Some(a))).collect();
+        native::native_growth(name, &sizes)
     }
 
     fn size_or_zero(&self, e: Option<&Expr>) -> CostExpr {
@@ -516,63 +622,27 @@ impl Walker<'_> {
     }
 
     /// Growth contribution for a higher-order builtin
-    /// (`arrayMap` and friends). Cost is `count(arr) ·
-    /// lambda_body_cost` when arg[1] is a Lambda; otherwise just
-    /// `count(arr)` (treats a function-reference callback as O(1)
-    /// per element, which is conservative but matches our default
-    /// "unknown user-fn cost = Unknown" rule).
-    fn hof_growth(&self, name: &str, args: &[Expr]) -> CostExpr {
+    /// (`arrayMap` and friends): `count(arr) · lambda_body_cost`,
+    /// with `arr` the first argument and the callback the second.
+    fn hof_growth(&self, args: &[Expr]) -> CostExpr {
         let arr_size = self.size_or_zero(args.first());
-        let body_cost = if let Some(arg1) = args.get(1) {
-            match &arg1.kind {
-                ExprKind::Lambda(lam) => match &lam.body {
-                    LambdaBody::Block(b) => self.walk_block(b),
-                    LambdaBody::Expr(e) => self.walk_expr(e),
-                },
-                ExprKind::Name(NameRef::Function(_)) => {
-                    // A passed function reference. We could
-                    // substitute its formula here, but we don't
-                    // know the elementwise param's size; emit a
-                    // small constant per call.
-                    CostExpr::Const(USER_CALL_OVERHEAD)
-                }
-                _ => CostExpr::Const(0),
-            }
-        } else {
-            CostExpr::Const(0)
-        };
-        let _ = name; // future: distinguish reducers from mappers
+        let body_cost = self.hof_body_cost(args.get(1));
         CostExpr::product(vec![arr_size, body_cost])
     }
-}
 
-/// Which builtins take a function argument that's invoked per
-/// element of the first argument.
-fn is_hof(name: &str) -> bool {
-    matches!(
-        name,
-        "arrayMap"
-            | "arrayFilter"
-            | "arrayReduce"
-            | "arrayReduceRight"
-            | "arrayFoldLeft"
-            | "arrayFoldRight"
-            | "arrayForeach"
-            | "forEach"
-            | "arrayIter"
-            | "arrayPartition"
-            | "arrayEvery"
-            | "arraySome"
-            | "mapFilter"
-            | "mapMap"
-            | "mapForEach"
-            | "setForEach"
-            | "setForeach"
-            | "intervalMap"
-            | "intervalFilter"
-            | "intervalForeach"
-            | "intervalForEach"
-            | "intervalReduce"
-            | "intervalReduceRight"
-    )
+    /// Per-element body cost of a higher-order builtin's callback
+    /// argument. Walks a lambda body in the current caller context;
+    /// a bare function-reference callback costs a small constant
+    /// (we don't know the element's size to substitute its formula);
+    /// anything else contributes nothing.
+    fn hof_body_cost(&self, callback: Option<&Expr>) -> CostExpr {
+        match callback.map(|a| &a.kind) {
+            Some(ExprKind::Lambda(lam)) => match &lam.body {
+                LambdaBody::Block(b) => self.walk_block(b),
+                LambdaBody::Expr(e) => self.walk_expr(e),
+            },
+            Some(ExprKind::Name(NameRef::Function(_))) => CostExpr::Const(USER_CALL_OVERHEAD),
+            _ => CostExpr::Const(0),
+        }
+    }
 }

@@ -14,6 +14,7 @@ use std::fmt;
 /// for the first parameter when it's typed as an array. Two
 /// `SizeVar`s are equal iff their `param_index` matches; `name`
 /// is purely cosmetic (for display).
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SizeVar {
     /// 0-based parameter position the size refers to.
@@ -39,6 +40,7 @@ impl fmt::Display for SizeVar {
 }
 
 /// Symbolic ops-cost expression.
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CostExpr {
     /// A literal ops count. The straight-line floor of `leek-charge`

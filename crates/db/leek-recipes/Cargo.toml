@@ -19,6 +19,7 @@ leek-types    = { workspace = true }
 leek-hir      = { workspace = true }
 leek-mir      = { workspace = true }
 leek-lint     = { workspace = true }
+leek-complexity = { workspace = true, features = ["salsa"] }
 leek-fmt      = { workspace = true, features = ["salsa"] }
 
 [lints]

@@ -1064,15 +1064,18 @@ name = "leek-complexity"
 version = "0.0.1"
 dependencies = [
  "leek-backend-native",
+ "leek-builtins",
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
  "leek-parser",
+ "leek-pipeline",
  "leek-resolver",
  "leek-runtime",
  "leek-span",
  "leek-syntax",
  "leek-types",
+ "salsa",
 ]
 
 [[package]]
@@ -1347,6 +1350,7 @@ dependencies = [
 name = "leek-recipes"
 version = "0.0.1"
 dependencies = [
+ "leek-complexity",
  "leek-diagnostics",
  "leek-environment",
  "leek-fmt",

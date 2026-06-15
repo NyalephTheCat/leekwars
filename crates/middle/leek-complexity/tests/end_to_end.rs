@@ -478,3 +478,137 @@ return x + y\n",
     let main = find(&r, "<main>");
     assert!(matches!(main.big_o, BigO::Constant));
 }
+
+// ─── class methods ─────────────────────────────────────────────────
+
+#[test]
+fn class_method_body_is_analysed() {
+    // A method that loops over an array parameter is linear, and is
+    // reported under its `Class.method` key (methods used to be
+    // skipped entirely).
+    let r = analyze(
+        "\
+class Vec {\n\
+    public total(arr) {\n\
+        var t = 0\n\
+        for (var x in arr) { t = t + x }\n\
+        return t\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Vec.total");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn this_method_call_is_substituted() {
+    // `this.total(arr)` resolves to `Vec.total` (via the enclosing
+    // class) and substitutes its linear formula — twice — so `twice`
+    // stays linear rather than collapsing to Unknown.
+    let r = analyze(
+        "\
+class Vec {\n\
+    public total(arr) {\n\
+        var t = 0\n\
+        for (var x in arr) { t = t + x }\n\
+        return t\n\
+    }\n\
+    public twice(arr) {\n\
+        return this.total(arr) + this.total(arr)\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Vec.twice");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn unique_method_name_resolves_across_instances() {
+    // `w.run(arr)` — `w` is an untyped param, so the receiver class is
+    // unknown, but exactly one class defines `run`, so the unique-name
+    // fallback resolves it and substitutes the linear formula.
+    let r = analyze(
+        "\
+class Worker {\n\
+    public run(arr) {\n\
+        for (var x in arr) {}\n\
+        return 0\n\
+    }\n\
+}\n\
+function dispatch(w, arr) {\n\
+    return w.run(arr)\n\
+}\n",
+    );
+    let f = find(&r, "dispatch");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn class_methods_do_not_leak_bodiless_artifacts() {
+    // Lowering emits a bodiless `Function` per method; it must not
+    // surface as a spurious top-level `O(1)` entry beside the real
+    // `Class.method` one.
+    let r = analyze(
+        "\
+class Vec {\n\
+    public total(arr) { return count(arr) }\n\
+}\n",
+    );
+    assert!(
+        r.iter().any(|c| c.name == "Vec.total"),
+        "method missing: {:?}",
+        r.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    assert!(
+        !r.iter().any(|c| c.name == "total"),
+        "bodiless artifact leaked: {:?}",
+        r.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+}
+
+// ─── native functions called as methods ────────────────────────────
+
+#[test]
+fn native_method_sort_is_n_log_n() {
+    // `arr.sort()` — method syntax for the native sort — contributes
+    // the same `n · log n` the free-function `sort(arr)` does.
+    let r = analyze(
+        "\
+function ordered(arr) {\n\
+    arr.sort()\n\
+    return arr\n\
+}\n",
+    );
+    let f = find(&r, "ordered");
+    match &f.big_o {
+        BigO::NLogN(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr · log arr), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn uncurated_native_uses_catalog_growth() {
+    // `arrayClone` has no curated shape but carries a `batch_mult` in
+    // the builtin catalog → linear. Proves the catalog fallback wires
+    // a real cost in instead of silently costing zero.
+    let r = analyze(
+        "\
+function dup(arr) {\n\
+    return arrayClone(arr)\n\
+}\n",
+    );
+    let f = find(&r, "dup");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "arr"),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula),
+    }
+}
