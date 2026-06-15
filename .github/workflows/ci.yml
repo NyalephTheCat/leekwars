@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. a force-push to a PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Formatting + the architecture (layer) check + generated-catalog drift.
+  # Cheap and fast, so it runs on its own and fails early.
+  fmt:
+    name: rustfmt + layer check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The official* submodules back the generated weapon/chip catalog
+          # drift check; fetch them so it actually runs.
+          submodules: recursive
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+      - name: layer check
+        run: tools/check-layers.sh
+      - name: generated catalog drift
+        run: tools/game-item-extract.sh --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # A JDK is only needed for the (snapshot-gated) Java-backend parity
+      # tests; without it those tests skip cleanly. Installing it gives the
+      # broadest coverage.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: cargo build --workspace
+        run: cargo build --workspace --locked
+      # Mirrors `tools/check.sh`: the fast gate excludes the multi-minute
+      # upstream corpus suite (run separately in the nightly job below).
+      - name: cargo test --workspace (fast)
+        run: cargo test --workspace --exclude leek-test-corpus --locked
+
+  # Supply-chain / license audit driven by deny.toml.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # VS Code extension (TypeScript) — type-check and bundle so the editor
+  # integration doesn't rot independently of the Rust workspace.
+  vscode-extension:
+    name: vscode extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: install + compile
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run compile
