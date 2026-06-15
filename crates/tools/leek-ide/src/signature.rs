@@ -185,14 +185,15 @@ fn first_decl_ident_text(node: &SyntaxNode) -> Option<String> {
             NodeOrToken::Node(n) if n.kind() == SyntaxKind::TypeRef => {
                 past_typeref = true;
             }
-            NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
+            NodeOrToken::Token(t)
+                if t.kind() == SyntaxKind::Ident
                 // For non-typed decls (or methods/fields with no leading
                 // type annotation, e.g. `purr()`), the first Ident is
                 // the name. For typed methods/fields the name follows
                 // the TypeRef.
-                if !needs_type_skip(node) || past_typeref || !has_type_prefix(node) {
-                    return Some(t.text().to_string());
-                }
+                && (!needs_type_skip(node) || past_typeref || !has_type_prefix(node)) =>
+            {
+                return Some(t.text().to_string());
             }
             _ => {}
         }

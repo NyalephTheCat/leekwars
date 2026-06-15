@@ -62,10 +62,8 @@ pub fn run(
     }
 
     let mut records: Vec<TestRecord> = Vec::new();
-    let mut next_source: u32 = 1;
-    for path in &tests {
+    for (next_source, path) in (1_u32..).zip(&tests) {
         let source = SourceId::new(next_source).unwrap();
-        next_source += 1;
         let start = Instant::now();
         let outcome = run_one(&project, &reporter, source, path)?;
         let duration = start.elapsed();

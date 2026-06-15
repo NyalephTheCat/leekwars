@@ -163,13 +163,10 @@ impl Emitter<'_> {
             // `emit_default_overload`) charges only its default expression at
             // v2+ — upstream emits `Object u_x = 5l; ops(0);`, no declaration
             // tick. v1 keeps the +1 (the Box ctor's runtime charge).
-            let base = if self.synthetic_default_decls.contains(&v.def)
-                && !matches!(self.opts.version, leek_syntax::Version::V1)
-            {
-                0
-            } else {
-                1
-            };
+            let base = u32::from(
+                !self.synthetic_default_decls.contains(&v.def)
+                    || matches!(self.opts.version, leek_syntax::Version::V1),
+            );
             let raw = self.v1_clone_with_ops(e, base);
             // A statically-typed scalar local coerces its initializer to the
             // declared type, mirroring upstream `compileConvert`: the runtime

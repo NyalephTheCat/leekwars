@@ -602,10 +602,10 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
                 // `1 + object.operations` (`LeekObjectAccess.analyze`). No
                 // extra per-call op. Builtin-class receivers
                 // (`Integer.parse(...)`) are exempt like the `Field` arm.
-                Callee::Method { receiver, .. } => {
-                    if !matches!(&receiver.kind, ExprKind::Name(NameRef::Builtin(_))) {
-                        total += 1 + expr_op_cost(receiver);
-                    }
+                Callee::Method { receiver, .. }
+                    if !matches!(&receiver.kind, ExprKind::Name(NameRef::Builtin(_))) =>
+                {
+                    total += 1 + expr_op_cost(receiver);
                 }
                 _ => {}
             }
@@ -1563,11 +1563,11 @@ pub(crate) fn v1_box_returners(
     let mut var_ev: HashMap<u32, Ev> = HashMap::new();
 
     let mut roots: Vec<&[Stmt]> = vec![&hir.main];
-    for (i, d) in hir.defs.iter().enumerate() {
+    for (i, d) in (0u32..).zip(hir.defs.iter()) {
         if let Def::Function(f) = d
             && let Some(b) = &f.body
         {
-            fn_ev.insert(i as u32, body_evidence(&b.stmts));
+            fn_ev.insert(i, body_evidence(&b.stmts));
             roots.push(&b.stmts);
         }
     }

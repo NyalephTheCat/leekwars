@@ -53,7 +53,7 @@ fn show_complexity(ws: &Workspace, args: &[Json]) -> Option<Json> {
     let hir = run.get::<HirArtifact>()?;
     let report = analyze_file(&hir.0);
     let c = report.iter().find(|c| c.name == fn_name)?;
-    Some(Json::String(format!("{} — ops: {}", c.big_o, c.formula,)))
+    Some(Json::String(format!("{} — ops: {}", c.big_o, c.formula)))
 }
 
 /// `leek.analyze (uri)` → JSON array of `{ name, params, big_o,

@@ -62,8 +62,7 @@ fn runnable(bin: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Newest mtime of any `*.java` under `dir` (recursive). `None` if the
@@ -166,8 +165,7 @@ pub fn prepare_embed(manifest_dir: &Path, out_dir: &Path) {
             match regenerate(manifest_dir, &committed) {
                 Ok(()) => {
                     let rows = std::fs::read_to_string(&committed)
-                        .map(|s| s.lines().filter(|l| !l.starts_with('#')).count())
-                        .unwrap_or(0);
+                        .map_or(0, |s| s.lines().filter(|l| !l.starts_with('#')).count());
                     println!(
                         "cargo:warning=regenerated {} ({rows} rows)",
                         committed.display()

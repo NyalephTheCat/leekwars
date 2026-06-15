@@ -123,7 +123,7 @@ pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<
             if changed == 1 { "" } else { "s" },
         )];
         if skipped > 0 {
-            parts.push(format!("{skipped} skipped",));
+            parts.push(format!("{skipped} skipped"));
         }
         if warnings > 0 {
             parts.push(format!(

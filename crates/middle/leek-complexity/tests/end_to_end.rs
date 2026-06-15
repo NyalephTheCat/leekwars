@@ -146,7 +146,7 @@ function cross(arr) {\n\
     let f = find(&r, "cross");
     match &f.big_o {
         BigO::Quadratic(v) => assert_eq!(v.name, "arr"),
-        other => panic!("expected O(arr²), got {other:?}\nformula = {}", f.formula,),
+        other => panic!("expected O(arr²), got {other:?}\nformula = {}", f.formula),
     }
 }
 
@@ -309,7 +309,7 @@ function outer(data) {\n\
     let f = find(&r, "outer");
     match &f.big_o {
         BigO::Linear(v) => assert_eq!(v.name, "data"),
-        other => panic!("expected O(data), got {other:?}\nformula = {}", f.formula,),
+        other => panic!("expected O(data), got {other:?}\nformula = {}", f.formula),
     }
 }
 
@@ -332,7 +332,7 @@ function outer(data) {\n\
     let f = find(&r, "outer");
     match &f.big_o {
         BigO::Quadratic(v) => assert_eq!(v.name, "data"),
-        other => panic!("expected O(data²), got {other:?}\nformula = {}", f.formula,),
+        other => panic!("expected O(data²), got {other:?}\nformula = {}", f.formula),
     }
 }
 
@@ -379,7 +379,7 @@ function doubled(arr) {\n\
     let f = find(&r, "doubled");
     match &f.big_o {
         BigO::Linear(v) => assert_eq!(v.name, "arr"),
-        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula,),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula),
     }
 }
 
@@ -401,7 +401,7 @@ function compute(arr) {\n\
     let f = find(&r, "compute");
     match &f.big_o {
         BigO::Quadratic(v) => assert_eq!(v.name, "arr"),
-        other => panic!("expected O(arr²), got {other:?}\nformula = {}", f.formula,),
+        other => panic!("expected O(arr²), got {other:?}\nformula = {}", f.formula),
     }
 }
 
@@ -416,7 +416,7 @@ function evens(arr) {\n\
     let f = find(&r, "evens");
     match &f.big_o {
         BigO::Linear(v) => assert_eq!(v.name, "arr"),
-        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula,),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula),
     }
 }
 
@@ -431,7 +431,7 @@ function total(arr) {\n\
     let f = find(&r, "total");
     match &f.big_o {
         BigO::Linear(v) => assert_eq!(v.name, "arr"),
-        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula,),
+        other => panic!("expected O(arr), got {other:?}\nformula = {}", f.formula),
     }
 }
 

@@ -80,7 +80,7 @@ pub fn big_display(b: &BigInt) -> String {
     let keep = STRING_CROP_LIMIT + usize::from(b.is_negative());
     let first: String = first_digits.chars().take(keep).collect();
     let last = b.abs() % ten.pow(u32::try_from(STRING_CROP_LIMIT).unwrap_or(u32::MAX));
-    format!("{first}...{last:0>width$}", width = STRING_CROP_LIMIT)
+    format!("{first}...{last:0>STRING_CROP_LIMIT$}")
 }
 
 /// Full (uncropped) decimal form — used by `jsonEncode`, which bypasses

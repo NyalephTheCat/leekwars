@@ -104,7 +104,7 @@ impl Resolver {
                 self.err(
                     codes::CLASS_MEMBER_DOES_NOT_EXIST,
                     self.span_of(&field_tok),
-                    format!("class `{class_name}` has no member `{field_text}`",),
+                    format!("class `{class_name}` has no member `{field_text}`"),
                 );
                 return;
             }
@@ -120,7 +120,7 @@ impl Resolver {
                 self.err(
                     codes::CLASS_MEMBER_DOES_NOT_EXIST,
                     self.span_of(&field_tok),
-                    format!("class `{class_name}` has no member `{field_text}`",),
+                    format!("class `{class_name}` has no member `{field_text}`"),
                 );
                 return;
             }
@@ -144,7 +144,7 @@ impl Resolver {
             self.err(
                 codes::PRIVATE_FIELD,
                 self.span_of(&field_tok),
-                format!("field `{field_text}` is private on class `{owner}`",),
+                format!("field `{field_text}` is private on class `{owner}`"),
             );
             return;
         }
@@ -173,7 +173,7 @@ impl Resolver {
                 self.err(
                     codes::CLASS_STATIC_MEMBER_DOES_NOT_EXIST,
                     self.span_of(&field_tok),
-                    format!("`{class_name}` has no static member `{field_text}`",),
+                    format!("`{class_name}` has no static member `{field_text}`"),
                 );
             }
             return;
@@ -206,7 +206,7 @@ impl Resolver {
                 self.err(
                     codes::CLASS_STATIC_MEMBER_DOES_NOT_EXIST,
                     self.span_of(&field_tok),
-                    format!("`{base_text}` has no static member `{field_text}`",),
+                    format!("`{base_text}` has no static member `{field_text}`"),
                 );
                 return;
             }
@@ -223,7 +223,7 @@ impl Resolver {
             self.err(
                 codes::PRIVATE_FIELD,
                 self.span_of(&field_tok),
-                format!("field `{field_text}` is private on class `{owner}`",),
+                format!("field `{field_text}` is private on class `{owner}`"),
             );
             return;
         }
@@ -237,13 +237,13 @@ impl Resolver {
                 self.err(
                     codes::PRIVATE_FIELD,
                     self.span_of(&field_tok),
-                    format!("field `{field_text}` is private on class `{owner}`",),
+                    format!("field `{field_text}` is private on class `{owner}`"),
                 );
             } else if let Some(owner) = self.lookup_protected_owner(&class_name, field_text) {
                 self.err(
                     codes::PROTECTED_FIELD,
                     self.span_of(&field_tok),
-                    format!("field `{field_text}` is protected on class `{owner}`",),
+                    format!("field `{field_text}` is protected on class `{owner}`"),
                 );
             }
         }

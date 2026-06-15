@@ -96,7 +96,9 @@ pub extern "C" fn leek_array_new() -> *mut Value {
 }
 
 /// `(int) Math.sqrt(n)` — the truncating cast upstream uses in
-/// `LegacyArrayLeekValue.createElement`'s size-scaled charge.
+/// `LegacyArrayLeekValue.createElement`'s size-scaled charge. Mirrors the
+/// float sqrt + truncation exactly (integer isqrt could round differently).
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn isqrt(n: usize) -> i64 {
     (n as f64).sqrt() as i64
 }

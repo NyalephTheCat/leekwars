@@ -111,7 +111,7 @@ fn print_report(root: &Path, path: &Path, report: &[Complexity], show_formula: b
                 bigo_w = bigo_w,
             );
         } else {
-            println!("  {name:<name_w$}  {bigo}",);
+            println!("  {name:<name_w$}  {bigo}");
         }
     }
 }
