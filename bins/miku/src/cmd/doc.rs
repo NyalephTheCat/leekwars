@@ -323,7 +323,7 @@ fn render_item(item: &Item) -> String {
         html_escape(&item.signature),
     );
     if let Some(doc) = &item.doc {
-        let _ = write!(out, "<div class=\"doc\">{}</div>", html_escape(doc),);
+        let _ = write!(out, "<div class=\"doc\">{}</div>", html_escape(doc));
     }
     if let Some(c) = &item.complexity {
         let _ = write!(
@@ -333,7 +333,7 @@ fn render_item(item: &Item) -> String {
             html_escape(&c.formula.render()),
         );
     }
-    let _ = write!(out, "<div class=\"line\">line {}</div>", item.line,);
+    let _ = write!(out, "<div class=\"line\">line {}</div>", item.line);
     out.push_str("</div>");
     out
 }

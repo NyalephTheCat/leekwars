@@ -230,13 +230,13 @@ impl Resolver {
                     self.err(
                         codes::PRIVATE_CONSTRUCTOR,
                         self.span_of(&class_tok),
-                        format!("constructor of class `{class_name}` is private",),
+                        format!("constructor of class `{class_name}` is private"),
                     );
                 } else if self.class_protected_constructor.contains(&class_name) {
                     self.err(
                         codes::PROTECTED_CONSTRUCTOR,
                         self.span_of(&class_tok),
-                        format!("constructor of class `{class_name}` is protected",),
+                        format!("constructor of class `{class_name}` is protected"),
                     );
                 }
             }
@@ -297,7 +297,7 @@ impl Resolver {
         self.err(
             codes::INVALID_PARAMETER_COUNT,
             self.span_of(tok),
-            format!("`{class_name}.{method}` expects {expected} args; got {arg_count}",),
+            format!("`{class_name}.{method}` expects {expected} args; got {arg_count}"),
         );
     }
 
@@ -494,7 +494,7 @@ impl Resolver {
                 self.err(
                     codes::INVALID_PARAMETER_COUNT,
                     self.span_of(&field_tok),
-                    format!("`{class_name}.{method}` expects {expected} args; got {arg_count}",),
+                    format!("`{class_name}.{method}` expects {expected} args; got {arg_count}"),
                 );
             }
         }

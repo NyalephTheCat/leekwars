@@ -55,6 +55,6 @@ fn no_regressions_against_baseline() {
 
     let improvements: usize = diff.improvements.values().map(std::vec::Vec::len).sum();
     if improvements > 0 {
-        eprintln!("\n{improvements} improvements vs baseline (update with --save-baseline)",);
+        eprintln!("\n{improvements} improvements vs baseline (update with --save-baseline)");
     }
 }

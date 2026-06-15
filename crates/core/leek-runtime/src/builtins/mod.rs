@@ -45,7 +45,14 @@ pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
         let mut total = total.saturating_add(1 + 2 * n);
         if version <= 3 {
             for size_after in 1..=n {
-                #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+                // Float sqrt truncated to int, matching upstream's exact
+                // `(int)Math.sqrt(...)` charge — keep the cast, don't swap in
+                // integer isqrt (rounding could diverge from the reference).
+                #[allow(
+                    clippy::cast_precision_loss,
+                    clippy::cast_sign_loss,
+                    clippy::cast_possible_truncation
+                )]
                 let isqrt = (size_after as f64).sqrt() as u64;
                 total = total.saturating_add(5 + isqrt / 3);
             }

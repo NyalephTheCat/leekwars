@@ -564,18 +564,16 @@ impl Resolver {
                         // Resets between the key and value binding.
                         pending_var = false;
                     }
-                    SyntaxKind::Ident if !seen_in => {
-                        if pending_var {
-                            if self.name_in_outer_scope(t.text()) {
-                                self.err(
-                                    codes::VARIABLE_NAME_UNAVAILABLE,
-                                    self.span_of(&t),
-                                    format!("`{}` shadows an outer-scope binding", t.text()),
-                                );
-                            }
-                            let _ = self.declare(&t, SymbolKind::Local);
-                            pending_var = false;
+                    SyntaxKind::Ident if !seen_in && pending_var => {
+                        if self.name_in_outer_scope(t.text()) {
+                            self.err(
+                                codes::VARIABLE_NAME_UNAVAILABLE,
+                                self.span_of(&t),
+                                format!("`{}` shadows an outer-scope binding", t.text()),
+                            );
                         }
+                        let _ = self.declare(&t, SymbolKind::Local);
+                        pending_var = false;
                     }
                     _ => {}
                 },

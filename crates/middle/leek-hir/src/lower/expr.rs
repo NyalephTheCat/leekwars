@@ -301,8 +301,7 @@ impl Lowerer {
                 } else {
                     cleaned
                         .parse::<f64>()
-                        .map(Literal::Real)
-                        .unwrap_or(Literal::Real(0.0))
+                        .map_or(Literal::Real(0.0), Literal::Real)
                 }
             }
             SyntaxKind::StringLiteral => Literal::String(

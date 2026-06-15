@@ -4,7 +4,17 @@ yanked = "warn"
 
 [licenses]
 version = 2
-allow = ["MIT", "Apache-2.0", "Unicode-3.0", "BSD-2-Clause", "ISC"]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # Cranelift / Wasmtime crates (the native backend) are Apache-2.0 with the
+    # LLVM exception.
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib", # foldhash (pulled in transitively via hashbrown)
+]
 
 [bans]
 multiple-versions = "warn"

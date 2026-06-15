@@ -113,11 +113,9 @@ fn run_single(cli: &Cli, input: &Path) {
     }
     println!("{table}");
     if !cli.detail
-        && summaries.iter().any(|(_, r)| {
-            r.as_ref()
-                .map(|s| !s.prepare_steps.is_empty())
-                .unwrap_or(false)
-        })
+        && summaries
+            .iter()
+            .any(|(_, r)| r.as_ref().is_ok_and(|s| !s.prepare_steps.is_empty()))
     {
         println!("(pass --detail to see per-step prepare timings)");
     }
@@ -217,8 +215,7 @@ fn run_corpus(cli: &Cli) -> Result<()> {
     let work_root = cli.work_root.clone().unwrap_or_else(|| {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         std::env::temp_dir().join(format!("leekbench-corpus-{}-{}", std::process::id(), ts))
     });
     std::fs::create_dir_all(&work_root)?;

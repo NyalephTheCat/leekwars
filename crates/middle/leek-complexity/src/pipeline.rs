@@ -8,9 +8,7 @@
 use std::sync::Arc;
 
 use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::{
-    Artifact, Context, RecipeArtifact, RecipeParams, RecipeStep, Step, StepError,
-};
+use leek_pipeline::{Artifact, Context, RecipeArtifact, RecipeParams, RecipeStep, Step, StepError};
 
 use crate::Complexity;
 use crate::analyze::analyze_file;

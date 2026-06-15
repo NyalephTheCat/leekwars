@@ -27,7 +27,7 @@ pub fn compute_start_order(teams: &[Vec<(i64, i64)>], rng: &mut OfficialRng) -> 
         .iter()
         .map(|team| {
             let mut q = team.clone();
-            q.sort_by(|a, b| b.1.cmp(&a.1));
+            q.sort_by_key(|b| std::cmp::Reverse(b.1));
             q
         })
         .collect();

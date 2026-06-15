@@ -14,8 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use leek_hir::{
-    Block, Callee, Def, DefId, Expr, ExprKind, Flow, HirFile, NameRef, Stmt, Type, Visit,
-    Visitable,
+    Block, Callee, Def, DefId, Expr, ExprKind, Flow, HirFile, NameRef, Stmt, Type, Visit, Visitable,
 };
 
 /// Resolved call graph for the functions and methods defined in one
@@ -92,7 +91,14 @@ pub fn build(hir: &HirFile) -> CallGraph {
         match def {
             Def::Function(f) if is_real_function(f) => {
                 if let Some(body) = &f.body {
-                    collect_into(&mut edges, &f.name, body, &def_to_name, &method_owners, None);
+                    collect_into(
+                        &mut edges,
+                        &f.name,
+                        body,
+                        &def_to_name,
+                        &method_owners,
+                        None,
+                    );
                 }
             }
             Def::Class(c) => {
@@ -234,7 +240,10 @@ fn class_name_of_type(ty: &Type) -> Option<String> {
 /// local's `DefId` to a class name when its declaration pins it down:
 /// `C x = …` (typed), `var x = new C()`, `var x = this`, or `var x = y`
 /// where `y` is itself tracked. Built per function/method body.
-pub(crate) fn build_class_env(stmts: &[Stmt], current_class: Option<&str>) -> HashMap<DefId, String> {
+pub(crate) fn build_class_env(
+    stmts: &[Stmt],
+    current_class: Option<&str>,
+) -> HashMap<DefId, String> {
     let mut env: HashMap<DefId, String> = HashMap::new();
     let mut builder = ClassEnvBuilder {
         current_class,
@@ -270,7 +279,11 @@ impl Visit<Block> for ClassEnvBuilder<'_> {}
 impl Visit<Expr> for ClassEnvBuilder<'_> {}
 
 /// The class an initializer expression yields, if statically known.
-fn expr_class(e: &Expr, current_class: Option<&str>, env: &HashMap<DefId, String>) -> Option<String> {
+fn expr_class(
+    e: &Expr,
+    current_class: Option<&str>,
+    env: &HashMap<DefId, String>,
+) -> Option<String> {
     match &e.kind {
         ExprKind::New(n) => Some(n.class.clone()),
         ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_) => {

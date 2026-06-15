@@ -117,6 +117,9 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    // Takes `uri` by value: it's stored (cloned) into `self.docs` and used
+    // across both branches, and all call sites hand over an owned `Url`.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn open(&mut self, uri: Url, text: String) {
         if let Some(path) = uri_to_path(&uri)
             && let Some(indexed) = self.indexed.remove(&path)

@@ -7,19 +7,33 @@
   "engines": {
     "vscode": "^1.80.0"
   },
-  "categories": ["Programming Languages", "Debuggers"],
-  "activationEvents": ["onLanguage:leek", "onDebugResolve:leek"],
+  "categories": [
+    "Programming Languages",
+    "Debuggers"
+  ],
+  "activationEvents": [
+    "onLanguage:leek",
+    "onDebugResolve:leek"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
-    "breakpoints": [{ "language": "leek" }],
+    "breakpoints": [
+      {
+        "language": "leek"
+      }
+    ],
     "debuggers": [
       {
         "type": "leek",
         "label": "Leekscript",
-        "languages": ["leek"],
+        "languages": [
+          "leek"
+        ],
         "configurationAttributes": {
           "launch": {
-            "required": ["program"],
+            "required": [
+              "program"
+            ],
             "properties": {
               "program": {
                 "type": "string",
@@ -34,7 +48,12 @@
               "version": {
                 "type": "number",
                 "description": "Leekscript language version (1-4). Defaults to the file's pragma / latest.",
-                "enum": [1, 2, 3, 4]
+                "enum": [
+                  1,
+                  2,
+                  3,
+                  4
+                ]
               },
               "strict": {
                 "type": "boolean",
@@ -115,8 +134,13 @@
     "languages": [
       {
         "id": "leek",
-        "aliases": ["Leekscript", "leek"],
-        "extensions": [".leek"],
+        "aliases": [
+          "Leekscript",
+          "leek"
+        ],
+        "extensions": [
+          ".leek"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -143,13 +167,19 @@
         },
         "leek.trace.server": {
           "type": "string",
-          "enum": ["off", "messages", "verbose"],
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
           "default": "off",
           "description": "LSP trace level."
         },
         "leek.libraries": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Host-environment function libraries to load: a built-in name (\"leekwars\" for the leek-wars-generator fight functions) or a path to a library-definition file. Their functions are recognized by diagnostics and completion. Restart the server after changing."
         }
@@ -168,7 +198,7 @@
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.80.0",
     "@vscode/vsce": "^3.0.0",
-    "esbuild": "^0.23.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.0.0"
   }
 }

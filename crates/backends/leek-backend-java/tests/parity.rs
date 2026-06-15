@@ -568,7 +568,7 @@ fn run_via_interp(code: &str, version_byte: u8) -> InterpOutcome {
             Err(_) => InterpOutcome::Err("panic during interp".into()),
         });
     });
-    match rx.recv_timeout(std::time::Duration::from_millis(10_000)) {
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(outcome) => outcome,
         Err(_) => InterpOutcome::Err("timeout".into()),
     }

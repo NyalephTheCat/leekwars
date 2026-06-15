@@ -95,7 +95,7 @@ impl Backend for RustJavaEmit {
             .with_context(|| "running javac")?;
         steps.push(("javac".into(), t.elapsed()));
         if !javac.status.success() {
-            anyhow::bail!("javac failed: {}", String::from_utf8_lossy(&javac.stderr),);
+            anyhow::bail!("javac failed: {}", String::from_utf8_lossy(&javac.stderr));
         }
 
         self.work_dir = Some(dir);
@@ -124,7 +124,7 @@ impl Backend for RustJavaEmit {
             .output()
             .with_context(|| "running java")?;
         if !out.status.success() {
-            anyhow::bail!("java failed: {}", String::from_utf8_lossy(&out.stderr),);
+            anyhow::bail!("java failed: {}", String::from_utf8_lossy(&out.stderr));
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
