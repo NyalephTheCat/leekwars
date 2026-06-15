@@ -1006,6 +1006,7 @@ dependencies = [
  "leek-hir",
  "leek-mir",
  "leek-parser",
+ "leek-pipeline",
  "leek-runtime",
  "leek-span",
  "leek-syntax",

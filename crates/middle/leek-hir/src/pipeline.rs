@@ -5,7 +5,7 @@ use std::sync::Arc;
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::AstNode;
 use leek_parser::pipeline::AstArtifact;
-use leek_pipeline::{Artifact, Context, OptLevel, Step, StepError};
+use leek_pipeline::{Artifact, Context, OptConfig, OptLevel, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 use leek_resolver::pipeline::IncludeGraphArtifact;
 use leek_span::SourceId;
@@ -70,29 +70,40 @@ impl Artifact for HirArtifact {}
 /// AST → HIR lowering. Skipped silently if no AST is in the context
 /// (catastrophic parse error).
 ///
-/// `opt` controls whether the backend-agnostic [`fold_expressions`] pass runs
-/// after lowering. It is taken from the recipe's [`OptLevel`] so codegen
-/// drivers (`miku run`, `miku build --clean`, native) optimize while analysis
-/// drivers and Java *exact* mode keep the IR source-faithful.
+/// `opt` controls which backend-agnostic optimization passes run after
+/// lowering. It is taken from the recipe's [`OptConfig`] so codegen drivers
+/// (`miku run`, `miku build --clean`, native) optimize while analysis drivers
+/// and Java *exact* mode keep the IR source-faithful.
 ///
-/// [`fold_expressions`]: crate::transform::fold_expressions
+/// [`optimize_hir_with`]: crate::transform::optimize_hir_with
 pub struct LowerHir {
-    opt: OptLevel,
+    opt: OptConfig,
 }
 
 impl LowerHir {
-    /// A lowering step at the given [`OptLevel`]. Recipes build this via
-    /// [`RecipeStep::build`] from [`RecipeParams::opt`]; this constructor is
-    /// for manual `.with(...)` pipeline composition.
+    /// A lowering step at the given [`OptLevel`] (expands to that level's
+    /// default pass set). For manual `.with(...)` composition; recipes build
+    /// this via [`RecipeStep::build`] from [`RecipeParams::opt`].
     #[must_use]
     pub fn new(opt: OptLevel) -> Self {
+        Self {
+            opt: OptConfig::for_level(opt),
+        }
+    }
+
+    /// A lowering step with a fully-specified [`OptConfig`] (level + fuel +
+    /// per-pass toggles).
+    #[must_use]
+    pub fn with_config(opt: OptConfig) -> Self {
         Self { opt }
     }
 }
 
 impl Default for LowerHir {
     fn default() -> Self {
-        Self { opt: OptLevel::O0 }
+        Self {
+            opt: OptConfig::for_level(OptLevel::O0),
+        }
     }
 }
 
@@ -140,17 +151,17 @@ impl RecipeArtifact for HirArtifact {
 /// merge into the entry's HIR. Otherwise stays on the single-file
 /// path — existing pipelines without `ResolveIncludes` are
 /// unchanged.
-fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>) {
+fn run_lower(cx: &Context<'_>, opt: OptConfig) -> (Arc<HirFile>, Vec<Diagnostic>) {
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let out = lower_hir_query(db, file);
         // The salsa-tracked query is keyed only on the source file, not on the
-        // recipe's opt level, so it always produces unoptimized HIR (the LSP /
+        // recipe's opt config, so it always produces unoptimized HIR (the LSP /
         // analysis use case). Apply optimization outside the cache when a
         // codegen driver asked for it.
         if opt.optimizes() {
             let mut hir = (*out.hir).clone();
-            crate::transform::optimize_hir(&mut hir);
+            crate::transform::optimize_hir_with(&mut hir, &opt);
             return (Arc::new(hir), out.diagnostics);
         }
         return (out.hir, out.diagnostics);
@@ -214,7 +225,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
 /// `HirArtifact`) — see folded literals from one hook. A no-op (and
 /// allocation-free) when no fold constants are registered, so the default
 /// path and the corpus baseline are unchanged.
-fn finish_hir(mut hir: HirFile, opt: OptLevel) -> Arc<HirFile> {
+fn finish_hir(mut hir: HirFile, opt: OptConfig) -> Arc<HirFile> {
     let pairs = leek_prelude::fold_constants();
     if !pairs.is_empty() {
         let map: std::collections::HashMap<String, crate::ir::Literal> = pairs
@@ -230,11 +241,11 @@ fn finish_hir(mut hir: HirFile, opt: OptLevel) -> Arc<HirFile> {
             .collect();
         crate::transform::fold_constants(&mut hir, &map);
     }
-    // Backend-agnostic optimization — only at O1. Propagation and folding run
+    // Backend-agnostic optimization — only when the level optimizes. Passes run
     // to a fixpoint so chained constants (`var A = 2; var B = A + 1; …`) fully
     // resolve.
     if opt.optimizes() {
-        crate::transform::optimize_hir(&mut hir);
+        crate::transform::optimize_hir_with(&mut hir, &opt);
     }
     Arc::new(hir)
 }
@@ -280,13 +291,13 @@ pub fn lower_hir_query(
             flags,
         );
         return LowerHirResult {
-            hir: finish_hir(hir, OptLevel::O0),
+            hir: finish_hir(hir, OptConfig::for_level(OptLevel::O0)),
             diagnostics,
         };
     }
     let (hir, diagnostics) = lower_file_versioned_with_flags(&ast, file.source(db), version, flags);
     LowerHirResult {
-        hir: finish_hir(hir, OptLevel::O0),
+        hir: finish_hir(hir, OptConfig::for_level(OptLevel::O0)),
         diagnostics,
     }
 }

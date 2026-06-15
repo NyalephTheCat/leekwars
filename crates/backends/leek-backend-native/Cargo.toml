@@ -33,9 +33,12 @@ cranelift-object     = { workspace = true }
 target-lexicon       = { workspace = true }
 
 [dev-dependencies]
-leek-parser = { workspace = true }
-leek-syntax = { workspace = true }
-leek-span   = { workspace = true }
+leek-parser   = { workspace = true }
+leek-syntax   = { workspace = true }
+leek-span     = { workspace = true }
+# Cross-opt-level equivalence tests construct an `OptConfig` and run the HIR
+# optimizer at each level before JIT-compiling.
+leek-pipeline = { workspace = true }
 
 # Inherit the full workspace lint policy (pedantic clippy etc.). The JIT
 # path transmutes the finalized function pointer and calls it — inherently

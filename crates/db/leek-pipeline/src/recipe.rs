@@ -15,30 +15,7 @@ use leek_diagnostics::Severity;
 
 use crate::{Artifact, Pipeline, Step, TimedBox, TimingSink};
 
-/// How aggressively backend-agnostic optimization passes rewrite the IR.
-///
-/// Optimization is opt-in per recipe because some consumers need the IR to
-/// mirror the source 1:1 — notably the Java backend's *exact* mode, which
-/// reproduces the upstream reference compiler's emission shape, and analysis
-/// passes (lint, complexity) that report on the code as written. Codegen
-/// recipes (`miku run`, `miku build --clean`, native) request [`OptLevel::O1`]
-/// to shrink the program's static op budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OptLevel {
-    /// No optimization. The IR mirrors the source structure.
-    #[default]
-    O0,
-    /// Backend-agnostic constant folding / dead-code elimination.
-    O1,
-}
-
-impl OptLevel {
-    /// Whether optimization passes should run at this level.
-    #[must_use]
-    pub fn optimizes(self) -> bool {
-        matches!(self, OptLevel::O1)
-    }
-}
+use crate::opt::{OptConfig, OptLevel};
 
 /// Which opt-in lint groups the lint step should run, on top of the
 /// always-on defaults. Populated from CLI flags (`--pedantic`,
@@ -56,10 +33,11 @@ pub struct RecipeParams {
     /// If set, producer steps that opt into [`crate::combinators::RecipeStepStopOnError`]
     /// stop the pipeline when new diagnostics at or above this severity are emitted.
     pub stop_on_diagnostics: Option<Severity>,
-    /// How aggressively to optimize the IR. Defaults to [`OptLevel::O0`] so
-    /// analysis/diagnostic recipes see the code as written; codegen recipes
-    /// raise it via [`RecipeParams::with_opt`].
-    pub opt: OptLevel,
+    /// How aggressively to optimize the IR, and which passes run. Defaults to
+    /// [`OptLevel::O0`] so analysis/diagnostic recipes see the code as written;
+    /// codegen recipes raise it via [`RecipeParams::with_opt`] /
+    /// [`RecipeParams::with_opt_config`].
+    pub opt: OptConfig,
     /// Opt-in lint groups for recipes that include the lint step.
     /// Defaults to "none" — only the always-on groups run.
     pub lints: LintGroups,
@@ -72,7 +50,7 @@ impl Default for RecipeParams {
     fn default() -> Self {
         Self {
             stop_on_diagnostics: Some(Severity::Error),
-            opt: OptLevel::default(),
+            opt: OptConfig::default(),
             lints: LintGroups::default(),
             want: None,
         }
@@ -100,7 +78,7 @@ impl RecipeParams {
     pub fn lsp() -> Self {
         Self {
             stop_on_diagnostics: None,
-            opt: OptLevel::O0,
+            opt: OptConfig::for_level(OptLevel::O0),
             lints: LintGroups::default(),
             want: None,
         }
@@ -110,7 +88,7 @@ impl RecipeParams {
     pub fn permissive() -> Self {
         Self {
             stop_on_diagnostics: None,
-            opt: OptLevel::O0,
+            opt: OptConfig::for_level(OptLevel::O0),
             lints: LintGroups::default(),
             want: None,
         }
@@ -121,10 +99,20 @@ impl RecipeParams {
         self
     }
 
-    /// Request an [`OptLevel`] for this recipe (codegen drivers use
-    /// [`OptLevel::O1`]).
+    /// Request an [`OptLevel`] for this recipe (codegen drivers use at least
+    /// [`OptLevel::O1`]). Expands to the level's default pass set + fuel via
+    /// [`OptConfig::for_level`].
     #[must_use]
     pub fn with_opt(mut self, opt: OptLevel) -> Self {
+        self.opt = OptConfig::for_level(opt);
+        self
+    }
+
+    /// Request a fully-specified [`OptConfig`] (level + fuel + per-pass
+    /// toggles). Use this when a CLI flag has overridden individual passes or
+    /// the fuel budget; [`with_opt`](Self::with_opt) is the level-only shortcut.
+    #[must_use]
+    pub fn with_opt_config(mut self, opt: OptConfig) -> Self {
         self.opt = opt;
         self
     }

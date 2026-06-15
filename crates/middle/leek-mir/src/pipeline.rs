@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::{Artifact, Context, OptLevel, Step, StepError};
+use leek_pipeline::{Artifact, Context, OptConfig, OptLevel, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 
 use crate::MirProgram;
@@ -19,25 +19,37 @@ impl Artifact for MirArtifact {}
 /// Lowering diagnostics are emitted into the pipeline context (and returned
 /// from [`lower_mir_query`] on the salsa path).
 ///
-/// `opt` controls whether the backend-agnostic MIR passes
-/// ([`crate::optimize_program`]) run after lowering — codegen drivers request
-/// [`OptLevel::O1`]; analysis drivers keep the IR shape unchanged.
+/// `opt` controls which backend-agnostic MIR passes
+/// ([`crate::optimize_program_with`]) run after lowering — codegen drivers
+/// request at least [`OptLevel::O1`]; analysis drivers keep the IR shape
+/// unchanged.
 pub struct LowerMir {
-    opt: OptLevel,
+    opt: OptConfig,
 }
 
 impl LowerMir {
-    /// A lowering step at the given [`OptLevel`]. For manual `.with(...)`
-    /// composition; recipes build it from [`RecipeParams::opt`].
+    /// A lowering step at the given [`OptLevel`] (expands to that level's
+    /// default pass set). For manual `.with(...)` composition; recipes build it
+    /// from [`RecipeParams::opt`].
     #[must_use]
     pub fn new(opt: OptLevel) -> Self {
+        Self {
+            opt: OptConfig::for_level(opt),
+        }
+    }
+
+    /// A lowering step with a fully-specified [`OptConfig`].
+    #[must_use]
+    pub fn with_config(opt: OptConfig) -> Self {
         Self { opt }
     }
 }
 
 impl Default for LowerMir {
     fn default() -> Self {
-        Self { opt: OptLevel::O0 }
+        Self {
+            opt: OptConfig::for_level(OptLevel::O0),
+        }
     }
 }
 
@@ -65,7 +77,7 @@ impl RecipeArtifact for MirArtifact {
     type Produces = (MirArtifact,);
 }
 
-fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>> {
+fn run_lower_mir(cx: &mut Context<'_>, opt: OptConfig) -> Option<Arc<MirProgram>> {
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let out = lower_mir_query(db, file);
@@ -75,7 +87,7 @@ fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>>
         // asked for it.
         if opt.optimizes() {
             let mut program = (*out.program).clone();
-            crate::optimize_program(&mut program);
+            crate::optimize_program_with(&mut program, &opt);
             return Some(Arc::new(program));
         }
         return Some(out.program);
@@ -84,7 +96,7 @@ fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>>
     let (mut program, diags) = lower_file(hir.0.as_ref());
     cx.emit_all(diags);
     if opt.optimizes() {
-        crate::optimize_program(&mut program);
+        crate::optimize_program_with(&mut program, &opt);
     }
     Some(Arc::new(program))
 }

@@ -12,12 +12,15 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use leek_pipeline::{OptConfig, OptLevel};
 use leek_types::Type;
 
 use crate::ir::{
     BinaryOp, Block, Callee, Def, DefId, Expr, ExprKind, HirFile, LambdaBody, Literal, NameRef,
     PostfixOp, Stmt, UnaryOp,
 };
+
+mod intrinsics;
 use crate::visit::{
     Flow, VisitMut, VisitableMut, walk_expr_children, walk_expr_children_mut,
     walk_stmt_child_exprs, walk_stmt_child_exprs_mut, walk_stmt_child_stmts,
@@ -98,27 +101,73 @@ impl VisitMut<Expr> for ConstFolder<'_> {
 impl VisitMut<Block> for ConstFolder<'_> {}
 impl VisitMut<Stmt> for ConstFolder<'_> {}
 
-/// Run the backend-agnostic HIR optimization passes to a fixpoint.
+/// Run the backend-agnostic HIR optimization passes to a fixpoint at the
+/// default [`OptLevel::O1`] pass set. Thin wrapper over [`optimize_hir_with`]
+/// kept for callers/tests that don't carry an [`OptConfig`].
+pub fn optimize_hir(hir: &mut HirFile) -> usize {
+    optimize_hir_with(hir, &OptConfig::for_level(OptLevel::O1))
+}
+
+/// Run the enabled HIR optimization passes to a fixpoint (or until fuel runs
+/// out), in `cfg`-controlled rounds.
 ///
 /// Constant propagation and folding feed each other: propagating `A` into
 /// `var B = A + 1` lets folding reduce it to `var B = 3`, which then makes `B`
 /// itself a propagation candidate on the next round (`var C = B * 2` → `6`). A
 /// single linear pass stops after one such step, so we iterate until nothing
-/// changes. Each pass only ever replaces a sub-tree with a smaller constant or
-/// drops a dead declaration, so the program shrinks monotonically and the loop
-/// converges quickly; the bound is a safety backstop, not an expected limit.
+/// changes. Each pass only ever replaces a sub-tree with a smaller constant,
+/// canonicalizes a node, or drops a dead declaration, so the program shrinks
+/// monotonically (after desugaring's one-time expansion) and the loop converges
+/// quickly; `MAX_ROUNDS` is a safety backstop, not an expected limit.
+///
+/// Which passes run is governed by `cfg` (see [`OptConfig`]); the loop also
+/// stops early once [`cfg.fuel`](OptConfig::fuel) is exhausted. At
+/// [`OptLevel::O1`] the enabled set + order are exactly the pre-levels behavior
+/// (propagate → inline → fold → eliminate), so O1 output is unchanged.
 ///
 /// Returns the total number of rewrites across all rounds.
-pub fn optimize_hir(hir: &mut HirFile) -> usize {
+pub fn optimize_hir_with(hir: &mut HirFile, cfg: &OptConfig) -> usize {
     const MAX_ROUNDS: usize = 8;
+    let mut fuel = cfg.fuel;
     let mut total = 0;
     for _ in 0..MAX_ROUNDS {
+        if !fuel.available() {
+            break;
+        }
+        // Purity feeds DCE (drop unused pure calls) and inlining (O3). Recompute
+        // each round: inlining can change the call graph, but only ever turns an
+        // impure context purer, so a stale set would just miss opportunities.
+        let purity = if cfg.pure_fn {
+            pure_functions(hir)
+        } else {
+            PuritySet::empty()
+        };
         let mut changed = 0;
-        changed += propagate_const_globals(hir);
-        changed += propagate_const_locals(hir);
-        changed += inline_calls(hir);
-        changed += fold_expressions(hir);
-        changed += eliminate_dead_statements(hir);
+        // Run a pass only when enabled and fuel remains, charging the budget for
+        // the rewrites it reports. Each pass runs to completion (preserving its
+        // internal invariants), so fuel is honored at pass granularity.
+        macro_rules! pass {
+            ($enabled:expr, $call:expr) => {
+                if $enabled && fuel.available() {
+                    let c = $call;
+                    fuel.spend_n(c);
+                    changed += c;
+                }
+            };
+        }
+        pass!(cfg.desugar, desugar_hir(hir));
+        pass!(cfg.const_prop, propagate_const_globals(hir));
+        pass!(cfg.const_prop, propagate_const_locals(hir));
+        pass!(
+            cfg.inline,
+            inline_calls_cfg(hir, &purity, cfg.aggressive_inline)
+        );
+        pass!(cfg.const_fold, fold_expressions_cfg(hir, cfg.intrinsics));
+        pass!(cfg.algebraic, simplify_algebraic(hir));
+        pass!(
+            cfg.dce,
+            eliminate_dead_statements_cfg(hir, &purity, cfg.pure_fn)
+        );
         total += changed;
         if changed == 0 {
             break;
@@ -146,7 +195,19 @@ pub fn optimize_hir(hir: &mut HirFile) -> usize {
 /// version- or coercion-dependent semantics (`/`, `\`, `%`, `**`, `??`,
 /// `in`, identity ops, mixed string/number `==`, casts) are left untouched.
 pub fn fold_expressions(hir: &mut HirFile) -> usize {
-    let mut folder = ExprFolder { count: 0 };
+    fold_expressions_cfg(hir, false)
+}
+
+/// Like [`fold_expressions`], but when `intrinsics` is set also recognizes the
+/// extended intrinsic table — constant-evaluating and applying identity rewrites
+/// to known builtin calls (see [`mod@intrinsics`]). With `intrinsics == false`
+/// it folds exactly the conservative hardcoded set [`fold_expressions`] always
+/// did, so [`OptLevel::O1`] output is unchanged.
+pub fn fold_expressions_cfg(hir: &mut HirFile, intrinsics: bool) -> usize {
+    let mut folder = ExprFolder {
+        count: 0,
+        intrinsics,
+    };
     for def in &mut hir.defs {
         match def {
             Def::Function(f) => {
@@ -184,6 +245,9 @@ pub fn fold_expressions(hir: &mut HirFile) -> usize {
 /// nested constants collapse in a single pass (`1 + 2 + 3` → `6`).
 struct ExprFolder {
     count: usize,
+    /// Consult the extended intrinsic table (O2+) in addition to the
+    /// conservative hardcoded builtin whitelist.
+    intrinsics: bool,
 }
 
 impl ExprFolder {
@@ -229,6 +293,18 @@ impl ExprFolder {
                 *expr = *chosen;
                 self.count += 1;
             }
+            return;
+        }
+        // Intrinsic identity rewrites (O2+): `pow(x, 1)` → `x`, `count([..])` →
+        // a literal, etc. These can yield a non-literal, so they run before the
+        // literal-folding path below.
+        if self.intrinsics
+            && let ExprKind::Call(c) = &expr.kind
+            && let Callee::Function(NameRef::Builtin(name)) = &c.callee
+            && let Some(rewrite) = intrinsics::simplify_call(name, &c.args)
+        {
+            *expr = rewrite;
+            self.count += 1;
             return;
         }
         let folded = match &expr.kind {
@@ -713,26 +789,73 @@ fn drop_dead_in_boxed(s: &mut Box<Stmt>, dead: &HashMap<DefId, Literal>) {
 /// Java backend (which lowers HIR directly) benefit too, and trims the static
 /// per-statement charge.
 pub fn eliminate_dead_statements(hir: &mut HirFile) -> usize {
+    eliminate_dead_statements_cfg(hir, &PuritySet::empty(), false)
+}
+
+/// Like [`eliminate_dead_statements`], but when `drop_pure_calls` is set also
+/// drops discarded expression-statements that are calls to a pure function —
+/// a pure builtin (see [`intrinsics::is_pure`]) or a user function in `purity`
+/// — whose arguments are side-effect-free. With `drop_pure_calls == false` and
+/// an empty `purity` it behaves exactly like [`eliminate_dead_statements`], so
+/// [`OptLevel::O1`] output is unchanged.
+pub fn eliminate_dead_statements_cfg(
+    hir: &mut HirFile,
+    purity: &PuritySet,
+    drop_pure_calls: bool,
+) -> usize {
+    let ctx = DceCtx {
+        purity,
+        drop_pure_calls,
+    };
     let mut count = 0;
     for def in &mut hir.defs {
         match def {
             Def::Function(f) => {
                 if let Some(b) = &mut f.body {
-                    eliminate_in_stmts(&mut b.stmts, &mut count);
+                    eliminate_in_stmts(&mut b.stmts, &mut count, &ctx);
                 }
             }
             Def::Class(c) => {
                 for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
                     if let Some(b) = &mut m.body {
-                        eliminate_in_stmts(&mut b.stmts, &mut count);
+                        eliminate_in_stmts(&mut b.stmts, &mut count, &ctx);
                     }
                 }
             }
             Def::Global(_) | Def::Local(_) => {}
         }
     }
-    eliminate_in_stmts(&mut hir.main, &mut count);
+    eliminate_in_stmts(&mut hir.main, &mut count, &ctx);
     count
+}
+
+/// Context for dead-statement elimination: which functions are pure, and
+/// whether to drop unused pure-call statements at all.
+struct DceCtx<'a> {
+    purity: &'a PuritySet,
+    drop_pure_calls: bool,
+}
+
+/// Whether a discarded expression-statement `e` is safe to remove: either a
+/// pure value with no side effect ([`is_pure_discardable`]), or — when
+/// `ctx.drop_pure_calls` is set — a call to a pure function with side-effect-free
+/// arguments.
+fn is_discardable(e: &Expr, ctx: &DceCtx<'_>) -> bool {
+    if is_pure_discardable(e) {
+        return true;
+    }
+    if !ctx.drop_pure_calls {
+        return false;
+    }
+    if let ExprKind::Call(c) = &e.kind {
+        let pure = match &c.callee {
+            Callee::Function(NameRef::Builtin(name)) => intrinsics::is_pure(name),
+            Callee::Function(NameRef::Function(d)) => ctx.purity.contains(*d),
+            _ => false,
+        };
+        return pure && c.args.iter().all(is_side_effect_free);
+    }
+    false
 }
 
 /// The boolean value of a constant condition, or `None` if it isn't a `bool`
@@ -755,11 +878,11 @@ fn is_pure_discardable(e: &Expr) -> bool {
     )
 }
 
-fn eliminate_in_stmts(stmts: &mut Vec<Stmt>, count: &mut usize) {
+fn eliminate_in_stmts(stmts: &mut Vec<Stmt>, count: &mut usize, ctx: &DceCtx<'_>) {
     // Clean nested statement lists first (post-order), so a dead branch we
     // splice in is already simplified.
     for s in stmts.iter_mut() {
-        eliminate_in_children(s, count);
+        eliminate_in_children(s, count, ctx);
     }
     let old = std::mem::take(stmts);
     let last_idx = old.len().wrapping_sub(1);
@@ -804,7 +927,7 @@ fn eliminate_in_stmts(stmts: &mut Vec<Stmt>, count: &mut usize) {
                 *count += 1;
                 stmts.push(*d.body);
             }
-            Stmt::Expr(e) if is_pure_discardable(&e) && !is_last => *count += 1,
+            Stmt::Expr(e) if is_discardable(&e, ctx) && !is_last => *count += 1,
             other => stmts.push(other),
         }
     }
@@ -813,22 +936,22 @@ fn eliminate_in_stmts(stmts: &mut Vec<Stmt>, count: &mut usize) {
 /// Recurse into a statement's nested statement lists / bodies. Constant-`if`
 /// elimination itself happens at the [`Vec`] level in [`eliminate_in_stmts`];
 /// braced bodies are `Block`s, so they route back through there.
-fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
+fn eliminate_in_children(s: &mut Stmt, count: &mut usize, ctx: &DceCtx<'_>) {
     match s {
         Stmt::If(i) => {
-            eliminate_in_children(i.then_branch.as_mut(), count);
+            eliminate_in_children(i.then_branch.as_mut(), count, ctx);
             if let Some(e) = &mut i.else_branch {
-                eliminate_in_children(e.as_mut(), count);
+                eliminate_in_children(e.as_mut(), count, ctx);
             }
         }
-        Stmt::While(w) => eliminate_in_children(w.body.as_mut(), count),
-        Stmt::DoWhile(d) => eliminate_in_children(d.body.as_mut(), count),
-        Stmt::For(f) => eliminate_in_children(f.body.as_mut(), count),
-        Stmt::Foreach(fe) => eliminate_in_children(fe.body.as_mut(), count),
-        Stmt::Block(b) => eliminate_in_stmts(&mut b.stmts, count),
+        Stmt::While(w) => eliminate_in_children(w.body.as_mut(), count, ctx),
+        Stmt::DoWhile(d) => eliminate_in_children(d.body.as_mut(), count, ctx),
+        Stmt::For(f) => eliminate_in_children(f.body.as_mut(), count, ctx),
+        Stmt::Foreach(fe) => eliminate_in_children(fe.body.as_mut(), count, ctx),
+        Stmt::Block(b) => eliminate_in_stmts(&mut b.stmts, count, ctx),
         Stmt::Switch(sw) => {
             for arm in &mut sw.arms {
-                eliminate_in_stmts(&mut arm.body, count);
+                eliminate_in_stmts(&mut arm.body, count, ctx);
             }
         }
         _ => {}
@@ -1211,6 +1334,456 @@ fn for_each_file_expr_mut(hir: &mut HirFile, f: &mut impl FnMut(&mut Expr)) {
     for s in &mut hir.main {
         visit_stmt_all_exprs_mut(s, f);
     }
+}
+
+// ===========================================================================
+// Shared predicates / constructors for the O2+ passes below.
+// ===========================================================================
+
+/// Whether evaluating `e` has no observable side effect, so an algebraic /
+/// intrinsic rewrite may duplicate or drop it. Conservative: any call, `new`,
+/// assignment, in-place mutation, or non-trivial construct is treated as
+/// possibly-effecting (returns `false`). Reads (`Name`, `Field`, `Index`) of a
+/// missing slot can return `null`/raise depending on strict mode, so only the
+/// plainly-pure expression forms are allowed.
+fn is_side_effect_free(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) => true,
+        ExprKind::Unary(op, x) => {
+            !matches!(op, UnaryOp::PreInc | UnaryOp::PreDec) && is_side_effect_free(x)
+        }
+        ExprKind::Binary(op, l, r) => {
+            !op.is_assignment() && is_side_effect_free(l) && is_side_effect_free(r)
+        }
+        ExprKind::Ternary(c, a, b) => {
+            is_side_effect_free(c) && is_side_effect_free(a) && is_side_effect_free(b)
+        }
+        ExprKind::Array(xs) => xs.iter().all(is_side_effect_free),
+        _ => false,
+    }
+}
+
+/// A simple, side-effect-free assignment target that can be duplicated: a plain
+/// local or global name. (Index / field places route through the MIR lowering's
+/// read-modify-write path, which handles LegacyArray writeback, so desugaring
+/// leaves them alone.)
+fn is_simple_place(e: &Expr) -> bool {
+    matches!(
+        &e.kind,
+        ExprKind::Name(NameRef::Local(_) | NameRef::Global(_))
+    )
+}
+
+/// Build a literal expression carrying the given type/span.
+fn lit_expr(lit: Literal, ty: Type, span: leek_span::Span) -> Expr {
+    Expr {
+        kind: ExprKind::Literal(lit),
+        ty,
+        span,
+    }
+}
+
+// ===========================================================================
+// Desugaring (O2+): canonicalize compound assignment and statement-position
+// increment/decrement into core forms, so later passes and MIR lowering see
+// simpler HIR.
+// ===========================================================================
+
+/// Rewrite compound assignments (`x += y` → `x = x + y`) on simple places and
+/// statement-position `x++`/`++x` (`x = x + 1`) into core HIR. Returns the
+/// number of nodes rewritten.
+///
+/// Additive and conservative: `^=` (version-dependent pow-vs-xor), `??=`
+/// (coercing `??`), and compound assigns / postfix on index/field places are
+/// left for the MIR lowering's existing read-modify-write handling, so the O0/O1
+/// path is unchanged.
+pub fn desugar_hir(hir: &mut HirFile) -> usize {
+    let mut count = 0;
+    // Compound assignment in *any* position: an assignment expression returns
+    // its assigned value, so a nested `y = (x += 1)` desugars soundly too.
+    for_each_file_expr_mut(hir, &mut |e| desugar_compound_assign_expr(e, &mut count));
+    // Increment/decrement only when its value is discarded (statement position):
+    // a *used* postfix yields the old value, which a plain assignment can't
+    // express, so those are left for MIR lowering.
+    for def in &mut hir.defs {
+        match def {
+            Def::Function(f) => {
+                if let Some(b) = &mut f.body {
+                    for s in &mut b.stmts {
+                        desugar_incdec_in_stmt(s, &mut count);
+                    }
+                }
+            }
+            Def::Class(c) => {
+                for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
+                    if let Some(b) = &mut m.body {
+                        for s in &mut b.stmts {
+                            desugar_incdec_in_stmt(s, &mut count);
+                        }
+                    }
+                }
+            }
+            Def::Global(_) | Def::Local(_) => {}
+        }
+    }
+    for s in &mut hir.main {
+        desugar_incdec_in_stmt(s, &mut count);
+    }
+    count
+}
+
+/// The base operator a compound assignment desugars to, or `None` for ops left
+/// untouched (`=`, `^=`, `??=`).
+fn desugarable_base(op: BinaryOp) -> Option<BinaryOp> {
+    match op {
+        BinaryOp::BitXorAssign | BinaryOp::NullCoalesceAssign => None,
+        other => other.compound_base(),
+    }
+}
+
+fn desugar_compound_assign_expr(e: &mut Expr, count: &mut usize) {
+    let base = match &e.kind {
+        ExprKind::Binary(op, lhs, _) if is_simple_place(lhs) => match desugarable_base(*op) {
+            Some(b) => b,
+            None => return,
+        },
+        _ => return,
+    };
+    let ty = e.ty.clone();
+    let span = e.span;
+    let ExprKind::Binary(_, lhs, rhs) =
+        std::mem::replace(&mut e.kind, ExprKind::Literal(Literal::Null))
+    else {
+        unreachable!("matched a Binary compound assignment above");
+    };
+    let combined = Expr {
+        kind: ExprKind::Binary(base, lhs.clone(), rhs),
+        ty,
+        span,
+    };
+    e.kind = ExprKind::Binary(BinaryOp::Assign, lhs, Box::new(combined));
+    *count += 1;
+}
+
+fn desugar_incdec_in_stmt(s: &mut Stmt, count: &mut usize) {
+    if let Stmt::Expr(e) = s
+        && let Some(rewrite) = incdec_as_assign(e)
+    {
+        *e = rewrite;
+        *count += 1;
+    }
+    walk_stmt_child_stmts_mut(s, &mut |c| desugar_incdec_in_stmt(c, count));
+}
+
+/// `x++` / `++x` / `x--` / `--x` on a simple place, with its value discarded,
+/// as the equivalent `x = x ± 1`. `None` for anything else.
+fn incdec_as_assign(e: &Expr) -> Option<Expr> {
+    let (x, op) = match &e.kind {
+        ExprKind::Unary(UnaryOp::PreInc, x) | ExprKind::Postfix(PostfixOp::PostInc, x) => {
+            (x, BinaryOp::Add)
+        }
+        ExprKind::Unary(UnaryOp::PreDec, x) | ExprKind::Postfix(PostfixOp::PostDec, x) => {
+            (x, BinaryOp::Sub)
+        }
+        _ => return None,
+    };
+    if !is_simple_place(x) {
+        return None;
+    }
+    let one = lit_expr(Literal::Int(1), Type::Integer, x.span);
+    let combined = Expr {
+        kind: ExprKind::Binary(op, x.clone(), Box::new(one)),
+        ty: e.ty.clone(),
+        span: e.span,
+    };
+    Some(Expr {
+        kind: ExprKind::Binary(BinaryOp::Assign, x.clone(), Box::new(combined)),
+        ty: e.ty.clone(),
+        span: e.span,
+    })
+}
+
+// ===========================================================================
+// Algebraic / cosmetic simplification (O2+).
+// ===========================================================================
+
+/// Apply identity / absorption laws (`x + 0` → `x`, `x * 1` → `x`, `!!x` → `x`,
+/// …) in place across the file. Returns the number of rewrites.
+///
+/// **Soundness:** `+`/`*`/`&&`/… are overloaded and coercing in LeekScript, so a
+/// type-dependent rule fires only when the relevant operand's inferred [`Type`]
+/// is numeric / boolean — `"" + x` (string concat), `x * 0` on a
+/// `string`/`Real`/`Any`, etc. are *not* identities and are left alone. An
+/// operand is dropped only when it is [`is_side_effect_free`].
+///
+/// Post-lowering HIR is currently untyped (every `expr.ty` is [`Type::Any`]), so
+/// the type-dependent rules are conservatively skipped today and only the
+/// universally-sound ones fire: a constant short-circuit side (`false && x` →
+/// `false`, `true || x` → `true`) collapses regardless of the other operand's
+/// type. The type-guarded rules become active automatically if/when inferred
+/// types are attached to the HIR.
+pub fn simplify_algebraic(hir: &mut HirFile) -> usize {
+    let mut count = 0;
+    for_each_file_expr_mut(hir, &mut |e| simplify_algebraic_expr(e, &mut count));
+    count
+}
+
+fn is_int_lit(e: &Expr, n: i64) -> bool {
+    matches!(&e.kind, ExprKind::Literal(Literal::Int(v)) if *v == n)
+}
+
+fn is_bool_lit(e: &Expr, b: bool) -> bool {
+    matches!(&e.kind, ExprKind::Literal(Literal::Bool(v)) if *v == b)
+}
+
+fn is_integer_typed(e: &Expr) -> bool {
+    matches!(e.ty, Type::Integer)
+}
+
+fn is_bool_typed(e: &Expr) -> bool {
+    matches!(e.ty, Type::Boolean)
+}
+
+fn not_expr(inner: Expr, span: leek_span::Span) -> Expr {
+    Expr {
+        kind: ExprKind::Unary(UnaryOp::Not, Box::new(inner)),
+        ty: Type::Boolean,
+        span,
+    }
+}
+
+fn simplify_algebraic_expr(e: &mut Expr, count: &mut usize) {
+    let new: Option<Expr> = match &e.kind {
+        ExprKind::Binary(op, l, r) => simplify_binary(*op, l, r, e),
+        // `!!x` → `x` (x boolean-typed).
+        ExprKind::Unary(UnaryOp::Not, inner) => match &inner.kind {
+            ExprKind::Unary(UnaryOp::Not, y) if is_bool_typed(y) => Some(y.as_ref().clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(n) = new {
+        *e = n;
+        *count += 1;
+    }
+}
+
+fn simplify_binary(op: BinaryOp, l: &Expr, r: &Expr, e: &Expr) -> Option<Expr> {
+    let bool_lit = |b: bool| lit_expr(Literal::Bool(b), Type::Boolean, e.span);
+    match op {
+        BinaryOp::Add => {
+            // x + 0, 0 + x → x   (integer-typed; string `+` is concatenation)
+            if is_int_lit(r, 0) && is_integer_typed(l) {
+                Some(l.clone())
+            } else if is_int_lit(l, 0) && is_integer_typed(r) {
+                Some(r.clone())
+            } else {
+                None
+            }
+        }
+        BinaryOp::Sub => (is_int_lit(r, 0) && is_integer_typed(l)).then(|| l.clone()),
+        BinaryOp::Mul => {
+            // `x * 0` / `0 * x` → 0 (integer-typed, side-effect-free operand dropped).
+            let zero_side = (is_int_lit(r, 0) && is_integer_typed(l) && is_side_effect_free(l))
+                || (is_int_lit(l, 0) && is_integer_typed(r) && is_side_effect_free(r));
+            if is_int_lit(r, 1) && is_integer_typed(l) {
+                Some(l.clone())
+            } else if is_int_lit(l, 1) && is_integer_typed(r) {
+                Some(r.clone())
+            } else if zero_side {
+                Some(lit_expr(Literal::Int(0), Type::Integer, e.span))
+            } else {
+                None
+            }
+        }
+        BinaryOp::Div => (is_int_lit(r, 1) && is_integer_typed(l)).then(|| l.clone()),
+        BinaryOp::And => {
+            // `false && x` → false (x never runs); `x && false` → false when x has
+            // no effect. Both collapse to the boolean literal `false`.
+            let to_false = is_bool_lit(l, false)
+                || (is_bool_lit(r, false) && is_bool_typed(l) && is_side_effect_free(l));
+            if is_bool_lit(r, true) && is_bool_typed(l) {
+                Some(l.clone()) // x && true → x
+            } else if is_bool_lit(l, true) && is_bool_typed(r) {
+                Some(r.clone()) // true && x → x
+            } else if to_false {
+                Some(bool_lit(false))
+            } else {
+                None
+            }
+        }
+        BinaryOp::Or => {
+            // `true || x` → true (x never runs); `x || true` → true when x has no
+            // effect. Both collapse to the boolean literal `true`.
+            let to_true = is_bool_lit(l, true)
+                || (is_bool_lit(r, true) && is_bool_typed(l) && is_side_effect_free(l));
+            if is_bool_lit(r, false) && is_bool_typed(l) {
+                Some(l.clone()) // x || false → x
+            } else if is_bool_lit(l, false) && is_bool_typed(r) {
+                Some(r.clone()) // false || x → x
+            } else if to_true {
+                Some(bool_lit(true))
+            } else {
+                None
+            }
+        }
+        BinaryOp::Eq => {
+            // x == true → x ; x == false → !x   (boolean x; symmetric)
+            if is_bool_lit(r, true) && is_bool_typed(l) {
+                Some(l.clone())
+            } else if is_bool_lit(l, true) && is_bool_typed(r) {
+                Some(r.clone())
+            } else if is_bool_lit(r, false) && is_bool_typed(l) {
+                Some(not_expr(l.clone(), e.span))
+            } else if is_bool_lit(l, false) && is_bool_typed(r) {
+                Some(not_expr(r.clone(), e.span))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+// ===========================================================================
+// Pure-function detection (O2+): feeds dead-code elimination (drop unused pure
+// calls) and aggressive inlining.
+// ===========================================================================
+
+/// The set of free functions proven free of observable side effects.
+pub struct PuritySet(HashSet<DefId>);
+
+impl PuritySet {
+    /// An empty set — nothing is known pure (the O0/O1 default).
+    #[must_use]
+    pub fn empty() -> Self {
+        PuritySet(HashSet::new())
+    }
+
+    /// Whether function `d` is known pure.
+    #[must_use]
+    pub fn contains(&self, d: DefId) -> bool {
+        self.0.contains(&d)
+    }
+}
+
+/// Detect free functions with no observable side effects, via a fixpoint over
+/// the call graph (so mutually-recursive pure functions converge to pure).
+///
+/// Conservative: a function is impure if its body performs *any* assignment /
+/// `++` / `--` / `@`, constructs an object (`new`), contains a lambda, calls a
+/// builtin not in [`intrinsics::is_pure`], or calls a non-free-function
+/// (method/closure). It is then pure only if every free function it calls is
+/// also pure.
+fn pure_functions(hir: &HirFile) -> PuritySet {
+    let mut ids: Vec<DefId> = Vec::new();
+    let mut locally_pure: HashMap<DefId, bool> = HashMap::new();
+    let mut calls: HashMap<DefId, HashSet<DefId>> = HashMap::new();
+    for (i, def) in hir.defs.iter().enumerate() {
+        let Def::Function(f) = def else { continue };
+        let Some(body) = &f.body else { continue };
+        let id = DefId(u32::try_from(i).unwrap_or(u32::MAX));
+        ids.push(id);
+        let mut impure = false;
+        let mut callset: HashSet<DefId> = HashSet::new();
+        for s in &body.stmts {
+            visit_stmt_all_exprs(s, &mut |e| purity_scan_expr(e, &mut impure, &mut callset));
+        }
+        locally_pure.insert(id, !impure);
+        calls.insert(id, callset);
+    }
+    let mut pure: HashSet<DefId> = ids.iter().copied().filter(|id| locally_pure[id]).collect();
+    loop {
+        let next: HashSet<DefId> = pure
+            .iter()
+            .copied()
+            .filter(|id| calls[id].iter().all(|c| pure.contains(c)))
+            .collect();
+        if next.len() == pure.len() {
+            break;
+        }
+        pure = next;
+    }
+    PuritySet(pure)
+}
+
+/// Inspect one expression node for the purity analysis: flag locally-impure
+/// constructs, and record direct calls to free functions.
+fn purity_scan_expr(e: &Expr, impure: &mut bool, calls: &mut HashSet<DefId>) {
+    match &e.kind {
+        ExprKind::Binary(op, _, _) if op.is_assignment() => *impure = true,
+        ExprKind::Unary(UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::Ref, _) => *impure = true,
+        ExprKind::Postfix(PostfixOp::PostInc | PostfixOp::PostDec, _) => *impure = true,
+        ExprKind::New(_) | ExprKind::Lambda(_) => *impure = true,
+        ExprKind::Call(c) => match &c.callee {
+            Callee::Function(NameRef::Builtin(name)) if intrinsics::is_pure(name) => {}
+            Callee::Function(NameRef::Function(d)) => {
+                calls.insert(*d);
+            }
+            _ => *impure = true,
+        },
+        _ => {}
+    }
+}
+
+// ===========================================================================
+// Config-aware inlining.
+// ===========================================================================
+
+/// Inline calls per the optimization config. With `aggressive == false` this is
+/// exactly [`inline_calls`]; with `aggressive == true` (O3) it additionally
+/// inlines a non-trivial **side-effect-free** argument when its parameter is
+/// used at most once in the body (no work duplicated, no side effect reordered).
+pub fn inline_calls_cfg(hir: &mut HirFile, _purity: &PuritySet, aggressive: bool) -> usize {
+    if !aggressive {
+        return inline_calls(hir);
+    }
+    let inlinable = collect_inlinable(hir);
+    if inlinable.is_empty() {
+        return 0;
+    }
+    // Per inlinable function, how many times each parameter is read in the body.
+    let uses: HashMap<DefId, HashMap<DefId, usize>> = inlinable
+        .iter()
+        .map(|(id, (params, ret))| {
+            let mut m: HashMap<DefId, usize> = params.iter().map(|p| (*p, 0usize)).collect();
+            visit_expr_all(ret, &mut |x| {
+                if let ExprKind::Name(NameRef::Local(d)) = &x.kind
+                    && let Some(c) = m.get_mut(d)
+                {
+                    *c += 1;
+                }
+            });
+            (*id, m)
+        })
+        .collect();
+    let mut count = 0;
+    for_each_file_expr_mut(hir, &mut |e| {
+        let subst: Option<(Vec<DefId>, Expr, Vec<Expr>)> = match &e.kind {
+            ExprKind::Call(call) => match &call.callee {
+                Callee::Function(NameRef::Function(d)) => inlinable.get(d).and_then(|(ps, ret)| {
+                    if ps.len() != call.args.len() {
+                        return None;
+                    }
+                    let uc = &uses[d];
+                    let ok = call.args.iter().zip(ps).all(|(arg, p)| {
+                        is_trivial_arg(arg)
+                            || (is_side_effect_free(arg) && uc.get(p).copied().unwrap_or(0) <= 1)
+                    });
+                    ok.then(|| (ps.clone(), ret.clone(), call.args.clone()))
+                }),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((params, mut body, args)) = subst {
+            let map: HashMap<DefId, Expr> = params.into_iter().zip(args).collect();
+            substitute_params(&mut body, &map);
+            *e = body;
+            count += 1;
+        }
+    });
+    count
 }
 
 #[cfg(test)]
@@ -1704,5 +2277,205 @@ mod tests {
         };
         assert_eq!(before, 7, "1, 2, 3, (2*3), 4, two binops's tree = 7 nodes");
         assert_eq!(after, 1, "folds to the single literal 3");
+    }
+
+    // ----- desugaring (O2+) -----
+
+    use leek_pipeline::{Fuel, OptConfig, OptLevel, Pass};
+
+    #[test]
+    fn desugar_rewrites_compound_assign_on_local() {
+        let mut hir = lower("var x = read()\nx += 5\nreturn x\n");
+        assert_eq!(desugar_hir(&mut hir), 1);
+        let Stmt::Expr(e) = &hir.main[1] else {
+            panic!("expected expr stmt")
+        };
+        let ExprKind::Binary(BinaryOp::Assign, _, rhs) = &e.kind else {
+            panic!("x += 5 should desugar to a plain assignment")
+        };
+        assert!(
+            matches!(rhs.kind, ExprKind::Binary(BinaryOp::Add, _, _)),
+            "rhs is `x + 5`"
+        );
+    }
+
+    #[test]
+    fn desugar_leaves_index_compound_assign_for_mir() {
+        // An index place routes through MIR lowering's read-modify-write path.
+        let mut hir = lower("var a = [1, 2]\na[0] += 5\nreturn a\n");
+        assert_eq!(desugar_hir(&mut hir), 0);
+    }
+
+    #[test]
+    fn desugar_rewrites_statement_increment() {
+        let mut hir = lower("var x = read()\nx++\nreturn x\n");
+        assert_eq!(desugar_hir(&mut hir), 1);
+        let Stmt::Expr(e) = &hir.main[1] else {
+            panic!("expected expr stmt")
+        };
+        assert!(
+            matches!(e.kind, ExprKind::Binary(BinaryOp::Assign, _, _)),
+            "x++ → x = x + 1"
+        );
+    }
+
+    // ----- algebraic simplification (O2+) -----
+
+    #[test]
+    fn algebraic_simplifies_constant_short_circuit() {
+        // `false && x` → false and `true || x` → true hold for any x (the
+        // short-circuit side is constant), so they fire even on untyped HIR.
+        let mut hir =
+            lower("var x = read() > 0\nvar a = false && x\nvar b = true || x\nreturn a\n");
+        assert_eq!(simplify_algebraic(&mut hir), 2);
+        let Stmt::VarDecl(va) = &hir.main[1] else {
+            panic!("expected var a")
+        };
+        assert_eq!(
+            va.init.as_ref().unwrap().kind,
+            ExprKind::Literal(Bool(false))
+        );
+        let Stmt::VarDecl(vb) = &hir.main[2] else {
+            panic!("expected var b")
+        };
+        assert_eq!(
+            vb.init.as_ref().unwrap().kind,
+            ExprKind::Literal(Bool(true))
+        );
+    }
+
+    #[test]
+    fn algebraic_skips_type_dependent_rules_when_untyped() {
+        // `x + 0` is only an identity when x is integer; with untyped HIR the
+        // type is unknown, so it is conservatively left alone (a `string + 0`
+        // would concatenate). This is the coercion-safety guard in action.
+        let mut hir = lower("var x = read()\nvar y = x + 0\nreturn y\n");
+        assert_eq!(simplify_algebraic(&mut hir), 0);
+    }
+
+    #[test]
+    fn algebraic_skips_real_times_zero() {
+        // `real * 0` is NOT an identity (NaN/Inf), so it's left alone.
+        let mut hir = lower("var r = 1.5\nvar y = r * 0\nreturn y\n");
+        assert_eq!(simplify_algebraic(&mut hir), 0);
+    }
+
+    #[test]
+    fn algebraic_skips_side_effecting_times_zero() {
+        // f() is integer-typed but has a side effect, so `f() * 0` keeps the call.
+        let mut hir = lower("function f() { return 1 }\nvar y = f() * 0\nreturn y\n");
+        assert_eq!(simplify_algebraic(&mut hir), 0);
+    }
+
+    // ----- intrinsic recognition (O2+) -----
+
+    #[test]
+    fn intrinsics_fold_count_of_literal_array() {
+        let mut hir = lower("var n = count([1, 2, 3])\nreturn n\n");
+        assert_eq!(fold_expressions_cfg(&mut hir, true), 1);
+        let Stmt::VarDecl(v) = &hir.main[0] else {
+            panic!("expected var n")
+        };
+        assert_eq!(v.init.as_ref().unwrap().kind, ExprKind::Literal(Int(3)));
+    }
+
+    #[test]
+    fn intrinsics_off_leaves_count_call() {
+        // Without the intrinsic table (O1), `count([..])` is not folded.
+        let mut hir = lower("var n = count([1, 2, 3])\nreturn n\n");
+        assert_eq!(fold_expressions_cfg(&mut hir, false), 0);
+    }
+
+    // ----- pure-function detection + DCE (O2+) -----
+
+    #[test]
+    fn dce_drops_unused_pure_call_at_o2_but_not_o1() {
+        let src = "var x = read()\nabs(x)\nreturn x\n";
+        let has_call = |hir: &HirFile| {
+            hir.main
+                .iter()
+                .any(|s| matches!(s, Stmt::Expr(e) if matches!(&e.kind, ExprKind::Call(_))))
+        };
+
+        let mut o1 = lower(src);
+        optimize_hir_with(&mut o1, &OptConfig::for_level(OptLevel::O1));
+        assert!(has_call(&o1), "O1 keeps the pure `abs(x)` (no purity pass)");
+
+        let mut o2 = lower(src);
+        optimize_hir_with(&mut o2, &OptConfig::for_level(OptLevel::O2));
+        assert!(!has_call(&o2), "O2 drops the unused pure `abs(x)`");
+    }
+
+    #[test]
+    fn dce_keeps_impure_user_call_drops_pure_one() {
+        // `p` is pure (no writes); `imp` writes a global → impure. With inlining
+        // off, both stay calls so DCE alone decides.
+        let src = "global g = 0\n\
+             function p(x) { return x * x }\n\
+             function imp(y) { g = y\nreturn y }\n\
+             var a = read()\n\
+             p(a)\n\
+             imp(a)\n\
+             return a\n";
+        let mut hir = lower(src);
+        let cfg = OptConfig::for_level(OptLevel::O2).without(Pass::Inline);
+        optimize_hir_with(&mut hir, &cfg);
+        let user_calls = hir
+            .main
+            .iter()
+            .filter(|s| {
+                matches!(s, Stmt::Expr(e)
+                    if matches!(&e.kind, ExprKind::Call(c)
+                        if matches!(&c.callee, Callee::Function(NameRef::Function(_)))))
+            })
+            .count();
+        assert_eq!(user_calls, 1, "pure p(a) dropped, impure imp(a) kept");
+    }
+
+    // ----- fuel + toggles -----
+
+    #[test]
+    fn fuel_bounds_total_work() {
+        let src = "var a = 1 + 1\nvar b = 2 + 2\nvar c = 3 + 3\nreturn a + b + c\n";
+        let mut limited = lower(src);
+        let n = optimize_hir_with(
+            &mut limited,
+            &OptConfig::for_level(OptLevel::O1).with_fuel(Fuel::Limited(1)),
+        );
+        let mut full = lower(src);
+        let m = optimize_hir_with(&mut full, &OptConfig::for_level(OptLevel::O1));
+        assert!(
+            n > 0 && n < m,
+            "limited fuel ({n}) does less than unlimited ({m})"
+        );
+    }
+
+    #[test]
+    fn disabling_const_fold_leaves_arithmetic() {
+        let mut hir = lower("var x = 1 + 2\nreturn x\n");
+        optimize_hir_with(
+            &mut hir,
+            &OptConfig::for_level(OptLevel::O1).without(Pass::ConstFold),
+        );
+        let Stmt::VarDecl(v) = &hir.main[0] else {
+            panic!("expected var x")
+        };
+        assert!(
+            matches!(
+                v.init.as_ref().unwrap().kind,
+                ExprKind::Binary(BinaryOp::Add, _, _)
+            ),
+            "fold disabled → 1 + 2 stays"
+        );
+    }
+
+    #[test]
+    fn o0_is_a_noop() {
+        let src = "var x = 1 + 2\nreturn x\n";
+        let mut hir = lower(src);
+        assert_eq!(
+            optimize_hir_with(&mut hir, &OptConfig::for_level(OptLevel::O0)),
+            0
+        );
     }
 }

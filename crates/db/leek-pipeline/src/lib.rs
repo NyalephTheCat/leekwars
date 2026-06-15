@@ -35,6 +35,7 @@ mod adapters;
 mod combinators;
 mod context;
 mod macros;
+mod opt;
 mod pipeline;
 mod project;
 mod recipe;
@@ -49,12 +50,13 @@ pub use context::{Artifact, Context, Input};
 // Re-exported so Input-constructing crates can set `flags` without a direct
 // `leek-span` dependency.
 pub use leek_span::FeatureFlags;
+pub use opt::{Fuel, OptConfig, OptLevel, Pass};
 pub use pipeline::{Pipeline, Run, Step, StepError};
 pub use project::{
     LoadedProjectFile, Project, ProjectError, ProjectIndex, SourceInput, walk_leek_files,
 };
 pub use recipe::{
-    ArtifactList, LintGroups, OptLevel, RecipeArtifact, RecipeError, RecipeParams, RecipePlan,
-    RecipeStep, pipeline_for as pipeline_for_recipe, plan_for,
+    ArtifactList, LintGroups, RecipeArtifact, RecipeError, RecipeParams, RecipePlan, RecipeStep,
+    pipeline_for as pipeline_for_recipe, plan_for,
 };
 pub use timed::{StepTiming, Timed, TimedBox, TimingSink};

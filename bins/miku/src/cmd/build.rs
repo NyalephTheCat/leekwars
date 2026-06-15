@@ -40,7 +40,7 @@ pub fn run(
     // Java *exact* and the LeekScript source backend keep the IR
     // source-faithful (O0); the LeekScript backend runs its own opt passes
     // under `--optimize` instead. Everything else folds constants (O1).
-    let opt = if (matches!(backend, BackendKind::Java) && !clean_java)
+    let default_opt = if (matches!(backend, BackendKind::Java) && !clean_java)
         || matches!(backend, BackendKind::LeekScript)
     {
         leek_recipes::OptLevel::O0
@@ -50,7 +50,9 @@ pub fn run(
 
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default().with_opt(opt),
+        // The backend picks a default level (Java exact / LeekScript stay O0);
+        // `-O` / `--fuel` / `--no-*` flags override it.
+        params: RecipeParams::default().with_opt_config(args.opt.to_config(default_opt)),
         color: color.into(),
         format: format.into(),
     };

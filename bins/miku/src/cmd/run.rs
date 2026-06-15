@@ -30,8 +30,9 @@ pub fn run(
 
     let config = DriverConfig {
         target: Target::Linted,
-        // The interpreter enforces an op budget, so fold constants to shrink it.
-        params: RecipeParams::default().with_opt(OptLevel::O1),
+        // The interpreter enforces an op budget, so optimize to shrink it.
+        // Default to O1; `-O` / `--fuel` / `--no-*` flags override.
+        params: RecipeParams::default().with_opt_config(args.opt.to_config(OptLevel::O1)),
         color: color.into(),
         format: format.into(),
     };

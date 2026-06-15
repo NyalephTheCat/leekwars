@@ -89,6 +89,9 @@ pub fn run() -> Result<ExitCode> {
             pedantic: cli.pedantic,
             nursery: cli.nursery,
         },
+        // Default to O0 (leekc has historically emitted source-faithful IR);
+        // `-O` / `--fuel` / `--no-*` raise it.
+        cli.opt.to_config(leek_recipes::OptLevel::O0),
     );
     let result = pipeline.run(input);
 

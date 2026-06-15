@@ -20,22 +20,71 @@
 //! The passes preserve [`MirFunction`] well-formedness; callers run
 //! [`verify_program`](crate::verify::verify_program) after to assert it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use leek_pipeline::{Fuel, OptConfig, OptLevel};
 
 use crate::ir::{BlockId, Const, MirFunction, MirProgram, Operand, Terminator};
 
-/// Optimize every function in `program` in place.
+/// Optimize every function in `program` in place at the default
+/// [`OptLevel::O1`] pass set. Thin wrapper over [`optimize_program_with`].
 pub fn optimize_program(program: &mut MirProgram) {
+    optimize_program_with(program, &OptConfig::for_level(OptLevel::O1));
+}
+
+/// Optimize every function in `program` per `cfg`. A single fuel budget is
+/// shared across all functions, so a finite budget bounds total work.
+pub fn optimize_program_with(program: &mut MirProgram, cfg: &OptConfig) {
+    let mut fuel = cfg.fuel;
     for f in &mut program.functions {
-        optimize_function(f);
+        optimize_function_with(f, cfg, &mut fuel);
     }
 }
 
-/// Run the per-function passes: simplify constant terminators, then prune the
-/// blocks that became unreachable.
+/// Run the per-function passes once at [`OptLevel::O1`]. Thin wrapper kept for
+/// callers/tests that don't carry an [`OptConfig`].
 pub fn optimize_function(f: &mut MirFunction) {
-    simplify_const_terminators(f);
-    remove_unreachable_blocks(f);
+    let mut fuel = Fuel::Unlimited;
+    optimize_function_with(f, &OptConfig::for_level(OptLevel::O1), &mut fuel);
+}
+
+/// Run the enabled MIR passes on `f` to a fixpoint (or until `fuel` runs out):
+/// constant-terminator simplification, optional jump-threading, then
+/// unreachable-block pruning. Returns the number of rewrites.
+///
+/// At [`OptLevel::O1`] only `simplify_const_terminators` + `remove_unreachable_blocks`
+/// run; the loop reaches its fixpoint after one effective pass (block removal
+/// exposes no new constant terminator), so O1 output matches the previous
+/// single-pass behavior.
+pub fn optimize_function_with(f: &mut MirFunction, cfg: &OptConfig, fuel: &mut Fuel) -> usize {
+    const MAX_ROUNDS: usize = 16;
+    let mut total = 0;
+    for _ in 0..MAX_ROUNDS {
+        if !fuel.available() {
+            break;
+        }
+        let mut changed = 0;
+        if cfg.mir_const_branch && fuel.available() {
+            let c = simplify_const_terminators(f);
+            fuel.spend_n(c);
+            changed += c;
+        }
+        if cfg.mir_jump_thread && fuel.available() {
+            let c = thread_jumps(f);
+            fuel.spend_n(c);
+            changed += c;
+        }
+        // Structural cleanup — not fuel-charged; run last so it prunes blocks the
+        // other passes just made unreachable.
+        if cfg.mir_unreachable {
+            changed += remove_unreachable_blocks(f);
+        }
+        total += changed;
+        if changed == 0 {
+            break;
+        }
+    }
+    total
 }
 
 /// Rewrite terminators whose control flow is statically determined to an
@@ -198,6 +247,101 @@ fn remap_terminator(term: Terminator, remap: &HashMap<u32, u32>) -> Terminator {
         Terminator::Return(op) => Terminator::Return(op),
         Terminator::Unreachable => Terminator::Unreachable,
     }
+}
+
+/// Jump-threading / empty-block merging (O3): redirect every terminator target
+/// that points at an **empty** block whose terminator is an unconditional
+/// `Goto` straight to that goto's destination, following chains to their end.
+/// The bypassed blocks become unreachable and are pruned by the
+/// [`remove_unreachable_blocks`] pass that runs after. Returns the number of
+/// targets rewritten.
+///
+/// Only *empty* blocks are threaded, so `Charge` / `ChargeVersioned` statements
+/// (the op-budget ticks) are never dropped. Parameter default-init blocks are
+/// left as roots (a caller may enter them directly), and self-loops are skipped
+/// so the chain walk terminates.
+fn thread_jumps(f: &mut MirFunction) -> usize {
+    let init_roots: HashSet<BlockId> = f.locals.iter().filter_map(|l| l.default_init).collect();
+    let mut redirect: HashMap<BlockId, BlockId> = HashMap::new();
+    for b in &f.blocks {
+        if b.statements.is_empty()
+            && !init_roots.contains(&b.id)
+            && let Terminator::Goto(t) = &b.terminator
+            && *t != b.id
+        {
+            redirect.insert(b.id, *t);
+        }
+    }
+    if redirect.is_empty() {
+        return 0;
+    }
+    // Follow a chain of empty-goto blocks to its final destination, bounded by
+    // the map size so a cycle of empty blocks can't loop forever.
+    let resolve = |start: BlockId| -> BlockId {
+        let mut cur = start;
+        for _ in 0..=redirect.len() {
+            match redirect.get(&cur) {
+                Some(&next) if next != cur => cur = next,
+                _ => break,
+            }
+        }
+        cur
+    };
+
+    let mut changed = 0;
+    for b in &mut f.blocks {
+        let (new_term, n) = resolve_terminator(&b.terminator, &resolve);
+        if n > 0 {
+            b.terminator = new_term;
+            changed += n;
+        }
+    }
+    let new_entry = resolve(f.entry);
+    if new_entry != f.entry {
+        f.entry = new_entry;
+        changed += 1;
+    }
+    changed
+}
+
+/// Apply `resolve` to each target of `term`, returning the rewritten terminator
+/// and how many targets actually changed.
+fn resolve_terminator(
+    term: &Terminator,
+    resolve: &impl Fn(BlockId) -> BlockId,
+) -> (Terminator, usize) {
+    let mut n = 0;
+    let mut m = |b: BlockId| {
+        let r = resolve(b);
+        if r != b {
+            n += 1;
+        }
+        r
+    };
+    let new = match term {
+        Terminator::Goto(b) => Terminator::Goto(m(*b)),
+        Terminator::Branch {
+            cond,
+            then_block,
+            else_block,
+        } => Terminator::Branch {
+            cond: cond.clone(),
+            then_block: m(*then_block),
+            else_block: m(*else_block),
+        },
+        Terminator::Switch {
+            discriminant,
+            arms,
+            default,
+        } => Terminator::Switch {
+            discriminant: discriminant.clone(),
+            arms: arms.iter().map(|(k, b)| (k.clone(), m(*b))).collect(),
+            default: m(*default),
+        },
+        Terminator::Return(op) => Terminator::Return(op.clone()),
+        Terminator::Unreachable => Terminator::Unreachable,
+    };
+    (new, n)
 }
 
 #[cfg(test)]
@@ -376,5 +520,75 @@ mod tests {
         verify_function(&f).expect("well-formed");
         // bb2 becomes unreachable (branch always loops); bb0 + bb1 remain.
         assert_eq!(f.blocks.len(), 2);
+    }
+
+    #[test]
+    fn jump_threading_bypasses_empty_blocks_at_o3() {
+        // bb0 branches to two empty blocks that both `Goto` the return block.
+        let mut f = func(
+            vec![
+                block(
+                    0,
+                    Terminator::Branch {
+                        cond: Operand::Local(crate::ir::LocalId(0)),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                ),
+                block(1, Terminator::Goto(BlockId(3))),
+                block(2, Terminator::Goto(BlockId(3))),
+                block(3, Terminator::Return(None)),
+            ],
+            0,
+        );
+        let mut fuel = Fuel::Unlimited;
+        optimize_function_with(&mut f, &OptConfig::for_level(OptLevel::O3), &mut fuel);
+        verify_function(&f).expect("well-formed after opt");
+        // bb1/bb2 (empty gotos) are bypassed; the branch's arms then coincide and
+        // collapse to a goto, which is itself an empty entry block that threads
+        // straight to the return — the whole function reduces to one block.
+        assert_eq!(f.blocks.len(), 1);
+        assert!(matches!(f.blocks[0].terminator, Terminator::Return(_)));
+    }
+
+    #[test]
+    fn jump_threading_is_off_below_o3() {
+        // An empty-goto chain that O1 leaves intact (jump-threading is O3-only).
+        let mut f = func(
+            vec![
+                block(0, Terminator::Goto(BlockId(1))),
+                block(1, Terminator::Goto(BlockId(2))),
+                block(2, Terminator::Return(None)),
+            ],
+            0,
+        );
+        let mut fuel = Fuel::Unlimited;
+        optimize_function_with(&mut f, &OptConfig::for_level(OptLevel::O1), &mut fuel);
+        verify_function(&f).expect("well-formed");
+        assert_eq!(f.blocks.len(), 3, "no jump-threading at O1");
+    }
+
+    #[test]
+    fn fuel_zero_blocks_mir_rewrites() {
+        // With an exhausted budget, even a constant branch is left untouched.
+        let mut f = func(
+            vec![
+                block(
+                    0,
+                    Terminator::Branch {
+                        cond: Operand::Const(Const::Bool(true)),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                ),
+                block(1, Terminator::Return(None)),
+                block(2, Terminator::Return(None)),
+            ],
+            0,
+        );
+        let mut fuel = Fuel::Limited(0);
+        let n = optimize_function_with(&mut f, &OptConfig::for_level(OptLevel::O3), &mut fuel);
+        assert_eq!(n, 0, "no fuel → no rewrites");
+        assert_eq!(f.blocks.len(), 3, "branch and blocks untouched");
     }
 }
