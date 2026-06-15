@@ -91,4 +91,35 @@ impl TypeTable {
             .filter(|t| t.span.start <= start && end <= t.span.end)
             .min_by_key(|t| t.span.end - t.span.start)
     }
+
+    /// Return the inferred type of the expression whose span is *exactly*
+    /// `span` (same source + byte range), if the checker recorded one.
+    ///
+    /// Unlike [`spanning`](Self::spanning) (which returns the smallest
+    /// *containing* entry), this matches only an exact node, so a HIR node with
+    /// no own type entry — e.g. a synthetic/desugared one — is never given a
+    /// parent expression's type. The HIR optimizer uses it to resolve a node's
+    /// type on demand (HIR nodes carry the same `text_range`-derived spans)
+    /// without writing types back onto the HIR.
+    pub fn at_span(&self, span: Span) -> Option<&Type> {
+        let Ok(mut i) = self
+            .exprs
+            .binary_search_by_key(&span.start, |t| t.span.start)
+        else {
+            return None;
+        };
+        // Several entries can share a start (an expression and its first
+        // sub-expression); rewind to the first, then scan that run for an exact
+        // match (including the source id, which `Span`'s `Eq` compares).
+        while i > 0 && self.exprs[i - 1].span.start == span.start {
+            i -= 1;
+        }
+        while i < self.exprs.len() && self.exprs[i].span.start == span.start {
+            if self.exprs[i].span == span {
+                return Some(&self.exprs[i].ty);
+            }
+            i += 1;
+        }
+        None
+    }
 }

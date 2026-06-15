@@ -9,6 +9,8 @@ use leek_pipeline::{Artifact, Context, OptConfig, OptLevel, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 use leek_resolver::pipeline::IncludeGraphArtifact;
 use leek_span::SourceId;
+use leek_types::TypeTable;
+use leek_types::pipeline::TypeCheckArtifact;
 
 use crate::HirFile;
 use crate::lower::{
@@ -152,6 +154,10 @@ impl RecipeArtifact for HirArtifact {
 /// path — existing pipelines without `ResolveIncludes` are
 /// unchanged.
 fn run_lower(cx: &Context<'_>, opt: OptConfig) -> (Arc<HirFile>, Vec<Diagnostic>) {
+    // Inferred types from the type-check step, used to annotate the HIR before
+    // optimization so type-dependent algebraic rewrites are sound. Absent on
+    // pipelines that skipped type-checking (algebraic then stays conservative).
+    let types = cx.get::<TypeCheckArtifact>().map(|a| &a.table);
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let out = lower_hir_query(db, file);
@@ -161,7 +167,7 @@ fn run_lower(cx: &Context<'_>, opt: OptConfig) -> (Arc<HirFile>, Vec<Diagnostic>
         // codegen driver asked for it.
         if opt.optimizes() {
             let mut hir = (*out.hir).clone();
-            crate::transform::optimize_hir_with(&mut hir, &opt);
+            crate::transform::optimize_hir_with_types(&mut hir, &opt, types);
             return (Arc::new(hir), out.diagnostics);
         }
         return (out.hir, out.diagnostics);
@@ -198,7 +204,7 @@ fn run_lower(cx: &Context<'_>, opt: OptConfig) -> (Arc<HirFile>, Vec<Diagnostic>
             &includes,
             &graph.resolved,
         );
-        return (finish_hir(hir, opt), diagnostics);
+        return (finish_hir(hir, opt, types), diagnostics);
     }
     let src_text = ast.syntax().text().to_string();
     let version = effective_version(&src_text, cx.source(), cx.version_byte());
@@ -212,10 +218,10 @@ fn run_lower(cx: &Context<'_>, opt: OptConfig) -> (Arc<HirFile>, Vec<Diagnostic>
             prelude_src,
             flags,
         );
-        return (finish_hir(hir, opt), diagnostics);
+        return (finish_hir(hir, opt, types), diagnostics);
     }
     let (hir, diagnostics) = lower_file_versioned_with_flags(&ast, cx.source(), version, flags);
-    (finish_hir(hir, opt), diagnostics)
+    (finish_hir(hir, opt, types), diagnostics)
 }
 
 /// Apply the opt-in constant-folding pass (if any constants are active),
@@ -225,7 +231,7 @@ fn run_lower(cx: &Context<'_>, opt: OptConfig) -> (Arc<HirFile>, Vec<Diagnostic>
 /// `HirArtifact`) — see folded literals from one hook. A no-op (and
 /// allocation-free) when no fold constants are registered, so the default
 /// path and the corpus baseline are unchanged.
-fn finish_hir(mut hir: HirFile, opt: OptConfig) -> Arc<HirFile> {
+fn finish_hir(mut hir: HirFile, opt: OptConfig, types: Option<&TypeTable>) -> Arc<HirFile> {
     let pairs = leek_prelude::fold_constants();
     if !pairs.is_empty() {
         let map: std::collections::HashMap<String, crate::ir::Literal> = pairs
@@ -243,9 +249,13 @@ fn finish_hir(mut hir: HirFile, opt: OptConfig) -> Arc<HirFile> {
     }
     // Backend-agnostic optimization — only when the level optimizes. Passes run
     // to a fixpoint so chained constants (`var A = 2; var B = A + 1; …`) fully
-    // resolve.
+    // resolve. When algebraic simplification is on, first attach inferred types
+    // so its coercion-sensitive identities can fire soundly.
     if opt.optimizes() {
-        crate::transform::optimize_hir_with(&mut hir, &opt);
+        // The optimizer reads inferred types on demand (for sound algebraic
+        // rewrites); the HIR's own `expr.ty` is left untouched so backends keep
+        // seeing untyped nodes (some specialize codegen off `expr.ty`).
+        crate::transform::optimize_hir_with_types(&mut hir, &opt, types);
     }
     Arc::new(hir)
 }
@@ -291,13 +301,13 @@ pub fn lower_hir_query(
             flags,
         );
         return LowerHirResult {
-            hir: finish_hir(hir, OptConfig::for_level(OptLevel::O0)),
+            hir: finish_hir(hir, OptConfig::for_level(OptLevel::O0), None),
             diagnostics,
         };
     }
     let (hir, diagnostics) = lower_file_versioned_with_flags(&ast, file.source(db), version, flags);
     LowerHirResult {
-        hir: finish_hir(hir, OptConfig::for_level(OptLevel::O0)),
+        hir: finish_hir(hir, OptConfig::for_level(OptLevel::O0), None),
         diagnostics,
     }
 }

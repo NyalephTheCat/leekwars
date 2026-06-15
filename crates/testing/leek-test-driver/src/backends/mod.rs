@@ -125,6 +125,21 @@ struct CaseContext {
     has_compile_error: bool,
 }
 
+/// Recipe params for the corpus run. Defaults to `permissive()` (O0, the
+/// baseline shape); set `LEEK_TEST_OPT=0|1|2|3` to run the whole suite at a
+/// given IR optimization level — a regression then means some pass changed an
+/// observable result versus the O0 baseline.
+fn corpus_params() -> RecipeParams {
+    let params = RecipeParams::permissive();
+    match std::env::var("LEEK_TEST_OPT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u8>().ok())
+    {
+        Some(n) => params.with_opt(leek_recipes::OptLevel::from_u8(n)),
+        None => params,
+    }
+}
+
 fn build_context(case: &TestCase, source: SourceId) -> CaseContext {
     let input = Input {
         source,
@@ -133,8 +148,7 @@ fn build_context(case: &TestCase, source: SourceId) -> CaseContext {
         strict: case.strict,
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
-    let pipeline =
-        leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
+    let pipeline = leek_recipes::pipeline(Target::Hir, &corpus_params()).expect("recipe");
     let run = pipeline.run(input);
     let has_compile_error = run
         .diagnostics()

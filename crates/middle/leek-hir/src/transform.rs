@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use leek_pipeline::{OptConfig, OptLevel};
-use leek_types::Type;
+use leek_types::{Type, TypeTable};
 
 use crate::ir::{
     BinaryOp, Block, Callee, Def, DefId, Expr, ExprKind, HirFile, LambdaBody, Literal, NameRef,
@@ -101,6 +101,19 @@ impl VisitMut<Expr> for ConstFolder<'_> {
 impl VisitMut<Block> for ConstFolder<'_> {}
 impl VisitMut<Stmt> for ConstFolder<'_> {}
 
+/// The inferred type of `e`: from `table` (keyed by the node's span) when one is
+/// supplied, otherwise the node's own `ty` field.
+///
+/// The optimizer consults a [`TypeTable`] on demand rather than writing inferred
+/// types onto `expr.ty`, so the HIR handed to backends keeps the untyped (`Any`)
+/// shape they expect — some backends (the native JIT) specialize codegen off
+/// `expr.ty`, and leaking optimizer-only types would change their behavior.
+/// Constant folding preserves a node's span when it replaces the kind, so a
+/// folded literal still resolves to its original expression's type here.
+fn type_of<'a>(e: &'a Expr, table: Option<&'a TypeTable>) -> &'a Type {
+    table.and_then(|t| t.at_span(e.span)).unwrap_or(&e.ty)
+}
+
 /// Run the backend-agnostic HIR optimization passes to a fixpoint at the
 /// default [`OptLevel::O1`] pass set. Thin wrapper over [`optimize_hir_with`]
 /// kept for callers/tests that don't carry an [`OptConfig`].
@@ -127,6 +140,18 @@ pub fn optimize_hir(hir: &mut HirFile) -> usize {
 ///
 /// Returns the total number of rewrites across all rounds.
 pub fn optimize_hir_with(hir: &mut HirFile, cfg: &OptConfig) -> usize {
+    optimize_hir_with_types(hir, cfg, None)
+}
+
+/// Like [`optimize_hir_with`], but consults `types` (the type checker's
+/// [`TypeTable`]) so the algebraic pass's coercion-sensitive identities fire on
+/// inferred numeric/boolean operands. Types are read on demand and never written
+/// back onto the HIR, so backends still receive untyped (`Any`) expressions.
+pub fn optimize_hir_with_types(
+    hir: &mut HirFile,
+    cfg: &OptConfig,
+    types: Option<&TypeTable>,
+) -> usize {
     const MAX_ROUNDS: usize = 8;
     let mut fuel = cfg.fuel;
     let mut total = 0;
@@ -163,7 +188,7 @@ pub fn optimize_hir_with(hir: &mut HirFile, cfg: &OptConfig) -> usize {
             inline_calls_cfg(hir, &purity, cfg.aggressive_inline)
         );
         pass!(cfg.const_fold, fold_expressions_cfg(hir, cfg.intrinsics));
-        pass!(cfg.algebraic, simplify_algebraic(hir));
+        pass!(cfg.algebraic, simplify_algebraic_with(hir, types));
         pass!(
             cfg.dce,
             eliminate_dead_statements_cfg(hir, &purity, cfg.pure_fn)
@@ -1516,15 +1541,24 @@ fn incdec_as_assign(e: &Expr) -> Option<Expr> {
 /// `string`/`Real`/`Any`, etc. are *not* identities and are left alone. An
 /// operand is dropped only when it is [`is_side_effect_free`].
 ///
-/// Post-lowering HIR is currently untyped (every `expr.ty` is [`Type::Any`]), so
-/// the type-dependent rules are conservatively skipped today and only the
-/// universally-sound ones fire: a constant short-circuit side (`false && x` →
-/// `false`, `true || x` → `true`) collapses regardless of the other operand's
-/// type. The type-guarded rules become active automatically if/when inferred
-/// types are attached to the HIR.
+/// The pipeline runs [`annotate_types`] before this pass (at O2+), so the
+/// type-dependent rules fire on inferred numeric/boolean operands. On any path
+/// that did not attach types (HIR straight out of lowering, where every
+/// `expr.ty` is [`Type::Any`]) the type-guarded rules are conservatively skipped
+/// and only the universally-sound ones apply: a constant short-circuit side
+/// (`false && x` → `false`, `true || x` → `true`) collapses regardless of the
+/// other operand's type.
 pub fn simplify_algebraic(hir: &mut HirFile) -> usize {
+    simplify_algebraic_with(hir, None)
+}
+
+/// Like [`simplify_algebraic`], but consults `table` for operand types (falling
+/// back to `expr.ty`). With a table the type-dependent identities fire on
+/// inferred numeric/boolean operands; without one only the universally-sound
+/// short-circuit collapses apply.
+pub fn simplify_algebraic_with(hir: &mut HirFile, table: Option<&TypeTable>) -> usize {
     let mut count = 0;
-    for_each_file_expr_mut(hir, &mut |e| simplify_algebraic_expr(e, &mut count));
+    for_each_file_expr_mut(hir, &mut |e| simplify_algebraic_expr(e, table, &mut count));
     count
 }
 
@@ -1536,12 +1570,12 @@ fn is_bool_lit(e: &Expr, b: bool) -> bool {
     matches!(&e.kind, ExprKind::Literal(Literal::Bool(v)) if *v == b)
 }
 
-fn is_integer_typed(e: &Expr) -> bool {
-    matches!(e.ty, Type::Integer)
+fn is_integer_typed(e: &Expr, table: Option<&TypeTable>) -> bool {
+    matches!(type_of(e, table), Type::Integer)
 }
 
-fn is_bool_typed(e: &Expr) -> bool {
-    matches!(e.ty, Type::Boolean)
+fn is_bool_typed(e: &Expr, table: Option<&TypeTable>) -> bool {
+    matches!(type_of(e, table), Type::Boolean)
 }
 
 fn not_expr(inner: Expr, span: leek_span::Span) -> Expr {
@@ -1552,12 +1586,12 @@ fn not_expr(inner: Expr, span: leek_span::Span) -> Expr {
     }
 }
 
-fn simplify_algebraic_expr(e: &mut Expr, count: &mut usize) {
+fn simplify_algebraic_expr(e: &mut Expr, table: Option<&TypeTable>, count: &mut usize) {
     let new: Option<Expr> = match &e.kind {
-        ExprKind::Binary(op, l, r) => simplify_binary(*op, l, r, e),
+        ExprKind::Binary(op, l, r) => simplify_binary(*op, l, r, e, table),
         // `!!x` → `x` (x boolean-typed).
         ExprKind::Unary(UnaryOp::Not, inner) => match &inner.kind {
-            ExprKind::Unary(UnaryOp::Not, y) if is_bool_typed(y) => Some(y.as_ref().clone()),
+            ExprKind::Unary(UnaryOp::Not, y) if is_bool_typed(y, table) => Some(y.as_ref().clone()),
             _ => None,
         },
         _ => None,
@@ -1568,27 +1602,34 @@ fn simplify_algebraic_expr(e: &mut Expr, count: &mut usize) {
     }
 }
 
-fn simplify_binary(op: BinaryOp, l: &Expr, r: &Expr, e: &Expr) -> Option<Expr> {
+fn simplify_binary(
+    op: BinaryOp,
+    l: &Expr,
+    r: &Expr,
+    e: &Expr,
+    table: Option<&TypeTable>,
+) -> Option<Expr> {
     let bool_lit = |b: bool| lit_expr(Literal::Bool(b), Type::Boolean, e.span);
     match op {
         BinaryOp::Add => {
             // x + 0, 0 + x → x   (integer-typed; string `+` is concatenation)
-            if is_int_lit(r, 0) && is_integer_typed(l) {
+            if is_int_lit(r, 0) && is_integer_typed(l, table) {
                 Some(l.clone())
-            } else if is_int_lit(l, 0) && is_integer_typed(r) {
+            } else if is_int_lit(l, 0) && is_integer_typed(r, table) {
                 Some(r.clone())
             } else {
                 None
             }
         }
-        BinaryOp::Sub => (is_int_lit(r, 0) && is_integer_typed(l)).then(|| l.clone()),
+        BinaryOp::Sub => (is_int_lit(r, 0) && is_integer_typed(l, table)).then(|| l.clone()),
         BinaryOp::Mul => {
             // `x * 0` / `0 * x` → 0 (integer-typed, side-effect-free operand dropped).
-            let zero_side = (is_int_lit(r, 0) && is_integer_typed(l) && is_side_effect_free(l))
-                || (is_int_lit(l, 0) && is_integer_typed(r) && is_side_effect_free(r));
-            if is_int_lit(r, 1) && is_integer_typed(l) {
+            let zero_side =
+                (is_int_lit(r, 0) && is_integer_typed(l, table) && is_side_effect_free(l))
+                    || (is_int_lit(l, 0) && is_integer_typed(r, table) && is_side_effect_free(r));
+            if is_int_lit(r, 1) && is_integer_typed(l, table) {
                 Some(l.clone())
-            } else if is_int_lit(l, 1) && is_integer_typed(r) {
+            } else if is_int_lit(l, 1) && is_integer_typed(r, table) {
                 Some(r.clone())
             } else if zero_side {
                 Some(lit_expr(Literal::Int(0), Type::Integer, e.span))
@@ -1596,15 +1637,15 @@ fn simplify_binary(op: BinaryOp, l: &Expr, r: &Expr, e: &Expr) -> Option<Expr> {
                 None
             }
         }
-        BinaryOp::Div => (is_int_lit(r, 1) && is_integer_typed(l)).then(|| l.clone()),
+        BinaryOp::Div => (is_int_lit(r, 1) && is_integer_typed(l, table)).then(|| l.clone()),
         BinaryOp::And => {
             // `false && x` → false (x never runs); `x && false` → false when x has
             // no effect. Both collapse to the boolean literal `false`.
             let to_false = is_bool_lit(l, false)
-                || (is_bool_lit(r, false) && is_bool_typed(l) && is_side_effect_free(l));
-            if is_bool_lit(r, true) && is_bool_typed(l) {
+                || (is_bool_lit(r, false) && is_bool_typed(l, table) && is_side_effect_free(l));
+            if is_bool_lit(r, true) && is_bool_typed(l, table) {
                 Some(l.clone()) // x && true → x
-            } else if is_bool_lit(l, true) && is_bool_typed(r) {
+            } else if is_bool_lit(l, true) && is_bool_typed(r, table) {
                 Some(r.clone()) // true && x → x
             } else if to_false {
                 Some(bool_lit(false))
@@ -1616,10 +1657,10 @@ fn simplify_binary(op: BinaryOp, l: &Expr, r: &Expr, e: &Expr) -> Option<Expr> {
             // `true || x` → true (x never runs); `x || true` → true when x has no
             // effect. Both collapse to the boolean literal `true`.
             let to_true = is_bool_lit(l, true)
-                || (is_bool_lit(r, true) && is_bool_typed(l) && is_side_effect_free(l));
-            if is_bool_lit(r, false) && is_bool_typed(l) {
+                || (is_bool_lit(r, true) && is_bool_typed(l, table) && is_side_effect_free(l));
+            if is_bool_lit(r, false) && is_bool_typed(l, table) {
                 Some(l.clone()) // x || false → x
-            } else if is_bool_lit(l, false) && is_bool_typed(r) {
+            } else if is_bool_lit(l, false) && is_bool_typed(r, table) {
                 Some(r.clone()) // false || x → x
             } else if to_true {
                 Some(bool_lit(true))
@@ -1629,13 +1670,13 @@ fn simplify_binary(op: BinaryOp, l: &Expr, r: &Expr, e: &Expr) -> Option<Expr> {
         }
         BinaryOp::Eq => {
             // x == true → x ; x == false → !x   (boolean x; symmetric)
-            if is_bool_lit(r, true) && is_bool_typed(l) {
+            if is_bool_lit(r, true) && is_bool_typed(l, table) {
                 Some(l.clone())
-            } else if is_bool_lit(l, true) && is_bool_typed(r) {
+            } else if is_bool_lit(l, true) && is_bool_typed(r, table) {
                 Some(r.clone())
-            } else if is_bool_lit(r, false) && is_bool_typed(l) {
+            } else if is_bool_lit(r, false) && is_bool_typed(l, table) {
                 Some(not_expr(l.clone(), e.span))
-            } else if is_bool_lit(l, false) && is_bool_typed(r) {
+            } else if is_bool_lit(l, false) && is_bool_typed(r, table) {
                 Some(not_expr(r.clone(), e.span))
             } else {
                 None
@@ -2477,5 +2518,80 @@ mod tests {
             optimize_hir_with(&mut hir, &OptConfig::for_level(OptLevel::O0)),
             0
         );
+    }
+
+    // ----- inferred types enabling sound algebraic simplification -----
+
+    /// Lower `src` and run the type checker, returning the HIR plus the inferred
+    /// type table — the inputs the pipeline feeds the optimizer at O2+ (the
+    /// optimizer reads the table on demand; it does not mutate `expr.ty`).
+    fn lower_checked(src: &str) -> (HirFile, TypeTable) {
+        use leek_parser::ast::{AstNode, SourceFile};
+        use leek_span::SourceId;
+        use leek_syntax::{SyntaxNode, Version};
+        let source = SourceId::new(1).unwrap();
+        let parsed = leek_parser::parse(src, source, Version::V4);
+        let file = SourceFile::cast(SyntaxNode::new_root(parsed.green.clone())).expect("parses");
+        let hir = crate::lower_file(&file, source).0;
+        let checked = leek_types::check_collecting(
+            &file,
+            source,
+            Version::V4,
+            leek_types::Options::default(),
+        );
+        (hir, checked.table)
+    }
+
+    #[test]
+    fn type_table_resolves_node_types_by_span() {
+        // The checker's table knows the integer parameter read's type, looked up
+        // by the same span the HIR node carries — without mutating the HIR.
+        let (hir, table) = lower_checked("function f(integer x) { return x + 0 }\nreturn 0\n");
+        let Def::Function(f) = &hir.defs[0] else {
+            panic!("expected fn")
+        };
+        let Stmt::Return(Some(e)) = &f.body.as_ref().unwrap().stmts[0] else {
+            panic!("expected return")
+        };
+        let ExprKind::Binary(BinaryOp::Add, l, _) = &e.kind else {
+            panic!("expected x + 0")
+        };
+        assert_eq!(l.ty, Type::Any, "HIR node itself stays untyped");
+        assert_eq!(
+            table.at_span(l.span),
+            Some(&Type::Integer),
+            "table knows x: int"
+        );
+    }
+
+    #[test]
+    fn typed_algebraic_simplifies_integer_identity() {
+        // Consulting the type table on demand, `x + 0` on an integer collapses to
+        // `x` — and the HIR's `expr.ty` is never written (stays `Any`).
+        let (mut hir, table) = lower_checked("function f(integer x) { return x + 0 }\nreturn 0\n");
+        assert_eq!(simplify_algebraic_with(&mut hir, Some(&table)), 1);
+        let Def::Function(f) = &hir.defs[0] else {
+            panic!("expected fn")
+        };
+        let Stmt::Return(Some(e)) = &f.body.as_ref().unwrap().stmts[0] else {
+            panic!("expected return")
+        };
+        assert!(
+            matches!(e.kind, ExprKind::Name(NameRef::Local(_))),
+            "x + 0 → x once x is known to be Integer"
+        );
+        assert_eq!(
+            e.ty,
+            Type::Any,
+            "optimizer leaves expr.ty untouched for backends"
+        );
+    }
+
+    #[test]
+    fn typed_algebraic_keeps_string_concatenation() {
+        // `s + 0` on a string is concatenation, NOT an identity — left untouched
+        // even with types available (the coercion-safety guard).
+        let (mut hir, table) = lower_checked("function g(string s) { return s + 0 }\nreturn 0\n");
+        assert_eq!(simplify_algebraic_with(&mut hir, Some(&table)), 0);
     }
 }
