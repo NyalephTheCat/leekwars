@@ -7,6 +7,19 @@ use super::{
     types, unsupported,
 };
 
+/// Op cost charged per literal "slot" at construction (an array element, a
+/// map key or value, a set member, an interval endpoint). Upstream charges
+/// this statically before the per-insert runtime-shim cost. A set *range*
+/// element occupies two slots (its two bounds).
+const LITERAL_SLOT_COST: u64 = 2;
+
+/// v1–v3 legacy collections additionally pay `initTable` when built from a
+/// non-empty literal: `max(8, capacity) / 5` ops, where `capacity` is the
+/// number of backing slots (array elements, or key+value slots for a map).
+fn legacy_init_table_ops(capacity: u64) -> u64 {
+    8.max(capacity) / 5
+}
+
 impl Tx<'_, '_> {
     pub(super) fn rvalue(&mut self, rv: &Rvalue) -> Result<(Value, ValTy), NativeError> {
         match rv {
@@ -325,8 +338,9 @@ impl Tx<'_, '_> {
         &mut self,
         iv: &leek_mir::ir::IntervalRvalue,
     ) -> Result<(Value, ValTy), NativeError> {
-        // Interval-literal construction costs 2 ops (interp `exec.rs`).
-        self.charge(2)?;
+        // Interval-literal construction costs a flat 2 ops — one slot's
+        // worth (interp `exec.rs`).
+        self.charge(LITERAL_SLOT_COST)?;
         let f = self.imports.rt("leek_interval")?;
         let bound = |this: &mut Self, op: &Option<Operand>| -> Result<Value, NativeError> {
             match op {
@@ -353,13 +367,13 @@ impl Tx<'_, '_> {
         &mut self,
         pairs: &[(Operand, Operand)],
     ) -> Result<(Value, ValTy), NativeError> {
-        // The Java emitter charges 2 ops per pair statically; v1–3 legacy
-        // assoc arrays additionally pay `initTable` (`max(8, capacity) / 5`,
-        // capacity = key+value slots) at construction. The per-pair insert
-        // cost is charged by the `leek_map_put` shim.
-        self.charge(2 * pairs.len() as u64)?;
+        // The Java emitter charges one slot per pair statically; v1–3 legacy
+        // assoc arrays additionally pay `initTable` (capacity = key+value
+        // slots) at construction. The per-pair insert cost is charged by the
+        // `leek_map_put` shim.
+        self.charge(LITERAL_SLOT_COST * pairs.len() as u64)?;
         if self.lang.version <= 3 && !pairs.is_empty() {
-            self.charge(8.max(2 * pairs.len() as u64) / 5)?;
+            self.charge(legacy_init_table_ops(2 * pairs.len() as u64))?;
         }
         let new = self.imports.rt("leek_map_new")?;
         let put = self.imports.rt("leek_map_put")?;
@@ -383,14 +397,15 @@ impl Tx<'_, '_> {
     /// element `start..end` (#2335) expands at runtime via
     /// `leek_set_add_range`, which charges per inserted element.
     pub(super) fn set_literal(&mut self, items: &[SetElem]) -> Result<(Value, ValTy), NativeError> {
-        // Set-literal construction costs 2 ops per element — and per range
-        // *bound* (upstream `LeekSet.analyze`); the range expansion itself is
-        // charged dynamically inside the runtime shim.
+        // Set-literal construction costs one slot per element — and one per
+        // range *bound* (upstream `LeekSet.analyze`), so a range pays two;
+        // the range expansion itself is charged dynamically inside the
+        // runtime shim.
         let static_ops: u64 = items
             .iter()
             .map(|e| match e {
-                SetElem::One(_) => 2,
-                SetElem::Range(..) => 4,
+                SetElem::One(_) => LITERAL_SLOT_COST,
+                SetElem::Range(..) => 2 * LITERAL_SLOT_COST,
             })
             .sum();
         self.charge(static_ops)?;
@@ -475,13 +490,13 @@ impl Tx<'_, '_> {
         &mut self,
         elems: &[Operand],
     ) -> Result<(Value, ValTy), NativeError> {
-        // The Java emitter charges 2 ops per element statically; v1–3 legacy
-        // arrays additionally pay `initTable` (`max(8, n) / 5`) when built
-        // from a non-empty element list. The per-element insert cost is
-        // charged by the `leek_array_push` shim.
-        self.charge(2 * elems.len() as u64)?;
+        // The Java emitter charges one slot per element statically; v1–3
+        // legacy arrays additionally pay `initTable` (capacity = element
+        // count) when built from a non-empty element list. The per-element
+        // insert cost is charged by the `leek_array_push` shim.
+        self.charge(LITERAL_SLOT_COST * elems.len() as u64)?;
         if self.lang.version <= 3 && !elems.is_empty() {
-            self.charge(8.max(elems.len() as u64) / 5)?;
+            self.charge(legacy_init_table_ops(elems.len() as u64))?;
         }
         let new = self.imports.rt("leek_array_new")?;
         let push = self.imports.rt("leek_array_push")?;
