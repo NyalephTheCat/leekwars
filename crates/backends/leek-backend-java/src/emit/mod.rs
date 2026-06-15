@@ -692,42 +692,17 @@ pub(crate) fn builtin_call_cost(name: &str) -> u32 {
     leek_builtins::op_cost_emit(name)
 }
 
-/// Per-operator op cost, mirroring `LeekValueType.*_COST`. The
-/// default for "normal" binary ops is 1; only mul/div/mod/pow and
-/// the short-circuit logicals deviate.
+/// Per-operator op cost, mirroring `LeekValueType.*_COST`. Delegates to the
+/// canonical [`leek_hir::BinaryOp::op_cost`] so the Java emitter, the
+/// interpreter, and the native backend stay in lockstep. Compound assigns
+/// price as their underlying op; plain `=` (and the short-circuit logicals,
+/// whose `+1` own-cost the short-circuit wrapper folds in) cost 1.
 pub(crate) fn binary_op_cost(op: BinaryOp) -> u32 {
-    use BinaryOp::{
-        AddAssign, And, Assign, BitAndAssign, BitOrAssign, BitXorAssign, Div, DivAssign, IntDiv,
-        IntDivAssign, Mod, ModAssign, Mul, MulAssign, NullCoalesceAssign, Or, Pow, PowAssign,
-        ShiftLAssign, ShiftRAssign, SubAssign, UShiftRAssign,
-    };
-    match op {
-        Mul | MulAssign => 2,
-        Div | DivAssign | IntDiv | IntDivAssign | Mod | ModAssign => 5,
-        Pow | PowAssign => 40,
-        // Short-circuit logicals: upstream's emit wraps the LHS in
-        // `ops(lhs, lhs.ops+1)` — the +1 is the AND/OR's own cost
-        // (short-circuited away when the RHS doesn't run). Our flat
-        // wrapper folds that into the static cost.
-        And | Or => 1,
-        // Assignments themselves are zero-cost on top of the rhs.
-        // Plain `=` counts as 1 op (per `LeekExpression.computeOperations`
-        // — assignment falls into the default else-branch that adds 1).
-        // Compound assigns inherit the underlying op's cost via the
-        // matches above; pure `=` lands here.
-        Assign | AddAssign | SubAssign | BitAndAssign | BitOrAssign | BitXorAssign
-        | ShiftLAssign | ShiftRAssign | UShiftRAssign | NullCoalesceAssign => 1,
-        _ => 1,
-    }
+    op.op_cost()
 }
 
 pub(crate) fn unary_op_cost(op: UnaryOp) -> u32 {
-    use UnaryOp::{Pos, Ref};
-    match op {
-        // `@x` is a pass-through; `+x` is a no-op for numbers.
-        Ref | Pos => 0,
-        _ => 1,
-    }
+    op.op_cost()
 }
 
 /// True if the expression can appear as a Java statement on its own
