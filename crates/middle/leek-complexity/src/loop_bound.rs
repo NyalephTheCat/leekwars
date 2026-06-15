@@ -204,12 +204,20 @@ fn bound_from_value_expr(e: &Expr, ctx: &BoundContext) -> Option<LoopBound> {
     None
 }
 
-/// `count(p)` / `length(p)` / a parameter name → its SizeVar.
+/// `count(p)` / `length(p)` / a parameter name / a `this.field`
+/// access → its SizeVar.
 fn bound_from_iter_expr(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
     match &e.kind {
         ExprKind::Name(NameRef::Local(id)) => {
             let (idx, name) = ctx.params.lookup(*id)?;
             Some(SizeVar::new(idx, name))
+        }
+        // `this.data` — a class field. Iterating / counting it implies
+        // it's a sized container, so we attribute a field size variable
+        // (it stays in the method's own complexity; callers can't
+        // substitute instance state).
+        ExprKind::Field(receiver, name, _) if is_this_rooted(receiver) => {
+            Some(SizeVar::field(name.clone()))
         }
         ExprKind::Call(call) => {
             let Callee::Function(NameRef::Builtin(name)) = &call.callee else {
@@ -223,6 +231,15 @@ fn bound_from_iter_expr(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
         }
         _ => None,
     }
+}
+
+/// `true` if `e` is `this` / `super` / `class` — the receivers whose
+/// fields belong to the method's own instance.
+pub(crate) fn is_this_rooted(e: &Expr) -> bool {
+    matches!(
+        &e.kind,
+        ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_)
+    )
 }
 
 fn literal_uint(e: &Expr) -> Option<u64> {

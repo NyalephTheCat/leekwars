@@ -10,26 +10,86 @@
 
 use std::fmt;
 
-/// A size variable derived from a parameter — e.g. `count(arr0)`
-/// for the first parameter when it's typed as an array. Two
-/// `SizeVar`s are equal iff their `param_index` matches; `name`
-/// is purely cosmetic (for display).
+/// Where a size variable comes from. Drives identity (two `SizeVar`s
+/// are equal iff their `source` matches) and substitution behaviour:
+/// only [`Param`](SizeSource::Param) sources are rewritten at a call
+/// site — a [`Field`](SizeSource::Field) is *instance state* the caller
+/// can't supply, so it passes through unchanged and surfaces in the
+/// method's own big-O.
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SizeVar {
+pub enum SizeSource {
     /// 0-based parameter position the size refers to.
-    pub param_index: u32,
-    /// Display name. Conventionally the parameter's identifier or
-    /// `n`, `m`, ... when no name is known.
+    Param(u32),
+    /// A class field accessed as `this.<name>` inside a method body.
+    Field(String),
+}
+
+/// A size variable — the element count of a sized value (array / map /
+/// set / string). Derived either from a parameter (`count(arr0)`) or a
+/// class field (`count(this.data)`). Two `SizeVar`s are equal iff their
+/// [`source`](SizeVar::source) matches; `name` is purely cosmetic (for
+/// display).
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone)]
+pub struct SizeVar {
+    /// Identity of the size variable.
+    pub source: SizeSource,
+    /// Display name. Conventionally the parameter / field identifier,
+    /// or `n`, `m`, ... when no name is known.
     pub name: String,
 }
 
 impl SizeVar {
-    pub fn new(param_index: u32, name: impl Into<String>) -> Self {
+    /// A parameter-derived size variable at 0-based position `index`.
+    pub fn new(index: u32, name: impl Into<String>) -> Self {
         Self {
-            param_index,
+            source: SizeSource::Param(index),
             name: name.into(),
         }
+    }
+
+    /// A field-derived size variable for `this.<name>`.
+    pub fn field(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            source: SizeSource::Field(name.clone()),
+            name,
+        }
+    }
+
+    /// The parameter position this size refers to, if it's a parameter
+    /// (rather than a field). Field sources return `None`.
+    pub fn param_index(&self) -> Option<u32> {
+        match &self.source {
+            SizeSource::Param(i) => Some(*i),
+            SizeSource::Field(_) => None,
+        }
+    }
+}
+
+// Identity / ordering / hashing are by `source` only; `name` is
+// cosmetic, so two references to the same parameter or field compare
+// equal even if rendered under different display names.
+impl PartialEq for SizeVar {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+impl Eq for SizeVar {}
+impl std::hash::Hash for SizeVar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.source.hash(state);
+    }
+}
+impl PartialOrd for SizeVar {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for SizeVar {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.source.cmp(&other.source)
     }
 }
 
@@ -220,25 +280,32 @@ impl CostExpr {
         }
     }
 
-    /// Substitute every [`Size`] occurrence with a caller-provided
-    /// `CostExpr`, keyed by `SizeVar::param_index`. Unmapped size
-    /// variables become [`CostExpr::Unknown`] — the substitution is
-    /// then conservative: we never silently drop a size dependency.
+    /// Substitute every parameter [`Size`] occurrence with a
+    /// caller-provided `CostExpr`, keyed by parameter position.
+    /// Unmapped *parameter* size variables become [`CostExpr::Unknown`]
+    /// (conservative — we never silently drop a size dependency).
+    ///
+    /// Field size variables ([`SizeSource::Field`]) are **not**
+    /// substituted: a callee's field size is instance state the caller
+    /// can't supply, so it passes through unchanged and stays part of
+    /// the callee's reported complexity.
     ///
     /// Used by call-graph substitution: when caller `f` calls
     /// callee `g`, we replace each `Size(p)` in g's formula with
     /// "the size of f's expression passed to g's parameter p".
     ///
     /// [`Size`]: CostExpr::Size
+    /// [`SizeSource::Field`]: crate::cost_expr::SizeSource::Field
     pub fn substitute(&self, sub: &std::collections::HashMap<u32, CostExpr>) -> CostExpr {
         match self {
             CostExpr::Const(c) => CostExpr::Const(*c),
-            CostExpr::Size(v) => sub
-                .get(&v.param_index)
-                .cloned()
-                .unwrap_or(CostExpr::Unknown(
+            CostExpr::Size(v) => match v.param_index() {
+                // Field-derived sizes are instance state — keep them.
+                None => CostExpr::Size(v.clone()),
+                Some(idx) => sub.get(&idx).cloned().unwrap_or(CostExpr::Unknown(
                     "callee size variable not mapped at call site",
                 )),
+            },
             CostExpr::Log(inner) => CostExpr::Log(Box::new(inner.substitute(sub))).simplify(),
             CostExpr::Sum(parts) => {
                 CostExpr::sum(parts.iter().map(|p| p.substitute(sub)).collect())
@@ -255,13 +322,14 @@ impl CostExpr {
 
     /// Walk the expression and return the smallest constant
     /// upper-bound substitution that turns it into a scalar. Sets
-    /// every `Size(v)` to `sizes[&v.param_index]` and folds. Used
+    /// every parameter `Size(v)` to `sizes[idx]` and folds. Used
     /// by the empirical harness to predict ops at a concrete size.
-    /// Unknowns short-circuit to `None`.
+    /// Field sizes (no parameter index) and unknowns short-circuit
+    /// to `None`.
     pub fn evaluate_at(&self, sizes: &std::collections::HashMap<u32, u64>) -> Option<u64> {
         match self {
             CostExpr::Const(c) => Some(*c),
-            CostExpr::Size(v) => sizes.get(&v.param_index).copied(),
+            CostExpr::Size(v) => sizes.get(&v.param_index()?).copied(),
             CostExpr::Log(inner) => {
                 let v = inner.evaluate_at(sizes)?;
                 if v <= 1 {
@@ -459,6 +527,26 @@ mod tests {
         let sub = std::collections::HashMap::<u32, CostExpr>::new();
         let out = e.substitute(&sub);
         assert!(matches!(out, CostExpr::Unknown(_)));
+    }
+
+    #[test]
+    fn substitute_passes_field_sizes_through() {
+        // A field size is instance state — it survives substitution
+        // unchanged rather than becoming Unknown (the way an unmapped
+        // parameter would).
+        let e = CostExpr::Size(SizeVar::field("data"));
+        let sub = std::collections::HashMap::<u32, CostExpr>::new();
+        let out = e.substitute(&sub);
+        assert_eq!(out, CostExpr::Size(SizeVar::field("data")));
+    }
+
+    #[test]
+    fn field_and_param_sizes_have_distinct_identities() {
+        // Field "data" and param 0 are different variables; two fields
+        // with different names are different too.
+        assert_ne!(SizeVar::field("data"), SizeVar::new(0, "data"));
+        assert_ne!(SizeVar::field("a"), SizeVar::field("b"));
+        assert_eq!(SizeVar::field("a"), SizeVar::field("a"));
     }
 
     #[test]

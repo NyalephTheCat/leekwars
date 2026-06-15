@@ -575,6 +575,98 @@ class Vec {\n\
     );
 }
 
+// ─── field-size tracking ───────────────────────────────────────────
+
+#[test]
+fn method_looping_over_a_field_is_linear_in_that_field() {
+    // `foreach (c in this.cells)` — the field is the loop bound, so the
+    // method is linear in the field's size (named after the field).
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> cells = []\n\
+    public sumCells() {\n\
+        var t = 0\n\
+        for (var c in this.cells) { t = t + c }\n\
+        return t\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Grid.sumCells");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "cells"),
+        other => panic!("expected O(cells), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn count_of_a_field_drives_a_for_loop_bound() {
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> cells = []\n\
+    public walk() {\n\
+        for (var i = 0; i < count(this.cells); i++) {}\n\
+        return 0\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Grid.walk");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "cells"),
+        other => panic!("expected O(cells), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn field_size_substitutes_into_a_callee() {
+    // `helper(this.cells)` — the field size flows into the callee's
+    // parameter formula, so the method inherits O(cells).
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> cells = []\n\
+    public run() {\n\
+        return helper(this.cells)\n\
+    }\n\
+}\n\
+function helper(arr) {\n\
+    for (var x in arr) {}\n\
+    return 0\n\
+}\n",
+    );
+    let m = find(&r, "Grid.run");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "cells"),
+        other => panic!("expected O(cells), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
+#[test]
+fn nested_loops_over_two_fields_are_a_product() {
+    // The previously-`O(?)` nested-field case now resolves to a product
+    // of the two field sizes — even the un-annotated inner field, since
+    // iterating it implies a container.
+    let r = analyze(
+        "\
+class Grid {\n\
+    public Array<integer> rows = []\n\
+    public cols = []\n\
+    public area() {\n\
+        for (var r in this.rows) {\n\
+            for (var c in this.cols) {}\n\
+        }\n\
+        return 0\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Grid.area");
+    let label = m.big_o.render();
+    assert!(label.contains("rows"), "got {label}");
+    assert!(label.contains("cols"), "got {label}");
+    assert!(label.contains('·') || label.contains('*'), "got {label}");
+}
+
 // ─── native functions called as methods ────────────────────────────
 
 #[test]

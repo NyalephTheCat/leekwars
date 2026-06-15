@@ -54,7 +54,7 @@ pub mod pipeline;
 
 pub use analyze::{Complexity, ParamInfo, analyze_file, analyze_function};
 pub use big_o::BigO;
-pub use cost_expr::{CostExpr, SizeVar};
+pub use cost_expr::{CostExpr, SizeSource, SizeVar};
 pub use loop_bound::LoopBound;
 pub use native::{native_big_o, native_call_cost, native_growth};
 pub use pipeline::{Analyze, ComplexityArtifact};
