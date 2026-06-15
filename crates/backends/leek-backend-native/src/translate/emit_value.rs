@@ -573,10 +573,11 @@ impl Tx<'_, '_> {
 
     pub(super) fn unary(&mut self, op: UnOp, x: &Operand) -> Result<(Value, ValTy), NativeError> {
         // Upstream's emitter charges 1 op per source-level unary operator,
-        // except `+x` and `@x` which are free (`unary_op_cost`). Charged
+        // except `+x` and `@x` which are free (see `UnOp::op_cost`). Charged
         // before evaluation, mirroring `binary`.
-        if matches!(op, UnOp::Neg | UnOp::Not | UnOp::BitNot) {
-            self.charge(1)?;
+        let cost = op.op_cost();
+        if cost > 0 {
+            self.charge(cost)?;
         }
         let (v, ty) = self.operand(x)?;
         if ty == ValTy::Ref {

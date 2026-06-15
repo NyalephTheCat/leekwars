@@ -22,7 +22,7 @@ fn op_counts_match_the_interpreter_charge_model() {
     // A bare constant is free; an assignment is a static `leek-charge` op.
     assert_eq!(ops("return 1"), 0);
     assert_eq!(ops("var x = 42 return x"), 1);
-    // Binary op costs (binary_op_cost): add/sub 1, mul 2, div/mod 5.
+    // Binary op costs (BinOp::op_cost): add/sub 1, mul 2, div/mod 5.
     assert_eq!(ops("return 1 + 1"), 1);
     assert_eq!(ops("return 2 * 2"), 2);
     assert_eq!(ops("return 2 / 2"), 5);

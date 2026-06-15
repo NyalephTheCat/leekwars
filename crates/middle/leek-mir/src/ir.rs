@@ -826,24 +826,27 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    /// Operations charged for this binary op, mirroring the upstream VM. The
-    /// single source of truth shared by the interpreter and the native backend
-    /// so both report identical `.ops(N)` counts. Note: `In`/`NotIn` defaults
-    /// to 2 (the interval case, the common `.ops` target); an array-RHS `in`
-    /// over-charges by 1, matching the interpreter's existing behavior.
+    /// Operations charged for this binary op, mirroring the upstream VM.
+    /// Draws its tiers from [`leek_hir::op_cost`] — the single source of the
+    /// numbers shared with the Java emitter — so the interpreter, the native
+    /// backend, and Java all report identical `.ops(N)` counts. Note:
+    /// `In`/`NotIn` use the interval-membership tier (the common `.ops`
+    /// target); an array-RHS `in` over-charges by 1, matching the
+    /// interpreter's existing behavior.
     #[must_use]
     pub fn op_cost(self) -> u64 {
-        match self {
-            BinOp::Mul => 2,
-            BinOp::Div | BinOp::IntDiv | BinOp::Mod => 5,
-            BinOp::Pow => 40,
+        use leek_hir::op_cost::{CONTAINS, DEFAULT, DIV, MUL, POW};
+        u64::from(match self {
+            BinOp::Mul => MUL,
+            BinOp::Div | BinOp::IntDiv | BinOp::Mod => DIV,
+            BinOp::Pow => POW,
             // Upstream's emitter keys the charge on the *operator token*:
             // `^=` costs 1 even in v1, where its semantics are POW-assign
             // (only the spelled-out `**`/`**=` carry the 40-op power cost).
-            BinOp::CompoundXor => 1,
-            BinOp::In | BinOp::NotIn => 2,
-            _ => 1,
-        }
+            BinOp::CompoundXor => DEFAULT,
+            BinOp::In | BinOp::NotIn => CONTAINS,
+            _ => DEFAULT,
+        })
     }
 }
 
@@ -858,6 +861,20 @@ pub enum UnOp {
     /// (composites already alias via `Rc`); kept as its own
     /// variant so downstream tools can preserve source intent.
     Ref,
+}
+
+impl UnOp {
+    /// Operations charged for this unary op. Draws from [`leek_hir::op_cost`]
+    /// so it stays in lockstep with [`leek_hir::UnaryOp::op_cost`] (the Java
+    /// emitter): `+x` and `@x` are pass-throughs (free), the rest cost one op.
+    #[must_use]
+    pub fn op_cost(self) -> u64 {
+        use leek_hir::op_cost::{DEFAULT, FREE};
+        u64::from(match self {
+            UnOp::Pos | UnOp::Ref => FREE,
+            _ => DEFAULT,
+        })
+    }
 }
 
 /// Explicit conversions. The narrowing/widening that HIR leaves

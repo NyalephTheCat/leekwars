@@ -506,6 +506,30 @@ pub enum Literal {
     Null,
 }
 
+/// Canonical static op-cost tiers for the built-in operators, mirroring
+/// upstream `LeekValueType.*_COST` / `LeekExpression.computeOperations`.
+///
+/// This is the single source of the *numbers* every backend charges for an
+/// operator. The HIR-keyed [`BinaryOp::op_cost`] / [`UnaryOp::op_cost`] below
+/// (used by the Java emitter) and MIR's `BinOp` / `UnOp` `op_cost` (used by
+/// the interpreter and the native backend) all draw their tiers from here, so
+/// the two pipelines can't silently diverge on what an operator costs.
+pub mod op_cost {
+    /// `*` — multiply (`LeekValueType.MULTIPLY_COST`).
+    pub const MUL: u32 = 2;
+    /// `/`, `\`, `%` — divide / integer-divide / modulo.
+    pub const DIV: u32 = 5;
+    /// `**` — power.
+    pub const POW: u32 = 40;
+    /// `in` / `not in` over an interval — the common `.ops` membership target.
+    pub const CONTAINS: u32 = 2;
+    /// Every other binary operator, and a "real" unary operator
+    /// (`-x`, `!x`, `~x`). Plain `=` lands here too (its rhs cost plus 1).
+    pub const DEFAULT: u32 = 1;
+    /// `+x` and `@x` — pass-through unary operators charge nothing.
+    pub const FREE: u32 = 0;
+}
+
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -604,6 +628,26 @@ impl BinaryOp {
             _ => return None,
         })
     }
+
+    /// Static op cost charged for this operator, per the canonical
+    /// [`op_cost`] tiers. Keyed on the source-level operator: compound
+    /// assigns price as their underlying op (`*=` costs the same as `*`)
+    /// and plain `=` costs 1, matching upstream `computeOperations`. Used
+    /// by the Java emitter; MIR's `BinOp::op_cost` mirrors the same tiers.
+    #[must_use]
+    pub fn op_cost(self) -> u32 {
+        match self {
+            Self::Mul | Self::MulAssign => op_cost::MUL,
+            Self::Div
+            | Self::DivAssign
+            | Self::IntDiv
+            | Self::IntDivAssign
+            | Self::Mod
+            | Self::ModAssign => op_cost::DIV,
+            Self::Pow | Self::PowAssign => op_cost::POW,
+            _ => op_cost::DEFAULT,
+        }
+    }
 }
 
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
@@ -627,6 +671,20 @@ pub enum UnaryOp {
     /// semantic no-op; v1/v2 use it to box primitives. Lowered as
     /// identity by both backends.
     Ref,
+}
+
+impl UnaryOp {
+    /// Static op cost charged for this operator, per the canonical
+    /// [`op_cost`] tiers. `+x` and `@x` are pass-throughs and charge
+    /// nothing; the rest cost one op. Used by the Java emitter; MIR's
+    /// `UnOp::op_cost` mirrors the same tiers.
+    #[must_use]
+    pub fn op_cost(self) -> u32 {
+        match self {
+            Self::Pos | Self::Ref => op_cost::FREE,
+            _ => op_cost::DEFAULT,
+        }
+    }
 }
 
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]

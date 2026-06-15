@@ -246,13 +246,3 @@ pub fn lookup(name: &str) -> Option<Builtin> {
     }
     None
 }
-
-/// Legacy entry point: just the class name in the static case. Kept
-/// for any callers that don't need the full dispatch shape.
-#[allow(dead_code)]
-pub fn class_of(name: &str) -> Option<&'static str> {
-    match lookup(name)?.dispatch {
-        Dispatch::Static { class } => Some(class),
-        Dispatch::Receiver { v4_class, .. } => Some(v4_class),
-    }
-}

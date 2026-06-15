@@ -20,7 +20,6 @@ pub struct JavaWriter {
     line_map: Vec<(u32, u32)>,
 }
 
-#[allow(dead_code)]
 impl JavaWriter {
     pub fn new() -> Self {
         Self {
@@ -30,14 +29,6 @@ impl JavaWriter {
             indent: 0,
             line_map: Vec::new(),
         }
-    }
-
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    pub fn lines(&self) -> &str {
-        &self.lines_file
     }
 
     pub fn into_parts(mut self) -> (String, String) {
