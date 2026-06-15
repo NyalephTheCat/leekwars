@@ -44,7 +44,7 @@ individual is officially representing the project in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project maintainers at **yaelmagnier5@gmail.com**. All
+reported to the project maintainers at **contact@nyaleph.com**. All
 complaints will be reviewed and investigated promptly and fairly. Maintainers
 are obligated to respect the privacy and security of the reporter of any
 incident.
