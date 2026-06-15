@@ -163,33 +163,3 @@ pub fn global(_opts: &Options, name: &str) -> String {
 pub fn class_name(_opts: &Options, name: &str) -> String {
     format!("u_{}", safe_chars(name))
 }
-
-/// User method on an inner class: `m_run`. Superseded by the inline `u_<name>`
-/// naming in `emit/class.rs`; kept for the deferred static-method work.
-#[allow(dead_code)]
-pub fn method(opts: &Options, name: &str) -> String {
-    let safe = safe_chars(name);
-    if opts.is_clean() && !is_java_keyword(&safe) && !collides_with_runtime(&safe) {
-        safe
-    } else {
-        format!("m_{safe}")
-    }
-}
-
-/// Static field on a user class: `s_n`. For the deferred static-field work.
-#[allow(dead_code)]
-pub fn static_field(_opts: &Options, name: &str) -> String {
-    format!("s_{}", safe_chars(name))
-}
-
-/// Reassignable function (overwritten via `=`).
-#[allow(dead_code)]
-pub fn rfunction(_opts: &Options, name: &str) -> String {
-    format!("rfunction_{}", safe_chars(name))
-}
-
-/// Uplifted anonymous function wrapper.
-#[allow(dead_code)]
-pub fn ufunction(_opts: &Options, name: &str) -> String {
-    format!("ufunction_{}", safe_chars(name))
-}

@@ -28,7 +28,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use leek_diagnostics::{Code, Diagnostic};
+use leek_diagnostics::Diagnostic;
 use leek_syntax::language::NodeOrToken;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 
@@ -173,15 +173,6 @@ pub fn parse_allow_annotation(raw: &str) -> Option<HashSet<String>> {
         }
     }
     if codes.is_empty() { None } else { Some(codes) }
-}
-
-/// `Code` accessor wrapper — kept in this module to avoid leaking
-/// the public `Code::id` shape elsewhere. (Diagnostics' `Code` is
-/// already exported, so this is more about narrowing the import
-/// surface for the allow logic.)
-#[allow(dead_code)]
-fn code_id(code: Code) -> &'static str {
-    code.id()
 }
 
 #[cfg(test)]
