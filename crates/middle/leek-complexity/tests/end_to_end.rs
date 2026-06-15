@@ -730,6 +730,89 @@ class Board {\n\
     }
 }
 
+// ─── globals & local aliases ───────────────────────────────────────
+
+#[test]
+fn global_is_a_size_root() {
+    let r = analyze(
+        "\
+global data = []\n\
+function run() {\n\
+    for (var x in data) {}\n\
+    return 0\n\
+}\n",
+    );
+    let f = find(&r, "run");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "data"),
+        other => panic!("expected O(data), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn local_alias_resolves_to_its_origin() {
+    // `var xs = bag.items` then looping `xs` is linear in `bag.items`.
+    let r = analyze(
+        "\
+function run(bag) {\n\
+    var xs = bag.items\n\
+    for (var x in xs) {}\n\
+    return 0\n\
+}\n",
+    );
+    let f = find(&r, "run");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "bag.items"),
+        other => panic!("expected O(bag.items), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn reassigned_local_is_not_aliased() {
+    // `xs` is reassigned after binding `arr`, so it can't be treated as
+    // a stable alias — the loop bound is unknown rather than O(arr).
+    let r = analyze(
+        "\
+function run(arr) {\n\
+    var xs = arr\n\
+    xs = []\n\
+    for (var x in xs) {}\n\
+    return 0\n\
+}\n",
+    );
+    let f = find(&r, "run");
+    assert!(matches!(f.big_o, BigO::Unknown), "got {:?}", f.big_o);
+}
+
+#[test]
+fn method_receiver_tracked_through_local_new() {
+    // Both classes define `process`, so the unique-name fallback is
+    // ambiguous — only tracking `c = new Cat()` resolves the receiver.
+    // Cat.process is linear; Dog.process is constant; so a correct
+    // resolution makes `go` linear in `items`.
+    let r = analyze(
+        "\
+class Cat {\n\
+    public process(arr) {\n\
+        for (var x in arr) {}\n\
+        return 0\n\
+    }\n\
+}\n\
+class Dog {\n\
+    public process(arr) { return 0 }\n\
+}\n\
+function go(items) {\n\
+    var c = new Cat()\n\
+    return c.process(items)\n\
+}\n",
+    );
+    let f = find(&r, "go");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "items"),
+        other => panic!("expected O(items), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
 // ─── native functions called as methods ────────────────────────────
 
 #[test]

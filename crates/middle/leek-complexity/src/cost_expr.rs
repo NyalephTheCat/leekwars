@@ -19,6 +19,10 @@ pub enum SizeRoot {
     Param(u32),
     /// The enclosing instance (`this`) inside a method body.
     This,
+    /// A top-level global, identified by its declaration index
+    /// (`DefId`'s raw value). Like `This`, it's shared state the
+    /// caller can't supply, so it passes through substitution.
+    Global(u32),
 }
 
 /// Where a size variable comes from: a [`root`](SizeSource::root) plus a
@@ -75,6 +79,18 @@ impl SizeVar {
                 path: vec![name.clone()],
             },
             name,
+        }
+    }
+
+    /// A global-derived size variable (the global value itself, no
+    /// field path). `index` is the global's `DefId` raw value.
+    pub fn global(index: u32, name: impl Into<String>) -> Self {
+        Self {
+            source: SizeSource {
+                root: SizeRoot::Global(index),
+                path: Vec::new(),
+            },
+            name: name.into(),
         }
     }
 
@@ -491,7 +507,8 @@ impl CostExpr {
 ///   yield `Unknown`.
 fn substitute_size(v: &SizeVar, sub: &std::collections::HashMap<u32, CostExpr>) -> CostExpr {
     let SizeRoot::Param(idx) = v.source.root else {
-        // `this` root — instance state, keep as-is.
+        // `this` / global root — shared or instance state the caller
+        // can't supply, so keep it as-is.
         return CostExpr::Size(v.clone());
     };
     let Some(arg) = sub.get(&idx) else {

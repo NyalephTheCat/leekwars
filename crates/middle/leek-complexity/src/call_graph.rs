@@ -148,11 +148,13 @@ fn collect_into(
     method_owners: &HashMap<String, Vec<String>>,
     current_class: Option<&str>,
 ) {
+    let class_env = build_class_env(&body.stmts, current_class);
     let mut out = HashSet::new();
     let mut collector = CalleeCollector {
         def_to_name,
         method_owners,
         current_class,
+        class_env: &class_env,
         out: &mut out,
     };
     let _ = body.walk(&mut collector);
@@ -177,13 +179,14 @@ pub(crate) fn resolve_method_qualified(
     receiver: &Expr,
     method: &str,
     current_class: Option<&str>,
+    class_env: &HashMap<DefId, String>,
     method_owners: &HashMap<String, Vec<String>>,
 ) -> Option<String> {
     let owners = method_owners.get(method)?;
     if owners.is_empty() {
         return None;
     }
-    let chosen = match receiver_class(receiver, current_class) {
+    let chosen = match receiver_class(receiver, current_class, class_env) {
         // Receiver class known and it defines the method — exact hit.
         Some(c) if owners.iter().any(|o| o == &c) => c,
         // Class unknown, or known but not a direct owner (e.g. an
@@ -195,15 +198,24 @@ pub(crate) fn resolve_method_qualified(
     Some(qualified(&chosen, method))
 }
 
-/// Best-effort class of a method receiver. Reliable for `this`/`super`
-/// and `new C()`; otherwise reads the receiver's static type (often
-/// `Any` before type-checking, in which case this returns `None`).
-fn receiver_class(receiver: &Expr, current_class: Option<&str>) -> Option<String> {
+/// Best-effort class of a method receiver. Reliable for `this`/`super`,
+/// `new C()`, and a local tracked back to one of those (`var c = new
+/// Cat()`); otherwise reads the receiver's static type (often `Any`
+/// before type-checking, in which case this returns `None`).
+fn receiver_class(
+    receiver: &Expr,
+    current_class: Option<&str>,
+    class_env: &HashMap<DefId, String>,
+) -> Option<String> {
     match &receiver.kind {
         ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_) => {
             current_class.map(str::to_string)
         }
         ExprKind::New(n) => Some(n.class.clone()),
+        ExprKind::Name(NameRef::Local(id)) => class_env
+            .get(id)
+            .cloned()
+            .or_else(|| class_name_of_type(&receiver.ty)),
         _ => class_name_of_type(&receiver.ty),
     }
 }
@@ -213,6 +225,61 @@ fn class_name_of_type(ty: &Type) -> Option<String> {
         Type::ClassInstance(name, _) => Some(name.clone()),
         Type::Nullable(inner) => class_name_of_type(inner),
         _ => None,
+    }
+}
+
+// ─── per-body local → class environment ─────────────────────────────
+
+/// Track which class each local holds, for receiver resolution. Maps a
+/// local's `DefId` to a class name when its declaration pins it down:
+/// `C x = …` (typed), `var x = new C()`, `var x = this`, or `var x = y`
+/// where `y` is itself tracked. Built per function/method body.
+pub(crate) fn build_class_env(stmts: &[Stmt], current_class: Option<&str>) -> HashMap<DefId, String> {
+    let mut env: HashMap<DefId, String> = HashMap::new();
+    let mut builder = ClassEnvBuilder {
+        current_class,
+        env: &mut env,
+    };
+    for s in stmts {
+        let _ = s.walk(&mut builder);
+    }
+    env
+}
+
+struct ClassEnvBuilder<'a> {
+    current_class: Option<&'a str>,
+    env: &'a mut HashMap<DefId, String>,
+}
+
+impl Visit<Stmt> for ClassEnvBuilder<'_> {
+    fn visit(&mut self, s: &Stmt) -> Flow {
+        if let Stmt::VarDecl(v) = s {
+            let class = class_name_of_type(v.ty.as_ref().unwrap_or(&Type::Any)).or_else(|| {
+                v.init
+                    .as_ref()
+                    .and_then(|init| expr_class(init, self.current_class, self.env))
+            });
+            if let Some(class) = class {
+                self.env.insert(v.def, class);
+            }
+        }
+        Flow::Walk
+    }
+}
+impl Visit<Block> for ClassEnvBuilder<'_> {}
+impl Visit<Expr> for ClassEnvBuilder<'_> {}
+
+/// The class an initializer expression yields, if statically known.
+fn expr_class(e: &Expr, current_class: Option<&str>, env: &HashMap<DefId, String>) -> Option<String> {
+    match &e.kind {
+        ExprKind::New(n) => Some(n.class.clone()),
+        ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_) => {
+            current_class.map(str::to_string)
+        }
+        ExprKind::Name(NameRef::Local(id)) => {
+            env.get(id).cloned().or_else(|| class_name_of_type(&e.ty))
+        }
+        _ => class_name_of_type(&e.ty),
     }
 }
 
@@ -383,6 +450,7 @@ struct CalleeCollector<'a> {
     def_to_name: &'a HashMap<DefId, String>,
     method_owners: &'a HashMap<String, Vec<String>>,
     current_class: Option<&'a str>,
+    class_env: &'a HashMap<DefId, String>,
     out: &'a mut HashSet<String>,
 }
 
@@ -402,6 +470,7 @@ impl Visit<Expr> for CalleeCollector<'_> {
                         receiver,
                         method,
                         self.current_class,
+                        self.class_env,
                         self.method_owners,
                     ) {
                         self.out.insert(q);

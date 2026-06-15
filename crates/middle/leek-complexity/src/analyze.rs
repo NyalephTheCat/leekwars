@@ -40,7 +40,8 @@ use crate::big_o::big_o;
 use crate::call_graph;
 use crate::cost_expr::{CostExpr, SizeVar};
 use crate::loop_bound::{
-    BoundContext, LoopBound, ParamIndex, bound_of_for, bound_of_foreach, bound_of_while,
+    BoundContext, LocalIndex, LoopBound, ParamIndex, bound_of_for, bound_of_foreach, bound_of_while,
+    build_size_env,
 };
 use crate::native;
 
@@ -92,13 +93,14 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     let mut registry: HashMap<String, Complexity> = HashMap::new();
     let mut units: HashMap<String, Unit> = HashMap::new();
     let mut def_to_name: HashMap<DefId, String> = HashMap::new();
+    // `DefId → name` for top-level globals, so the size resolver can
+    // attribute `count(g)` / `g.field` to a global root.
+    let mut globals: HashMap<DefId, String> = HashMap::new();
     for (idx, def) in hir.defs.iter().enumerate() {
+        let def_id = DefId(u32::try_from(idx).expect("more than u32::MAX defs"));
         match def {
             Def::Function(f) if call_graph::is_real_function(f) => {
-                def_to_name.insert(
-                    DefId(u32::try_from(idx).expect("more than u32::MAX defs")),
-                    f.name.clone(),
-                );
+                def_to_name.insert(def_id, f.name.clone());
                 units.insert(
                     f.name.clone(),
                     Unit {
@@ -108,6 +110,9 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
                         class: None,
                     },
                 );
+            }
+            Def::Global(g) => {
+                globals.insert(def_id, g.name.clone());
             }
             Def::Class(c) => {
                 for m in &c.methods {
@@ -130,7 +135,7 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     // Non-recursive nodes, callees-first.
     for name in &ordering.topo {
         if let Some(u) = units.get(name) {
-            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph);
+            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph, &globals);
             registry.insert(name.clone(), c);
         }
     }
@@ -139,19 +144,29 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     // same-cycle peer falls through to Unknown.
     for name in &ordering.recursive {
         if let Some(u) = units.get(name) {
-            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph);
+            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph, &globals);
             registry.insert(name.clone(), c);
         }
     }
 
     // Main block.
     let pmap = ParamMap::empty();
-    let ctx = BoundContext { params: &pmap };
+    let main_locals = build_size_env(&hir.main, &pmap, &globals);
+    let main_class_env = call_graph::build_class_env(&hir.main, None);
+    let names = LocalIndex {
+        globals: &globals,
+        locals: &main_locals,
+    };
+    let ctx = BoundContext {
+        params: &pmap,
+        names: &names,
+    };
     let walker = Walker {
         registry: &registry,
         recursive: &ordering.recursive,
         def_to_name: &def_to_name,
         method_owners: &graph.method_owners,
+        class_env: &main_class_env,
         ctx: &ctx,
         analysing: None,
         analysing_class: None,
@@ -196,13 +211,14 @@ pub fn analyze_function(f: &Function) -> Complexity {
     let graph = call_graph::CallGraph::default();
     let recursive: HashSet<String> = HashSet::new();
     let def_to_name: HashMap<DefId, String> = HashMap::new();
+    let globals: HashMap<DefId, String> = HashMap::new();
     let unit = Unit {
         key: f.name.clone(),
         params: &f.params,
         body: &f.body,
         class: None,
     };
-    analyze_unit(&unit, &registry, &recursive, &def_to_name, &graph)
+    analyze_unit(&unit, &registry, &recursive, &def_to_name, &graph, &globals)
 }
 
 fn analyze_unit(
@@ -211,6 +227,7 @@ fn analyze_unit(
     recursive: &HashSet<String>,
     def_to_name: &HashMap<DefId, String>,
     graph: &call_graph::CallGraph,
+    globals: &HashMap<DefId, String>,
 ) -> Complexity {
     let params: Vec<ParamInfo> = u
         .params
@@ -222,12 +239,24 @@ fn analyze_unit(
         })
         .collect();
     let pmap = ParamMap::from_params(u.params);
-    let ctx = BoundContext { params: &pmap };
+    let stmts: &[Stmt] = u.body.as_ref().map_or(&[], |b| b.stmts.as_slice());
+    // Per-body resolution tables: local size aliases + local→class.
+    let locals = build_size_env(stmts, &pmap, globals);
+    let class_env = call_graph::build_class_env(stmts, u.class);
+    let names = LocalIndex {
+        globals,
+        locals: &locals,
+    };
+    let ctx = BoundContext {
+        params: &pmap,
+        names: &names,
+    };
     let walker = Walker {
         registry,
         recursive,
         def_to_name,
         method_owners: &graph.method_owners,
+        class_env: &class_env,
         ctx: &ctx,
         analysing: Some(u.key.as_str()),
         analysing_class: u.class,
@@ -310,6 +339,9 @@ struct Walker<'a> {
     /// resolution. Shared with the call graph so edges and
     /// substitutions agree.
     method_owners: &'a HashMap<String, Vec<String>>,
+    /// `local DefId → class name` for the body being analysed, so a
+    /// `var c = new Cat(); c.meow()` receiver resolves to `Cat`.
+    class_env: &'a HashMap<DefId, String>,
     ctx: &'a BoundContext<'a>,
     /// Registry key of the node currently being analysed (so calls
     /// from inside a recursive node to one of its same-cycle peers
@@ -498,6 +530,7 @@ impl Walker<'_> {
             receiver,
             method,
             self.analysing_class,
+            self.class_env,
             self.method_owners,
         ) {
             let cost = self.user_call_cost(&q, args);
@@ -600,9 +633,10 @@ impl Walker<'_> {
             ExprKind::Map(pairs) => return Some(CostExpr::Const(pairs.len() as u64)),
             _ => {}
         }
-        // Parameters, `this`/`obj` field paths, and `count(...)` of any
-        // of those resolve to a size variable.
-        crate::loop_bound::resolve_size_var(e, self.ctx.params).map(CostExpr::Size)
+        // Parameters, globals, `this`/`obj` field paths, locals that
+        // alias any of those, and `count(...)` of any of them resolve
+        // to a size variable.
+        crate::loop_bound::resolve_size_var(e, self.ctx).map(CostExpr::Size)
     }
 
     /// Growth contribution of a free-function builtin call. Higher-

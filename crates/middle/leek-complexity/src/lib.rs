@@ -30,12 +30,16 @@
 //! - **Size variables** are resolved uniformly by
 //!   [`resolve_size_var`](loop_bound::resolve_size_var): the element
 //!   count of any value reachable from a stable root — a parameter
-//!   (`arr`), or a field access path off a parameter or `this`
-//!   (`this.cells`, `bag.items`, `this.grid.rows`). Parameter roots
-//!   substitute at a call site (their field path composing onto the
-//!   argument's location, so `f(thing)` calling `sumField(obj)` over
-//!   `obj.items` reports `O(thing.items)`); `this` roots are instance
-//!   state and stay in the method's own big-O.
+//!   (`arr`), a global (`count(g)`), `this`, or a local that aliases
+//!   one of those (`var xs = bag.items`) — through any field access
+//!   path (`this.cells`, `bag.items`, `this.grid.rows`). Parameter
+//!   roots substitute at a call site (their field path composing onto
+//!   the argument's location, so `f(thing)` calling `sumField(obj)`
+//!   over `obj.items` reports `O(thing.items)`); `this` and global
+//!   roots are shared/instance state and stay in the method's own
+//!   big-O. Reassigned locals are excluded so a stale alias can't
+//!   mislead. Local `new C()` bindings also feed method-receiver
+//!   resolution (`var c = new Cat(); c.m()`).
 //!
 //! Returns one [`Complexity`] per user function and method, plus
 //! one entry for `<main>` (the top-level statements).
