@@ -108,50 +108,86 @@ time on four compute-heavy programs (checked in under
 plus **corpus correctness** (`equals(...)` cases checked against the
 reference's expected value). In each column **bold** is the best — fastest
 run, or most cases correct; upstream competes on equal footing (it wins
-`fib`, `array` and `map`):
+`array` and `map`, `rust-java` edges `fib`, and `rust-native` takes the
+scalar loop and the corpus):
 
 | backend | `fib(28)` | loop, 1M | array, 100k | map, 50k | corpus¹ |
 |---|--:|--:|--:|--:|--:|
-| rust-native · JIT² | 5.5 ms | **8.5 ms** | 19 ms | 17 ms | **9 317 / 9 519** |
-| rust-native · AOT exe³ | 6.2 ms | 11 ms | 25 ms | 26 ms | = JIT |
-| rust-java⁴ | 3.5 ms | **8.5 ms** | 4.9 ms | 4.6 ms | 9 129 / 9 519 |
-| upstream-java⁵ | **3.1 ms** | 11 ms | **2.3 ms** | **4.4 ms** | reference |
+| rust-native · JIT² | 5.3 ms | **7.7 ms** | 38 ms | 37 ms | **9 519 / 9 519** |
+| rust-native · AOT exe³ | 6.9 ms | 9.1 ms | 42 ms | 45 ms | = JIT |
+| rust-java⁴ | **4.6 ms** | 12 ms | 6.4 ms | 5.5 ms | 9 320 / 9 519 |
+| upstream-java⁵ | 4.6 ms | 12 ms | **3.4 ms** | **3.0 ms** | reference |
 
-<sub>4-core Intel Xeon @ 2.10 GHz (cloud VM) · OpenJDK 25 · rustc 1.94.1 ·
+<sub>4-core Intel Xeon @ 2.80 GHz (cloud VM) · OpenJDK 25 · rustc 1.94.1 ·
 release. Indicative — absolute values move with the machine and the JVM's
 warm samples are noisy (p95 up to ~3× the median); the relative picture is
 stable. Times exclude one-time compile/build and JVM start-up/warm-up
 (the JVM backends loop inside one warmed-up JVM and report per-iteration
 `nanoTime` brackets).
 **¹ Corpus**: 9 519 enabled `equals(...)` cases extracted from the pinned
-upstream test suite. Native runs 9 322 of them (the 197 compile errors are
-upstream features not implemented yet: big integers ×138, sets ×36, plus a
-few function/class cases) and matches the reference on 9 317 (5 wrong
-values: 3 big-int, 1 function, 1 string). Full native sweep ≈ 13 s
-(≈ 340 µs/case median — almost all Cranelift compile, ≈ 2.7 µs execute).
-The rust-java figure is the **full** corpus via the batch sweep
-(`--corpus --fast-java`: one `javac` per batch, one JVM; ≈ 65 s): 9 129
-correct, 149 wrong values (concentrated in intervals, numbers and strings),
-241 compile/emit errors (mostly the same big-int and set suites).
-**² JIT**: re-compiles each run — jit-compile (≈ 0.2–1.8 ms) + execute (the
-speed cell).
-**³ AOT exe**: compiles once (≈ 0.5 s `leekc`, including the `cc` link) to a
+upstream test suite. Native compiles and runs every one and **matches the
+reference on all 9 519** — no compile errors, and the newer upstream
+features the older table flagged as unimplemented (sets ×160, intervals
+×440) now run. Full native sweep ≈ 20 s (≈ 420 µs/case median — almost all
+Cranelift compile). The rust-java figure is the **full** corpus via the
+batch sweep (`--corpus --fast-java`: one `javac` per batch, one JVM; ≈ 85 s,
+27 javac rounds): 9 320 correct, 150 wrong values, 49 compile/emit errors.
+**² JIT**: re-compiles each run — jit-compile + execute (the speed cell).
+The compile is a small fraction of each run (≈ 0.3 ms on the scalar
+programs, a few ms on `array`), so warm time is mostly execution.
+**³ AOT exe**: compiles once (≈ 0.8 s `leekc`, including the `cc` link) to a
 standalone binary; cells are whole-process wall time (incl. ~1 ms process
 start). Same codegen as JIT, so identical corpus correctness.
 **⁴ rust-java**: a transpiler to Java, benchmarked on the upstream runtime
 classes.
 **⁵** Steady-state only exists after the JVM tax: a cold single-shot run
-pays JVM start + compile first (`javac` ≈ 0.6 s for rust-java; upstream's
-in-JVM compile of `fib` ≈ 1.3 s — ≈ 1.4 s end-to-end), where the Rust
-backends pay ~0 (JIT cold run ≈ 7 ms in-process, AOT exe ≈ 6 ms total).</sub>
+pays JVM start + in-JVM compile first (~1 s for the `fib` class), where the
+Rust backends pay ~0 (JIT cold run ≈ 6 ms in-process, AOT exe ≈ 7 ms
+total).</sub>
+
+### Per-run distribution & warm-up
+
+The warm median hides two things the harness also reports (`--detail`): the
+**cold→warm gap** (JIT/JVM warm-up paid before steady state) and the
+**noise** — the JVM samples are jittery while the native backend's are flat.
+On `loop` (1M):
+
+| backend | cold | warm-min | warm-med | warm-p95 | p95 ÷ med |
+|---|--:|--:|--:|--:|--:|
+| rust-native · JIT | 8.3 ms | 7.5 ms | **7.7 ms** | 8.0 ms | **1.0×** |
+| rust-java | 46 ms | 10.3 ms | 11.1 ms | 28.0 ms | 2.5× |
+| upstream-java | 46 ms | 10.8 ms | 11.9 ms | 32.4 ms | 2.7× |
+
+Native's 7.7 ms warm run breaks down as **0.27 ms Cranelift JIT-compile +
+7.4 ms execute**; the JVMs' warm runs are pure execution inside an
+already-warmed JVM, so their one-time `javac` + in-JVM JIT cost (≈ 0.85 s for
+rust-java, ≈ 1.9 s for upstream) is paid once, off the per-run clock — which
+is also why their p95 stays 2.5–2.7× the median while native sits at ~1.0×.
+
+### Optimization levels
+
+The native backend's Cranelift opt-level (`leekc --opt-level none | speed |
+speed-and-size`) barely moves these programs — whole-process AOT-exe wall
+time, ms:
+
+| program | `none` (debug) | `speed` (release) | `speed-and-size` |
+|---|--:|--:|--:|
+| `fib(28)` | 7.0 | 6.9 | 6.9 |
+| loop, 1M | 9.1 | 9.1 | 9.1 |
+| array, 100k | 42 | 42 | 42 |
+| map, 50k | 46 | 45 | 46 |
+
+Execution is dominated by the (already-optimized) boxed-value runtime and the
+loop bodies — not the glue Cranelift optimizes — so `none` lands within noise
+of `speed`. The speed/AOT figures in the main table use `speed` (release).
 
 - **rust-native** keeps LeekScript's dynamic (boxed) values but unboxes scalars
-  whose type is known. It **matches or beats the JVMs on the scalar loop** and stays within
-  ~2× on recursion (`fib`, via param-type specialization — proving an untyped
+  whose type is known. It **beats both JVMs on the scalar loop** and stays within
+  ~15% on recursion (`fib`, via param-type specialization — proving an untyped
   parameter is monomorphic and compiling it as an unboxed register), while
-  trailing on allocation/hashing (arrays, maps) where values stay boxed.
-  Cranelift codegen is sub-millisecond on these programs, so each warm JIT run
-  is essentially pure execution.
+  trailing ~10× on allocation/hashing (arrays, maps) where values stay boxed.
+  Cranelift codegen is a small fraction of each run, so each warm JIT run is
+  mostly execution.
 - **rust-native AOT exe** is the same Cranelift code compiled *ahead of time* to a
   standalone binary — no per-run compilation, first run = steady-state. Ideal for
   a single deployed binary (e.g. a fight AI); it trails the JIT on still-boxing
@@ -159,9 +195,9 @@ backends pay ~0 (JIT cold run ≈ 7 ms in-process, AOT exe ≈ 6 ms total).</sub
 - **rust-java** transpiles to Java, in the same ballpark as upstream; the
   instantly-starting Rust backends still win *end-to-end* on single runs since the
   JVM pair pays its start-up tax first.
-- The **native** backend matches the reference on every corpus case it can
-  compile (9 317 / 9 322); the gap to 9 519 is unimplemented newer upstream
-  features (big integers, sets), not wrong answers — see the footnote above.
+- The **native** backend matches the reference on **every one of the 9 519
+  corpus cases** — including the sets and intervals the older table counted as
+  unimplemented — with no compile errors. See the footnote above.
 
 ## Desugaring to official LeekScript
 
