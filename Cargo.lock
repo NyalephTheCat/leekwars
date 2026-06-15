@@ -977,6 +977,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "leek-backend-leekscript"
+version = "0.0.1"
+dependencies = [
+ "leek-backend-native",
+ "leek-diagnostics",
+ "leek-hir",
+ "leek-lexer",
+ "leek-parser",
+ "leek-runtime",
+ "leek-span",
+ "leek-syntax",
+ "leek-types",
+]
+
+[[package]]
 name = "leek-backend-native"
 version = "0.0.1"
 dependencies = [
@@ -1519,6 +1534,7 @@ dependencies = [
  "anyhow",
  "clap",
  "leek-backend-java",
+ "leek-backend-leekscript",
  "leek-backend-native",
  "leek-diagnostics",
  "leek-environment",
@@ -1630,6 +1646,7 @@ dependencies = [
  "clap_complete",
  "ignore",
  "leek-backend-java",
+ "leek-backend-leekscript",
  "leek-backend-native",
  "leek-backends",
  "leek-complexity",

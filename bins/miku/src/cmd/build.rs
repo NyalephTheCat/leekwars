@@ -37,7 +37,12 @@ pub fn run(
             args.clean,
             &project.manifest.backend.java.clone().unwrap_or_default(),
         );
-    let opt = if matches!(backend, BackendKind::Java) && !clean_java {
+    // Java *exact* and the LeekScript source backend keep the IR
+    // source-faithful (O0); the LeekScript backend runs its own opt passes
+    // under `--optimize` instead. Everything else folds constants (O1).
+    let opt = if (matches!(backend, BackendKind::Java) && !clean_java)
+        || matches!(backend, BackendKind::LeekScript)
+    {
         leek_recipes::OptLevel::O0
     } else {
         leek_recipes::OptLevel::O1
@@ -77,6 +82,7 @@ pub fn run(
             emit_java(&project, &driver_run.run, version, args, quiet, environment)
         }
         BackendKind::Native => emit_native(&project, &driver_run.run, args, quiet),
+        BackendKind::LeekScript => emit_leekscript(&project, &driver_run.run, version, args, quiet),
         BackendKind::Jar => {
             bail!("jar backend not yet supported in this toolchain");
         }
@@ -109,6 +115,50 @@ fn emit_native(
         .with_op_limit(u64::MAX);
     leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, quiet)
         .with_context(|| format!("compiling native executable to {}", out.display()))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Emit desugared official LeekScript source for the project. Writes
+/// `<entry-stem>.leek` to `--out-dir` (or `<build>/leekscript`).
+fn emit_leekscript(
+    project: &Project,
+    result: &leek_pipeline::Run<'_>,
+    version: leek_syntax::Version,
+    args: &Build,
+    quiet: bool,
+) -> Result<ExitCode> {
+    let hir = result
+        .get::<HirArtifact>()
+        .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
+    let input = result.input();
+
+    let mut opts = if args.compact {
+        leek_backend_leekscript::Options::compact(version)
+    } else {
+        leek_backend_leekscript::Options::pretty(version).with_source_text(input.text.clone())
+    };
+    opts = opts
+        .with_optimize(args.optimize)
+        .with_user_source(input.source);
+
+    let out = leek_backend_leekscript::emit(hir.0.as_ref(), &opts);
+
+    let out_dir = match &args.out_dir {
+        Some(dir) if dir.is_absolute() => dir.clone(),
+        Some(dir) => project.root.join(dir),
+        None => project.build_dir().join("leekscript"),
+    };
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+
+    let stem = project
+        .entry_path()
+        .file_stem()
+        .map_or_else(|| "main".to_string(), |s| s.to_string_lossy().into_owned());
+    let path = out_dir.join(format!("{stem}.leek"));
+    std::fs::write(&path, &out.source).with_context(|| format!("writing {}", path.display()))?;
+    if !quiet {
+        eprintln!("wrote {}", path.display());
+    }
     Ok(ExitCode::SUCCESS)
 }
 

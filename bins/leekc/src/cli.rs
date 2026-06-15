@@ -30,6 +30,11 @@ pub enum Emit {
     Native,
     /// Format the source via `leek-fmt` and print to stdout.
     Fmt,
+    /// Emit valid official LeekScript with experimental features
+    /// desugared. Human-readable by default; see `--compact` and
+    /// `--optimize`.
+    #[value(name = "leekscript")]
+    LeekScript,
 }
 
 /// Native optimization level (the debug/release switch).
@@ -134,6 +139,16 @@ pub struct Cli {
     /// leek-wars-generator can run directly in a fight.
     #[arg(long = "base-class", value_name = "NAME")]
     pub base_class: Option<String>,
+
+    /// For `--emit leekscript`: emit minified output (no indentation /
+    /// newlines, comments dropped) instead of the human-readable form.
+    #[arg(long)]
+    pub compact: bool,
+
+    /// For `--emit leekscript`: run semantics-preserving optimizations
+    /// (constant folding, dead-code elimination) before emitting.
+    #[arg(long)]
+    pub optimize: bool,
 
     /// Fold known library constants to their literal values before emit
     /// (e.g. `WEAPON_PISTOL` → `37`). Opt-in; requires a `--library`

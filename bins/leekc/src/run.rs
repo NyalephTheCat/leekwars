@@ -200,6 +200,34 @@ pub fn run() -> Result<ExitCode> {
                 eprintln!("leekc: parse failed; no Java to emit");
             }
         }
+        Emit::LeekScript => {
+            if let Some(hir) = result.get::<HirArtifact>() {
+                let mut opts = if cli.compact {
+                    leek_backend_leekscript::Options::compact(version)
+                } else {
+                    leek_backend_leekscript::Options::pretty(version).with_source_text(text.clone())
+                };
+                opts = opts.with_optimize(cli.optimize).with_user_source(source);
+                let out = leek_backend_leekscript::emit(hir.0.as_ref(), &opts);
+                match &cli.out_dir {
+                    Some(dir) => {
+                        std::fs::create_dir_all(dir)
+                            .with_context(|| format!("creating {}", dir.display()))?;
+                        let stem = cli.input.file_stem().map_or_else(
+                            || "out".to_string(),
+                            |s| s.to_string_lossy().into_owned(),
+                        );
+                        let path = dir.join(format!("{stem}.out.leek"));
+                        std::fs::write(&path, &out.source)
+                            .with_context(|| format!("writing {}", path.display()))?;
+                        eprintln!("wrote {}", path.display());
+                    }
+                    None => print!("{}", out.source),
+                }
+            } else {
+                eprintln!("leekc: parse failed; no LeekScript to emit");
+            }
+        }
         Emit::Fmt => {
             if let Some(artifact) = result.get::<FormattedArtifact>() {
                 print!("{}", artifact.0);

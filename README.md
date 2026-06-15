@@ -163,6 +163,29 @@ backends pay ~0 (JIT cold run ≈ 7 ms in-process, AOT exe ≈ 6 ms total).</sub
   compile (9 317 / 9 322); the gap to 9 519 is unimplemented newer upstream
   features (big integers, sets), not wrong answers — see the footnote above.
 
+## Desugaring to official LeekScript
+
+The **leekscript** backend emits valid *official* (non-experimental) LeekScript
+from code that uses the experimental features (`enum`, `type` aliases,
+`interface`/`implements`, generics, function overloading), with those features
+desugared away — `enum`s become a class of `static final` fields, overloaded
+functions are renamed uniquely (call sites follow), and type-only constructs are
+erased. The emitted program runs identically (it is generated from the same
+checked HIR the other backends consume).
+
+```sh
+leekc src/main.leek --emit leekscript            # human-readable, comments kept
+leekc src/main.leek --emit leekscript --compact  # minified, comments dropped
+leekc src/main.leek --emit leekscript --optimize # + constant folding / dead-code
+miku build --backend leekscript                  # writes build/leekscript/<stem>.leek
+```
+
+Pretty output re-formats cleanly and carries the original comments over (recovered
+by source span); compact output is minified. `--optimize` runs a small set of
+semantics-preserving HIR→HIR passes (constant folding, dead-code elimination)
+first. Round-trip and JIT-equivalence tests live in
+[`crates/backends/leek-backend-leekscript/tests/`](crates/backends/leek-backend-leekscript/tests/).
+
 ## Repository layout
 
 ```
@@ -171,7 +194,7 @@ crates/
   core/      spans, diagnostics, manifest, runtime, prelude, environment
   frontend/  lexer, parser, syntax
   middle/    resolver, types, HIR, MIR, complexity
-  backends/  java, native (cranelift), backend registry
+  backends/  java, native (cranelift), leekscript (source), backend registry
   db/        pipeline, recipes, driver (the compilation orchestration)
   game/      leek-game-runtime, leek-generator, leek-scenario  (fights)
   tools/     leek-lsp, leek-dap, leek-fmt, leek-lint, leek-ide, …
