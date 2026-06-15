@@ -49,7 +49,7 @@ impl SuiteBackend {
         match kind {
             BackendKind::Java => Some(Self::Java),
             BackendKind::Native => Some(Self::Native),
-            BackendKind::Jar | BackendKind::Wasm => None,
+            BackendKind::Jar | BackendKind::Wasm | BackendKind::LeekScript => None,
         }
     }
 }

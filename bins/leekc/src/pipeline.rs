@@ -12,7 +12,7 @@ use crate::cli::Emit;
 pub fn pipeline_for(emit: Emit, fmt_opts: FormatOptions, lints: LintGroups) -> Pipeline {
     let params = leek_recipes::driver_params().with_lints(lints);
     match emit {
-        Emit::Check | Emit::Hir | Emit::Java | Emit::Run | Emit::Native => {
+        Emit::Check | Emit::Hir | Emit::Java | Emit::LeekScript | Emit::Run | Emit::Native => {
             leek_recipes::pipeline(Target::Linted, &params).expect("recipe")
         }
         Emit::Tokens | Emit::FlatCst => {

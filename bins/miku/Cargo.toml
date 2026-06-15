@@ -24,6 +24,7 @@ leek-project        = { workspace = true }
 leek-driver         = { workspace = true }
 leek-backends       = { workspace = true }
 leek-backend-java   = { workspace = true }
+leek-backend-leekscript = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-fmt            = { workspace = true }
 leek-lint           = { workspace = true }

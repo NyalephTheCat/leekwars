@@ -267,6 +267,13 @@ pub struct Build {
     /// For the Java backend: emit clean (readable) output.
     #[arg(long)]
     pub clean: bool,
+    /// For the LeekScript backend: emit minified output (comments dropped).
+    #[arg(long)]
+    pub compact: bool,
+    /// For the LeekScript backend: run semantics-preserving optimizations
+    /// (constant folding, dead-code elimination) before emitting.
+    #[arg(long)]
+    pub optimize: bool,
     /// Override the output directory for the chosen backend.
     #[arg(long, value_name = "PATH")]
     pub out_dir: Option<PathBuf>,

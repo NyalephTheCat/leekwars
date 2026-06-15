@@ -263,7 +263,7 @@ fn parse_backend(
     tbl: &toml::value::Table,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<BackendTable, ManifestError> {
-    const KNOWN: &[&str] = &["java", "jar", "native", "wasm"];
+    const KNOWN: &[&str] = &["java", "jar", "native", "wasm", "leekscript"];
     warn_unknown(tbl, "backend", KNOWN, warnings);
     let mut out = BackendTable::default();
     for (key, val) in tbl {
@@ -280,6 +280,7 @@ fn parse_backend(
             "jar" => out.jar = Some(settings),
             "native" => out.native = Some(settings),
             "wasm" => out.wasm = Some(settings),
+            "leekscript" => out.leekscript = Some(settings),
             _ => unreachable!(),
         }
     }

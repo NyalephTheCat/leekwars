@@ -16,7 +16,7 @@ pub fn resolve_backend(manifest: &Manifest, cli_backend: Option<&str>) -> Result
     if let Some(raw) = cli_backend {
         return BackendKind::parse(raw).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown backend `{raw}` (expected one of: java, jar, native, interp, wasm)"
+                "unknown backend `{raw}` (expected one of: java, jar, native, wasm, leekscript)"
             )
         });
     }

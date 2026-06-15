@@ -1,0 +1,23 @@
+[package]
+name        = "leek-backend-leekscript"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-lexer       = { workspace = true }
+leek-hir         = { workspace = true }
+leek-types       = { workspace = true }
+
+[dev-dependencies]
+leek-parser         = { workspace = true }
+leek-backend-native = { workspace = true }
+leek-runtime        = { workspace = true }
+leek-diagnostics    = { workspace = true }

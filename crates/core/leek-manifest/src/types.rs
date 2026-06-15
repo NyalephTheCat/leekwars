@@ -76,6 +76,7 @@ pub struct BackendTable {
     pub jar: Option<BackendSettings>,
     pub native: Option<BackendSettings>,
     pub wasm: Option<BackendSettings>,
+    pub leekscript: Option<BackendSettings>,
 }
 
 impl BackendTable {
@@ -85,11 +86,12 @@ impl BackendTable {
     /// falls back to the first enabled backend in the order
     /// java → jar → native → wasm.
     pub fn default_kind(&self) -> Option<BackendKind> {
-        let entries: [(BackendKind, &Option<BackendSettings>); 4] = [
+        let entries: [(BackendKind, &Option<BackendSettings>); 5] = [
             (BackendKind::Java, &self.java),
             (BackendKind::Jar, &self.jar),
             (BackendKind::Native, &self.native),
             (BackendKind::Wasm, &self.wasm),
+            (BackendKind::LeekScript, &self.leekscript),
         ];
         for (kind, slot) in &entries {
             if let Some(s) = slot
@@ -114,6 +116,7 @@ impl BackendTable {
             BackendKind::Jar => self.jar.as_ref(),
             BackendKind::Native => self.native.as_ref(),
             BackendKind::Wasm => self.wasm.as_ref(),
+            BackendKind::LeekScript => self.leekscript.as_ref(),
         }
     }
 }
@@ -124,6 +127,8 @@ pub enum BackendKind {
     Jar,
     Native,
     Wasm,
+    /// Emit desugared official LeekScript source.
+    LeekScript,
 }
 
 impl BackendKind {
@@ -133,6 +138,7 @@ impl BackendKind {
             BackendKind::Jar => "jar",
             BackendKind::Native => "native",
             BackendKind::Wasm => "wasm",
+            BackendKind::LeekScript => "leekscript",
         }
     }
 
@@ -142,6 +148,7 @@ impl BackendKind {
             "jar" => BackendKind::Jar,
             "native" => BackendKind::Native,
             "wasm" => BackendKind::Wasm,
+            "leekscript" => BackendKind::LeekScript,
             _ => return None,
         })
     }
