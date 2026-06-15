@@ -15,37 +15,87 @@ LeekScript is the dynamically-typed scripting language behind
 the lexical structure (how source text is split into tokens) and the syntactic
 structure (how tokens form declarations, statements, and expressions).
 
-The grammar is presented in **Extended Backus–Naur Form (EBNF)** and is derived
-directly from the parser implementation in this repository, not from an external
-language standard. Where the implementation deviates from a naïve reading of the
-syntax — operator fusion, lookahead-based disambiguation, version gates — those
-behaviours are documented explicitly so the grammar reflects what the parser
-*actually* accepts.
+The grammar is derived directly from the parser implementation in this
+repository, not from an external language standard. Where the implementation
+deviates from a naïve reading of the syntax — operator fusion, lookahead-based
+disambiguation, version gates — those behaviours are documented explicitly so
+the grammar reflects what the parser *actually* accepts.
 
-### 1.1 Notational conventions
+### 1.1 Grammars and notational conventions
 
-This document uses the following EBNF metasyntax:
+The notation is modelled on the **ECMA-262 (ECMAScript) grammar conventions**
+([tc39.es/ecma262, §Notational Conventions](https://tc39.es/ecma262/#sec-notational-conventions)),
+with two deliberate deviations noted at the end of this section.
 
-| Notation        | Meaning                                            |
-| --------------- | -------------------------------------------------- |
-| `=`             | production definition                              |
-| `,`             | concatenation (often elided where unambiguous)     |
-| `\|`            | alternation                                        |
-| `[ x ]`         | optional — zero or one occurrence of `x`           |
-| `{ x }`         | repetition — zero or more occurrences of `x`       |
-| `{ x }+`        | one or more occurrences of `x`                     |
-| `( x )`         | grouping                                           |
-| `'x'`           | terminal — the literal text `x`                    |
-| `UPPERCASE`     | a lexical token class (see §3)                      |
-| `PascalCase`    | a non-terminal production                          |
-| `(* … *)`       | comment                                            |
+**Two grammars.** Two cooperating grammars define the language, distinguished by
+their defining symbol:
 
-Terminals are written either as their literal spelling (`'while'`, `'->'`) or as
-a named token class for tokens whose spelling varies (`IDENT`, `INT_LITERAL`).
+- The **lexical grammar** (§3) maps source characters to tokens. Its productions
+  use the defining symbol **`::`**.
+- The **syntactic grammar** (§4–§8) maps the token stream to a syntax tree. Its
+  productions use the defining symbol **`:`**.
+
+**Productions.** A production lists, on the lines following its left-hand side,
+one *alternative* per line. For example
+
+```ebnf
+Stmt :
+    Block
+    IfStmt
+```
+
+defines `Stmt` as matching either a `Block` or an `IfStmt`.
+
+**Terminals and nonterminals.**
+
+- **Nonterminals** are written in `MixedCase` (`Stmt`, `Expr`, `IntLiteral`).
+- **Terminals** — the literal tokens of §3 — are written in single quotes
+  (`'while'`, `'->'`, `'('`). *(ECMA-262 sets terminals in a distinct typeface;
+  because this document renders grammar in monospaced blocks, terminals are
+  quoted instead.)*
+- Abbreviations in angle brackets denote individual characters that are otherwise
+  hard to show: `<SP>` space, `<TAB>` tab, `<LF>` line feed, `<CR>` carriage
+  return, `<NBSP>` no-break space (U+00A0).
+
+**`one of`.** When every alternative is a single terminal, the production is
+written `Name :: one of` followed by the terminals laid out on the next line(s).
+Items in a `one of` list are bare (unquoted), since the entire list is terminals:
+
+```ebnf
+BinDigit :: one of
+    0 1
+```
+
+**`but not`.** `A but not B` matches any expansion of `A` that is not an
+expansion of `B` (used to carve exceptions out of broad character classes).
+
+**`[empty]`.** Denotes an alternative that matches no tokens.
+
+**Lookahead restrictions.** `[lookahead ∉ { … }]` and `[lookahead = … ]` place a
+condition on the next token(s); the surrounding alternative applies only when the
+condition holds. These capture the parser's disambiguation decisions. Multi-token
+or contextual restrictions that do not fit the bracket form are given as
+`(* … *)` comments.
+
+**Grouping.** `( … )` groups symbols. Inline alternation within a group uses `|`
+(e.g. `( '->' | '=>' )`).
+
+**Deviations from ECMA-262 (at the author's request).** Optional and repeated
+symbols use postfix operators rather than ECMA-262's `opt` subscript and
+recursive list productions:
+
+| Notation | Meaning                              | ECMA-262 equivalent           |
+| -------- | ------------------------------------ | ----------------------------- |
+| `x?`     | optional — zero or one `x`           | `x` with `opt` subscript      |
+| `x*`     | zero or more `x`                     | a recursive *List* production |
+| `x+`     | one or more `x`                      | a recursive *List* production |
+
+The postfix operators bind tighter than concatenation, which binds tighter than
+alternation; use `( … )` to override.
 
 ### 1.2 Processing model
 
-A LeekScript source file is processed in three conceptual stages:
+A LeekScript source file is processed in stages:
 
 ```
 source text  ──▶  Lexer  ──▶  token stream  ──▶  Parser  ──▶  syntax tree (CST/AST)
@@ -59,8 +109,8 @@ source text  ──▶  Lexer  ──▶  token stream  ──▶  Parser  ─�
    syntax tree. The parser is error-recovering: malformed input is wrapped in
    error nodes rather than aborting the parse.
 
-The lexer and parser are both *total* in the sense that any input produces a
-token stream and a tree; diagnostics are reported as a side channel.
+The lexer and parser are both *total*: any input produces a token stream and a
+tree; diagnostics are reported as a side channel.
 
 ---
 
@@ -70,7 +120,8 @@ LeekScript has four language versions. The version in force changes the keyword
 set and some lexical/syntactic rules.
 
 ```ebnf
-Version = '1' | '2' | '3' | '4'
+Version :: one of
+    1 2 3 4
 ```
 
 | Version | Summary                                                            |
@@ -104,15 +155,34 @@ experimental syntax independently of the version (§7).
 ## 3. Lexical grammar
 
 The lexer reads UTF-8 text and is multi-byte safe: it never splits a UTF-8
-sequence, and any unrecognised character is consumed as a single `ERROR` token
-spanning the whole code point.
+sequence, and any unrecognised character is consumed as a single `Error` token
+spanning the whole code point. `SourceCharacter` denotes any single Unicode code
+point of the input.
 
 A token stream is a sequence of tokens terminated by `EOF`:
 
 ```ebnf
-TokenStream = { Token } , EOF
-Token       = Trivia | Literal | Identifier | Keyword | Operator | Punctuation
-Trivia      = Whitespace | LineComment | BlockComment
+TokenStream ::
+    Token* EOF
+
+Token ::
+    Trivia
+    Literal
+    Ident
+    Keyword
+    Punctuator
+
+Trivia ::
+    Whitespace
+    LineComment
+    BlockComment
+
+Literal ::
+    IntLiteral
+    RealLiteral
+    StringLiteral
+    Lemniscate
+    Pi
 ```
 
 Trivia tokens are retained in the concrete syntax tree but skipped by the
@@ -120,35 +190,27 @@ parser's grammar productions.
 
 ### 3.1 Keywords
 
-Keywords are introduced cumulatively by version. The tables below give the exact
-spellings.
+Keywords are introduced cumulatively by version.
 
-**Version 1** (core):
+```ebnf
+KeywordV1 :: one of
+    var      global   return   function if       else
+    while    for      do       in       break    continue
+    null     true     false    and      or       not
+    include  is       as       xor
 
-```
-var      global    return    function  if       else
-while    for       do        in        break    continue
-null     true      false     and       or       not
-include  is        as        xor
-```
+KeywordV2 :: one of
+    class    extends  this     super    new
+    static   private  public   protected constructor
 
-**Version 2** adds (object orientation):
-
-```
-class    extends   this      super     new
-static   private   public    protected constructor
-```
-
-**Version 3** adds (Java-style reserved set, case-sensitive):
-
-```
-switch   case      default   instanceof  abstract  await
-import   export    goto      catch       finally   try
-throw    throws    typeof    void        interface let
-native   package   byte      char        float     double
-int      long      short     transient   volatile  synchronized
-enum     eval      final     with        yield     implements
-const    boolean
+KeywordV3 :: one of
+    switch   case     default  instanceof abstract await
+    import   export   goto     catch      finally  try
+    throw    throws   typeof   void       interface let
+    native   package  byte     char       float    double
+    int      long     short    transient  volatile synchronized
+    enum     eval     final    with       yield    implements
+    const    boolean
 ```
 
 **Version 4** adds no new keywords.
@@ -156,11 +218,12 @@ const    boolean
 Not every reserved word has a corresponding grammar construct. Keywords that are
 **implemented** (the parser builds a node for them) are:
 
-```
-var global return function if else while for do in break continue
-null true false and or not include xor class extends this super new
-static private public protected constructor instanceof is as
-switch case default import
+```ebnf
+ImplementedKeyword :: one of
+    var global return function if else while for do in break continue
+    null true false and or not include xor class extends this super new
+    static private public protected constructor instanceof is as
+    switch case default import
 ```
 
 The remaining v3 words (`abstract`, `await`, `export`, `goto`, `catch`,
@@ -168,7 +231,7 @@ The remaining v3 words (`abstract`, `await`, `export`, `goto`, `catch`,
 `native`, `package`, the Java numeric type names, `transient`, `volatile`,
 `synchronized`, `enum`, `eval`, `final`, `with`, `yield`, `implements`, `const`,
 `boolean`) are **reserved-only**: they tokenize as keywords but, outside of
-feature-gated constructs (§7) or type position (§6), have no associated syntax.
+feature-gated constructs (§7) or type position (§7), have no associated syntax.
 
 **Keyword operators.** Three keywords lex to the same token as a symbolic
 operator and behave identically in the grammar:
@@ -182,12 +245,21 @@ operator and behave identically in the grammar:
 ### 3.2 Identifiers
 
 ```ebnf
-IDENT      = IdentStart , { IdentCont }
-IdentStart = 'a'…'z' | 'A'…'Z' | '_' | Latin1Letter
-IdentCont  = IdentStart | '0'…'9'
+Ident ::
+    IdentStart IdentCont*
+
+IdentStart ::
+    AsciiLetter
+    '_'
+    Latin1Letter
+
+IdentCont ::
+    IdentStart
+    DecDigit
 ```
 
-`Latin1Letter` covers the accented Latin-1 letter ranges accepted by the lexer:
+`AsciiLetter` is any character in `a`–`z` or `A`–`Z`. `Latin1Letter` covers the
+accented Latin-1 letter ranges accepted by the lexer:
 
 ```
 U+00C0…U+00D6   (À … Ö)
@@ -199,35 +271,69 @@ U+00FF          (ÿ)
 ```
 
 Two Unicode characters are **not** identifier characters; each lexes as its own
-single-character literal token (§3.4):
-
-- `U+221E` `∞` — positive-infinity literal (`Lemniscate`).
-- `U+03C0` `π` — the mathematical constant pi (`Pi`).
+single-character literal token (§3.4): `U+221E` `∞` (`Lemniscate`) and `U+03C0`
+`π` (`Pi`).
 
 ### 3.3 Number literals
 
 ```ebnf
-INT_LITERAL  = DecInt | HexInt | BinInt
-REAL_LITERAL = DecReal | HexReal
+IntLiteral ::
+    DecInt
+    HexInt
+    BinInt
 
-DecInt   = DecDigits , [ 'L' ]
-HexInt   = ( '0x' | '0X' ) , HexDigits , [ 'L' ]
-BinInt   = ( '0b' | '0B' ) , BinDigits , [ 'L' ]
+RealLiteral ::
+    DecReal
+    HexReal
 
-DecReal  = DecDigits , '.' , [ DecDigits ] , [ DecExponent ]
-         | DecDigits , DecExponent
-HexReal  = ( '0x' | '0X' ) , HexDigits , [ '.' , [ HexDigits ] ] , HexExponent
+DecInt ::
+    DecDigits 'L'?
 
-DecExponent = ( 'e' | 'E' ) , [ '+' | '-' ] , DecDigits
-HexExponent = ( 'p' | 'P' ) , [ '+' | '-' ] , DecDigits
+HexInt ::
+    HexPrefix HexDigits 'L'?
 
-DecDigits = DecDigit , { [ '_' ] , DecDigit }
-HexDigits = HexDigit , { [ '_' ] , HexDigit }
-BinDigits = BinDigit , { [ '_' ] , BinDigit }
+BinInt ::
+    BinPrefix BinDigits 'L'?
 
-DecDigit  = '0'…'9'
-HexDigit  = '0'…'9' | 'a'…'f' | 'A'…'F'
-BinDigit  = '0' | '1'
+DecReal ::
+    DecDigits '.' DecDigits? DecExponent?
+    DecDigits DecExponent
+
+HexReal ::
+    HexPrefix HexDigits ( '.' HexDigits? )? HexExponent
+
+DecExponent ::
+    ( 'e' | 'E' ) Sign? DecDigits
+
+HexExponent ::
+    ( 'p' | 'P' ) Sign? DecDigits
+
+DecDigits ::
+    DecDigit ( '_'? DecDigit )*
+
+HexDigits ::
+    HexDigit ( '_'? HexDigit )*
+
+BinDigits ::
+    BinDigit ( '_'? BinDigit )*
+
+HexPrefix :: one of
+    0x 0X
+
+BinPrefix :: one of
+    0b 0B
+
+Sign :: one of
+    + -
+
+DecDigit :: one of
+    0 1 2 3 4 5 6 7 8 9
+
+HexDigit :: one of
+    0 1 2 3 4 5 6 7 8 9 a b c d e f A B C D E F
+
+BinDigit :: one of
+    0 1
 ```
 
 Notes and constraints (enforced by the lexer, with diagnostics):
@@ -245,15 +351,18 @@ Notes and constraints (enforced by the lexer, with diagnostics):
   Hex-float literals use a mandatory binary exponent `p`/`P`
   (e.g. `0x1.p53`, `0xa.bcdp-42`). Binary (`0b`) literals support neither
   fraction nor exponent.
-- **Range vs. trailing dot.** `1..10` lexes as `INT_LITERAL '..' INT_LITERAL`
-  (an interval), never as `1.0 . 10`. `0.foo` lexes as `INT_LITERAL '.' IDENT`
+- **Range vs. trailing dot.** `1..10` lexes as `IntLiteral '..' IntLiteral`
+  (an interval), never as `1.0 . 10`. `0.foo` lexes as `IntLiteral '.' Ident`
   (member access), not as a real.
 
 ### 3.4 Special numeric tokens
 
 ```ebnf
-Lemniscate = '∞'   (* U+221E — positive infinity *)
-Pi         = 'π'   (* U+03C0 — the constant pi    *)
+Lemniscate ::
+    '∞'        (* U+221E — positive infinity *)
+
+Pi ::
+    'π'        (* U+03C0 — the constant pi *)
 ```
 
 These are atomic single-character literal tokens (see §3.2).
@@ -261,9 +370,17 @@ These are atomic single-character literal tokens (see §3.2).
 ### 3.5 String literals
 
 ```ebnf
-STRING_LITERAL = '"'  , { StringChar | '\' AnyChar } , '"'
-               | "'" , { StringChar | '\' AnyChar } , "'"
-StringChar     = (* any character except the delimiter, backslash, or newline *)
+StringLiteral ::
+    '"' DoubleStringChar* '"'
+    "'" SingleStringChar* "'"
+
+DoubleStringChar ::
+    SourceCharacter but not one of '"' or '\' or LineTerminator
+    '\' SourceCharacter
+
+SingleStringChar ::
+    SourceCharacter but not one of "'" or '\' or LineTerminator
+    '\' SourceCharacter
 ```
 
 - Strings are delimited by **double** (`"…"`) or **single** (`'…'`) quotes.
@@ -271,34 +388,51 @@ StringChar     = (* any character except the delimiter, backslash, or newline *)
   (`"say \"hi\""`, `'it\'s'`). The **lexer does not interpret** escape sequences;
   the backslash and escaped character are preserved verbatim in the token text
   (interpretation happens later).
-- Strings are **single-line**. An unterminated string (newline or EOF before the
-  closing quote) raises `STRING_NOT_CLOSED`; the token is still emitted.
+- Strings are **single-line**. An unterminated string (a `LineTerminator` or
+  `EOF` before the closing quote) raises `STRING_NOT_CLOSED`; the token is still
+  emitted.
 
 ### 3.6 Comments
 
 ```ebnf
-LineComment  = '//' , { AnyCharExceptNewline }
-BlockComment = '/*' , { AnyChar } , '*/'
+LineComment ::
+    '//' LineCommentChar*
+
+LineCommentChar ::
+    SourceCharacter but not LineTerminator
+
+BlockComment ::
+    '/*' BlockCommentChar* '*/'
+
+BlockCommentChar ::
+    SourceCharacter but not the sequence '*/'
 ```
 
 - **Line comments** run to (but do not include) the end of line.
 - **Block comments** are **not nestable**: the first `*/` closes the comment
   regardless of any intervening `/*`. An unterminated block comment extends to
-  EOF.
+  `EOF`.
 - **v1 quirk:** in v1 only, `/*/` is a complete block comment.
 - There is no distinct doc-comment token; documentation comments are ordinary
   line/block comments.
 
-### 3.7 Whitespace and newlines
+### 3.7 Whitespace and line terminators
 
 ```ebnf
-Whitespace = { WsChar }+
-WsChar     = ' ' | '\t' | '\n' | '\r' | U+00A0   (* NBSP *)
+Whitespace ::
+    WhitespaceChar+
+
+WhitespaceChar :: one of
+    <SP> <TAB> <LF> <CR> <NBSP>
+
+LineTerminator :: one of
+    <LF> <CR>
 ```
 
-Whitespace (including newlines) is trivia. **There is no automatic semicolon
-insertion**: a newline is whitespace, never a statement terminator. A run of
-whitespace — possibly containing newlines — forms a single trivia token.
+Whitespace (including line terminators) is trivia. **There is no automatic
+semicolon insertion**: a line terminator is whitespace, never a statement
+terminator. A run of whitespace — possibly containing line terminators — forms a
+single trivia token.
 
 ### 3.8 Pragmas
 
@@ -306,11 +440,23 @@ Pragmas are special `//`-comments that configure the compiler. They may appear
 anywhere in the file.
 
 ```ebnf
-Pragma          = '//' , '@' , PragmaBody
-PragmaBody      = VersionPragma | StrictPragma | ExperimentalPragma | UnknownPragma
-VersionPragma   = 'version' , ':' , ( '1' | '2' | '3' | '4' )
-StrictPragma    = 'strict'
-ExperimentalPragma = 'experimental' , ':' , FeatureName
+Pragma ::
+    '//' '@' PragmaBody
+
+PragmaBody ::
+    VersionPragma
+    StrictPragma
+    ExperimentalPragma
+    UnknownPragma
+
+VersionPragma ::
+    'version' ':' Version
+
+StrictPragma ::
+    'strict'
+
+ExperimentalPragma ::
+    'experimental' ':' FeatureName
 ```
 
 - `// @version:N` selects the language version (§2). Whitespace is permitted
@@ -322,42 +468,36 @@ ExperimentalPragma = 'experimental' , ':' , FeatureName
   `PRAGMA_BAD_VERSION`, `PRAGMA_INVALID_VALUE` (`@strict` given a value, or
   `@experimental` given none), and `PRAGMA_UNKNOWN` (warning).
 
-### 3.9 Operators and punctuation
+### 3.9 Punctuators and operators
 
-The complete symbolic token set. Multi-character operators are matched greedily
-(longest match): `===` is one token, not `==` followed by `=`.
+Multi-character operators are matched greedily (longest match): `===` is one
+token, not `==` followed by `=`.
 
-**Punctuation / delimiters:**
+```ebnf
+Punctuator :: one of
+    ( ) [ ] { } , ; : . ..
+    = == === != !==
+    < <= > >=
+    + - * / \ % **
+    ++ --
+    ~ & | ^
+    << >> >>>
+    && ||
+    ! ? ??
+    -> =>
+    @
 
-```
-(  )  [  ]  {  }  ,  ;  :  .  ..
-```
-
-**Operators (by spelling):**
-
-```
-=    ==   ===  !=   !==        (* equality / assignment *)
-<    <=   >    >=               (* relational *)
-+    -    *    /    \    %  **  (* arithmetic; \ is integer division *)
-++   --                        (* increment / decrement *)
-~    &    |    ^                (* bitwise *)
-<<   >>   >>>                   (* shifts; >>> is unsigned *)
-&&   ||                        (* logical *)
-!    ?    ??                   (* not / ternary / null-coalesce *)
-->   =>                        (* arrows *)
-@                              (* reference / annotation marker *)
-```
-
-**Compound assignment operators:**
-
-```
-+=   -=   *=   /=   \=   %=   **=
-&=   |=   ^=
-<<=  >>=  >>>=
-??=
+AssignmentOperator :: one of
+    = += -= *= /= \= %= **=
+    &= |= ^=
+    <<= >>= >>>=
+    ??=
 ```
 
-The named operator-tokens are: `LParen ( )`, `RParen )`, `LBracket [`,
+`\` is integer (floored) division; `>>>` is the unsigned right shift; `@` serves
+both as the by-reference marker and the annotation marker.
+
+For reference, the named token kinds are: `LParen ( )`, `RParen )`, `LBracket [`,
 `RBracket ]`, `LBrace {`, `RBrace }`, `Comma ,`, `Semicolon ;`, `Colon :`,
 `Dot .`, `DotDot ..`, `Tilde ~`, `At @`, `Eq =`, `EqEq ==`, `EqEqEq ===`,
 `NotEq !=`, `NotEqEq !==`, `Lt <`, `Le <=`, `Gt >`, `Ge >=`, `Plus +`,
@@ -379,21 +519,31 @@ between declarations and statements; both may appear at the top level and in any
 order.
 
 ```ebnf
-SourceFile   = { TopLevelItem }
-TopLevelItem = { Annotation } ,
-               ( FnDecl
-               | ClassDecl
-               | IncludeStmt
-               | ImportStmt
-               | Stmt )
+SourceFile :
+    TopLevelItem*
 
-Annotation     = '@' , ( IDENT | Keyword ) , [ '(' , [ ArgList ] , ')' ]
+TopLevelItem :
+    Annotation* FnDecl
+    Annotation* ClassDecl
+    Annotation* IncludeStmt
+    Annotation* ImportStmt
+    Annotation* Stmt
+
+Annotation :
+    '@' AnnotationName Arguments?
+
+AnnotationName :
+    Ident
+    Keyword
+
+Arguments :
+    '(' ArgList? ')'
 ```
 
 An annotation binds to the declaration that follows it (the annotation is folded
 into that declaration's node). The parser distinguishes an *annotation*
 `@name { … }` from an *expression statement* `@name(...);` by lookahead: a `;`
-following the optional argument list marks an expression statement.
+following the optional arguments marks an expression statement.
 
 Statements are terminated by an **optional** `;` (§3.7 — there is no automatic
 semicolon insertion, but most statements tolerate a missing or extra terminator).
@@ -405,36 +555,51 @@ semicolon insertion, but most statements tolerate a missing or extra terminator)
 ### 5.1 Variable declarations
 
 ```ebnf
-VarDeclStmt = ( 'var'    , Declarator , { ',' , Declarator }
-              | Type     , Declarator , { ',' , Declarator }
-              | 'global' , GlobalDeclr , { ',' , GlobalDeclr } ) ,
-              [ ';' ]
+VarDeclStmt :
+    'var'    VarDeclarator    ( ',' VarDeclarator )*    ';'?
+    Type     VarDeclarator    ( ',' VarDeclarator )*    ';'?
+    'global' GlobalDeclarator ( ',' GlobalDeclarator )* ';'?
 
-Declarator  = IDENT , [ '=' , Expr ]
-GlobalDeclr = [ Type ] , IDENT , [ '=' , Expr ]
+VarDeclarator :
+    Ident ( '=' Expr )?
+
+GlobalDeclarator :
+    Type? Ident ( '=' Expr )?
 ```
+
+The `Type`-prefixed alternative applies only under a lookahead restriction:
+`[lookahead = Type Ident ( '=' | ';' | ',' | '}' | EOF )]`. An
+expression-continuation token (`(`, `[`, `.`, `++`, `--`, a binary operator, …)
+after the identifier disqualifies it, and the construct is parsed as an
+expression statement instead.
 
 - **Untyped** (`var x;`, `var a = 1, b = 2, c;`) and **typed**
   (`integer x = 5;`, `Array<integer> arr;`) forms coexist; multiple declarators
   share one keyword/type prefix.
 - **Globals** (`global x = 10;`, `global integer x = 5;`) may mix typed and
   untyped declarators in one statement (`global a, integer b = 0;`).
-- A typed declaration is recognised by lookahead: `Type IDENT` followed by one of
-  `=`, `;`, `,`, `EOF`, or `}` is a declaration; an expression-continuation token
-  (`(`, `[`, `.`, `++`, `--`, a binary operator, …) disqualifies it, so it is
-  parsed as an expression instead.
 
 ### 5.2 Function declarations
 
 ```ebnf
-FnDecl    = 'function' , [ IDENT ] , [ TypeParams ] , ParamList ,
-            [ ReturnType ] , ( Block | ';' )
+FnDecl :
+    'function' Ident? TypeParams? ParamList ReturnType? FnBody
 
-ParamList = '(' , [ Param , { ',' , Param } ] , ')'
-Param     = [ '@' ] , [ Type , [ '@' ] ] , IDENT , [ '=' , Expr ]
+FnBody :
+    Block
+    ';'                                   (* feature: function_signatures *)
 
-ReturnType = ( '->' | '=>' ) , Type
-TypeParams = '<' , IDENT , { ',' , IDENT } , '>'        (* feature: generics *)
+ParamList :
+    '(' ( Param ( ',' Param )* )? ')'
+
+Param :
+    '@'? ( Type '@'? )? Ident ( '=' Expr )?
+
+ReturnType :
+    ( '->' | '=>' ) Type
+
+TypeParams :
+    '<' Ident ( ',' Ident )* '>'          (* feature: generics *)
 ```
 
 - The return type is introduced by `->` *or* `=>` (interchangeable) and is
@@ -450,27 +615,39 @@ TypeParams = '<' , IDENT , { ',' , IDENT } , '>'        (* feature: generics *)
 ### 5.3 Class declarations
 
 ```ebnf
-ClassDecl    = 'class' , IDENT , [ TypeParams ] ,
-               [ 'extends' , IDENT , [ TypeParams ] ] ,
-               [ ImplementsClause ] ,
-               '{' , { ClassMember } , '}'
+ClassDecl :
+    'class' Ident TypeParams? ClassExtends? ClassImplements? ClassBody
 
-ImplementsClause = 'implements' , IDENT , { ',' , IDENT }   (* feature: interfaces *)
+ClassExtends :
+    'extends' Ident TypeParams?
 
-ClassMember  = { Annotation } ,
-               ( ClassConstructor | ClassMethod | ClassField )
+ClassImplements :
+    'implements' Ident ( ',' Ident )*     (* feature: interfaces *)
 
-ClassField   = { Modifier } , Type , IDENT , [ '=' , Expr ] , [ ';' ]
-ClassMethod  = { Modifier } , [ Type ] , IDENT , [ TypeParams ] ,
-               ParamList , [ ReturnType ] , [ Block ]
-ClassConstructor = { Modifier } , 'constructor' , ParamList , [ Block ]
+ClassBody :
+    '{' ClassMember* '}'
 
-Modifier     = 'public' | 'private' | 'protected' | 'static' | 'final'
+ClassMember :
+    Annotation* ClassConstructor
+    Annotation* ClassMethod
+    Annotation* ClassField
+
+ClassField :
+    Modifier* Type Ident ( '=' Expr )? ';'?
+
+ClassMethod :
+    Modifier* Type? Ident TypeParams? ParamList ReturnType? Block?
+
+ClassConstructor :
+    Modifier* 'constructor' ParamList Block?
+
+Modifier : one of
+    public private protected static final
 ```
 
 - Single inheritance only (`extends` takes one class).
 - A member is disambiguated as a **method** when its name is followed by `(`
-  (or, under the `generics` feature, `<`); otherwise `Type IDENT` followed by
+  (or, under the `generics` feature, `<`); otherwise `Type Ident` followed by
   `=` or `;` is a **field**.
 - Constructors are always named by the keyword `constructor`.
 - Visibility defaults to public when no modifier is given. Modifiers may appear
@@ -482,29 +659,35 @@ Modifier     = 'public' | 'private' | 'protected' | 'static' | 'final'
 ## 6. Statements
 
 ```ebnf
-Stmt = Block
-     | VarDeclStmt
-     | IfStmt
-     | WhileStmt
-     | DoWhileStmt
-     | ForStmt
-     | ForeachStmt
-     | SwitchStmt
-     | BreakStmt
-     | ContinueStmt
-     | ReturnStmt
-     | IncludeStmt
-     | ImportStmt
-     | ExprStmt
-     | EmptyStmt
+Stmt :
+    Block
+    VarDeclStmt
+    IfStmt
+    WhileStmt
+    DoWhileStmt
+    ForStmt
+    ForeachStmt
+    SwitchStmt
+    BreakStmt
+    ContinueStmt
+    ReturnStmt
+    IncludeStmt
+    ImportStmt
+    ExprStmt
+    EmptyStmt
 ```
 
 ### 6.1 Blocks and trivial statements
 
 ```ebnf
-Block     = '{' , { Stmt } , '}'
-ExprStmt  = Expr , [ ';' ]
-EmptyStmt = ';'
+Block :
+    '{' Stmt* '}'
+
+ExprStmt :
+    Expr ';'?
+
+EmptyStmt :
+    ';'
 ```
 
 A bare `;` is a tolerated empty statement.
@@ -512,9 +695,15 @@ A bare `;` is a tolerated empty statement.
 ### 6.2 Conditionals
 
 ```ebnf
-IfStmt     = 'if' , '(' , Expr , ')' , Stmt , [ 'else' , Stmt ]
-SwitchStmt = 'switch' , '(' , Expr , ')' , '{' , { SwitchCase } , '}'
-SwitchCase = ( 'case' , Expr | 'default' ) , ':' , { Stmt }
+IfStmt :
+    'if' '(' Expr ')' Stmt ( 'else' Stmt )?
+
+SwitchStmt :
+    'switch' '(' Expr ')' '{' SwitchCase* '}'
+
+SwitchCase :
+    'case' Expr ':' Stmt*
+    'default' ':' Stmt*
 ```
 
 - The dangling `else` binds to the nearest unmatched `if`.
@@ -525,14 +714,24 @@ SwitchCase = ( 'case' , Expr | 'default' ) , ':' , { Stmt }
 ### 6.3 Loops
 
 ```ebnf
-WhileStmt   = 'while' , '(' , Expr , ')' , Stmt
-DoWhileStmt = 'do' , Stmt , 'while' , '(' , Expr , ')' , [ ';' ]
+WhileStmt :
+    'while' '(' Expr ')' Stmt
 
-ForStmt     = 'for' , '(' , [ ForInit ] , ';' , [ Expr ] , ';' , [ Expr ] , ')' , Stmt
-ForInit     = VarDeclStmt | Expr
+DoWhileStmt :
+    'do' Stmt 'while' '(' Expr ')' ';'?
 
-ForeachStmt = 'for' , '(' , ForBinding , [ ':' , ForBinding ] , 'in' , Expr , ')' , Stmt
-ForBinding  = [ 'var' ] , [ '@' ] , [ Type ] , IDENT
+ForStmt :
+    'for' '(' ForInit? ';' Expr? ';' Expr? ')' Stmt
+
+ForInit :
+    VarDeclStmt
+    Expr
+
+ForeachStmt :
+    'for' '(' ForBinding ( ':' ForBinding )? 'in' Expr ')' Stmt
+
+ForBinding :
+    'var'? '@'? Type? Ident
 ```
 
 - `ForStmt` is the C-style loop; all three clauses are optional
@@ -542,14 +741,20 @@ ForBinding  = [ 'var' ] , [ '@' ] , [ Type ] , IDENT
   key/value form (`for (k : v in map)`). Each binding independently allows an
   optional `var`, an optional by-reference `@`, and an optional type.
 - The parser distinguishes `ForeachStmt` from `ForStmt` by scanning for an `in`
-  keyword at the head's top nesting level before any `;`.
+  keyword at the head's top nesting level before any `;` — i.e.
+  `[lookahead = … 'in' … before ';']`.
 
 ### 6.4 Jumps
 
 ```ebnf
-BreakStmt    = 'break' , [ ';' ]
-ContinueStmt = 'continue' , [ ';' ]
-ReturnStmt   = 'return' , [ '?' ] , [ Expr ] , [ ';' ]
+BreakStmt :
+    'break' ';'?
+
+ContinueStmt :
+    'continue' ';'?
+
+ReturnStmt :
+    'return' '?'? Expr? ';'?
 ```
 
 Labeled break/continue is **not** supported. The optional `?` after `return` is
@@ -559,11 +764,16 @@ compilation stage).
 ### 6.5 Module statements
 
 ```ebnf
-IncludeStmt = 'include' , '(' , STRING_LITERAL , ')' , [ ';' ]
-ImportStmt  = 'import' , ( '(' , STRING_LITERAL , ')'
-                         | STRING_LITERAL
-                         | DottedPath ) , [ ';' ]
-DottedPath  = IDENT , { '.' , IDENT }
+IncludeStmt :
+    'include' '(' StringLiteral ')' ';'?
+
+ImportStmt :
+    'import' '(' StringLiteral ')' ';'?
+    'import' StringLiteral ';'?
+    'import' DottedPath ';'?
+
+DottedPath :
+    Ident ( '.' Ident )*
 ```
 
 `include` takes a string-literal module name. `import` accepts a string literal
@@ -577,21 +787,28 @@ Types appear in variable/field/parameter declarations, return-type position,
 `as` casts, and `instanceof`.
 
 ```ebnf
-Type      = TypeUnion , [ ( '->' | '=>' ) , Type ]      (* function type *)
-TypeUnion = TypeAtom , { '|' , TypeAtom } , { '?' }
-TypeAtom  = TypeName , [ TypeArgs ]
-          | 'Array' , [ TypeArgs ] , [ '[' , TypeUnion , { ',' , TypeUnion } , ']' ]
-          | ( '->' | '=>' ) , Type
+Type :
+    TypeUnion ( ( '->' | '=>' ) Type )?          (* trailing arrow: function type *)
 
-TypeArgs  = '<' , Type , { ',' , Type } , GenericClose
-TypeName  = PrimitiveType | IDENT
-```
+TypeUnion :
+    TypeAtom ( '|' TypeAtom )* '?'*
 
-```ebnf
-PrimitiveType = 'integer' | 'real'    | 'big_integer' | 'string'  | 'boolean'
-              | 'void'    | 'any'     | 'null'        | 'Array'   | 'Map'
-              | 'Set'     | 'Interval'| 'Object'      | 'Function'| 'Number'
-              | 'Boolean'
+TypeAtom :
+    TypeName TypeArgs?
+    'Array' TypeArgs? ( '[' TypeUnion ( ',' TypeUnion )* ']' )?
+    ( '->' | '=>' ) Type
+
+TypeArgs :
+    '<' Type ( ',' Type )* GenericClose
+
+TypeName :
+    PrimitiveType
+    Ident
+
+PrimitiveType : one of
+    integer real big_integer string boolean
+    void any null Array Map
+    Set Interval Object Function Number Boolean
 ```
 
 - **Nullable.** A trailing `?` marks a nullable type; multiple `?` are tolerated
@@ -599,7 +816,7 @@ PrimitiveType = 'integer' | 'real'    | 'big_integer' | 'string'  | 'boolean'
 - **Unions.** `A | B | C` denotes a union of alternatives.
 - **Generics.** `Array<integer>`, `Map<string, integer>`,
   `Array<Array<integer>>`. Because the lexer fuses consecutive `>` into `>>` /
-  `>>>` (to avoid clashing with shift operators), `GenericClose` represents the
+  `>>>` (to avoid clashing with shift operators), `GenericClose` denotes the
   closing `>` that the parser splits back out of a fused `>>` or `>>>` token at
   the end of nested generic argument lists.
 - **Tuple-shaped arrays** (`types` feature): `Array[T, U]` gives per-position
@@ -652,75 +869,91 @@ Notes:
 
 - **Right-associative exponent** binds tighter than prefix unary, so `-12 ** 2`
   is `(-12) ** 2 = 144`, not `-(12 ** 2)`.
-- The `?` of a ternary is disambiguated from `??` by one-token lookahead.
+- The `?` of a ternary (`Question`) and the coalescing `??` (`QuestionQuestion`)
+  are distinct tokens, so no grammar-level lookahead is needed to separate them.
 - For `instanceof` and `as`, the right operand is a **Type** (§7), not an
   expression. `not in` is recognised as the two-token sequence `not` then `in`.
-- `\` is integer (floored) division; `>>>` is the unsigned right shift.
 
 ### 8.2 Expression structure
 
+The production below collapses the precedence tiers of §8.1 into a single
+`BinaryExpr` for brevity; in the implementation each tier is a distinct level of
+the precedence-climbing loop with the associativity given in the table.
+
 ```ebnf
-Expr      = Assignment
+Expr :
+    AssignmentExpr
 
-Assignment = Ternary , [ AssignOp , Assignment ]
-AssignOp   = '=' | '+=' | '-=' | '*=' | '/=' | '\=' | '%=' | '**='
-           | '&=' | '|=' | '^=' | '<<=' | '>>=' | '>>>=' | '??='
+AssignmentExpr :
+    ConditionalExpr ( AssignmentOperator AssignmentExpr )?
 
-Ternary    = BinaryExpr , [ '?' , Expr , ':' , Assignment ]
+ConditionalExpr :
+    BinaryExpr ( '?' Expr ':' AssignmentExpr )?
 
-BinaryExpr = Unary , { BinOp , Unary }     (* grouped by §8.1 precedence/assoc *)
+BinaryExpr :
+    UnaryExpr ( BinaryOperator UnaryExpr )*
 
-Unary      = PrefixOp , Unary
-           | Postfix
-PrefixOp   = '-' | '+' | '!' | '~' | 'not' | '++' | '--' | '@'
+UnaryExpr :
+    PrefixOperator UnaryExpr
+    PostfixExpr
 
-Postfix    = Primary , { PostfixOp }
-PostfixOp  = '(' , [ ArgList ] , ')'                       (* call *)
-           | '[' , Expr , ']'                              (* index *)
-           | '[' , [ Expr ] , ':' , [ Expr ] , [ ':' , [ Expr ] ] , ']'  (* slice, v4+ *)
-           | '.'  , ( IDENT | Keyword )                    (* member *)
-           | '?.' , ( IDENT | Keyword )                    (* optional member *)
-           | '++' | '--' | '!'                             (* postfix unary *)
-           | 'as' , Type                                   (* cast *)
+PrefixOperator : one of
+    - + ! ~ not ++ --  @
 
-ArgList    = Expr , { ',' , Expr }
+PostfixExpr :
+    PrimaryExpr PostfixOp*
+
+PostfixOp :
+    '(' ArgList? ')'                              (* call *)
+    '[' Expr ']'                                  (* index *)
+    '[' Expr? ':' Expr? ( ':' Expr? )? ']'        (* slice, v4+ *)
+    '.'  ( Ident | Keyword )                      (* member *)
+    '?.' ( Ident | Keyword )                      (* optional member *)
+    '++'
+    '--'
+    '!'                                           (* non-null assertion *)
+    'as' Type                                     (* cast *)
+
+ArgList :
+    Expr ( ',' Expr )*
 ```
 
-The `BinaryExpr` production is shorthand: in the implementation, each precedence
-tier of §8.1 is a distinct level of the precedence-climbing loop with the stated
-associativity. Member/field names after `.` and `?.` may be any identifier *or*
-keyword (e.g. `obj.class`, `obj.if`); stricter checking happens in the resolver.
+Member/field names after `.` and `?.` may be any identifier *or* keyword
+(e.g. `obj.class`, `obj.if`); stricter checking happens in the resolver.
 
-Notable lookahead behaviour:
+Notable lookahead restrictions:
 
-- `[index]` is taken as a subscript only when a matching `]` exists at the same
-  bracket depth, so it does not swallow an interval close (`[`).
-- A `[ … : … ]` postfix is a **slice** (v4+); in v1–v3 a `:` inside `[ … ]` is
+- The `'[' Expr ']'` index applies only `[lookahead: a matching ']' exists at the
+  same bracket depth]`, so it does not swallow an interval close (`[`).
+- The slice form `'[' … ':' … ']'` is v4+; in v1–v3 a `:` inside `[ … ]` is
   rejected.
-- `?.` is taken only when an identifier-shaped name follows the dot, so
-  `a ? .5 : b` remains a ternary.
+- `?.` applies only `[lookahead = '?.' Ident-shaped]`, so `a ? .5 : b` remains a
+  ternary.
 
 ### 8.3 Primary expressions
 
 ```ebnf
-Primary = Literal
-        | NameRef
-        | '(' , Expr , ')'
-        | NewExpr
-        | Lambda
-        | CollectionLiteral
-        | IntervalExpr
+PrimaryExpr :
+    Literal
+    NameRef
+    '(' Expr ')'
+    NewExpr
+    Lambda
+    CollectionLiteral
+    IntervalExpr
 
-Literal = INT_LITERAL | REAL_LITERAL | STRING_LITERAL
-        | 'true' | 'false' | 'null' | Lemniscate | Pi
+NameRef :
+    Ident
+    'this'
+    'super'
+    'class'
 
-NameRef = IDENT | 'this' | 'super' | 'class'
-
-NewExpr = 'new' , IDENT , [ '(' , [ ArgList ] , ')' ]
+NewExpr :
+    'new' Ident ( '(' ArgList? ')' )?
 ```
 
-`new MyClass(a, b)` invokes a constructor; the argument list is optional
-(`new MyClass` constructs with no arguments).
+(`Literal` is defined in §3.) `new MyClass(a, b)` invokes a constructor; the
+argument list is optional (`new MyClass` constructs with no arguments).
 
 ### 8.4 Lambdas and anonymous functions
 
@@ -728,53 +961,78 @@ LeekScript accepts several lambda shapes; `->` and `=>` are interchangeable
 arrows in all of them.
 
 ```ebnf
-Lambda     = LambdaArrow | AnonFn
+Lambda :
+    Arrow LambdaBody                              (* zero parameters *)
+    Ident Arrow LambdaBody                        (* one bare parameter *)
+    Type Ident Arrow LambdaBody                   (* one typed parameter *)
+    Ident ( ',' Ident )+ Arrow LambdaBody         (* multiple bare parameters *)
+    '(' LambdaParams? ')' Arrow LambdaBody        (* parenthesised parameters *)
+    '(' LambdaParams? Arrow LambdaBody ')'        (* inner-arrow form *)
+    AnonFn
 
-LambdaArrow = Arrow , LambdaBody                                   (* zero params *)
-            | IDENT , Arrow , LambdaBody                           (* one bare param *)
-            | Type , IDENT , Arrow , LambdaBody                    (* one typed param *)
-            | IDENT , { ',' , IDENT }+ , Arrow , LambdaBody        (* multi bare param *)
-            | '(' , [ ParamList0 ] , ')' , Arrow , LambdaBody      (* paren params *)
-            | '(' , [ ParamList0 ] , Arrow , LambdaBody , ')'      (* inner-arrow form *)
+AnonFn :
+    'function' Ident? ParamList ReturnType? Block
 
-AnonFn      = 'function' , [ IDENT ] , ParamList , [ ReturnType ] , Block
+Arrow : one of
+    -> =>
 
-Arrow       = '->' | '=>'
-LambdaBody  = [ Type ] , ( Block | Expr )
-ParamList0  = LambdaParam , { ',' , LambdaParam }
-LambdaParam = [ Type ] , IDENT
+LambdaBody :
+    Type? Block
+    Type? Expr
+
+LambdaParams :
+    LambdaParam ( ',' LambdaParam )*
+
+LambdaParam :
+    Type? Ident
 ```
 
-- The multi-bare-parameter form (`x, y -> …`) is only recognised at
+- The multiple-bare-parameter form (`x, y -> …`) is only recognised at
   statement/initialiser position, where the commas are unambiguous.
 - A lambda body may be a block `{ … }` or a single expression, optionally
   preceded by a return type.
 
 ### 8.5 Collection literals
 
-LeekScript shares the `[ … ]` and `{ … }` (and legacy `< … >`) delimiters
-across arrays, maps, objects, and sets; the parser discriminates by the first
-separator it sees.
+LeekScript shares the `[ … ]` and `{ … }` (and legacy `< … >`) delimiters across
+arrays, maps, objects, and sets; the parser discriminates by the first separator
+it sees.
 
 ```ebnf
-CollectionLiteral = ArrayLiteral | MapLiteral | ObjectLiteral
-                  | SetLiteral   | MapAngle   | SetAngle
+CollectionLiteral :
+    ArrayLiteral
+    MapLiteral
+    ObjectLiteral
+    SetLiteral
+    MapAngle
+    SetAngle
 
-ArrayLiteral = '[' , ']'
-             | '[' , Expr , { ( ',' , Expr | Expr ) } , ']'
-MapLiteral   = '[' , ':' , ']'
-             | '[' , Expr , ':' , Expr , { ',' , Expr , ':' , Expr } , ']'
+ArrayLiteral :
+    '[' ']'
+    '[' Expr ( ',' Expr | Expr )* ']'
 
-ObjectLiteral = '{' , '}'
-              | '{' , Expr , ':' , Expr , { [ ',' ] , Expr , ':' , Expr } , '}'
-SetLiteral    = '{' , SetElem , { ',' , SetElem } , [ ',' ] , '}'
+MapLiteral :
+    '[' ':' ']'
+    '[' Expr ':' Expr ( ',' Expr ':' Expr )* ']'
 
-MapAngle      = '<' , ':' , '>'
-              | '<' , Expr , ':' , Expr , { ',' , Expr , ':' , Expr } , '>'
-SetAngle      = '<' , '>'
-              | '<' , SetElem , { ',' , SetElem } , [ ',' ] , '>'
+ObjectLiteral :
+    '{' '}'
+    '{' Expr ':' Expr ( ','? Expr ':' Expr )* '}'
 
-SetElem      = Expr | Expr , '..' , Expr      (* a..b expands to an inclusive range *)
+SetLiteral :
+    '{' SetElem ( ',' SetElem )* ','? '}'
+
+MapAngle :
+    '<' ':' '>'
+    '<' Expr ':' Expr ( ',' Expr ':' Expr )* '>'
+
+SetAngle :
+    '<' '>'
+    '<' SetElem ( ',' SetElem )* ','? '>'
+
+SetElem :
+    Expr '..' Expr                 (* a..b expands to an inclusive range *)
+    Expr
 ```
 
 Discrimination rules:
@@ -797,14 +1055,19 @@ Intervals (v4+) are bracket-delimited ranges. The bracket *direction* encodes
 inclusivity at each end: `[` is inclusive, `]` is exclusive.
 
 ```ebnf
-IntervalExpr = OpenBracket , [ Expr ] , '..' , [ Expr ] , [ ':' , [ Expr ] ] , CloseBracket
-OpenBracket  = '[' | ']'      (* '[' inclusive start, ']' exclusive start *)
-CloseBracket = ']' | '['      (* ']' inclusive end,   '[' exclusive end   *)
+IntervalExpr :
+    OpenBracket Expr? '..' Expr? ( ':' Expr? )? CloseBracket
+
+OpenBracket : one of
+    [ ]            (* '[' inclusive start, ']' exclusive start *)
+
+CloseBracket : one of
+    ] [            (* ']' inclusive end,   '[' exclusive end   *)
 ```
 
-A leading `[` is parsed as an interval (rather than an array/subscript) when a
-top-level `..` appears before the matching close bracket. The optional `:` step
-gives a stride.
+A leading `[` is parsed as an interval (rather than an array/subscript) under the
+restriction `[lookahead: a top-level '..' appears before the matching close
+bracket]`. The optional `:` step gives a stride.
 
 Examples:
 
