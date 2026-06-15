@@ -576,9 +576,9 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
         ExprKind::Binary(BinaryOp::And | BinaryOp::Or, _, _) => 0,
         ExprKind::Binary(op, l, r) => {
             let sub = expr_op_cost(l) + expr_op_cost(r);
-            sub + binary_op_cost(*op)
+            sub + op.op_cost()
         }
-        ExprKind::Unary(op, x) => unary_op_cost(*op) + expr_op_cost(x),
+        ExprKind::Unary(op, x) => op.op_cost() + expr_op_cost(x),
         ExprKind::Postfix(_, x) => 1 + expr_op_cost(x),
         // User-function calls account for their own work via the
         // per-statement ticks inside the callee body. Builtin calls
@@ -690,19 +690,6 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
 /// numeric arg in upstream).
 pub(crate) fn builtin_call_cost(name: &str) -> u32 {
     leek_builtins::op_cost_emit(name)
-}
-
-/// Per-operator op cost, mirroring `LeekValueType.*_COST`. Delegates to the
-/// canonical [`leek_hir::BinaryOp::op_cost`] so the Java emitter, the
-/// interpreter, and the native backend stay in lockstep. Compound assigns
-/// price as their underlying op; plain `=` (and the short-circuit logicals,
-/// whose `+1` own-cost the short-circuit wrapper folds in) cost 1.
-pub(crate) fn binary_op_cost(op: BinaryOp) -> u32 {
-    op.op_cost()
-}
-
-pub(crate) fn unary_op_cost(op: UnaryOp) -> u32 {
-    op.op_cost()
 }
 
 /// True if the expression can appear as a Java statement on its own

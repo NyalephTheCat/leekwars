@@ -865,8 +865,8 @@ pub enum UnOp {
 
 impl UnOp {
     /// Operations charged for this unary op. Draws from [`leek_hir::op_cost`]
-    /// so it stays in lockstep with the Java emitter's `unary_op_cost`:
-    /// `+x` and `@x` are pass-throughs (free), the rest cost one op.
+    /// so it stays in lockstep with [`leek_hir::UnaryOp::op_cost`] (the Java
+    /// emitter): `+x` and `@x` are pass-throughs (free), the rest cost one op.
     #[must_use]
     pub fn op_cost(self) -> u64 {
         use leek_hir::op_cost::{DEFAULT, FREE};

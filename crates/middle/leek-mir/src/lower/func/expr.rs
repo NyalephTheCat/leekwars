@@ -613,8 +613,8 @@ impl FnLowerer<'_> {
             }
         } else {
             let v = self.lower_expr_to_operand(rhs);
-            // Plain `=` re-assignment costs 1 op (upstream's
-            // `binary_op_cost(Assign)`); compound assigns charge via
+            // Plain `=` re-assignment costs 1 op (the canonical
+            // `leek_hir::op_cost::DEFAULT`); compound assigns charge via
             // their base `Rvalue::Binary` op instead.
             self.push_stmt(Statement::Charge(1));
             v

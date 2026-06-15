@@ -1107,7 +1107,7 @@ impl Emitter<'_> {
     }
 
     /// Extra static cost for v1 `^=`: HIR lowers it to `BitXorAssign`
-    /// (version-agnostic), which [`super::binary_op_cost`] prices at 1 —
+    /// (version-agnostic), which [`BinaryOp::op_cost`] prices at 1 —
     /// but at v1 the operator means power-assign (see
     /// [`Self::compound_base_op`]), which upstream charges like `**=` (40).
     fn v1_pow_assign_surcharge(&self, e: &Expr) -> u32 {
@@ -1116,7 +1116,7 @@ impl Emitter<'_> {
         }
         let mut total = 0;
         if matches!(&e.kind, ExprKind::Binary(BinaryOp::BitXorAssign, ..)) {
-            total += super::binary_op_cost(BinaryOp::PowAssign) - 1;
+            total += BinaryOp::PowAssign.op_cost() - 1;
         }
         leek_hir::visit::walk_expr_children(e, &mut |c| {
             total += self.v1_pow_assign_surcharge(c);
@@ -1140,7 +1140,7 @@ impl Emitter<'_> {
         let lb = self.expr_to_bool(l);
         let rb = self.expr_to_bool(r);
         if self.opts.emit_ops {
-            let lc = self.emit_cost(l) + super::binary_op_cost(op);
+            let lc = self.emit_cost(l) + op.op_cost();
             let rc = self.emit_cost(r);
             let _ = write!(buf, "ops({lb}, {lc}) {java_op} ops({rb}, {rc})");
         } else {
