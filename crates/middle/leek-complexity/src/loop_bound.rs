@@ -187,59 +187,68 @@ fn bound_from_condition(
 /// Convert an `Expr` representing the loop's bound into a
 /// [`LoopBound`]. Recognises:
 /// - integer literal → `Const`
-/// - `Name(Local(p))` where p is a parameter → `Size(p)`
-/// - `count(p)` / `length(p)` where p is a parameter → `Size(p)`
+/// - any size location ([`resolve_size_var`]) → `Size`
 fn bound_from_value_expr(e: &Expr, ctx: &BoundContext) -> Option<LoopBound> {
     if let Some(n) = literal_uint(e) {
         return Some(LoopBound::Const(n));
     }
-    if let ExprKind::Name(NameRef::Local(id)) = &e.kind
-        && let Some((idx, name)) = ctx.params.lookup(*id)
-    {
-        return Some(LoopBound::Size(SizeVar::new(idx, name)));
-    }
-    if let Some(size) = bound_from_iter_expr(e, ctx) {
-        return Some(LoopBound::Size(size));
-    }
-    None
+    resolve_size_var(e, ctx.params).map(LoopBound::Size)
 }
 
-/// `count(p)` / `length(p)` / a parameter name / a `this.field`
-/// access → its SizeVar.
+/// `count(x)` / a parameter name / a `this.field` access → its SizeVar.
 fn bound_from_iter_expr(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
+    resolve_size_var(e, ctx.params)
+}
+
+/// Resolve `e` to the [`SizeVar`] of the value it denotes — the central
+/// "what is this thing's size?" routine shared by loop bounds and
+/// call-site argument sizing.
+///
+/// It unwraps `count`/`length`/`size`/`mapSize`, then walks an access
+/// path down to a *stable root*: a parameter, or `this`. So it covers a
+/// bare parameter (`arr`), a field off `this` (`this.cells`), a field
+/// off a parameter (`obj.cells`), and nested chains (`this.grid.rows`).
+///
+/// Returns `None` when the size can't be tied to a stable input — an
+/// arbitrary local, a computed expression, or `this` itself (an object,
+/// not a sized container).
+pub(crate) fn resolve_size_var(e: &Expr, params: &dyn ParamIndex) -> Option<SizeVar> {
+    // `count(x)` / `length(x)` / … → size of `x`.
+    if let ExprKind::Call(call) = &e.kind
+        && let Callee::Function(NameRef::Builtin(name)) = &call.callee
+        && matches!(name.as_str(), "count" | "length" | "size" | "mapSize")
+    {
+        return resolve_size_var(call.args.first()?, params);
+    }
+    let loc = resolve_location(e, params)?;
+    // A bare object root (`this`) isn't a sized container — only a field
+    // path off it is.
+    if loc.source.path.is_empty() && !matches!(loc.source.root, crate::cost_expr::SizeRoot::Param(_))
+    {
+        return None;
+    }
+    Some(loc)
+}
+
+/// Walk an access path (`a.b.c`) down to its root, returning the
+/// location as a [`SizeVar`]. Roots are a parameter or `this`/`super`/
+/// `class`; anything else (a non-parameter local, a call result, …)
+/// yields `None`.
+fn resolve_location(e: &Expr, params: &dyn ParamIndex) -> Option<SizeVar> {
     match &e.kind {
         ExprKind::Name(NameRef::Local(id)) => {
-            let (idx, name) = ctx.params.lookup(*id)?;
+            let (idx, name) = params.lookup(*id)?;
             Some(SizeVar::new(idx, name))
         }
-        // `this.data` — a class field. Iterating / counting it implies
-        // it's a sized container, so we attribute a field size variable
-        // (it stays in the method's own complexity; callers can't
-        // substitute instance state).
-        ExprKind::Field(receiver, name, _) if is_this_rooted(receiver) => {
-            Some(SizeVar::field(name.clone()))
+        ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_) => {
+            Some(SizeVar::this_object())
         }
-        ExprKind::Call(call) => {
-            let Callee::Function(NameRef::Builtin(name)) = &call.callee else {
-                return None;
-            };
-            if !matches!(name.as_str(), "count" | "length" | "size" | "mapSize") {
-                return None;
-            }
-            let arg = call.args.first()?;
-            bound_from_iter_expr(arg, ctx)
+        ExprKind::Field(receiver, field, _) => {
+            let base = resolve_location(receiver, params)?;
+            Some(base.with_field(field))
         }
         _ => None,
     }
-}
-
-/// `true` if `e` is `this` / `super` / `class` — the receivers whose
-/// fields belong to the method's own instance.
-pub(crate) fn is_this_rooted(e: &Expr) -> bool {
-    matches!(
-        &e.kind,
-        ExprKind::Name(NameRef::This | NameRef::Super | NameRef::Class_)
-    )
 }
 
 fn literal_uint(e: &Expr) -> Option<u64> {

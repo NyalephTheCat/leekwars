@@ -127,25 +127,10 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
         }
     }
 
-    let field_sets = build_field_sets(hir);
-    let no_fields = HashSet::new();
-    let fields_for = |u: &Unit| {
-        u.class
-            .and_then(|c| field_sets.get(c))
-            .unwrap_or(&no_fields)
-    };
-
     // Non-recursive nodes, callees-first.
     for name in &ordering.topo {
         if let Some(u) = units.get(name) {
-            let c = analyze_unit(
-                u,
-                &registry,
-                &ordering.recursive,
-                &def_to_name,
-                &graph,
-                fields_for(u),
-            );
+            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph);
             registry.insert(name.clone(), c);
         }
     }
@@ -154,14 +139,7 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     // same-cycle peer falls through to Unknown.
     for name in &ordering.recursive {
         if let Some(u) = units.get(name) {
-            let c = analyze_unit(
-                u,
-                &registry,
-                &ordering.recursive,
-                &def_to_name,
-                &graph,
-                fields_for(u),
-            );
+            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph);
             registry.insert(name.clone(), c);
         }
     }
@@ -174,7 +152,6 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
         recursive: &ordering.recursive,
         def_to_name: &def_to_name,
         method_owners: &graph.method_owners,
-        class_fields: &no_fields,
         ctx: &ctx,
         analysing: None,
         analysing_class: None,
@@ -219,14 +196,13 @@ pub fn analyze_function(f: &Function) -> Complexity {
     let graph = call_graph::CallGraph::default();
     let recursive: HashSet<String> = HashSet::new();
     let def_to_name: HashMap<DefId, String> = HashMap::new();
-    let no_fields = HashSet::new();
     let unit = Unit {
         key: f.name.clone(),
         params: &f.params,
         body: &f.body,
         class: None,
     };
-    analyze_unit(&unit, &registry, &recursive, &def_to_name, &graph, &no_fields)
+    analyze_unit(&unit, &registry, &recursive, &def_to_name, &graph)
 }
 
 fn analyze_unit(
@@ -235,7 +211,6 @@ fn analyze_unit(
     recursive: &HashSet<String>,
     def_to_name: &HashMap<DefId, String>,
     graph: &call_graph::CallGraph,
-    class_fields: &HashSet<String>,
 ) -> Complexity {
     let params: Vec<ParamInfo> = u
         .params
@@ -253,7 +228,6 @@ fn analyze_unit(
         recursive,
         def_to_name,
         method_owners: &graph.method_owners,
-        class_fields,
         ctx: &ctx,
         analysing: Some(u.key.as_str()),
         analysing_class: u.class,
@@ -289,27 +263,6 @@ fn is_size_bearing_type(ty: Option<&leek_hir::Type>) -> bool {
         Some(Type::Nullable(inner)) => is_size_bearing_type(Some(inner)),
         _ => false,
     }
-}
-
-/// `class name → set of fields declared with a size-bearing type`.
-/// A method that touches `this.<field>` for one of these attributes a
-/// field size variable; un-annotated fields stay out (we only trust
-/// declared container types for the substitution path — the loop-bound
-/// path is lenient because iterating implies a container).
-fn build_field_sets(hir: &HirFile) -> HashMap<String, HashSet<String>> {
-    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for def in &hir.defs {
-        if let Def::Class(c) = def {
-            let set = c
-                .fields
-                .iter()
-                .filter(|f| is_size_bearing_type(f.ty.as_ref()))
-                .map(|f| f.name.clone())
-                .collect();
-            out.insert(c.name.clone(), set);
-        }
-    }
-    out
 }
 
 struct ParamMap {
@@ -357,10 +310,6 @@ struct Walker<'a> {
     /// resolution. Shared with the call graph so edges and
     /// substitutions agree.
     method_owners: &'a HashMap<String, Vec<String>>,
-    /// Size-bearing fields (declared array/map/set/string) of the
-    /// class being analysed — so `this.<field>` reads attribute a
-    /// field size variable. Empty outside a method body.
-    class_fields: &'a HashSet<String>,
     ctx: &'a BoundContext<'a>,
     /// Registry key of the node currently being analysed (so calls
     /// from inside a recursive node to one of its same-cycle peers
@@ -623,58 +572,37 @@ impl Walker<'_> {
 
     /// Convert a call-site argument expression into a CostExpr
     /// suitable as a "size" substitution. Recognises:
-    /// - a caller parameter → `Size(caller_param)`
-    /// - a `this.<field>` read of a size-bearing field → `Size(field)`
-    /// - `count(p)` / `length(p)` → same
     /// - an integer literal → `Const(n)` (so `f(arr, 5)` propagates
     ///   the literal into a callee formula like `n · k`)
-    /// - otherwise → `Const(0)`, which folds the size factor out
+    /// - an array / map / set literal → its `Const` length
+    /// - any size location ([`resolve_size_var`](crate::loop_bound::resolve_size_var)):
+    ///   a parameter, a `this`/`obj` field path, or `count(...)` of one
+    /// - otherwise → `None`, folding the size factor out
     fn arg_size_expr(&self, e: &Expr) -> Option<CostExpr> {
         match &e.kind {
-            ExprKind::Name(NameRef::Local(id)) => {
-                let (idx, name) = self.ctx.params.lookup(*id)?;
-                Some(CostExpr::Size(SizeVar::new(idx, name)))
+            ExprKind::Literal(leek_hir::Literal::Int(v)) if *v >= 0 => {
+                return Some(CostExpr::Const(
+                    u64::try_from(*v).expect("non-negative by guard"),
+                ));
             }
-            // `this.data` where `data` is a declared container field.
-            ExprKind::Field(receiver, name, _)
-                if crate::loop_bound::is_this_rooted(receiver)
-                    && self.class_fields.contains(name) =>
-            {
-                Some(CostExpr::Size(SizeVar::field(name.clone())))
-            }
-            ExprKind::Literal(leek_hir::Literal::Int(v)) if *v >= 0 => Some(CostExpr::Const(
-                u64::try_from(*v).expect("non-negative by guard"),
-            )),
             // Array / map / set literals contribute their literal
             // length as a constant. Useful for the empirical
             // harness where main passes `[1, 2, ..., n]` to a
             // callee — the literal length flows into the callee's
             // size variable and the whole formula collapses to a
             // scalar.
-            ExprKind::Array(items) => Some(CostExpr::Const(items.len() as u64)),
+            ExprKind::Array(items) => return Some(CostExpr::Const(items.len() as u64)),
             // Range elements (`<a..b>`) have a dynamic expanded
             // length — only count sets made of plain elements.
             ExprKind::Set(items) if items.iter().all(|i| i.end.is_none()) => {
-                Some(CostExpr::Const(items.len() as u64))
+                return Some(CostExpr::Const(items.len() as u64));
             }
-            ExprKind::Map(pairs) => Some(CostExpr::Const(pairs.len() as u64)),
-            ExprKind::Call(call) => match &call.callee {
-                Callee::Function(NameRef::Builtin(b)) if native::is_size_query(b) => {
-                    let arg = call.args.first()?;
-                    // `count(this.field)` — counting implies a container,
-                    // so attribute a field size even for un-annotated
-                    // fields (the loop-bound path is lenient too).
-                    if let ExprKind::Field(receiver, name, _) = &arg.kind
-                        && crate::loop_bound::is_this_rooted(receiver)
-                    {
-                        return Some(CostExpr::Size(SizeVar::field(name.clone())));
-                    }
-                    self.arg_size_expr(arg)
-                }
-                _ => None,
-            },
-            _ => None,
+            ExprKind::Map(pairs) => return Some(CostExpr::Const(pairs.len() as u64)),
+            _ => {}
         }
+        // Parameters, `this`/`obj` field paths, and `count(...)` of any
+        // of those resolve to a size variable.
+        crate::loop_bound::resolve_size_var(e, self.ctx.params).map(CostExpr::Size)
     }
 
     /// Growth contribution of a free-function builtin call. Higher-

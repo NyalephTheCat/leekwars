@@ -27,6 +27,15 @@
 //!   *call sites* resolve through the enclosing class (`this.m()`),
 //!   the receiver's type, a unique-method-name fallback, or the
 //!   native catalog (`arr.sort()`).
+//! - **Size variables** are resolved uniformly by
+//!   [`resolve_size_var`](loop_bound::resolve_size_var): the element
+//!   count of any value reachable from a stable root — a parameter
+//!   (`arr`), or a field access path off a parameter or `this`
+//!   (`this.cells`, `bag.items`, `this.grid.rows`). Parameter roots
+//!   substitute at a call site (their field path composing onto the
+//!   argument's location, so `f(thing)` calling `sumField(obj)` over
+//!   `obj.items` reports `O(thing.items)`); `this` roots are instance
+//!   state and stay in the method's own big-O.
 //!
 //! Returns one [`Complexity`] per user function and method, plus
 //! one entry for `<main>` (the top-level statements).
@@ -54,7 +63,7 @@ pub mod pipeline;
 
 pub use analyze::{Complexity, ParamInfo, analyze_file, analyze_function};
 pub use big_o::BigO;
-pub use cost_expr::{CostExpr, SizeSource, SizeVar};
+pub use cost_expr::{CostExpr, SizeRoot, SizeSource, SizeVar};
 pub use loop_bound::LoopBound;
 pub use native::{native_big_o, native_call_cost, native_growth};
 pub use pipeline::{Analyze, ComplexityArtifact};

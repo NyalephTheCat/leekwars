@@ -667,6 +667,69 @@ class Grid {\n\
     assert!(label.contains('·') || label.contains('*'), "got {label}");
 }
 
+#[test]
+fn field_of_another_object_parameter_resolves() {
+    // `bag.items` where `bag` is a (here untyped) parameter — not
+    // `this` — resolves to a field-path size variable off that param.
+    let r = analyze(
+        "\
+function total(bag) {\n\
+    var t = 0\n\
+    for (var x in bag.items) { t = t + x }\n\
+    return t\n\
+}\n",
+    );
+    let f = find(&r, "total");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "bag.items"),
+        other => panic!("expected O(bag.items), got {other:?}\nformula = {}", f.formula),
+    }
+}
+
+#[test]
+fn field_path_composes_through_a_call() {
+    // The callee loops over `obj.items` (a field off its own param);
+    // the caller passes `thing`, so the field path retargets onto the
+    // argument → O(thing.items).
+    let r = analyze(
+        "\
+function sumField(obj) {\n\
+    for (var x in obj.items) {}\n\
+    return 0\n\
+}\n\
+function driver(thing) {\n\
+    return sumField(thing)\n\
+}\n",
+    );
+    let f = find(&r, "driver");
+    match &f.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "thing.items"),
+        other => panic!(
+            "expected O(thing.items), got {other:?}\nformula = {}",
+            f.formula
+        ),
+    }
+}
+
+#[test]
+fn nested_field_chain_resolves() {
+    let r = analyze(
+        "\
+class Board {\n\
+    public grid = []\n\
+    public scan() {\n\
+        for (var r in this.grid.rows) {}\n\
+        return 0\n\
+    }\n\
+}\n",
+    );
+    let m = find(&r, "Board.scan");
+    match &m.big_o {
+        BigO::Linear(v) => assert_eq!(v.name, "grid.rows"),
+        other => panic!("expected O(grid.rows), got {other:?}\nformula = {}", m.formula),
+    }
+}
+
 // ─── native functions called as methods ────────────────────────────
 
 #[test]

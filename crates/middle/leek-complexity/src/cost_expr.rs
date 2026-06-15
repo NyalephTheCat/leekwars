@@ -10,41 +10,58 @@
 
 use std::fmt;
 
-/// Where a size variable comes from. Drives identity (two `SizeVar`s
-/// are equal iff their `source` matches) and substitution behaviour:
-/// only [`Param`](SizeSource::Param) sources are rewritten at a call
-/// site — a [`Field`](SizeSource::Field) is *instance state* the caller
-/// can't supply, so it passes through unchanged and surfaces in the
-/// method's own big-O.
+/// The root a size variable hangs off — the stable input whose value
+/// (or one of whose fields) carries the element count.
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum SizeSource {
-    /// 0-based parameter position the size refers to.
+pub enum SizeRoot {
+    /// 0-based parameter position.
     Param(u32),
-    /// A class field accessed as `this.<name>` inside a method body.
-    Field(String),
+    /// The enclosing instance (`this`) inside a method body.
+    This,
+}
+
+/// Where a size variable comes from: a [`root`](SizeSource::root) plus a
+/// field-access [`path`](SizeSource::path) off it. The empty path means
+/// the root value itself (`count(arr)`); a non-empty path is a field
+/// chain (`this.data`, `obj.cells`, `this.grid.rows`).
+///
+/// Drives identity (two `SizeVar`s are equal iff their `source` matches)
+/// and substitution: a parameter root is rewritten at a call site (its
+/// field path composed onto the argument's), while a `this` root is
+/// *instance state* the caller can't supply, so it passes through and
+/// surfaces in the method's own big-O.
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SizeSource {
+    pub root: SizeRoot,
+    pub path: Vec<String>,
 }
 
 /// A size variable — the element count of a sized value (array / map /
-/// set / string). Derived either from a parameter (`count(arr0)`) or a
-/// class field (`count(this.data)`). Two `SizeVar`s are equal iff their
-/// [`source`](SizeVar::source) matches; `name` is purely cosmetic (for
-/// display).
+/// set / string), identified by its access path from a stable root
+/// (`count(arr)`, `count(this.data)`, `count(obj.cells)`). Two
+/// `SizeVar`s are equal iff their [`source`](SizeVar::source) matches;
+/// `name` is purely cosmetic (for display).
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone)]
 pub struct SizeVar {
     /// Identity of the size variable.
     pub source: SizeSource,
-    /// Display name. Conventionally the parameter / field identifier,
+    /// Display name. Conventionally the parameter / field access path,
     /// or `n`, `m`, ... when no name is known.
     pub name: String,
 }
 
 impl SizeVar {
-    /// A parameter-derived size variable at 0-based position `index`.
+    /// A parameter-derived size variable at 0-based position `index`
+    /// (the parameter value itself, no field path).
     pub fn new(index: u32, name: impl Into<String>) -> Self {
         Self {
-            source: SizeSource::Param(index),
+            source: SizeSource {
+                root: SizeRoot::Param(index),
+                path: Vec::new(),
+            },
             name: name.into(),
         }
     }
@@ -53,17 +70,56 @@ impl SizeVar {
     pub fn field(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
-            source: SizeSource::Field(name.clone()),
+            source: SizeSource {
+                root: SizeRoot::This,
+                path: vec![name.clone()],
+            },
             name,
         }
     }
 
-    /// The parameter position this size refers to, if it's a parameter
-    /// (rather than a field). Field sources return `None`.
+    /// The `this` object root (`{root: This, path: []}`). Not a sized
+    /// value on its own — only a field path off it is — but the base a
+    /// resolver extends with [`with_field`](Self::with_field).
+    pub(crate) fn this_object() -> Self {
+        Self {
+            source: SizeSource {
+                root: SizeRoot::This,
+                path: Vec::new(),
+            },
+            name: String::new(),
+        }
+    }
+
+    /// Extend this location with one more field access (`base.field`),
+    /// updating both the path and the display name.
+    pub(crate) fn with_field(mut self, field: &str) -> Self {
+        self.source.path.push(field.to_string());
+        self.name = if self.name.is_empty() {
+            field.to_string()
+        } else {
+            format!("{}.{field}", self.name)
+        };
+        self
+    }
+
+    /// Append a whole field chain — used to compose a callee's
+    /// `param.field…` path onto the argument's location during
+    /// substitution.
+    pub(crate) fn extend(mut self, more: &[String]) -> Self {
+        for f in more {
+            self = self.with_field(f);
+        }
+        self
+    }
+
+    /// The parameter position this size substitutes for at a call site:
+    /// `Some(i)` only for a bare parameter (root `Param(i)`, empty path).
+    /// Field paths and `this` roots return `None`.
     pub fn param_index(&self) -> Option<u32> {
-        match &self.source {
-            SizeSource::Param(i) => Some(*i),
-            SizeSource::Field(_) => None,
+        match (&self.source.root, self.source.path.is_empty()) {
+            (SizeRoot::Param(i), true) => Some(*i),
+            _ => None,
         }
     }
 }
@@ -299,13 +355,7 @@ impl CostExpr {
     pub fn substitute(&self, sub: &std::collections::HashMap<u32, CostExpr>) -> CostExpr {
         match self {
             CostExpr::Const(c) => CostExpr::Const(*c),
-            CostExpr::Size(v) => match v.param_index() {
-                // Field-derived sizes are instance state — keep them.
-                None => CostExpr::Size(v.clone()),
-                Some(idx) => sub.get(&idx).cloned().unwrap_or(CostExpr::Unknown(
-                    "callee size variable not mapped at call site",
-                )),
-            },
+            CostExpr::Size(v) => substitute_size(v, sub),
             CostExpr::Log(inner) => CostExpr::Log(Box::new(inner.substitute(sub))).simplify(),
             CostExpr::Sum(parts) => {
                 CostExpr::sum(parts.iter().map(|p| p.substitute(sub)).collect())
@@ -425,6 +475,35 @@ impl CostExpr {
                 out.push(')');
             }
         }
+    }
+}
+
+/// Substitute one [`Size`](CostExpr::Size) at a call site.
+///
+/// - A `this`-rooted size is instance state the caller can't supply, so
+///   it passes through unchanged.
+/// - A bare parameter (`root: Param(i)`, empty path) becomes the
+///   caller's argument size, or `Unknown` if the parameter wasn't mapped.
+/// - A parameter *field path* (`obj.field…`) retargets onto the
+///   argument's location: if the argument resolves to another size
+///   location we compose the paths (`f(a)` where `f` reads `obj.field`
+///   ⇒ `a.field`); otherwise we can't tie the field to an input and
+///   yield `Unknown`.
+fn substitute_size(v: &SizeVar, sub: &std::collections::HashMap<u32, CostExpr>) -> CostExpr {
+    let SizeRoot::Param(idx) = v.source.root else {
+        // `this` root — instance state, keep as-is.
+        return CostExpr::Size(v.clone());
+    };
+    let Some(arg) = sub.get(&idx) else {
+        return CostExpr::Unknown("callee size variable not mapped at call site");
+    };
+    if v.source.path.is_empty() {
+        return arg.clone();
+    }
+    // Field path off the parameter: compose onto the argument's location.
+    match arg {
+        CostExpr::Size(arg_var) => CostExpr::Size(arg_var.clone().extend(&v.source.path)),
+        _ => CostExpr::Unknown("can't resolve field path through non-aggregate argument"),
     }
 }
 
