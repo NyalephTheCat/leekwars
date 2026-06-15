@@ -40,8 +40,8 @@ use crate::big_o::big_o;
 use crate::call_graph;
 use crate::cost_expr::{CostExpr, SizeVar};
 use crate::loop_bound::{
-    BoundContext, LocalIndex, LoopBound, ParamIndex, bound_of_for, bound_of_foreach, bound_of_while,
-    build_size_env,
+    BoundContext, LocalIndex, LoopBound, ParamIndex, bound_of_for, bound_of_foreach,
+    bound_of_while, build_size_env,
 };
 use crate::native;
 
@@ -135,7 +135,14 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     // Non-recursive nodes, callees-first.
     for name in &ordering.topo {
         if let Some(u) = units.get(name) {
-            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph, &globals);
+            let c = analyze_unit(
+                u,
+                &registry,
+                &ordering.recursive,
+                &def_to_name,
+                &graph,
+                &globals,
+            );
             registry.insert(name.clone(), c);
         }
     }
@@ -144,7 +151,14 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
     // same-cycle peer falls through to Unknown.
     for name in &ordering.recursive {
         if let Some(u) = units.get(name) {
-            let c = analyze_unit(u, &registry, &ordering.recursive, &def_to_name, &graph, &globals);
+            let c = analyze_unit(
+                u,
+                &registry,
+                &ordering.recursive,
+                &def_to_name,
+                &graph,
+                &globals,
+            );
             registry.insert(name.clone(), c);
         }
     }
@@ -485,7 +499,11 @@ impl Walker<'_> {
         match &c.callee {
             Callee::Function(NameRef::Builtin(name)) => {
                 let growth = self.builtin_growth(name, &c.args);
-                CostExpr::sum(vec![CostExpr::Const(native::base_cost(name)), args_c, growth])
+                CostExpr::sum(vec![
+                    CostExpr::Const(native::base_cost(name)),
+                    args_c,
+                    growth,
+                ])
             }
             Callee::Function(NameRef::Function(def_id)) => {
                 // Look the callee up in the registry — its name is

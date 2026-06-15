@@ -231,13 +231,19 @@ mod tests {
         // `arrayClone` has a batch_mult in the catalog but no curated
         // shape — it should still come out linear in arg0.
         let g = native_growth("arrayClone", &[CostExpr::Size(n())]);
-        assert!(matches!(big_o(&g), BigO::Linear(v) if v.name == "n"), "got {g}");
+        assert!(
+            matches!(big_o(&g), BigO::Linear(v) if v.name == "n"),
+            "got {g}"
+        );
     }
 
     #[test]
     fn constant_builtin_has_constant_growth_and_base() {
         // `count` is op_cost 1, no batch_mult → constant growth.
-        assert!(matches!(big_o(&native_growth("count", &[CostExpr::Size(n())])), BigO::Constant));
+        assert!(matches!(
+            big_o(&native_growth("count", &[CostExpr::Size(n())])),
+            BigO::Constant
+        ));
         assert!(base_cost("count") >= 1);
     }
 

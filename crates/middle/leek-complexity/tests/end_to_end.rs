@@ -682,7 +682,10 @@ function total(bag) {\n\
     let f = find(&r, "total");
     match &f.big_o {
         BigO::Linear(v) => assert_eq!(v.name, "bag.items"),
-        other => panic!("expected O(bag.items), got {other:?}\nformula = {}", f.formula),
+        other => panic!(
+            "expected O(bag.items), got {other:?}\nformula = {}",
+            f.formula
+        ),
     }
 }
 
@@ -726,7 +729,10 @@ class Board {\n\
     let m = find(&r, "Board.scan");
     match &m.big_o {
         BigO::Linear(v) => assert_eq!(v.name, "grid.rows"),
-        other => panic!("expected O(grid.rows), got {other:?}\nformula = {}", m.formula),
+        other => panic!(
+            "expected O(grid.rows), got {other:?}\nformula = {}",
+            m.formula
+        ),
     }
 }
 
@@ -763,7 +769,10 @@ function run(bag) {\n\
     let f = find(&r, "run");
     match &f.big_o {
         BigO::Linear(v) => assert_eq!(v.name, "bag.items"),
-        other => panic!("expected O(bag.items), got {other:?}\nformula = {}", f.formula),
+        other => panic!(
+            "expected O(bag.items), got {other:?}\nformula = {}",
+            f.formula
+        ),
     }
 }
 
@@ -829,7 +838,10 @@ function ordered(arr) {\n\
     let f = find(&r, "ordered");
     match &f.big_o {
         BigO::NLogN(v) => assert_eq!(v.name, "arr"),
-        other => panic!("expected O(arr · log arr), got {other:?}\nformula = {}", f.formula),
+        other => panic!(
+            "expected O(arr · log arr), got {other:?}\nformula = {}",
+            f.formula
+        ),
     }
 }
 
