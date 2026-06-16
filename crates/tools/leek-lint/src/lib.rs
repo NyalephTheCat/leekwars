@@ -1,10 +1,10 @@
 //! Leekscript linter.
 //!
 //! Operates on the [`HirFile`] produced by `leek-hir` and emits
-//! [`Diagnostic`]s in the `L0xxx` numeric range (see
-//! `doc/diagnostics.md` §3.6). Findings flow through the standard
-//! pipeline diagnostic stream, so they show up in `leekc` output
-//! and the LSP without any extra wiring.
+//! [`Diagnostic`]s in the `L0xxx` numeric range (the `lint` section of
+//! `leek-diagnostics`' `catalog.yaml`). Findings flow through the
+//! standard pipeline diagnostic stream, so they show up in `leekc`
+//! output and the LSP without any extra wiring.
 //!
 //! Lints are grouped clippy-style ([`LintGroup`]): `correctness`,
 //! `suspicious`, `complexity`, and `style` run by default; `pedantic`

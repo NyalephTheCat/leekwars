@@ -5,7 +5,9 @@
 //! resolver, type checker, …) refers to the constants in [`codes`]
 //! rather than minting its own.
 //!
-//! See `doc/diagnostics.md` for the contract.
+//! `catalog.yaml` is the single source of truth for codes; each may
+//! ship an extended write-up under `explain/<ID>.md` (printed by
+//! `miku explain <CODE>`).
 
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
@@ -326,8 +328,8 @@ impl Diagnostic {
 // ---- Severity overrides (`--allow` / `--warn` / `--deny`) ----
 
 /// Per-code severity overrides applied at emission time. Mirrors the
-/// `--deny <code>`, `--warn <code>`, `--allow <code>` CLI flags spec'd
-/// in `doc/diagnostics.md` §5.
+/// `--deny <code>` / `--warn <code>` / `--allow <code>` CLI flags and
+/// the manifest `[lint]` table.
 #[derive(Debug, Clone, Default)]
 pub struct SeverityConfig {
     overrides: std::collections::HashMap<&'static str, Severity>,

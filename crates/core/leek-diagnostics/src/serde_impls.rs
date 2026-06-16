@@ -1,8 +1,8 @@
 //! `Serialize` / `Deserialize` for the diagnostic types.
 //!
-//! Wire format mirrors `doc/diagnostics.md` §4 — IDs and names are
-//! both emitted so tooling can search either; spans are flattened to
-//! `[start, end]` tuples.
+//! This module is the wire-format spec: IDs and names are both emitted
+//! so tooling can search either, and spans are flattened to
+//! `{source, start, end}` objects.
 
 use leek_span::Span;
 use serde::ser::SerializeStruct;
