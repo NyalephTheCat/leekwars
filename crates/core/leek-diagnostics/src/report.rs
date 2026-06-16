@@ -19,7 +19,6 @@ pub enum MessageFormat {
     #[default]
     Human,
     Json,
-    Junit,
 }
 
 /// Manifest `[lint]` table levels (string codes).
@@ -108,7 +107,7 @@ impl Reporter {
                 continue;
             }
             match self.format {
-                MessageFormat::Human | MessageFormat::Junit => {
+                MessageFormat::Human => {
                     let (text, label, table) = extra_sources
                         .iter()
                         .position(|s| s.source == adjusted.span.source)

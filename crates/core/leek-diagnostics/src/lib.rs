@@ -127,22 +127,6 @@ pub struct CodeMeta {
     pub id: &'static str,
     pub name: &'static str,
     pub default_severity: Severity,
-    pub category: Category,
-}
-
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Category {
-    Lexer,
-    Parser,
-    Pragma,
-    Resolver,
-    Types,
-    Lowering,
-    Manifest,
-    Rewrite,
-    Lint,
-    Runtime,
 }
 
 // ---- Diagnostic ----

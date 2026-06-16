@@ -21,7 +21,9 @@ impl From<MessageFormat> for DiagFormat {
         match f {
             MessageFormat::Human => DiagFormat::Human,
             MessageFormat::Json => DiagFormat::Json,
-            MessageFormat::Junit => DiagFormat::Junit,
+            // JUnit is a test-report format produced by `miku test`
+            // itself; per-diagnostic rendering uses the human renderer.
+            MessageFormat::Junit => DiagFormat::Human,
         }
     }
 }

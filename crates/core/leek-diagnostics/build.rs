@@ -1,6 +1,5 @@
 //! Generate the diagnostic catalog from `catalog.yaml` into `OUT_DIR`.
 
-use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -20,27 +19,23 @@ fn main() {
     let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse catalog.yaml");
     let map = doc.as_mapping().expect("catalog root must be a map");
 
-    let category_rust: HashMap<&str, &str> = HashMap::from([
-        ("lexer", "Lexer"),
-        ("pragma", "Pragma"),
-        ("parser", "Parser"),
-        ("resolver", "Resolver"),
-        ("types", "Types"),
-        ("lint", "Lint"),
-        ("lowering", "Lowering"),
-        ("manifest", "Manifest"),
-        ("rewrite", "Rewrite"),
-    ]);
+    // Catalog sections, in declaration order. The section name is only
+    // a grouping label in the generated `catalog!` invocation now
+    // (categories are not part of the public API); it still fixes the
+    // order entries are assigned their stable CATALOG indices.
+    let sections_order = [
+        "lexer", "pragma", "parser", "resolver", "types", "lowering", "manifest", "rewrite", "lint",
+    ];
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut sections = String::new();
     let mut catalog_index = 0usize;
 
-    for (key, cat_rust) in category_rust {
+    for key in sections_order {
         let Some(yaml_entries) = map.get(key).and_then(|v| v.as_sequence()) else {
             continue;
         };
-        writeln!(sections, "    {cat_rust}: {{").unwrap();
+        writeln!(sections, "    {key}: {{").unwrap();
         for entry in yaml_entries {
             let id = entry["id"].as_str().unwrap().to_string();
             let name = entry["name"].as_str().unwrap().to_string();
@@ -111,7 +106,7 @@ fn main() {
     }
 
     let out = format!(
-        r#"use super::{{Category, Code, CodeMeta, Severity}};
+        r#"use super::{{Code, CodeMeta, Severity}};
 
 macro_rules! catalog {{
     (
@@ -135,7 +130,6 @@ macro_rules! catalog {{
                         id: $id,
                         name: $name,
                         default_severity: Severity::$sev,
-                        category: Category::$cat,
                     }},
                 )*
             )*
@@ -223,7 +217,6 @@ mod tests {{
             assert_eq!(meta.id, entry.id);
             assert_eq!(meta.name, entry.name);
             assert_eq!(meta.default_severity, entry.default_severity);
-            assert_eq!(meta.category, entry.category);
         }}
     }}
 
