@@ -59,6 +59,7 @@ fn harness_pistol() -> WeaponSpec {
             targets: EffectTargets::all(),
             modifiers: EffectModifiers::empty(),
         }],
+        forgotten: false,
     }
 }
 
