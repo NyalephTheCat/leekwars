@@ -167,13 +167,7 @@ impl Serialize for TextEdit {
 
 impl Serialize for Applicability {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let v = match self {
-            Applicability::MachineApplicable => "machine-applicable",
-            Applicability::MaybeIncorrect => "maybe-incorrect",
-            Applicability::HasPlaceholders => "has-placeholders",
-            Applicability::Unspecified => "unspecified",
-        };
-        s.serialize_str(v)
+        s.serialize_str(self.as_str())
     }
 }
 

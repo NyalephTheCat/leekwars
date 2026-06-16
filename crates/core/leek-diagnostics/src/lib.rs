@@ -49,6 +49,12 @@ impl Severity {
     }
 }
 
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // ---- Code (stable identifier + metadata lookup) ----
 
 /// Stable diagnostic code. The wrapped string (e.g. `"E0250"`) is the
@@ -88,6 +94,18 @@ impl Code {
     /// this code.
     pub fn explain(&self) -> Option<&'static str> {
         codes::explain_for(self.0)
+    }
+
+    /// Resolve a `Code` from its stable id (`"E0250"`) or canonical
+    /// name (`"AssignmentIncompatibleType"`). Returns `None` if neither
+    /// matches a catalog entry. This is the single home for the
+    /// name-or-id lookup that CLIs (`--deny <code>`, `miku explain`)
+    /// need.
+    pub fn resolve(s: &str) -> Option<Code> {
+        codes::CATALOG
+            .iter()
+            .find(|m| m.id == s || m.name == s)
+            .map(|m| Code(m.id))
     }
 }
 
@@ -167,6 +185,15 @@ impl Diagnostic {
         Self::new(code, Severity::Warning, span, message)
     }
 
+    /// Construct a diagnostic at `code`'s catalog [default
+    /// severity](Code::default_severity) — the right constructor when a
+    /// producer emits a code at its declared level (the common case,
+    /// and what the [`diag!`](crate::diag) macro expands to). Avoids
+    /// restating a severity the catalog already owns.
+    pub fn at(code: Code, span: Span, message: impl Into<String>) -> Self {
+        Self::new(code, code.default_severity(), span, message)
+    }
+
     /// Attach a secondary label at `span` — typically used for
     /// "previously declared here" / "this binding had type X".
     pub fn with_label(mut self, span: Span, label: impl Into<String>) -> Self {
@@ -209,6 +236,8 @@ pub struct Suggestion {
 }
 
 impl Suggestion {
+    /// A single-edit suggestion replacing `span` with `with`, marked
+    /// [`MachineApplicable`](Applicability::MachineApplicable).
     pub fn replace(message: impl Into<String>, span: Span, with: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -218,6 +247,29 @@ impl Suggestion {
             }],
             applicability: Applicability::MachineApplicable,
         }
+    }
+
+    /// A single-edit suggestion that deletes `span` (replaces it with
+    /// nothing), marked [`MachineApplicable`](Applicability::MachineApplicable).
+    pub fn remove(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            message: message.into(),
+            edits: vec![TextEdit {
+                span,
+                replacement: String::new(),
+            }],
+            applicability: Applicability::MachineApplicable,
+        }
+    }
+
+    /// Override the applicability (builder-style). `replace`/`remove`
+    /// default to `MachineApplicable`; downgrade to
+    /// [`MaybeIncorrect`](Applicability::MaybeIncorrect) when the fix
+    /// wants a human glance.
+    #[must_use]
+    pub fn with_applicability(mut self, applicability: Applicability) -> Self {
+        self.applicability = applicability;
+        self
     }
 }
 
@@ -242,6 +294,18 @@ pub enum Applicability {
     HasPlaceholders,
     /// Heuristic — apply only after review.
     Unspecified,
+}
+
+impl Applicability {
+    /// Kebab-case wire form used by the JSON serializer.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Applicability::MachineApplicable => "machine-applicable",
+            Applicability::MaybeIncorrect => "maybe-incorrect",
+            Applicability::HasPlaceholders => "has-placeholders",
+            Applicability::Unspecified => "unspecified",
+        }
+    }
 }
 
 // ---- Rendering helpers ----
@@ -302,5 +366,56 @@ impl SeverityConfig {
             diag.severity = sev;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leek_span::SourceId;
+
+    fn span() -> Span {
+        Span::new(SourceId::new(1).unwrap(), 0, 1)
+    }
+
+    #[test]
+    fn at_uses_catalog_severity() {
+        // A lint code declared `warning` in the catalog comes out as a
+        // warning without restating the severity.
+        let d = Diagnostic::at(codes::UNUSED_VARIABLE, span(), "x");
+        assert_eq!(d.severity, Severity::Warning);
+        // A hint-level lint comes out as a hint.
+        let d = Diagnostic::at(codes::SHADOWED_BINDING, span(), "x");
+        assert_eq!(d.severity, Severity::Hint);
+    }
+
+    #[test]
+    fn code_resolve_by_id_and_name() {
+        assert_eq!(
+            Code::resolve("E0250"),
+            Some(codes::ASSIGNMENT_INCOMPATIBLE_TYPE)
+        );
+        assert_eq!(
+            Code::resolve("AssignmentIncompatibleType"),
+            Some(codes::ASSIGNMENT_INCOMPATIBLE_TYPE)
+        );
+        assert_eq!(Code::resolve("nope"), None);
+    }
+
+    #[test]
+    fn suggestion_remove_and_applicability() {
+        let s = Suggestion::remove("drop it", span());
+        assert_eq!(s.edits.len(), 1);
+        assert_eq!(s.edits[0].replacement, "");
+        assert_eq!(s.applicability, Applicability::MachineApplicable);
+        let s = Suggestion::replace("swap", span(), "y")
+            .with_applicability(Applicability::MaybeIncorrect);
+        assert_eq!(s.applicability, Applicability::MaybeIncorrect);
+    }
+
+    #[test]
+    fn severity_display_matches_as_str() {
+        assert_eq!(Severity::Error.to_string(), "error");
+        assert_eq!(Applicability::HasPlaceholders.as_str(), "has-placeholders");
     }
 }

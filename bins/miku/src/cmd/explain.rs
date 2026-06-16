@@ -9,20 +9,24 @@ use leek_diagnostics::codes::CATALOG;
 use crate::cli::Explain;
 
 pub fn run(args: &Explain) -> ExitCode {
-    let query = args.code.trim().to_ascii_uppercase();
+    let trimmed = args.code.trim();
 
     // Resolve the query against the catalog so we get back the `'static`
-    // id needed to look up the explanation.
-    let Some(meta) = CATALOG.iter().find(|m| m.id == query) else {
+    // id needed to look up the explanation. Accept the canonical name
+    // (`PrivateField`) as well as the id (`E0240`, case-insensitive).
+    let Some(code) =
+        Code::resolve(trimmed).or_else(|| Code::resolve(&trimmed.to_ascii_uppercase()))
+    else {
         eprintln!("miku: unknown diagnostic code `{}`", args.code);
         print_available();
         return ExitCode::from(2);
     };
 
-    let Some(text) = Code(meta.id).explain() else {
+    let Some(text) = code.explain() else {
         eprintln!(
             "miku: no extended explanation for `{}` ({}) yet",
-            meta.id, meta.name
+            code.id(),
+            code.name()
         );
         print_available();
         return ExitCode::from(1);
