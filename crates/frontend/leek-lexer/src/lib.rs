@@ -24,7 +24,7 @@
 //! - [`strings`] — string literals
 //! - [`operators`] — multi-character operator dispatch
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, Token, Version};
 
@@ -179,10 +179,10 @@ impl<'a> Lexer<'a> {
         let n = ch.len_utf8().max(1);
         self.pos += n;
         let span = self.span(start, self.pos);
-        self.diagnostics.push(Diagnostic::error(
+        self.diagnostics.push(diag!(
             codes::UNEXPECTED_CHAR,
             span,
-            format!("unexpected character: {ch:?}"),
+            "unexpected character: {ch:?}",
         ));
         self.tokens.push(Token::new(SyntaxKind::Error, span));
     }

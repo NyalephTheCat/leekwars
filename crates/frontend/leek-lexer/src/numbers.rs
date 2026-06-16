@@ -1,7 +1,7 @@
 //! Numeric literal lexing — decimal integers and reals plus
 //! `0x…` / `0b…` prefixed integers.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_syntax::{SyntaxKind, Token};
 
 use crate::Lexer;
@@ -114,13 +114,13 @@ impl Lexer<'_> {
         };
         let span = self.span(start, self.pos);
         if bad_suffix {
-            self.diagnostics.push(Diagnostic::error(
+            self.diagnostics.push(diag!(
                 codes::INVALID_NUMBER,
                 span,
                 "numeric literal has a non-digit suffix",
             ));
         } else if multiple_sep {
-            self.diagnostics.push(Diagnostic::error(
+            self.diagnostics.push(diag!(
                 codes::MULTIPLE_NUMERIC_SEPARATORS,
                 span,
                 "numeric literal has consecutive `_` separators",
@@ -213,22 +213,23 @@ impl Lexer<'_> {
         let span = self.span(start, self.pos);
         if !any_digit && self.pos > digits_start && bad.is_none() {
             // Only underscores after the prefix — that's malformed.
-            self.diagnostics.push(Diagnostic::error(
+            self.diagnostics.push(diag!(
                 codes::INVALID_NUMBER,
                 span,
                 "numeric literal has only `_` separators after prefix",
             ));
         } else if self.pos == digits_start {
-            self.diagnostics.push(Diagnostic::error(
+            self.diagnostics.push(diag!(
                 codes::INVALID_NUMBER,
                 span,
-                "numeric literal has no digits after prefix".to_string(),
+                "numeric literal has no digits after prefix",
             ));
         } else if let Some(c) = bad {
-            self.diagnostics.push(Diagnostic::error(
+            self.diagnostics.push(diag!(
                 codes::INVALID_NUMBER,
                 span,
-                format!("invalid digit {:?} in numeric literal", c as char),
+                "invalid digit {:?} in numeric literal",
+                c as char,
             ));
         }
         let kind = if is_hex_float {

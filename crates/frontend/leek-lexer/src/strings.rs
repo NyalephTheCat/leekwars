@@ -1,6 +1,6 @@
 //! String-literal lexing — `"…"` and `'…'` with backslash escapes.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_syntax::{SyntaxKind, Token};
 
 use crate::Lexer;
@@ -33,7 +33,7 @@ impl Lexer<'_> {
         }
         // EOF inside string.
         let span = self.span(start, self.pos);
-        self.diagnostics.push(Diagnostic::error(
+        self.diagnostics.push(diag!(
             codes::STRING_NOT_CLOSED,
             span,
             "string literal not closed before end of file",

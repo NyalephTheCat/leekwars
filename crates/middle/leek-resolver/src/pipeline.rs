@@ -227,18 +227,20 @@ impl Step for ResolveIncludes {
             if let Some(sites) = graph.include_sites.get(&path) {
                 if parsed.ast.is_none() {
                     for site in sites {
-                        cx.emit(leek_diagnostics::Diagnostic::error(
+                        cx.emit(leek_diagnostics::diag!(
                             leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
                             site.span,
-                            format!("included file `{}` failed to parse", path.display()),
+                            "included file `{}` failed to parse",
+                            path.display(),
                         ));
                     }
                 }
             } else if parsed.ast.is_none() {
-                cx.emit(leek_diagnostics::Diagnostic::error(
+                cx.emit(leek_diagnostics::diag!(
                     leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
                     Span::new(source, 0, 0),
-                    format!("included file `{}` failed to parse", path.display()),
+                    "included file `{}` failed to parse",
+                    path.display(),
                 ));
             }
             let Some(ast) = parsed.ast else {

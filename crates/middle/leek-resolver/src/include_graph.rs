@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use leek_diagnostics::{Diagnostic, IntoDiagnostic, codes};
+use leek_diagnostics::{Diagnostic, IntoDiagnostic, codes, diag};
 use leek_lexer::lex;
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, Version, parse_pragmas};
@@ -149,10 +149,11 @@ pub fn build_include_graph(
             // anchored on the file's source id.
             let file = files.get(&current).cloned();
             if let Some(file) = file {
-                diagnostics.push(Diagnostic::error(
+                diagnostics.push(diag!(
                     codes::CIRCULAR_INCLUDE,
                     Span::new(file.source, 0, 0),
-                    format!("circular include involving `{}`", current.display()),
+                    "circular include involving `{}`",
+                    current.display(),
                 ));
             }
             return;
