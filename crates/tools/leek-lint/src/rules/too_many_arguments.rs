@@ -5,7 +5,7 @@
 //! damage again?). Grouping related values in a map, object, or class
 //! usually reads better. Inspired by clippy's `too_many_arguments`.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 
 use crate::LintGroup;
 use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
@@ -37,11 +37,10 @@ impl LintPass for TooManyArguments {
         let name = body.name.unwrap_or("<anonymous>");
         let n = body.params.len();
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::TOO_MANY_ARGUMENTS,
-                leek_diagnostics::Severity::Hint,
                 body.span,
-                format!("`{name}` takes {n} parameters — more than {MAX_PARAMS} is hard to call correctly"),
+                "`{name}` takes {n} parameters — more than {MAX_PARAMS} is hard to call correctly"
             )
             .with_note(
                 "group related parameters into a map, array, or class so call sites stay readable",
@@ -54,6 +53,7 @@ impl LintPass for TooManyArguments {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(TooManyArguments, src)

@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 
 use super::structural::{expr_key, has_side_effect};
@@ -63,10 +63,10 @@ impl LintPass for DuplicateCondition {
 }
 
 fn diagnostic(span: leek_span::Span) -> Diagnostic {
-    Diagnostic::warning(
+    diag!(
         codes::DUPLICATE_CONDITION,
         span,
-        "this condition is identical to an earlier branch in the chain".to_string(),
+        "this condition is identical to an earlier branch in the chain"
     )
     .with_note("the earlier branch always wins, so this arm can never run — did you mean a different condition?")
 }

@@ -20,7 +20,7 @@
 
 use std::collections::HashSet;
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind, Literal, Stmt};
 
 use super::structural::expr_key;
@@ -101,11 +101,10 @@ fn contains_string_literal(e: &Expr) -> bool {
 }
 
 fn diagnostic(span: leek_span::Span) -> Diagnostic {
-    Diagnostic::new(
+    diag!(
         codes::STRING_CONCAT_IN_LOOP,
-        leek_diagnostics::Severity::Hint,
         span,
-        "string concatenation inside a loop".to_string(),
+        "string concatenation inside a loop"
     )
     .with_note(
         "each `+=` copies the whole string accumulated so far, so the loop costs O(n²) ops — push the pieces into an array and `join(parts, …)` once after the loop",

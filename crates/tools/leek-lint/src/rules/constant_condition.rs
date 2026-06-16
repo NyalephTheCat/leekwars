@@ -16,7 +16,7 @@
 //!   has `if`/`block` for that. The user can `@allow` if they
 //!   actually meant it.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Expr, ExprKind, Literal, Stmt};
 use leek_span::Span;
 
@@ -103,10 +103,10 @@ fn body_breaks_or_returns(body: &Stmt) -> bool {
 
 fn diagnostic(span: Span, kind: &str, value: bool) -> Diagnostic {
     let truthy = if value { "always true" } else { "always false" };
-    Diagnostic::warning(
+    diag!(
         codes::CONSTANT_CONDITION,
         span,
-        format!("`{kind}` condition is {truthy} — the body is unconditional"),
+        "`{kind}` condition is {truthy} — the body is unconditional"
     )
 }
 

@@ -836,7 +836,10 @@ impl State {
     /// `State.getRestatPotionsAvailable(farmer)` — 0 when none set.
     #[must_use]
     pub fn restat_potions_available(&self, farmer: i64) -> i32 {
-        self.restat_potions_available.get(&farmer).copied().unwrap_or(0)
+        self.restat_potions_available
+            .get(&farmer)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// `State.consumeRestatPotion(farmer)` — spend one potion; `true` if one
@@ -1185,7 +1188,9 @@ impl State {
     /// `Weapon.isForgotten()` for a template id (false for unknown weapons).
     #[must_use]
     fn is_forgotten_weapon(&self, weapon_id: i32) -> bool {
-        self.weapon_specs.get(&weapon_id).is_some_and(|w| w.forgotten)
+        self.weapon_specs
+            .get(&weapon_id)
+            .is_some_and(|w| w.forgotten)
     }
 
     /// `Entity.applyLoadout(loadout, reservedForgotten, applyStats)` — swap the

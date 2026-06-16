@@ -17,7 +17,7 @@
 //! every block is exempt — its value may be the block's result. Only
 //! non-terminal expression statements are reported.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Expr, ExprKind, Stmt};
 
 use super::structural::has_side_effect;
@@ -56,10 +56,10 @@ impl LintPass for UnusedExpression {
 }
 
 fn diagnostic(e: &Expr) -> Diagnostic {
-    let mut d = Diagnostic::warning(
+    let mut d = diag!(
         codes::UNUSED_EXPRESSION,
         e.span,
-        "this expression's value is computed but never used".to_string(),
+        "this expression's value is computed but never used"
     );
     // The `==`-for-`=` typo is common enough to call out specifically.
     if matches!(&e.kind, ExprKind::Binary(leek_hir::BinaryOp::Eq, ..)) {

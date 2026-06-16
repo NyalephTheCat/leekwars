@@ -1,8 +1,8 @@
 //! `Serialize` / `Deserialize` for the diagnostic types.
 //!
-//! Wire format mirrors `doc/diagnostics.md` §4 — IDs and names are
-//! both emitted so tooling can search either; spans are flattened to
-//! `[start, end]` tuples.
+//! This module is the wire-format spec: IDs and names are both emitted
+//! so tooling can search either, and spans are flattened to
+//! `{source, start, end}` objects.
 
 use leek_span::Span;
 use serde::ser::SerializeStruct;
@@ -101,7 +101,7 @@ impl Serialize for Diagnostic {
         st.serialize_field(
             "primary",
             &PrimarySer {
-                span: self.span,
+                span: self.span.into(),
                 label: &self.message,
             },
         )?;
@@ -114,40 +114,36 @@ impl Serialize for Diagnostic {
 
 #[derive(Serialize)]
 struct PrimarySer<'a> {
-    #[serde(serialize_with = "serialize_span")]
-    span: Span,
+    span: SpanWrap,
     label: &'a str,
-}
-
-fn serialize_span<S: Serializer>(span: &Span, s: S) -> Result<S::Ok, S::Error> {
-    let mut st = s.serialize_struct("Span", 3)?;
-    st.serialize_field("source", &span.source.get())?;
-    st.serialize_field("start", &span.start)?;
-    st.serialize_field("end", &span.end)?;
-    st.end()
 }
 
 impl Serialize for Label {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut st = s.serialize_struct("Label", 2)?;
-        st.serialize_field(
-            "span",
-            &SpanWrap {
-                source: self.span.source.get(),
-                start: self.span.start,
-                end: self.span.end,
-            },
-        )?;
+        st.serialize_field("span", &SpanWrap::from(self.span))?;
         st.serialize_field("label", &self.message)?;
         st.end()
     }
 }
 
+/// Wire form of a [`Span`] — flattened to `{source, start, end}`. Used
+/// everywhere a span is serialized so the format is defined once.
 #[derive(Serialize)]
 struct SpanWrap {
     source: u32,
     start: u32,
     end: u32,
+}
+
+impl From<Span> for SpanWrap {
+    fn from(span: Span) -> Self {
+        Self {
+            source: span.source.get(),
+            start: span.start,
+            end: span.end,
+        }
+    }
 }
 
 impl Serialize for Suggestion {
@@ -163,14 +159,7 @@ impl Serialize for Suggestion {
 impl Serialize for TextEdit {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut st = s.serialize_struct("TextEdit", 2)?;
-        st.serialize_field(
-            "span",
-            &SpanWrap {
-                source: self.span.source.get(),
-                start: self.span.start,
-                end: self.span.end,
-            },
-        )?;
+        st.serialize_field("span", &SpanWrap::from(self.span))?;
         st.serialize_field("replacement", &self.replacement)?;
         st.end()
     }
@@ -178,13 +167,7 @@ impl Serialize for TextEdit {
 
 impl Serialize for Applicability {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let v = match self {
-            Applicability::MachineApplicable => "machine-applicable",
-            Applicability::MaybeIncorrect => "maybe-incorrect",
-            Applicability::HasPlaceholders => "has-placeholders",
-            Applicability::Unspecified => "unspecified",
-        };
-        s.serialize_str(v)
+        s.serialize_str(self.as_str())
     }
 }
 

@@ -4,7 +4,7 @@
 //!
 //! [`checks`]: super::checks
 
-use leek_diagnostics::Diagnostic;
+use leek_diagnostics::diag;
 use leek_parser::ast::{AstNode, Block, CallExpr, Expr, NameRef};
 use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken, Version};
 
@@ -832,10 +832,10 @@ impl Resolver {
         //   3. Malformed numeric-literal-shaped identifiers.
         if self.looks_like_case_typo(name) || self.in_class || looks_like_bad_number {
             let span = self.span_of(&ident);
-            let mut diag = Diagnostic::error(
+            let mut diag = diag!(
                 codes::UNKNOWN_VARIABLE,
                 span,
-                format!("unknown variable or function `{name}`"),
+                "unknown variable or function `{name}`",
             );
             // Offer a "did you mean…?" autofix when an in-scope name
             // is close enough by edit distance.

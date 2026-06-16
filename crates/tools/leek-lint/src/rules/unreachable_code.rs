@@ -19,7 +19,7 @@
 //!   `stmt_definitely_returns` analysis the Java backend uses;
 //!   factor that out in a later slice if useful.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 use leek_span::Span;
 
@@ -70,10 +70,10 @@ fn terminator_kind(s: &Stmt) -> &'static str {
 }
 
 fn diagnostic(span: Span, kind: &str) -> Diagnostic {
-    Diagnostic::warning(
+    diag!(
         codes::UNREACHABLE_CODE,
         span,
-        format!("unreachable statement: previous `{kind}` already exits this block"),
+        "unreachable statement: previous `{kind}` already exits this block"
     )
 }
 

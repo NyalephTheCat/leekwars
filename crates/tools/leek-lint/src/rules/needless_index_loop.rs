@@ -17,7 +17,7 @@
 //! side-effect-free `arr`, and any *write* through `arr[i]` bails (a
 //! by-value `foreach` binding wouldn't update the array).
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, DefId, Expr, ExprKind, Literal, NameRef, PostfixOp, Stmt, UnaryOp};
 
 use super::structural::{expr_key, has_side_effect};
@@ -68,11 +68,10 @@ impl LintPass for NeedlessIndexLoop {
         let _ = array_key;
 
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::NEEDLESS_INDEX_LOOP,
-                leek_diagnostics::Severity::Hint,
                 fr.span,
-                "this loop's counter is only used to index one array".to_string(),
+                "this loop's counter is only used to index one array"
             )
             .with_note(
                 "iterate the elements directly: `for (var x in arr) { … }` — no bounds to get wrong, and it skips the per-iteration index ops",
@@ -184,6 +183,7 @@ fn indexes_counter(e: &Expr, counter: DefId) -> bool {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(NeedlessIndexLoop, src)

@@ -6,7 +6,7 @@
 //!   the boolean value of `cond`. Flagged (no fix, since the exact
 //!   rewrite depends on `cond` already being boolean).
 
-use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
+use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes, diag};
 use leek_hir::{Expr, ExprKind, Literal};
 use leek_span::Span;
 
@@ -49,11 +49,10 @@ fn bool_lit(e: &Expr) -> Option<bool> {
 }
 
 fn identical_arms(expr: Span, then: Span, cond: &Expr) -> Diagnostic {
-    let mut d = Diagnostic::new(
+    let mut d = diag!(
         codes::REDUNDANT_TERNARY,
-        leek_diagnostics::Severity::Hint,
         expr,
-        "both branches of this ternary are identical".to_string(),
+        "both branches of this ternary are identical"
     )
     .with_note("the condition has no effect — `c ? a : a` is just `a`");
     // Only safe to drop the condition when it has no side effects.
@@ -79,11 +78,10 @@ fn identical_arms(expr: Span, then: Span, cond: &Expr) -> Diagnostic {
 }
 
 fn boolean_ternary(expr: Span) -> Diagnostic {
-    Diagnostic::new(
+    diag!(
         codes::REDUNDANT_TERNARY,
-        leek_diagnostics::Severity::Hint,
         expr,
-        "ternary returning boolean literals is redundant".to_string(),
+        "ternary returning boolean literals is redundant"
     )
     .with_note("`c ? true : false` is just the boolean value of `c` — drop the ternary")
 }

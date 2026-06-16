@@ -31,7 +31,7 @@
 
 use std::collections::HashSet;
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{ForStmt, ForeachStmt, Stmt, VarDecl};
 
 use crate::LintGroup;
@@ -170,12 +170,10 @@ fn walk_foreach(fe: &ForeachStmt, scopes: &mut Vec<HashSet<String>>, out: &mut V
 }
 
 fn diagnostic(name: &str, span: leek_span::Span) -> Diagnostic {
-    use leek_diagnostics::Severity;
-    Diagnostic::new(
+    diag!(
         codes::SHADOWED_BINDING,
-        Severity::Hint,
         span,
-        format!("`{name}` shadows an outer binding with the same name"),
+        "`{name}` shadows an outer binding with the same name"
     )
     .with_note("rename one of the two for clarity, or `@allow(L0003)` if intentional")
 }

@@ -11,7 +11,7 @@
 //! compared (a call could legitimately differ between the condition
 //! and the arm). Inspired by clippy's `manual_clamp` family.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
@@ -55,11 +55,10 @@ impl LintPass for ManualMinMax {
             _ => return,
         };
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::MANUAL_MIN_MAX,
-                leek_diagnostics::Severity::Hint,
                 e.span,
-                format!("this ternary is `{builtin}` written by hand"),
+                "this ternary is `{builtin}` written by hand"
             )
             .with_note(format!(
                 "`{builtin}(a, b)` says what you mean and evaluates each operand once"
@@ -72,6 +71,7 @@ impl LintPass for ManualMinMax {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(ManualMinMax, src)

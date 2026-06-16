@@ -20,12 +20,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, IntoDiagnostic, codes, diag};
 use leek_lexer::lex;
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, Version, parse_pragmas};
 
-use crate::folder::{Folder, LoadedFile};
+use crate::folder::{Folder, IncludeError, LoadedFile};
 
 /// Build outcome — the ordered file list plus the forward edge
 /// map and any diagnostics raised during the walk.
@@ -149,10 +149,11 @@ pub fn build_include_graph(
             // anchored on the file's source id.
             let file = files.get(&current).cloned();
             if let Some(file) = file {
-                diagnostics.push(Diagnostic::error(
+                diagnostics.push(diag!(
                     codes::CIRCULAR_INCLUDE,
                     Span::new(file.source, 0, 0),
-                    format!("circular include involving `{}`", current.display()),
+                    "circular include involving `{}`",
+                    current.display(),
                 ));
             }
             return;
@@ -210,7 +211,14 @@ pub fn build_include_graph(
                     );
                 }
                 Err(e) => {
-                    diagnostics.push(e.to_diagnostic(inc.span, &inc.name));
+                    diagnostics.push(
+                        IncludeError {
+                            cause: e,
+                            span: inc.span,
+                            name: &inc.name,
+                        }
+                        .into_diagnostic(),
+                    );
                 }
             }
         }

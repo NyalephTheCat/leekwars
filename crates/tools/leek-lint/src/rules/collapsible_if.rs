@@ -12,7 +12,7 @@
 //! conditions can need parentheses (`a || b` and `c` join as
 //! `(a || b) && c`) which the lint layer doesn't reprint.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{IfStmt, Stmt};
 
 use crate::LintGroup;
@@ -44,11 +44,10 @@ impl LintPass for CollapsibleIf {
             return;
         }
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::COLLAPSIBLE_IF,
-                leek_diagnostics::Severity::Hint,
                 outer.span,
-                "this `if` can be collapsed into its parent".to_string(),
+                "this `if` can be collapsed into its parent"
             )
             .with_label(inner.cond.span, "join this condition with `&&`")
             .with_note(
@@ -75,6 +74,7 @@ fn lone_inner_if(then: &Stmt) -> Option<&IfStmt> {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(CollapsibleIf, src)

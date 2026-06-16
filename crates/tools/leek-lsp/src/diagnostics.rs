@@ -8,12 +8,18 @@ use crate::util::position::{PosMap, span_to_range};
 /// Map a Leek diagnostic to the LSP wire shape, including catalog
 /// metadata and secondary labels as `relatedInformation`.
 pub fn to_lsp(diag: &LeekDiagnostic, pm: PosMap<'_>, uri: Option<&lsp::Url>) -> lsp::Diagnostic {
+    // Link the code to its extended write-up when one exists — the
+    // `explain/<ID>.md` file the build embeds (and `miku explain`
+    // prints). Codes without a write-up get no link.
     let code_description = diag
         .code
-        .meta()
+        .explain()
         .and_then(|_| {
-            lsp::Url::parse("https://github.com/chloe/leekscript-rs/blob/main/doc/diagnostics.md")
-                .ok()
+            lsp::Url::parse(&format!(
+                "https://github.com/chloe/leekscript-rs/blob/main/crates/core/leek-diagnostics/explain/{}.md",
+                diag.code.id()
+            ))
+            .ok()
         })
         .map(|href| lsp::CodeDescription { href });
 

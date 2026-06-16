@@ -15,7 +15,7 @@
 //! Gated on [`crate::LintOptions::version`] ≥ 4 — older scripts don't
 //! have sets.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Callee, Expr, ExprKind, NameRef};
 
 use crate::LintGroup;
@@ -56,11 +56,10 @@ impl LintPass for ArrayLiteralMembership {
             return;
         }
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::ARRAY_LITERAL_MEMBERSHIP,
-                leek_diagnostics::Severity::Hint,
                 e.span,
-                "membership test against an array literal".to_string(),
+                "membership test against an array literal"
             )
             .with_note(
                 "a set literal says \"one of these values\" directly and checks membership by hash instead of scanning: `x in <a, b, c>`",
@@ -79,6 +78,7 @@ fn is_multi_array(e: &Expr) -> bool {
 mod tests {
     use super::*;
     use crate::testing::{lint_one, lint_one_v};
+    use leek_diagnostics::Diagnostic;
     use leek_syntax::Version;
 
     fn run(src: &str) -> Vec<Diagnostic> {

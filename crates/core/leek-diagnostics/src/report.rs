@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 
 use leek_span::LineTable;
 
-use crate::{Code, Diagnostic, Renderer, Severity, SeverityConfig, codes::CATALOG};
+use crate::{Code, Diagnostic, Renderer, Severity, SeverityConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorWhen {
@@ -19,7 +19,6 @@ pub enum MessageFormat {
     #[default]
     Human,
     Json,
-    Junit,
 }
 
 /// Manifest `[lint]` table levels (string codes).
@@ -108,7 +107,7 @@ impl Reporter {
                 continue;
             }
             match self.format {
-                MessageFormat::Human | MessageFormat::Junit => {
+                MessageFormat::Human => {
                     let (text, label, table) = extra_sources
                         .iter()
                         .position(|s| s.source == adjusted.span.source)
@@ -157,9 +156,5 @@ fn should_color(when: ColorWhen) -> bool {
 }
 
 fn resolve_code(raw: &str) -> Result<Code, String> {
-    if let Some(meta) = CATALOG.iter().find(|m| m.id == raw || m.name == raw) {
-        Ok(Code(meta.id))
-    } else {
-        Err(format!("unknown diagnostic code `{raw}`"))
-    }
+    Code::resolve(raw).ok_or_else(|| format!("unknown diagnostic code `{raw}`"))
 }

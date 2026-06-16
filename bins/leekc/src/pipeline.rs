@@ -27,10 +27,8 @@ pub fn pipeline_for(emit: Emit, fmt_opts: FormatOptions, lints: LintGroups) -> P
 /// Look up a code by ID (`E0240`) or canonical name (`PrivateField`).
 pub fn resolve_code(raw: &str) -> Result<Code> {
     use leek_diagnostics::codes::CATALOG;
-    if let Some(meta) = CATALOG.iter().find(|m| m.id == raw || m.name == raw) {
-        Ok(Code(meta.id))
-    } else {
-        anyhow::bail!(
+    Code::resolve(raw).ok_or_else(|| {
+        anyhow::anyhow!(
             "unknown diagnostic code `{raw}` (try one of: {})",
             CATALOG
                 .iter()
@@ -39,7 +37,7 @@ pub fn resolve_code(raw: &str) -> Result<Code> {
                 .collect::<Vec<_>>()
                 .join(", ")
         )
-    }
+    })
 }
 
 /// True if stderr is attached to a terminal. Honors `NO_COLOR`.

@@ -5,7 +5,9 @@
 //! resolver, type checker, …) refers to the constants in [`codes`]
 //! rather than minting its own.
 //!
-//! See `doc/diagnostics.md` for the contract.
+//! `catalog.yaml` is the single source of truth for codes; each may
+//! ship an extended write-up under `explain/<ID>.md` (printed by
+//! `miku explain <CODE>`).
 
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
@@ -16,6 +18,7 @@ pub mod codes {
     include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
 }
 pub mod convert;
+mod macros;
 mod render;
 pub mod report;
 mod suggest;
@@ -23,6 +26,10 @@ mod suggest;
 pub use render::{Renderer, Style};
 pub use report::{ColorWhen, LintLevels, MessageFormat, Reporter, RunSource};
 pub use suggest::{best_match, suggest_similar};
+
+// Implementation detail of the `diag!` macro; not a stable API.
+#[doc(hidden)]
+pub use macros::__format_message;
 
 #[cfg(feature = "serde")]
 mod serde_impls;
@@ -46,6 +53,12 @@ impl Severity {
             Severity::Info => "info",
             Severity::Hint => "hint",
         }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -89,6 +102,18 @@ impl Code {
     pub fn explain(&self) -> Option<&'static str> {
         codes::explain_for(self.0)
     }
+
+    /// Resolve a `Code` from its stable id (`"E0250"`) or canonical
+    /// name (`"AssignmentIncompatibleType"`). Returns `None` if neither
+    /// matches a catalog entry. This is the single home for the
+    /// name-or-id lookup that CLIs (`--deny <code>`, `miku explain`)
+    /// need.
+    pub fn resolve(s: &str) -> Option<Code> {
+        codes::CATALOG
+            .iter()
+            .find(|m| m.id == s || m.name == s)
+            .map(|m| Code(m.id))
+    }
 }
 
 impl std::fmt::Display for Code {
@@ -104,22 +129,6 @@ pub struct CodeMeta {
     pub id: &'static str,
     pub name: &'static str,
     pub default_severity: Severity,
-    pub category: Category,
-}
-
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Category {
-    Lexer,
-    Parser,
-    Pragma,
-    Resolver,
-    Types,
-    Lowering,
-    Manifest,
-    Rewrite,
-    Lint,
-    Runtime,
 }
 
 // ---- Diagnostic ----
@@ -167,6 +176,15 @@ impl Diagnostic {
         Self::new(code, Severity::Warning, span, message)
     }
 
+    /// Construct a diagnostic at `code`'s catalog [default
+    /// severity](Code::default_severity) — the right constructor when a
+    /// producer emits a code at its declared level (the common case,
+    /// and what the [`diag!`](crate::diag) macro expands to). Avoids
+    /// restating a severity the catalog already owns.
+    pub fn at(code: Code, span: Span, message: impl Into<String>) -> Self {
+        Self::new(code, code.default_severity(), span, message)
+    }
+
     /// Attach a secondary label at `span` — typically used for
     /// "previously declared here" / "this binding had type X".
     pub fn with_label(mut self, span: Span, label: impl Into<String>) -> Self {
@@ -209,6 +227,8 @@ pub struct Suggestion {
 }
 
 impl Suggestion {
+    /// A single-edit suggestion replacing `span` with `with`, marked
+    /// [`MachineApplicable`](Applicability::MachineApplicable).
     pub fn replace(message: impl Into<String>, span: Span, with: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -218,6 +238,29 @@ impl Suggestion {
             }],
             applicability: Applicability::MachineApplicable,
         }
+    }
+
+    /// A single-edit suggestion that deletes `span` (replaces it with
+    /// nothing), marked [`MachineApplicable`](Applicability::MachineApplicable).
+    pub fn remove(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            message: message.into(),
+            edits: vec![TextEdit {
+                span,
+                replacement: String::new(),
+            }],
+            applicability: Applicability::MachineApplicable,
+        }
+    }
+
+    /// Override the applicability (builder-style). `replace`/`remove`
+    /// default to `MachineApplicable`; downgrade to
+    /// [`MaybeIncorrect`](Applicability::MaybeIncorrect) when the fix
+    /// wants a human glance.
+    #[must_use]
+    pub fn with_applicability(mut self, applicability: Applicability) -> Self {
+        self.applicability = applicability;
+        self
     }
 }
 
@@ -244,6 +287,33 @@ pub enum Applicability {
     Unspecified,
 }
 
+impl Applicability {
+    /// Kebab-case wire form used by the JSON serializer.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Applicability::MachineApplicable => "machine-applicable",
+            Applicability::MaybeIncorrect => "maybe-incorrect",
+            Applicability::HasPlaceholders => "has-placeholders",
+            Applicability::Unspecified => "unspecified",
+        }
+    }
+}
+
+// ---- Error → Diagnostic conversion ----
+
+/// Conversion from a self-contained error value into a [`Diagnostic`].
+///
+/// Producers with an intermediate error enum implement this so the
+/// error type owns its own rendering instead of constructing a
+/// `Diagnostic` at the throw site. The error value must be
+/// self-contained: anything the diagnostic needs (a span, a name) is
+/// carried as a field rather than passed as a conversion argument, so
+/// the conversion can stay a plain `value.into_diagnostic()` (or
+/// `Diagnostic::from`-style call) at the boundary.
+pub trait IntoDiagnostic {
+    fn into_diagnostic(self) -> Diagnostic;
+}
+
 // ---- Rendering helpers ----
 
 impl Diagnostic {
@@ -258,8 +328,8 @@ impl Diagnostic {
 // ---- Severity overrides (`--allow` / `--warn` / `--deny`) ----
 
 /// Per-code severity overrides applied at emission time. Mirrors the
-/// `--deny <code>`, `--warn <code>`, `--allow <code>` CLI flags spec'd
-/// in `doc/diagnostics.md` §5.
+/// `--deny <code>` / `--warn <code>` / `--allow <code>` CLI flags and
+/// the manifest `[lint]` table.
 #[derive(Debug, Clone, Default)]
 pub struct SeverityConfig {
     overrides: std::collections::HashMap<&'static str, Severity>,
@@ -302,5 +372,56 @@ impl SeverityConfig {
             diag.severity = sev;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leek_span::SourceId;
+
+    fn span() -> Span {
+        Span::new(SourceId::new(1).unwrap(), 0, 1)
+    }
+
+    #[test]
+    fn at_uses_catalog_severity() {
+        // A lint code declared `warning` in the catalog comes out as a
+        // warning without restating the severity.
+        let d = Diagnostic::at(codes::UNUSED_VARIABLE, span(), "x");
+        assert_eq!(d.severity, Severity::Warning);
+        // A hint-level lint comes out as a hint.
+        let d = Diagnostic::at(codes::SHADOWED_BINDING, span(), "x");
+        assert_eq!(d.severity, Severity::Hint);
+    }
+
+    #[test]
+    fn code_resolve_by_id_and_name() {
+        assert_eq!(
+            Code::resolve("E0250"),
+            Some(codes::ASSIGNMENT_INCOMPATIBLE_TYPE)
+        );
+        assert_eq!(
+            Code::resolve("AssignmentIncompatibleType"),
+            Some(codes::ASSIGNMENT_INCOMPATIBLE_TYPE)
+        );
+        assert_eq!(Code::resolve("nope"), None);
+    }
+
+    #[test]
+    fn suggestion_remove_and_applicability() {
+        let s = Suggestion::remove("drop it", span());
+        assert_eq!(s.edits.len(), 1);
+        assert_eq!(s.edits[0].replacement, "");
+        assert_eq!(s.applicability, Applicability::MachineApplicable);
+        let s = Suggestion::replace("swap", span(), "y")
+            .with_applicability(Applicability::MaybeIncorrect);
+        assert_eq!(s.applicability, Applicability::MaybeIncorrect);
+    }
+
+    #[test]
+    fn severity_display_matches_as_str() {
+        assert_eq!(Severity::Error.to_string(), "error");
+        assert_eq!(Applicability::HasPlaceholders.as_str(), "has-placeholders");
     }
 }

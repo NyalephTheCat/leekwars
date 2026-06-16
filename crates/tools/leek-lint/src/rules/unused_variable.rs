@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Callee, ExprKind, NameRef, Stmt};
 use leek_span::Span;
 
@@ -99,10 +99,10 @@ struct DeclInfo {
 
 fn diagnostic_unused(name: &str, span: Span) -> Diagnostic {
     use leek_diagnostics::{Applicability, Suggestion, TextEdit};
-    Diagnostic::warning(
+    diag!(
         codes::UNUSED_VARIABLE,
         span,
-        format!("variable `{name}` is declared but never used"),
+        "variable `{name}` is declared but never used"
     )
     .with_note(format!(
         "if this is intentional, prefix `{name}` with `_` or annotate `@unused` once wired up"

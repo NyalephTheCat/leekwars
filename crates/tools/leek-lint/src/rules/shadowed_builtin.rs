@@ -12,7 +12,7 @@
 //! [`shadowed-binding`](super::shadowed_binding), but against the
 //! standard library instead of outer locals.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 use leek_resolver::builtins::is_builtin_name;
 
@@ -77,11 +77,10 @@ impl LintPass for ShadowedBuiltin {
 }
 
 fn diagnostic(what: &str, name: &str, span: leek_span::Span) -> Diagnostic {
-    Diagnostic::new(
+    diag!(
         codes::SHADOWED_BUILTIN,
-        leek_diagnostics::Severity::Hint,
         span,
-        format!("{what} `{name}` shadows the builtin function `{name}`"),
+        "{what} `{name}` shadows the builtin function `{name}`"
     )
     .with_note(format!(
         "later calls to `{name}(...)` will use this {what} instead of the builtin — rename it to keep the standard library reachable"

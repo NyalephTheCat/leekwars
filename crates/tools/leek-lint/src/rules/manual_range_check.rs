@@ -19,7 +19,7 @@
 //! Gated on [`crate::LintOptions::version`] ≥ 4 — older scripts don't
 //! have intervals.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
@@ -75,11 +75,10 @@ impl LintPass for ManualRangeCheck {
             if upper { ']' } else { '[' },
         );
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::MANUAL_RANGE_CHECK,
-                leek_diagnostics::Severity::Hint,
                 e.span,
-                "this pair of comparisons tests a range".to_string(),
+                "this pair of comparisons tests a range"
             )
             .with_note(format!(
                 "LeekScript 4 intervals test ranges in one operator: `{sketch}` — the brackets carry the inclusivity (`[` includes the bound, `]`/`[` on the other side excludes it)"
@@ -153,6 +152,7 @@ fn pair_bounds(a: &[(String, Bound); 2], b: &[(String, Bound); 2]) -> Option<(bo
 mod tests {
     use super::*;
     use crate::testing::{lint_one, lint_one_v};
+    use leek_diagnostics::Diagnostic;
     use leek_syntax::Version;
 
     fn run(src: &str) -> Vec<Diagnostic> {

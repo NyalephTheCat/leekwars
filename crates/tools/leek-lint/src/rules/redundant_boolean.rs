@@ -2,7 +2,7 @@
 //! literal: `x == true`, `x != false`, `flag == false`. These simplify
 //! to `x` or `!x`, and the lint ships a machine-applicable autofix.
 
-use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
+use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind, Literal};
 use leek_span::Span;
 
@@ -62,11 +62,10 @@ fn diagnostic(
     } else {
         "`x == true` is just `x`"
     };
-    Diagnostic::new(
+    diag!(
         codes::REDUNDANT_BOOLEAN,
-        leek_diagnostics::Severity::Hint,
         expr.span,
-        "comparison against a boolean literal is redundant".to_string(),
+        "comparison against a boolean literal is redundant"
     )
     .with_note(format!(
         "a boolean is already truthy on its own — {example}"

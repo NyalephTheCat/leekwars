@@ -3,7 +3,7 @@
 //! `a || a`, `f & f`. The whole expression equals one operand, so it
 //! ships a machine-applicable autofix.
 
-use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
+use leek_diagnostics::{Diagnostic, Suggestion, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 use leek_span::Span;
 
@@ -53,10 +53,10 @@ fn diagnostic(op: BinaryOp, expr: Span, operand: Span) -> Diagnostic {
         BinaryOp::BitAnd => "&",
         _ => "|",
     };
-    let mut d = Diagnostic::warning(
+    let mut d = diag!(
         codes::IDENTICAL_OPERANDS,
         expr,
-        "both operands of this expression are identical".to_string(),
+        "both operands of this expression are identical"
     );
     // Bitwise `&`/`|` are idempotent on integers, so `x & x` is exactly
     // `x` — safe to rewrite. Logical `&&`/`||` are *not* (Leekscript's
@@ -67,15 +67,11 @@ fn diagnostic(op: BinaryOp, expr: Span, operand: Span) -> Diagnostic {
             .with_note(format!(
                 "`x {word} x` is just `x` — did you mean a different operand?"
             ))
-            .with_suggestion(Suggestion {
-                message: "use the operand directly".to_string(),
-                // Drop the ` OP <rhs>` tail, leaving just the (left) operand.
-                edits: vec![TextEdit {
-                    span: Span::new(expr.source, operand.end, expr.end),
-                    replacement: String::new(),
-                }],
-                applicability: Applicability::MachineApplicable,
-            });
+            // Drop the ` OP <rhs>` tail, leaving just the (left) operand.
+            .with_suggestion(Suggestion::remove(
+                "use the operand directly",
+                Span::new(expr.source, operand.end, expr.end),
+            ));
     } else {
         d = d.with_note(format!(
             "both sides of this `{word}` are the same — did you mean a different operand, like `x {word} y`?"
@@ -88,6 +84,7 @@ fn diagnostic(op: BinaryOp, expr: Span, operand: Span) -> Diagnostic {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Applicability;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(IdenticalOperands, src)

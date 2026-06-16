@@ -60,26 +60,34 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-impl LoadError {
-    /// Convert a folder load failure into a resolver diagnostic at
-    /// the `include(...)` call site.
-    pub fn to_diagnostic(
-        self,
-        span: leek_span::Span,
-        include_name: &str,
-    ) -> leek_diagnostics::Diagnostic {
-        use leek_diagnostics::{Diagnostic, codes};
-        match self {
-            LoadError::NotFound => Diagnostic::error(
-                codes::INCLUDE_NOT_FOUND,
-                span,
-                format!("included file `{include_name}` not found"),
-            ),
-            LoadError::Unreadable(msg) => Diagnostic::error(
-                codes::INCLUDE_UNREADABLE,
-                span,
-                format!("included file `{include_name}` is unreadable: {msg}"),
-            ),
+/// A failed `include(...)` — a [`LoadError`] together with the call
+/// site needed to render it. Self-contained so it can convert via
+/// [`IntoDiagnostic`](leek_diagnostics::IntoDiagnostic).
+pub struct IncludeError<'a> {
+    pub cause: LoadError,
+    pub span: leek_span::Span,
+    pub name: &'a str,
+}
+
+impl leek_diagnostics::IntoDiagnostic for IncludeError<'_> {
+    fn into_diagnostic(self) -> leek_diagnostics::Diagnostic {
+        use leek_diagnostics::{codes, diag};
+        let IncludeError { cause, span, name } = self;
+        match cause {
+            LoadError::NotFound => {
+                diag!(
+                    codes::INCLUDE_NOT_FOUND,
+                    span,
+                    "included file `{name}` not found"
+                )
+            }
+            LoadError::Unreadable(msg) => {
+                diag!(
+                    codes::INCLUDE_UNREADABLE,
+                    span,
+                    "included file `{name}` is unreadable: {msg}"
+                )
+            }
         }
     }
 }

@@ -1,7 +1,7 @@
 //! L0021 `NegatedComparison` — flag `!(a == b)` and friends, which read
 //! more clearly as the negated comparison (`a != b`). A readability hint.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind, UnaryOp};
 
 use crate::LintGroup;
@@ -46,11 +46,10 @@ fn negation(op: BinaryOp) -> Option<(&'static str, &'static str)> {
 }
 
 fn diagnostic(had: &str, want: &str, span: leek_span::Span) -> Diagnostic {
-    Diagnostic::new(
+    diag!(
         codes::NEGATED_COMPARISON,
-        leek_diagnostics::Severity::Hint,
         span,
-        format!("`!(a {had} b)` is clearer as `a {want} b`"),
+        "`!(a {had} b)` is clearer as `a {want} b`"
     )
     .with_note(format!(
         "rewrite the negated comparison using `{want}` directly"

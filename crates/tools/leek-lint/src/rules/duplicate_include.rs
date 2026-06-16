@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
+use leek_diagnostics::{Applicability, Diagnostic, Suggestion, codes, diag};
 use leek_hir::Stmt;
 
 use crate::LintGroup;
@@ -43,21 +43,17 @@ impl LintPass for DuplicateInclude {
 }
 
 fn diagnostic(path: &str, span: leek_span::Span) -> Diagnostic {
-    Diagnostic::warning(
+    diag!(
         codes::DUPLICATE_INCLUDE,
         span,
-        format!("`{path}` is already included above"),
+        "`{path}` is already included above"
     )
     .with_note("a second `include` of the same file does nothing — remove it")
-    .with_suggestion(Suggestion {
-        message: "remove the duplicate include".to_string(),
-        edits: vec![TextEdit {
-            span,
-            replacement: String::new(),
-        }],
+    .with_suggestion(
         // Deleting the statement may leave a blank line behind.
-        applicability: Applicability::MaybeIncorrect,
-    })
+        Suggestion::remove("remove the duplicate include", span)
+            .with_applicability(Applicability::MaybeIncorrect),
+    )
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@
 //! offered because flattening the block requires re-indentation the lint
 //! layer doesn't model.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 use leek_span::Span;
 
@@ -71,11 +71,10 @@ fn exit_kind(s: &Stmt) -> &'static str {
 }
 
 fn diagnostic(span: Span, kind: &str) -> Diagnostic {
-    Diagnostic::new(
+    diag!(
         codes::UNNECESSARY_ELSE,
-        leek_diagnostics::Severity::Hint,
         span,
-        format!("this `else` is unnecessary — the `if` branch always `{kind}`s"),
+        "this `else` is unnecessary — the `if` branch always `{kind}`s"
     )
     .with_note(
         "drop the `else` and dedent its body; control only reaches it when the `if` was false",

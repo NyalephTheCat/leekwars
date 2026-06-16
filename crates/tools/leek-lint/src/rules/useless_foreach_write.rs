@@ -15,7 +15,7 @@
 //! reference bindings are the language's own answer — exactly the
 //! feature this nursery group exists to teach.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{DefId, Expr, ExprKind, NameRef, PostfixOp, Stmt, UnaryOp};
 
 use super::for_each_expr_deep;
@@ -73,11 +73,10 @@ fn write_to(e: &Expr, def: DefId) -> Option<leek_span::Span> {
 }
 
 fn diagnostic(name: &str, span: leek_span::Span) -> Diagnostic {
-    Diagnostic::new(
+    diag!(
         codes::USELESS_FOREACH_WRITE,
-        leek_diagnostics::Severity::Hint,
         span,
-        format!("writing to `{name}` does not modify the collection"),
+        "writing to `{name}` does not modify the collection"
     )
     .with_note(format!(
         "`{name}` is a by-value copy that is overwritten on the next iteration — declare it `var @{name}` to make it a reference that writes through to the collection"

@@ -1,6 +1,6 @@
 //! Parser driver: token cursor + green-tree builder + error sink.
 
-use leek_diagnostics::{Diagnostic, Severity};
+use leek_diagnostics::Diagnostic;
 use leek_lexer::lex;
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, Token, Version};
@@ -454,12 +454,8 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn error(&mut self, message: impl Into<String>) {
         let span = self.current_span();
-        self.diagnostics.push(Diagnostic::new(
-            UNEXPECTED_TOKEN,
-            Severity::Error,
-            span,
-            message,
-        ));
+        self.diagnostics
+            .push(Diagnostic::at(UNEXPECTED_TOKEN, span, message));
     }
 
     /// Consume the current non-trivia token into an `ErrorNode` and
