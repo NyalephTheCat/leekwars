@@ -12,7 +12,7 @@
 //! including `maxVersion` should emit a deprecation warning so
 //! users migrate before the function disappears.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Callee, Expr, ExprKind, NameRef};
 
 use crate::LintGroup;
@@ -66,10 +66,10 @@ fn diagnostic(name: &str, replacement: &str, span: leek_span::Span) -> Diagnosti
     // whole call expression. That's still useful as an attachment
     // point; the suggestion below targets the call's text range
     // and replaces the name prefix.
-    Diagnostic::warning(
+    diag!(
         codes::DEPRECATED_FEATURE,
         span,
-        format!("`{name}` is deprecated; use `{replacement}` instead"),
+        "`{name}` is deprecated; use `{replacement}` instead"
     )
     .with_note(format!(
         "`{name}` still works at this version but will be removed in a future release"

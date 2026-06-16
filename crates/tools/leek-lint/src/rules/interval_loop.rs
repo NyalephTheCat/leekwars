@@ -15,7 +15,7 @@
 //! Gated on [`crate::LintOptions::version`] ≥ 4 — older scripts don't
 //! have intervals.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, DefId, Expr, ExprKind, Literal, NameRef, PostfixOp, Stmt, UnaryOp};
 
 use super::{for_each_expr_deep, for_each_stmt};
@@ -62,11 +62,10 @@ impl LintPass for IntervalLoop {
             format!("for (var {name} in [start..end[)")
         };
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::INTERVAL_LOOP,
-                leek_diagnostics::Severity::Hint,
                 fr.span,
-                "this counting loop can be an interval iteration".to_string(),
+                "this counting loop can be an interval iteration"
             )
             .with_note(format!(
                 "LeekScript 4 intervals iterate ranges directly: `{sketch}` — no `++`/bound clause to get wrong{}",
@@ -144,6 +143,7 @@ fn body_writes(body: &Stmt, counter: DefId) -> bool {
 mod tests {
     use super::*;
     use crate::testing::{lint_one, lint_one_v};
+    use leek_diagnostics::Diagnostic;
     use leek_syntax::Version;
 
     fn run(src: &str) -> Vec<Diagnostic> {

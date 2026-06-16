@@ -13,7 +13,7 @@
 //! are compared; a label that calls a function might legitimately differ
 //! between evaluations, so it is left alone.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 use leek_span::Span;
 
@@ -56,10 +56,10 @@ impl LintPass for DuplicateCase {
 }
 
 fn diagnostic(span: Span, first: Span) -> Diagnostic {
-    Diagnostic::warning(
+    diag!(
         codes::DUPLICATE_CASE,
         span,
-        "this `case` label is identical to an earlier one".to_string(),
+        "this `case` label is identical to an earlier one"
     )
     .with_label(first, "first matched here")
     .with_note("the first matching label always wins, so this arm can never run — give it a distinct value")

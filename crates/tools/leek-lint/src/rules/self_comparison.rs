@@ -3,7 +3,7 @@
 //! `this.n != this.n`. Such a comparison is constant (always true or
 //! always false) — usually a typo for a different variable.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
@@ -55,10 +55,10 @@ fn diagnostic(op: BinaryOp, span: leek_span::Span) -> Diagnostic {
         BinaryOp::Eq | BinaryOp::IdentityEq | BinaryOp::Le | BinaryOp::Ge => "always true",
         _ => "always false",
     };
-    Diagnostic::warning(
+    diag!(
         codes::SELF_COMPARISON,
         span,
-        "both sides of this comparison are identical".to_string(),
+        "both sides of this comparison are identical"
     )
     .with_note(format!(
         "this comparison is {constant} — e.g. `x == x` is always true. \

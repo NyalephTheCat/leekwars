@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Callee, DefId, ExprKind, NameRef};
 
 use super::for_each_expr_deep_in_stmts;
@@ -68,14 +68,7 @@ impl LintPass for UnusedParameter {
 }
 
 fn diagnostic(name: &str, span: leek_span::Span) -> Diagnostic {
-    use leek_diagnostics::Severity;
-    Diagnostic::new(
-        codes::UNUSED_PARAMETER,
-        Severity::Hint,
-        span,
-        format!("parameter `{name}` is never used"),
-    )
-    .with_note(format!(
+    diag!(codes::UNUSED_PARAMETER, span, "parameter `{name}` is never used").with_note(format!(
         "remove it if the signature allows, or rename it to `_{name}` to mark it intentionally unused"
     ))
 }

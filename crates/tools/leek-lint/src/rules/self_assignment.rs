@@ -2,7 +2,7 @@
 //! assignment whose target and value are the same side-effect-free
 //! place. It does nothing — usually a leftover or a typo.
 
-use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
+use leek_diagnostics::{Applicability, Diagnostic, Suggestion, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
@@ -35,22 +35,18 @@ impl LintPass for SelfAssignment {
 }
 
 fn diagnostic(span: leek_span::Span) -> Diagnostic {
-    Diagnostic::warning(
+    diag!(
         codes::SELF_ASSIGNMENT,
         span,
-        "this assignment has no effect (assigns a value to itself)".to_string(),
+        "this assignment has no effect (assigns a value to itself)"
     )
     .with_note("`x = x` does nothing — remove it, or assign the value you intended")
-    .with_suggestion(Suggestion {
-        message: "remove the assignment".to_string(),
-        edits: vec![TextEdit {
-            span,
-            replacement: String::new(),
-        }],
+    .with_suggestion(
         // Deleting the expression leaves the statement's `;` behind
         // (a harmless empty statement), so flag for a human glance.
-        applicability: Applicability::MaybeIncorrect,
-    })
+        Suggestion::remove("remove the assignment", span)
+            .with_applicability(Applicability::MaybeIncorrect),
+    )
 }
 
 #[cfg(test)]

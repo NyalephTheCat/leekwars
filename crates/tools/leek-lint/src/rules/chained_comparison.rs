@@ -11,7 +11,7 @@
 //! where chaining works). Modeled on `pylint`'s `chained-comparison`
 //! and clippy's `double_comparisons` family.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use crate::LintGroup;
@@ -47,10 +47,10 @@ impl LintPass for ChainedComparison {
             return;
         }
         cx.emit(
-            Diagnostic::warning(
+            diag!(
                 codes::CHAINED_COMPARISON,
                 e.span,
-                "chained comparison does not test a range".to_string(),
+                "chained comparison does not test a range"
             )
             .with_note(
                 "`a < b < c` is `(a < b) < c` — the boolean result of the first comparison is compared with `c`. For a range test, write `a < b && b < c`",
@@ -70,6 +70,7 @@ fn is_ordering(op: BinaryOp) -> bool {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(ChainedComparison, src)

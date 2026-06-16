@@ -4,7 +4,7 @@
 //! Severity is Hint: the construct is sometimes intentional (e.g.
 //! polling spin-wait) but more often a leftover stub.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 
 use crate::LintGroup;
@@ -69,14 +69,8 @@ fn empty_block_span(s: &Stmt) -> Option<leek_span::Span> {
 }
 
 fn empty(span: leek_span::Span, what: &str) -> Diagnostic {
-    use leek_diagnostics::Severity;
-    Diagnostic::new(
-        codes::EMPTY_BLOCK,
-        Severity::Hint,
-        span,
-        format!("empty {what} body"),
-    )
-    .with_note("if this is intentional, leave a comment explaining why")
+    diag!(codes::EMPTY_BLOCK, span, "empty {what} body")
+        .with_note("if this is intentional, leave a comment explaining why")
 }
 
 #[cfg(test)]

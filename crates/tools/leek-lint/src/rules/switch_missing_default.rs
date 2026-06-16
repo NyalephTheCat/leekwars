@@ -4,7 +4,7 @@
 //! whether that's intended (even if its body is just a comment or a
 //! debug log). Inspired by the classic C/Java style checks.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::Stmt;
 
 use crate::LintGroup;
@@ -30,11 +30,10 @@ impl LintPass for SwitchMissingDefault {
             return;
         }
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::SWITCH_MISSING_DEFAULT,
-                leek_diagnostics::Severity::Hint,
                 sw.span,
-                "this `switch` has no `default` arm".to_string(),
+                "this `switch` has no `default` arm"
             )
             .with_note(
                 "a value matching no `case` silently skips the whole `switch` — add `default:` to handle (or deliberately ignore) the leftover values",
@@ -47,6 +46,7 @@ impl LintPass for SwitchMissingDefault {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(SwitchMissingDefault, src)

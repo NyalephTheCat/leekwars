@@ -7,7 +7,7 @@
 //! branch that declares its own locals won't collide, so we never report
 //! a false duplicate.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 
 use super::structural::stmt_key;
@@ -49,10 +49,10 @@ fn is_empty_branch(s: &Stmt) -> bool {
 }
 
 fn diagnostic(span: leek_span::Span) -> Diagnostic {
-    Diagnostic::warning(
+    diag!(
         codes::DUPLICATE_BRANCHES,
         span,
-        "both branches of this `if` are identical".to_string(),
+        "both branches of this `if` are identical"
     )
     .with_note(
         "the condition has no effect — e.g. `if (c) { f() } else { f() }` is just `f()`. \

@@ -14,7 +14,7 @@
 //! the counted collection* (it might grow or shrink it, making the
 //! per-iteration re-count load-bearing).
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Callee, Expr, ExprKind, NameRef, Stmt};
 
 use super::structural::{expr_key, has_side_effect};
@@ -107,11 +107,10 @@ fn body_touches(body: &Stmt, counted: &Expr) -> bool {
 }
 
 fn diagnostic(builtin: &str, span: leek_span::Span) -> Diagnostic {
-    Diagnostic::new(
+    diag!(
         codes::COUNT_IN_LOOP_CONDITION,
-        leek_diagnostics::Severity::Hint,
         span,
-        format!("`{builtin}(...)` runs again on every iteration of this loop"),
+        "`{builtin}(...)` runs again on every iteration of this loop"
     )
     .with_note(format!(
         "the condition is re-evaluated each time around, so this `{builtin}` costs ops every iteration — hoist it: `var n = {builtin}(...)` before the loop, then compare against `n`"

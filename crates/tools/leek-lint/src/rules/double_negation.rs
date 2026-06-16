@@ -2,7 +2,7 @@
 //! `x` (booleanized). Ships a machine-applicable autofix that strips
 //! the leading `!!`.
 
-use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes};
+use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes, diag};
 use leek_hir::{Expr, ExprKind, UnaryOp};
 use leek_span::Span;
 
@@ -42,11 +42,10 @@ fn diagnostic(outer: Span, operand: Span) -> Diagnostic {
         }],
         applicability: Applicability::MachineApplicable,
     };
-    Diagnostic::new(
+    diag!(
         codes::DOUBLE_NEGATION,
-        leek_diagnostics::Severity::Hint,
         outer,
-        "double negation is redundant".to_string(),
+        "double negation is redundant"
     )
     .with_note("`!!x` is just `x` — remove the extra `!`")
     .with_suggestion(fix)

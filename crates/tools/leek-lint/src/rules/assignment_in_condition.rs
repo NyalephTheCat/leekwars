@@ -3,7 +3,7 @@
 //! a typo for `==`; the few intentional uses read more clearly written
 //! out, so we always warn.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Expr, ExprKind, Stmt};
 
 use super::structural::is_assignment;
@@ -49,10 +49,10 @@ fn assignment_span(cond: &Expr) -> Option<leek_span::Span> {
 }
 
 fn diagnostic(span: leek_span::Span) -> Diagnostic {
-    Diagnostic::warning(
+    diag!(
         codes::ASSIGNMENT_IN_CONDITION,
         span,
-        "assignment used as a condition".to_string(),
+        "assignment used as a condition"
     )
     .with_note(
         "this assigns and then tests the result — likely a typo for `==`. \

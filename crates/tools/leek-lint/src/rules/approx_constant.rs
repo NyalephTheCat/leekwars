@@ -11,7 +11,7 @@
 //! at least [`MIN_DIGITS`] characters long — so `3.1` stays quiet but
 //! `3.14`, `3.1416`, and a fully spelled-out value all fire.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::{Expr, ExprKind, Literal};
 
 use crate::LintGroup;
@@ -50,11 +50,10 @@ impl LintPass for ApproxConstant {
         for (digits, name) in KNOWN {
             if text.len() >= MIN_DIGITS && digits.starts_with(&text) {
                 cx.emit(
-                    Diagnostic::new(
+                    diag!(
                         codes::APPROX_CONSTANT,
-                        leek_diagnostics::Severity::Hint,
                         e.span,
-                        format!("`{text}` looks like an approximation of `{name}`"),
+                        "`{text}` looks like an approximation of `{name}`"
                     )
                     .with_note(format!(
                         "use the builtin constant `{name}` — it is more precise and says what you mean"
@@ -70,6 +69,7 @@ impl LintPass for ApproxConstant {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(ApproxConstant, src)

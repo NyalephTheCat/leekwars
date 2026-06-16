@@ -9,7 +9,7 @@
 //! "things this function does" more honestly than blank-line-padded
 //! line counts anyway.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 
 use super::for_each_stmt;
 use crate::LintGroup;
@@ -46,11 +46,10 @@ impl LintPass for LongFunction {
         }
         let name = body.name.unwrap_or("<anonymous>");
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::LONG_FUNCTION,
-                leek_diagnostics::Severity::Hint,
                 body.span,
-                format!("`{name}` contains {count} statements (more than {MAX_STMTS})"),
+                "`{name}` contains {count} statements (more than {MAX_STMTS})"
             )
             .with_note(
                 "long functions are hard to follow — extract self-contained steps into helper functions",
@@ -63,6 +62,7 @@ impl LintPass for LongFunction {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(LongFunction, src)

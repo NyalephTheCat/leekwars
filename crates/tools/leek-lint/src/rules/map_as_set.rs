@@ -25,7 +25,7 @@
 //! Gated on [`crate::LintOptions::version`] ≥ 4 — older scripts don't
 //! have sets.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{BinaryOp, Callee, DefId, Expr, ExprKind, Literal, NameRef, Stmt};
 
 use super::{for_each_expr_deep_in_stmts, for_each_stmt};
@@ -161,11 +161,10 @@ fn judge(
         return None;
     }
     Some(
-        Diagnostic::new(
+        diag!(
             codes::MAP_AS_SET,
-            leek_diagnostics::Severity::Hint,
             span,
-            format!("`{name}` only ever stores `true` — it is a set of keys"),
+            "`{name}` only ever stores `true` — it is a set of keys"
         )
         .with_note(format!(
             "declare it as a set: `var {name} = <>`, then `setPut({name}, key)` to add, `key in {name}` to test, `setRemove({name}, key)` to drop — same operations without the placeholder values"

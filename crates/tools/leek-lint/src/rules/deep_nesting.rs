@@ -20,7 +20,7 @@
 //! Only the statement that *opens* the offending level is reported —
 //! anything nested deeper is inside that statement and would be noise.
 
-use leek_diagnostics::{Diagnostic, codes};
+use leek_diagnostics::{codes, diag};
 use leek_hir::Stmt;
 
 use crate::LintGroup;
@@ -52,11 +52,10 @@ impl LintPass for DeepNesting {
             return;
         }
         cx.emit(
-            Diagnostic::new(
+            diag!(
                 codes::DEEP_NESTING,
-                leek_diagnostics::Severity::Hint,
                 s.span(),
-                format!("this nests control flow more than {MAX_DEPTH} levels deep"),
+                "this nests control flow more than {MAX_DEPTH} levels deep"
             )
             .with_note(
                 "deep nesting is hard to follow — invert conditions into early `return`/`continue`, or extract the inner levels into a function",
@@ -81,6 +80,7 @@ fn opens_a_level(s: &Stmt) -> bool {
 mod tests {
     use super::*;
     use crate::testing::lint_one;
+    use leek_diagnostics::Diagnostic;
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(DeepNesting, src)
