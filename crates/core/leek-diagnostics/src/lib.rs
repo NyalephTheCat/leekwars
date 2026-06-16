@@ -16,6 +16,7 @@ pub mod codes {
     include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
 }
 pub mod convert;
+mod macros;
 mod render;
 pub mod report;
 mod suggest;
@@ -23,6 +24,10 @@ mod suggest;
 pub use render::{Renderer, Style};
 pub use report::{ColorWhen, LintLevels, MessageFormat, Reporter, RunSource};
 pub use suggest::{best_match, suggest_similar};
+
+// Implementation detail of the `diag!` macro; not a stable API.
+#[doc(hidden)]
+pub use macros::__format_message;
 
 #[cfg(feature = "serde")]
 mod serde_impls;
