@@ -21,7 +21,7 @@ pub use leek_game_runtime::attack::{
     Area, EffectModifiers, EffectParams, EffectTargets, EffectType,
 };
 pub use leek_game_runtime::state::{
-    BulbTemplate, ChipSpec, Fighter, FightLoadout, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE,
+    BulbTemplate, ChipSpec, FightLoadout, Fighter, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE,
     STAT_MP, STAT_RESISTANCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
 };
 
@@ -92,11 +92,9 @@ fn run_bulb_ai(
 /// `user_fn_idx` once `hook_roots` has force-compiled it.
 fn find_hook(hir: &HirFile, name: &str) -> Option<Value> {
     hir.defs.iter().enumerate().find_map(|(i, def)| match def {
-        Def::Function(f) if f.name == name && f.params.is_empty() => {
-            u32::try_from(i)
-                .ok()
-                .map(|id| Value::Function(Function::User(DefId(id))))
-        }
+        Def::Function(f) if f.name == name && f.params.is_empty() => u32::try_from(i)
+            .ok()
+            .map(|id| Value::Function(Function::User(DefId(id)))),
         _ => None,
     })
 }
@@ -114,9 +112,7 @@ fn run_hooks(
     hook_name: &str,
 ) -> Result<(), NativeError> {
     let fids = state.borrow().order.fids().to_vec();
-    let hook_opts = opts
-        .clone()
-        .with_hook_roots(vec![hook_name.to_string()]);
+    let hook_opts = opts.clone().with_hook_roots(vec![hook_name.to_string()]);
     for fid in fids {
         let Some(hir) = ais.get(&fid) else { continue };
         let Some(hook_fn) = find_hook(hir, hook_name) else {

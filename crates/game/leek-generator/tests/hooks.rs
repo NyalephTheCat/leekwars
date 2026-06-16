@@ -111,7 +111,9 @@ fn lifecycle_hooks_run_through_the_jit() {
     // FID 1: no hooks.
     ais.insert(1, compile("return 0;"));
 
-    let opts = NativeOptions::release().with_lang(4, false).with_link_game(true);
+    let opts = NativeOptions::release()
+        .with_lang(4, false)
+        .with_link_game(true);
     let outcome = run_official_fight(state, &ais, &[100], &opts).expect("fight runs");
 
     // beforeFight's setLoadout took effect before the snapshot: team-0 leek
@@ -121,7 +123,11 @@ fn lifecycle_hooks_run_through_the_jit() {
         .iter()
         .find(|l| l["id"] == serde_json::json!(0))
         .expect("snapshot for fid 0");
-    assert_eq!(a_snap["life"], serde_json::json!(1000), "loadout life applied");
+    assert_eq!(
+        a_snap["life"],
+        serde_json::json!(1000),
+        "loadout life applied"
+    );
 
     // Team 0 wins the life tiebreak (1000 vs 500).
     assert_eq!(outcome["winner"], serde_json::json!(0));
@@ -130,7 +136,10 @@ fn lifecycle_hooks_run_through_the_jit() {
     // 1008) and `getWinner() == 0` was true, so the out-of-(beforeFight)-hook
     // setLoadout warned (SET_LOADOUT_OUT_OF_HOOK, 1007).
     assert!(logged(&outcome, 100, 1008), "useWeapon denied in hook");
-    assert!(logged(&outcome, 100, 1007), "setLoadout out of beforeFight hook");
+    assert!(
+        logged(&outcome, 100, 1007),
+        "setLoadout out of beforeFight hook"
+    );
 }
 
 /// A `setLoadout()` for an unknown loadout name warns `LOADOUT_NOT_FOUND`
@@ -150,7 +159,9 @@ fn set_loadout_unknown_name_warns_through_hook() {
     );
     ais.insert(1, compile("return 0;"));
 
-    let opts = NativeOptions::release().with_lang(4, false).with_link_game(true);
+    let opts = NativeOptions::release()
+        .with_lang(4, false)
+        .with_link_game(true);
     let outcome = run_official_fight(state, &ais, &[100], &opts).expect("fight runs");
 
     assert!(logged(&outcome, 100, 1006), "LOADOUT_NOT_FOUND warning");
