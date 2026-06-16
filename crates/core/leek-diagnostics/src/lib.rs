@@ -313,6 +313,21 @@ impl Applicability {
     }
 }
 
+// ---- Error → Diagnostic conversion ----
+
+/// Conversion from a self-contained error value into a [`Diagnostic`].
+///
+/// Producers with an intermediate error enum implement this so the
+/// error type owns its own rendering instead of constructing a
+/// `Diagnostic` at the throw site. The error value must be
+/// self-contained: anything the diagnostic needs (a span, a name) is
+/// carried as a field rather than passed as a conversion argument, so
+/// the conversion can stay a plain `value.into_diagnostic()` (or
+/// `Diagnostic::from`-style call) at the boundary.
+pub trait IntoDiagnostic {
+    fn into_diagnostic(self) -> Diagnostic;
+}
+
 // ---- Rendering helpers ----
 
 impl Diagnostic {
