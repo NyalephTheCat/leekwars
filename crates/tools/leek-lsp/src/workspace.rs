@@ -227,10 +227,23 @@ impl Workspace {
     }
 
     /// Discover `Miku.toml` from `start` and register every `.leek`
-    /// file under the project's source tree as salsa-tracked inputs.
+    /// file under the project's source tree as salsa-tracked inputs. When
+    /// no manifest exists in `start` or its ancestors, treat `start` itself
+    /// as the source root (`src = "."`).
     pub fn index_project_at(&mut self, start: &Path) {
-        let Ok(mut index) = ProjectIndex::discover(start) else {
-            return;
+        let mut index = if manifest_exists_at_or_above(start) {
+            match ProjectIndex::discover(start) {
+                Ok(index) => index,
+                Err(error) => {
+                    eprintln!(
+                        "leek-lsp: failed to index project at {}: {error}",
+                        start.display()
+                    );
+                    return;
+                }
+            }
+        } else {
+            ProjectIndex::from_src_root(start)
         };
         for path in index.files().to_vec() {
             let Ok(loaded) = index.load_file(&path) else {
@@ -471,4 +484,76 @@ pub fn path_to_uri(path: &Path) -> Url {
 
 pub fn uri_to_path(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path().ok()
+}
+
+/// Whether a `Miku.toml` exists at `start` or in one of its ancestors.
+/// Keep this separate from [`ProjectIndex::discover`] so a malformed
+/// manifest is still reported as an error instead of being mistaken for a
+/// manifestless workspace.
+fn manifest_exists_at_or_above(start: &Path) -> bool {
+    let mut cursor = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(|_| start.to_path_buf(), |current| current.join(start))
+    };
+    loop {
+        if cursor.join("Miku.toml").is_file() {
+            return true;
+        }
+        if !cursor.pop() {
+            return false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "leek-lsp-workspace-fallback-{}-{suffix}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn index_project_defaults_to_workspace_root_without_manifest() {
+        let root = temp_root();
+        let library = root.join("library");
+        fs::create_dir_all(&library).expect("create fallback project");
+        fs::write(root.join("main.leek"), "var main = 1\n").expect("write entry");
+        fs::write(
+            library.join("helper.leek"),
+            "function helper() { return 1 }\n",
+        )
+        .expect("write nested source");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+
+        let mut indexed: Vec<PathBuf> = ws.indexed.values().map(|file| file.path.clone()).collect();
+        indexed.sort();
+        let mut expected = vec![
+            root.join("main.leek")
+                .canonicalize()
+                .expect("entry path should canonicalize"),
+            library
+                .join("helper.leek")
+                .canonicalize()
+                .expect("nested path should canonicalize"),
+        ];
+        expected.sort();
+
+        fs::remove_dir_all(&root).expect("remove fallback project");
+
+        assert_eq!(indexed, expected);
+        assert_eq!(ws.analysis_targets().len(), 2);
+    }
 }
