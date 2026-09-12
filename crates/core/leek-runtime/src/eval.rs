@@ -744,7 +744,7 @@ fn eq_legacy(l: &Value, r: &Value) -> bool {
         {
             "true" => *r != 0.0,
             "false" | "0" | "" => *r == 0.0,
-            other => other.parse::<f64>().ok().is_some_and(|f| f == *r),
+            other => other.parse::<f64>().is_ok_and(|f| f == *r),
         },
         _ => l.loose_eq(r),
     }

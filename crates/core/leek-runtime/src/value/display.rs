@@ -149,7 +149,7 @@ pub(super) fn loose_eq_inner(
             s.parse::<i64>().ok() == Some(*i)
         }
         (Value::String(s), Value::Real(r)) | (Value::Real(r), Value::String(s)) => {
-            s.parse::<f64>().ok().is_some_and(|f| f == *r)
+            s.parse::<f64>().is_ok_and(|f| f == *r)
         }
         (Value::Null, _) | (_, Value::Null) => false,
         _ => false,

@@ -152,10 +152,9 @@ pub fn parse_allow_annotation(raw: &str) -> Option<HashSet<String>> {
     // Strip comment delimiters.
     let body = if let Some(rest) = raw.strip_prefix("//") {
         rest.trim_end()
-    } else if let Some(rest) = raw.strip_prefix("/*") {
-        rest.strip_suffix("*/").unwrap_or(rest).trim()
     } else {
-        return None;
+        let rest = raw.strip_prefix("/*")?;
+        rest.strip_suffix("*/").unwrap_or(rest).trim()
     };
     let body = body.trim();
     // Accept `@allow(...)`, also tolerant of `@lint:allow(...)` /

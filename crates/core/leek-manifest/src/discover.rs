@@ -72,15 +72,24 @@ pub fn load_str(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), ManifestErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
     fn tempdir() -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "leek-manifest-test-{}-{}",
-            std::process::id(),
-            random_suffix(),
-        ));
-        std::fs::create_dir_all(&base).expect("create tempdir");
-        base
+        loop {
+            let base = std::env::temp_dir().join(format!(
+                "leek-manifest-test-{}-{}-{}",
+                std::process::id(),
+                random_suffix(),
+                NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed),
+            ));
+            match std::fs::create_dir(&base) {
+                Ok(()) => return base,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("create tempdir: {error}"),
+            }
+        }
     }
 
     fn random_suffix() -> u64 {
