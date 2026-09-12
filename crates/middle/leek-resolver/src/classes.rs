@@ -326,10 +326,8 @@ impl Resolver {
             if pred(&cur) {
                 return Some(cur);
             }
-            match self.class_parent.get(&cur) {
-                Some(p) => cur.clone_from(p),
-                None => return None,
-            }
+            let parent = self.class_parent.get(&cur)?;
+            cur.clone_from(parent);
         }
     }
 }

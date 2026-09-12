@@ -44,23 +44,23 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
 
     // Find the callee: a bare NameRef (`foo(…)`) or a member access
     // (`recv.method(…)` — the callee is a FieldExpr).
-    let (label, parameters) = if let Some(callee) =
-        call.children().find(|c| c.kind() == SyntaxKind::NameRef)
-    {
-        let callee_ident = callee
-            .children_with_tokens()
-            .filter_map(leek_syntax::language::NodeOrToken::into_token)
-            .find(|t| t.kind() == SyntaxKind::Ident)?;
-        let callee_name = callee_ident.text().to_string();
-        // Render the signature. Try user fns first, then builtins.
-        resolve_user_function(&run, &root, &callee_name)
-            .or_else(|| resolve_builtin(&callee_name))
-            .unwrap_or_else(|| (format!("{callee_name}(...)"), Vec::new()))
-    } else if let Some(field_node) = call.children().find(|c| c.kind() == SyntaxKind::FieldExpr) {
-        resolve_method(&run, &root, &field_node)?
-    } else {
-        return None;
-    };
+    let (label, parameters) =
+        if let Some(callee) = call.children().find(|c| c.kind() == SyntaxKind::NameRef) {
+            let callee_ident = callee
+                .children_with_tokens()
+                .filter_map(leek_syntax::language::NodeOrToken::into_token)
+                .find(|t| t.kind() == SyntaxKind::Ident)?;
+            let callee_name = callee_ident.text().to_string();
+            // Render the signature. Try user fns first, then builtins.
+            resolve_user_function(&run, &root, &callee_name)
+                .or_else(|| resolve_builtin(&callee_name))
+                .unwrap_or_else(|| (format!("{callee_name}(...)"), Vec::new()))
+        } else {
+            let field_node = call
+                .children()
+                .find(|c| c.kind() == SyntaxKind::FieldExpr)?;
+            resolve_method(&run, &root, &field_node)?
+        };
 
     let active_parameter = if parameters.is_empty() {
         None
