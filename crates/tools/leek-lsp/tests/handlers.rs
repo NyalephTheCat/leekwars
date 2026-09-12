@@ -12,8 +12,15 @@ use leek_lsp::handlers::{
 use leek_lsp::workspace::Workspace;
 use tower_lsp::lsp_types as lsp;
 
+fn test_file(name: &str) -> lsp::Url {
+    let path = std::env::temp_dir()
+        .join("leek-lsp-handler-tests")
+        .join(name);
+    lsp::Url::from_file_path(path).expect("test path should be a valid file URI")
+}
+
 fn url() -> lsp::Url {
-    lsp::Url::parse("file:///fixture.leek").unwrap()
+    test_file("fixture.leek")
 }
 
 fn open(text: &str) -> Workspace {
@@ -817,6 +824,116 @@ fn pull_diagnostics_maps_catalog_code_description() {
 }
 
 #[test]
+fn pull_diagnostics_resolves_parent_directory_include_symbols() {
+    let mut ws = Workspace::default();
+    let main = test_file("relative-include-project/src/entry.leek");
+    let included = test_file("relative-include-project/lib/constants.leek");
+    ws.open(included, "var INCLUDED_VALUE = 42\n".to_string());
+    ws.open(
+        main.clone(),
+        "include(\"../lib/constants.leek\")\nclass Consumer { read() { return INCLUDED_VALUE } }\n"
+            .to_string(),
+    );
+
+    let report = pull_diagnostics::handle_textdoc(&ws, &main);
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        report
+    else {
+        panic!("expected full report");
+    };
+    let items = &full.full_document_diagnostic_report.items;
+    assert!(
+        items.iter().all(|d| !d.message.contains("INCLUDED_VALUE")),
+        "included value should resolve, got diagnostics: {items:#?}"
+    );
+}
+
+#[test]
+fn pull_diagnostics_resolves_nested_includes_relative_to_each_includer() {
+    let mut ws = Workspace::default();
+    let main = test_file("nested-include-project/src/entry.leek");
+    let included = test_file("nested-include-project/lib/bridge.leek");
+    let shared = test_file("nested-include-project/shared/constants.leek");
+    ws.open(shared, "var SHARED_VALUE = 7\n".to_string());
+    ws.open(
+        included,
+        "include(\"../shared/constants.leek\")\n".to_string(),
+    );
+    ws.open(
+        main.clone(),
+        "include(\"../lib/bridge.leek\")\nclass Consumer { read() { return SHARED_VALUE } }\n"
+            .to_string(),
+    );
+
+    let report = pull_diagnostics::handle_textdoc(&ws, &main);
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        report
+    else {
+        panic!("expected full report");
+    };
+    let items = &full.full_document_diagnostic_report.items;
+    assert!(
+        items.iter().all(|d| !d.message.contains("SHARED_VALUE")),
+        "nested include should resolve relative to its includer, got: {items:#?}"
+    );
+}
+
+#[test]
+fn pull_diagnostics_uses_latest_open_include_buffer() {
+    let mut ws = Workspace::default();
+    let main = test_file("open-buffer-include-project/src/entry.leek");
+    let included = test_file("open-buffer-include-project/lib/value.leek");
+    ws.open(included.clone(), "var OLD_INCLUDED_VALUE = 1\n".to_string());
+    ws.open(
+        main.clone(),
+        "include(\"../lib/value.leek\")\nclass Consumer { read() { return NEW_INCLUDED_VALUE } }\n"
+            .to_string(),
+    );
+    ws.update(&included, "var NEW_INCLUDED_VALUE = 2\n".to_string());
+
+    let report = pull_diagnostics::handle_textdoc(&ws, &main);
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        report
+    else {
+        panic!("expected full report");
+    };
+    let items = &full.full_document_diagnostic_report.items;
+    assert!(
+        items
+            .iter()
+            .all(|d| !d.message.contains("NEW_INCLUDED_VALUE")),
+        "include should use current open-buffer text, got: {items:#?}"
+    );
+}
+
+#[test]
+fn pull_diagnostics_type_checks_globals_from_includes() {
+    let mut ws = Workspace::default();
+    let main = test_file("type-include-project/src/entry.leek");
+    let included = test_file("type-include-project/lib/constants.leek");
+    ws.open(included, "var INCLUDED_STRING = \"text\"\n".to_string());
+    ws.open(
+        main.clone(),
+        "include(\"../lib/constants.leek\")\nclass Consumer { read() { var value = INCLUDED_STRING\nvalue = 1\nreturn value } }\n"
+            .to_string(),
+    );
+
+    let report = pull_diagnostics::handle_textdoc(&ws, &main);
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        report
+    else {
+        panic!("expected full report");
+    };
+    let items = &full.full_document_diagnostic_report.items;
+    assert!(
+        items
+            .iter()
+            .any(|d| d.code == Some(lsp::NumberOrString::String("E0250".into()))),
+        "included global type should flow into the entry file, got: {items:#?}"
+    );
+}
+
+#[test]
 fn pull_diagnostics_workspace_enumerates_open_docs() {
     let ws = open("function ok() { return 1 }\n");
     let report = pull_diagnostics::handle_workspace(&ws);
@@ -964,11 +1081,11 @@ fn inlay_hint_resolve_adds_tooltip() {
 #[test]
 fn will_rename_rewrites_include_references() {
     let mut ws = Workspace::default();
-    let main = lsp::Url::parse("file:///proj/main.leek").unwrap();
+    let main = test_file("rename/main.leek");
     ws.open(main.clone(), "include(\"helpers\")\nreturn 0\n".to_string());
     let renames = vec![(
-        "file:///proj/helpers.leek".to_string(),
-        "file:///proj/util.leek".to_string(),
+        test_file("rename/helpers.leek").to_string(),
+        test_file("rename/util.leek").to_string(),
     )];
     let edit = file_operations::will_rename(&ws, &renames).expect("workspace edit");
     let edits = edit.changes.unwrap().remove(&main).unwrap();
@@ -978,18 +1095,18 @@ fn will_rename_rewrites_include_references() {
 
 // ─── slice 6: workspace-wide references & rename ───────────────────
 
-/// Open several named files (siblings under `/proj/`) in one workspace.
+/// Open several named files under one platform-valid test directory.
 fn open_files(files: &[(&str, &str)]) -> Workspace {
     let mut ws = Workspace::default();
     for (name, src) in files {
-        let uri = lsp::Url::parse(&format!("file:///proj/{name}")).unwrap();
+        let uri = test_file(name);
         ws.open(uri, src.to_string());
     }
     ws
 }
 
 fn proj(name: &str) -> lsp::Url {
-    lsp::Url::parse(&format!("file:///proj/{name}")).unwrap()
+    test_file(name)
 }
 
 #[test]

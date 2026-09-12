@@ -141,7 +141,9 @@ impl RecipeArtifact for AstArtifact {
 /// [`Lex`](leek_lexer::pipeline::Lex) step has already produced one.
 fn run_parse(cx: &Context<'_>) -> (GreenNode, Vec<Diagnostic>) {
     #[cfg(feature = "salsa")]
-    if let Some((db, file)) = cx.salsa() {
+    if cx.get::<KnownClassesArtifact>().is_none()
+        && let Some((db, file)) = cx.salsa()
+    {
         let out = parse_query(db, file);
         return (out.green, out.diagnostics);
     }

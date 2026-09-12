@@ -141,30 +141,12 @@ impl RecipeArtifact for HirArtifact {
 /// path — existing pipelines without `ResolveIncludes` are
 /// unchanged.
 fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>) {
-    #[cfg(feature = "salsa")]
-    if let Some((db, file)) = cx.salsa() {
-        let out = lower_hir_query(db, file);
-        // The salsa-tracked query is keyed only on the source file, not on the
-        // recipe's opt level, so it always produces unoptimized HIR (the LSP /
-        // analysis use case). Apply optimization outside the cache when a
-        // codegen driver asked for it.
-        if opt.optimizes() {
-            let mut hir = (*out.hir).clone();
-            crate::transform::optimize_hir(&mut hir);
-            return (Arc::new(hir), out.diagnostics);
-        }
-        return (out.hir, out.diagnostics);
-    }
-    let ast = cx
-        .get::<AstArtifact>()
-        .and_then(|a| a.0.clone())
-        .expect("LowerHir::run guards on AstArtifact presence outside the salsa path");
-    // Multi-file path — only when the include graph actually found
-    // included files; an entry without `include(...)` stays on the
-    // single-file path below (identical behavior, prelude handling
-    // included).
+    // An include graph is assembled outside salsa from the workspace's
+    // open-buffer/disk snapshot. Lower it directly so the graph is not lost
+    // when the ordinary single-file salsa query is available.
     if let Some(graph) = cx.get::<IncludeGraphArtifact>()
         && !graph.includes.is_empty()
+        && let Some(ast) = cx.get::<AstArtifact>().and_then(|a| a.0.clone())
     {
         let mut includes: Vec<_> = graph
             .includes
@@ -189,6 +171,25 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         );
         return (finish_hir(hir, opt), diagnostics);
     }
+
+    #[cfg(feature = "salsa")]
+    if let Some((db, file)) = cx.salsa() {
+        let out = lower_hir_query(db, file);
+        // The salsa-tracked query is keyed only on the source file, not on the
+        // recipe's opt level, so it always produces unoptimized HIR (the LSP /
+        // analysis use case). Apply optimization outside the cache when a
+        // codegen driver asked for it.
+        if opt.optimizes() {
+            let mut hir = (*out.hir).clone();
+            crate::transform::optimize_hir(&mut hir);
+            return (Arc::new(hir), out.diagnostics);
+        }
+        return (out.hir, out.diagnostics);
+    }
+    let ast = cx
+        .get::<AstArtifact>()
+        .and_then(|a| a.0.clone())
+        .expect("LowerHir::run guards on AstArtifact presence outside the salsa path");
     let src_text = ast.syntax().text().to_string();
     let version = effective_version(&src_text, cx.source(), cx.version_byte());
     let flags = cx.flags();

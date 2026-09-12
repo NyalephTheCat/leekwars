@@ -4,10 +4,10 @@ use leek_diagnostics::Diagnostic;
 use leek_parser::pipeline::AstArtifact;
 use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
-use leek_syntax::pipeline::version_from_byte;
+use leek_syntax::{Version, pipeline::version_from_byte};
 
 use crate::index::{InferredSignatures, TypeTable};
-use crate::{Options, TypeCheckResult, check_collecting};
+use crate::{Options, TypeCheckResult, check_collecting, check_collecting_files};
 
 /// Type-check outcome.
 ///
@@ -63,6 +63,21 @@ impl RecipeArtifact for TypeCheckArtifact {
 
 /// Salsa-aware type-check driver.
 fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
+    // The include-aware resolver has already parsed the closure and assigned
+    // each file a source id. Type-check those ASTs together instead of
+    // entering the single-file salsa query.
+    if let Some(graph) = cx.get::<leek_resolver::pipeline::IncludeGraphArtifact>()
+        && !graph.includes.is_empty()
+        && let Some(entry) = cx.get::<AstArtifact>().and_then(|a| a.0.as_ref())
+    {
+        let mut files: Vec<(&leek_parser::ast::SourceFile, leek_span::SourceId, Version)> = graph
+            .includes
+            .iter()
+            .map(|file| (&file.ast, file.source, file.version))
+            .collect();
+        files.push((entry, cx.source(), version_from_byte(cx.version_byte())));
+        return check_collecting_files(&files, type_options(cx));
+    }
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let art = typecheck_query(db, file);
@@ -75,7 +90,16 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
     let Some(ast) = cx.get::<AstArtifact>().and_then(|a| a.0.clone()) else {
         return TypeCheckResult::default();
     };
-    let opts = Options {
+    check_collecting(
+        &ast,
+        cx.source(),
+        version_from_byte(cx.version_byte()),
+        type_options(cx),
+    )
+}
+
+fn type_options(cx: &Context<'_>) -> Options {
+    Options {
         strict: cx.strict(),
         experimental_generics: cx.flags().generics,
         seed_library: crate::seed_library_enabled(),
@@ -83,13 +107,7 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
         experimental_types: cx.flags().types,
         experimental_interfaces: cx.flags().interfaces,
         experimental_enums: cx.flags().enums,
-    };
-    check_collecting(
-        &ast,
-        cx.source(),
-        version_from_byte(cx.version_byte()),
-        opts,
-    )
+    }
 }
 
 /// Salsa-tracked entry point for type checking. Re-runs only when the

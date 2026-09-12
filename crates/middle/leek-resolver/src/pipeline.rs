@@ -13,10 +13,10 @@ use leek_syntax::Version;
 use leek_syntax::pipeline::PragmasArtifact;
 use leek_syntax::pipeline::version_from_byte;
 
-use crate::folder::Folder;
+use crate::folder::{Folder, canonical_or_normalized};
 use crate::include_graph::{ResolvedFile, build_include_graph};
 use crate::index::ResolveTable;
-use crate::{Options, ResolveResult, resolve_collecting};
+use crate::{Options, ResolveResult, resolve_collecting, resolve_collecting_files};
 
 /// Resolver outcome.
 ///
@@ -60,6 +60,21 @@ impl RecipeArtifact for ResolveArtifact {
 
 /// Salsa-aware resolve driver.
 fn run_resolve(cx: &Context<'_>) -> ResolveResult {
+    // Include-aware runs must bypass the single-file salsa query: the graph
+    // is a per-run artifact containing open-buffer/disk snapshots, and the
+    // resolver needs to walk all of those ASTs in one shared scope.
+    if let Some(graph) = cx.get::<IncludeGraphArtifact>()
+        && !graph.includes.is_empty()
+        && let Some(entry) = cx.get::<AstArtifact>().and_then(|a| a.0.as_ref())
+    {
+        let mut files: Vec<(&SourceFile, leek_span::SourceId, Version)> = graph
+            .includes
+            .iter()
+            .map(|file| (&file.ast, file.source, file.version))
+            .collect();
+        files.push((entry, cx.source(), version_from_byte(cx.version_byte())));
+        return resolve_collecting_files(&files, resolve_options(cx));
+    }
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let art = resolve_query(db, file);
@@ -71,6 +86,15 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
     let Some(ast) = cx.get::<AstArtifact>().and_then(|a| a.0.clone()) else {
         return ResolveResult::default();
     };
+    resolve_collecting(
+        &ast,
+        cx.source(),
+        version_from_byte(cx.version_byte()),
+        resolve_options(cx),
+    )
+}
+
+fn resolve_options(cx: &Context<'_>) -> Options {
     let experimental_imports = cx
         .get::<PragmasArtifact>()
         .is_some_and(|p| p.0.experimental.iter().any(|f| f == "imports"));
@@ -79,17 +103,11 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
         .map(|p| &p.0)
         .is_some_and(pragma_overloads)
         || cx.flags().overloads;
-    let opts = Options {
+    Options {
         strict: cx.strict(),
         experimental_imports,
         experimental_overloads,
-    };
-    resolve_collecting(
-        &ast,
-        cx.source(),
-        version_from_byte(cx.version_byte()),
-        opts,
-    )
+    }
 }
 
 /// True when the file opts into experimental function overloads via a
@@ -181,12 +199,13 @@ impl Step for ResolveIncludes {
         "resolve_includes"
     }
     fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
+        let entry_path = canonical_or_normalized(&self.entry_path);
         let graph = {
             let mut alloc = self.source_allocator.lock().map_err(|e| StepError {
                 step: "resolve_includes",
                 message: format!("source allocator poisoned: {e}"),
             })?;
-            build_include_graph(&self.entry_path, cx.text(), &*self.folder, |p| (alloc)(p))
+            build_include_graph(&entry_path, cx.text(), &*self.folder, |p| (alloc)(p))
         };
 
         cx.emit_all(graph.diagnostics.iter().cloned());
@@ -218,9 +237,7 @@ impl Step for ResolveIncludes {
             version,
         } in graph.files
         {
-            if path == self.entry_path
-                || path.canonicalize().ok().as_deref() == Some(&self.entry_path)
-            {
+            if path == entry_path {
                 continue;
             }
             let parsed = parse_file_with_classes(&text, source, version, &known_classes);
@@ -261,7 +278,7 @@ impl Step for ResolveIncludes {
             includes,
             resolved: graph.resolved,
             forward: graph.forward,
-            entry_path: self.entry_path.clone(),
+            entry_path,
         });
         Ok(())
     }

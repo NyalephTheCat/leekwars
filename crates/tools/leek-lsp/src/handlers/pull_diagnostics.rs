@@ -62,14 +62,17 @@ fn collect_target(
     pm: PosMap<'_>,
     source_file: SourceFile,
 ) -> Vec<lsp::Diagnostic> {
+    let source = source_file.source(&ws.db);
     // Recipe planning can fail; degrade to "no diagnostics" rather than crash.
     // `Linted` runs the lint pass on top of type checking so lint findings
     // surface in pull-model diagnostics too.
-    let Some(run) = crate::pipeline::run_on_file(ws, source_file, Target::Linted) else {
+    let Some(run) = crate::pipeline::run_on_file_with_includes(ws, source_file, Target::Linted)
+    else {
         return Vec::new();
     };
     run.diagnostics()
         .iter()
+        .filter(|d| d.span.source == source)
         .map(|d| to_lsp(d, pm, Some(uri)))
         .collect()
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
+use leek_span::SourceId;
 use leek_syntax::Version;
 use rowan::GreenNode;
 
@@ -132,6 +133,28 @@ impl Checker {
     }
 
     pub(crate) fn check_file(&mut self, file: &SourceFile) {
+        self.prepare_file(file);
+        self.check_file_body(file);
+    }
+
+    /// Type-check an include closure as one program. Declarations and
+    /// signatures are collected from every file before any body is checked;
+    /// then bodies run in include order so included top-level bindings are
+    /// available to the entry file.
+    pub(crate) fn check_files(&mut self, files: &[(&SourceFile, SourceId, Version)]) {
+        for (file, source, version) in files {
+            self.source = *source;
+            self.version = *version;
+            self.prepare_file(file);
+        }
+        for (file, source, version) in files {
+            self.source = *source;
+            self.version = *version;
+            self.check_file_body(file);
+        }
+    }
+
+    fn prepare_file(&mut self, file: &SourceFile) {
         // Experimental `type Name = T` aliases: collected before any
         // signature pass so every annotation in the file (including
         // ones textually above the alias) can reference them.
@@ -187,6 +210,9 @@ impl Checker {
                 _ => {}
             }
         }
+    }
+
+    fn check_file_body(&mut self, file: &SourceFile) {
         for child in file.syntax().children() {
             match child.kind() {
                 SyntaxKind::FnDecl => {

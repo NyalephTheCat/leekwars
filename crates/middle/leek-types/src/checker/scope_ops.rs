@@ -32,7 +32,10 @@ impl Checker {
                 return Some(ty);
             }
             if scope.is_function_boundary {
-                return None;
+                // Functions cannot capture another function's locals, but
+                // file-level bindings are globals and remain visible across
+                // the boundary (including when supplied by an include).
+                return self.scopes.first().and_then(|scope| scope.locals.get(name));
             }
         }
         None

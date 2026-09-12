@@ -113,15 +113,39 @@ pub fn resolve_collecting(
 ) -> ResolveResult {
     let mut r = Resolver::new(source, version, opts);
     r.resolve_file(file);
-    // References are pushed in walk order; sort by offset so the
-    // LSP's cursor-position lookup can binary-search.
-    r.references.sort_by_key(|r| r.name_offset);
-    ResolveResult {
-        diagnostics: r.diagnostics,
-        table: ResolveTable {
-            symbols: r.symbols,
-            references: r.references,
-        },
+    r.into_result()
+}
+
+/// Resolve several source files as one Leekscript program.
+///
+/// `files` must be ordered so included files precede the entry file. The
+/// resolver shares one top-level scope across the whole slice, while keeping
+/// each file's source id/version when walking its spans and diagnostics.
+/// This is the semantic half of filesystem `include(...)` resolution.
+pub fn resolve_collecting_files(
+    files: &[(&SourceFile, SourceId, Version)],
+    opts: Options,
+) -> ResolveResult {
+    let Some((_, source, version)) = files.last().copied() else {
+        return ResolveResult::default();
+    };
+    let mut r = Resolver::new(source, version, opts);
+    r.resolve_files(files);
+    r.into_result()
+}
+
+impl Resolver {
+    fn into_result(mut self) -> ResolveResult {
+        // References are pushed in walk order; sort by offset so the
+        // LSP's cursor-position lookup can binary-search.
+        self.references.sort_by_key(|r| (r.name_offset, r.name_len));
+        ResolveResult {
+            diagnostics: self.diagnostics,
+            table: ResolveTable {
+                symbols: self.symbols,
+                references: self.references,
+            },
+        }
     }
 }
 
@@ -294,6 +318,29 @@ impl Resolver {
         // declarations live separately and shadowing checks can see
         // outer scopes without the noise of every builtin.
         self.push_scope();
+        self.declare_file(file);
+        self.resolve_file_contents(file);
+        self.pop_scope();
+    }
+
+    fn resolve_files(&mut self, files: &[(&SourceFile, SourceId, Version)]) {
+        // One shared top-level scope makes declarations from included files
+        // visible to the entry file and to every other file in the closure.
+        self.push_scope();
+        for (file, source, version) in files {
+            self.source = *source;
+            self.version = *version;
+            self.declare_file(file);
+        }
+        for (file, source, version) in files {
+            self.source = *source;
+            self.version = *version;
+            self.resolve_file_contents(file);
+        }
+        self.pop_scope();
+    }
+
+    fn declare_file(&mut self, file: &SourceFile) {
         // Two-pass for forward references: first collect
         // declarations, then walk bodies. Matching on the node kind before
         // casting consumes each child with a single `cast` rather than cloning
@@ -317,6 +364,9 @@ impl Resolver {
                 }
             }
         }
+    }
+
+    fn resolve_file_contents(&mut self, file: &SourceFile) {
         let mut terminated_at: Option<leek_span::Span> = None;
         for child in file.syntax().children() {
             match child.kind() {
@@ -353,7 +403,6 @@ impl Resolver {
         // positions. Runs while the file scope (holding every class
         // symbol) is still on the stack so name lookups succeed.
         self.record_type_ref_classes(file.syntax());
-        self.pop_scope();
     }
 }
 

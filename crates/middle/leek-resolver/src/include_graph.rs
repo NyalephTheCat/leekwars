@@ -25,7 +25,7 @@ use leek_lexer::lex;
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, Version, parse_pragmas};
 
-use crate::folder::{Folder, IncludeError, LoadedFile};
+use crate::folder::{Folder, IncludeError, LoadedFile, canonical_or_normalized};
 
 /// Build outcome — the ordered file list plus the forward edge
 /// map and any diagnostics raised during the walk.
@@ -111,9 +111,7 @@ pub fn build_include_graph(
     let mut done: BTreeSet<PathBuf> = BTreeSet::new();
 
     // Seed the entry file.
-    let entry_canonical = entry_path
-        .canonicalize()
-        .unwrap_or_else(|_| entry_path.to_path_buf());
+    let entry_canonical = canonical_or_normalized(entry_path);
     let entry_source = source_for(&entry_canonical);
     let entry_version = pragma_version(entry_text);
     files.insert(
