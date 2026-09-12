@@ -196,14 +196,20 @@ mod tests {
     fn ws_with(files: &[(&str, &str)]) -> Workspace {
         let mut ws = Workspace::default();
         for (name, src) in files {
-            let uri = Url::parse(&format!("file:///proj/{name}")).unwrap();
+            let path = std::env::temp_dir()
+                .join("leek-lsp-program-scope-tests")
+                .join(name);
+            let uri = Url::from_file_path(path).expect("test path should be a valid file URI");
             ws.open(uri, src.to_string());
         }
         ws
     }
 
     fn uri(name: &str) -> Url {
-        Url::parse(&format!("file:///proj/{name}")).unwrap()
+        let path = std::env::temp_dir()
+            .join("leek-lsp-program-scope-tests")
+            .join(name);
+        Url::from_file_path(path).expect("test path should be a valid file URI")
     }
 
     fn scope_names(ws: &Workspace, home: &str) -> Vec<String> {

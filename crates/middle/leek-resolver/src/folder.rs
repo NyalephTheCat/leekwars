@@ -22,7 +22,7 @@
 //! callers don't open the file again separately.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Outcome of `Folder::load`. Carries both the canonical path and
 /// the bytes so callers don't double-stat or double-read.
@@ -108,6 +108,26 @@ pub trait Folder: Send + Sync {
     fn load(&self, includer: &Path, name: &str) -> Result<LoadedFile, LoadError>;
 }
 
+/// Normalize `.` and `..` without touching the filesystem.
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Canonicalize a real path, or lexically normalize a virtual/nonexistent one.
+pub fn canonical_or_normalized(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| normalize_path(path))
+}
+
 /// Resolves include names against the filesystem, treating each
 /// name as a `.leek` file relative to the includer's directory.
 /// `name` may contain `/` segments for sub-folders.
@@ -130,7 +150,7 @@ impl Folder for DiskFolder {
         } else {
             return Err(LoadError::NotFound);
         };
-        let canonical = candidate.canonicalize().unwrap_or(candidate.clone());
+        let canonical = canonical_or_normalized(&candidate);
         let text = std::fs::read_to_string(&canonical)
             .map_err(|e| LoadError::Unreadable(e.to_string()))?;
         Ok(LoadedFile {
@@ -159,7 +179,7 @@ impl MemFolder {
     /// callers should pass the same form they'd pass as the
     /// `includer` to `load`.
     pub fn insert(&mut self, path: impl Into<PathBuf>, text: impl Into<String>) {
-        self.files.insert(path.into(), text.into());
+        self.files.insert(normalize_path(&path.into()), text.into());
     }
 
     /// Build with a single entry shortcut.
@@ -182,9 +202,9 @@ impl Folder for MemFolder {
         // Candidate paths in priority order — matches DiskFolder's
         // policy (sibling `.leek`, sibling bare, raw name).
         let candidates = [
-            parent.join(format!("{name}.leek")),
-            parent.join(name),
-            PathBuf::from(name),
+            normalize_path(&parent.join(format!("{name}.leek"))),
+            normalize_path(&parent.join(name)),
+            normalize_path(Path::new(name)),
         ];
         for c in &candidates {
             if let Some(text) = self.files.get(c) {
@@ -226,5 +246,18 @@ mod tests {
         f.insert("/proj/lib/util.leek", "function k() {}");
         let got = f.load(Path::new("/proj/main.leek"), "lib/util").unwrap();
         assert_eq!(got.path, PathBuf::from("/proj/lib/util.leek"));
+    }
+
+    #[test]
+    fn mem_folder_normalizes_parent_directory() {
+        let mut f = MemFolder::new();
+        f.insert("/proj/shared/constants.leek", "var INCLUDED_VALUE = 1");
+        let got = f
+            .load(
+                Path::new("/proj/src/entry.leek"),
+                "../shared/constants.leek",
+            )
+            .unwrap();
+        assert_eq!(got.path, PathBuf::from("/proj/shared/constants.leek"));
     }
 }

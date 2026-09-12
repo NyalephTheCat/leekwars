@@ -167,17 +167,24 @@ mod tests {
     use super::*;
     use crate::workspace::Workspace;
 
+    fn test_url(name: &str) -> lsp::Url {
+        let path = std::env::temp_dir()
+            .join("leek-lsp-file-operation-tests")
+            .join(name);
+        lsp::Url::from_file_path(path).expect("test path should be a valid file URI")
+    }
+
     fn ws_with(files: &[(&str, &str)]) -> Workspace {
         let mut ws = Workspace::default();
         for (name, src) in files {
-            let uri = lsp::Url::parse(&format!("file:///proj/{name}")).unwrap();
+            let uri = test_url(name);
             ws.open(uri, src.to_string());
         }
         ws
     }
 
     fn rename(old: &str, new: &str) -> (String, String) {
-        (format!("file:///proj/{old}"), format!("file:///proj/{new}"))
+        (test_url(old).to_string(), test_url(new).to_string())
     }
 
     #[test]
@@ -188,7 +195,7 @@ mod tests {
         ]);
         let edit = will_rename(&ws, &[rename("helpers.leek", "util.leek")]).expect("edit");
         let changes = edit.changes.unwrap();
-        let main_uri = lsp::Url::parse("file:///proj/main.leek").unwrap();
+        let main_uri = test_url("main.leek");
         let edits = changes.get(&main_uri).expect("edit for main");
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "util");
@@ -201,7 +208,7 @@ mod tests {
         let edits = edit
             .changes
             .unwrap()
-            .remove(&lsp::Url::parse("file:///proj/main.leek").unwrap())
+            .remove(&test_url("main.leek"))
             .unwrap();
         assert_eq!(edits[0].new_text, "lib/util.leek");
     }
@@ -216,8 +223,8 @@ mod tests {
     fn non_leek_rename_is_ignored() {
         let ws = ws_with(&[("main.leek", "include(\"helpers\")\nreturn 0\n")]);
         let r = (
-            "file:///proj/helpers.txt".to_string(),
-            "file:///proj/util.txt".to_string(),
+            test_url("helpers.txt").to_string(),
+            test_url("util.txt").to_string(),
         );
         assert!(will_rename(&ws, &[r]).is_none());
     }

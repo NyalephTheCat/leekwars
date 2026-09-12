@@ -165,6 +165,31 @@ pub fn check_collecting(
         c.seed_library_signatures();
     }
     c.check_file(file);
+    finish_checker(c)
+}
+
+/// Type-check several source files as one Leekscript program.
+///
+/// `files` must be ordered with included files before the entry file. Shared
+/// checker state exposes top-level variables, function signatures, classes,
+/// and member types across the include closure while preserving each file's
+/// source id for expression spans and diagnostics.
+pub fn check_collecting_files(
+    files: &[(&SourceFile, SourceId, Version)],
+    opts: Options,
+) -> TypeCheckResult {
+    let Some((_, source, version)) = files.last().copied() else {
+        return TypeCheckResult::default();
+    };
+    let mut c = checker::Checker::new(source, version, opts);
+    if opts.seed_library || opts.experimental_prelude {
+        c.seed_library_signatures();
+    }
+    c.check_files(files);
+    finish_checker(c)
+}
+
+fn finish_checker(c: checker::Checker) -> TypeCheckResult {
     let signatures = InferredSignatures {
         fn_returns: c.user_fn_return_type.clone(),
         fn_params: c.user_fn_param_types.clone(),

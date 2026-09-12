@@ -988,24 +988,27 @@ impl LeekLanguageServer {
             // client can drop these if a newer revision's diagnostics
             // have already landed (publishes can complete out of order).
             let doc_version = doc.version;
+            let source = source_file.source(&ws.db);
             // Recipe planning can fail (e.g. a malformed recipe params); degrade
             // to "no diagnostics" rather than crashing the server.
             // `Linted` is a superset of `TypeChecked` (it runs through type
             // checking + HIR + the lint pass), so the editor's problems panel
             // shows lint findings alongside parse/type errors.
-            let lsp_diags: Vec<_> =
-                if let Some(run) = crate::pipeline::run_on_file(&ws, source_file, Target::Linted) {
-                    let pm = crate::util::position::PosMap::new(&line_table, &text);
-                    run.diagnostics()
-                        .iter()
-                        .map(|d| to_lsp(d, pm, Some(&uri)))
-                        .collect()
-                } else {
-                    if crate::trace_enabled() {
-                        eprintln!("leek-lsp: recipe planning failed for {uri}; no diagnostics");
-                    }
-                    Vec::new()
-                };
+            let lsp_diags: Vec<_> = if let Some(run) =
+                crate::pipeline::run_on_file_with_includes(&ws, source_file, Target::Linted)
+            {
+                let pm = crate::util::position::PosMap::new(&line_table, &text);
+                run.diagnostics()
+                    .iter()
+                    .filter(|d| d.span.source == source)
+                    .map(|d| to_lsp(d, pm, Some(&uri)))
+                    .collect()
+            } else {
+                if crate::trace_enabled() {
+                    eprintln!("leek-lsp: recipe planning failed for {uri}; no diagnostics");
+                }
+                Vec::new()
+            };
             drop(ws);
             (lsp_diags, Some(doc_version))
         };
