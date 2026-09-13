@@ -13,6 +13,18 @@ pub struct Manifest {
     pub lint: LintTable,
     pub format: FormatOptions,
     pub test: TestTable,
+    pub fight: FightTable,
+}
+
+/// `[fight]` — defaults for `miku fight`. Paths are relative to the
+/// project root.
+#[derive(Debug, Clone, Default)]
+pub struct FightTable {
+    /// Scenario `miku fight` runs when no scenario argument is given.
+    pub default_scenario: Option<PathBuf>,
+    /// Directory holding the project's scenario files; listed by
+    /// `miku fight` when no scenario is given and no default is set.
+    pub scenarios_dir: Option<PathBuf>,
 }
 
 /// `[project]` — required.

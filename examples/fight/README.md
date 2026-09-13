@@ -10,7 +10,8 @@ Run everything from this directory.
 ## Layout
 
 ```
-Miku.toml            project manifest (makes `miku check`/`fmt` work on ais/)
+Miku.toml            project manifest (makes `miku check`/`fmt` work on ais/;
+                     `[fight]` makes a bare `miku fight` run duel.toml)
 base-arena.toml      a bare arena (map + seed) meant to be inherited
 duel.toml            the main scenario: extends base-arena, pulls leek builds
                      from files, has a profile + a [testing] block
@@ -60,6 +61,7 @@ flag is needed for fights. (For `miku check`/`fmt` on the AIs you do need it:
 ### One fight
 
 ```sh
+miku fight                       # Miku.toml's [fight].default_scenario (duel.toml)
 miku fight duel.toml
 miku fight duel.toml --seed 5 --profile aggressive
 miku fight skirmish.toml --format json

@@ -5,8 +5,8 @@
 
 use crate::format::FormatOptions;
 use crate::types::{
-    BackendSettings, BackendTable, JavaMode, LintTable, Manifest, PathsTable, ProjectTable,
-    TestTable,
+    BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest, PathsTable,
+    ProjectTable, TestTable,
 };
 use std::path::PathBuf;
 
@@ -70,6 +70,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "lint",
     "format",
     "test",
+    "fight",
     "lsp",
     "bench",
     "experimental",
@@ -172,6 +173,16 @@ pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), Manifes
         }
     };
 
+    let fight = match root.get("fight") {
+        None => FightTable::default(),
+        Some(v) => {
+            let tbl = v
+                .as_table()
+                .ok_or_else(|| ManifestError::new("Miku.toml: `fight` must be a table"))?;
+            parse_fight(tbl)?
+        }
+    };
+
     Ok((
         Manifest {
             project,
@@ -180,6 +191,7 @@ pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), Manifes
             lint,
             format,
             test,
+            fight,
         },
         warnings,
     ))
@@ -411,6 +423,29 @@ fn parse_test(
     Ok(out)
 }
 
+/// `[fight]` is strict: an unknown key is an error rather than a
+/// warning, because a mistyped `default_scenario` would otherwise
+/// silently make `miku fight` (no argument) fail for a confusing reason.
+fn parse_fight(tbl: &toml::value::Table) -> Result<FightTable, ManifestError> {
+    const KNOWN: &[&str] = &["default_scenario", "scenarios_dir"];
+    for (key, _) in tbl {
+        if !KNOWN.contains(&key.as_str()) {
+            return Err(ManifestError::new(format!(
+                "Miku.toml: unknown key `fight.{key}` (expected one of: {})",
+                KNOWN.join(", ")
+            )));
+        }
+    }
+    let mut out = FightTable::default();
+    if let Some(v) = tbl.get("default_scenario") {
+        out.default_scenario = Some(PathBuf::from(string_val(v, "fight.default_scenario")?));
+    }
+    if let Some(v) = tbl.get("scenarios_dir") {
+        out.scenarios_dir = Some(PathBuf::from(string_val(v, "fight.scenarios_dir")?));
+    }
+    Ok(out)
+}
+
 // ---- helpers ----
 
 fn warn_unknown(
@@ -613,6 +648,61 @@ mod tests {
         assert_eq!(m.lint.deny, ["L0006"]);
         assert_eq!(m.lint.warn, ["L0001"]);
         assert_eq!(m.lint.allow, ["L0004"]);
+    }
+
+    #[test]
+    fn fight_table_parsed() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            default_scenario = "duel.toml"
+            scenarios_dir = "scenarios"
+        "#;
+        let (m, warnings) = parse_ok(src);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(m.fight.default_scenario, Some(PathBuf::from("duel.toml")));
+        assert_eq!(m.fight.scenarios_dir, Some(PathBuf::from("scenarios")));
+    }
+
+    #[test]
+    fn fight_table_defaults_to_empty() {
+        let (m, _) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            "#,
+        );
+        assert_eq!(m.fight.default_scenario, None);
+        assert_eq!(m.fight.scenarios_dir, None);
+    }
+
+    #[test]
+    fn fight_table_unknown_key_errors() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            default_senario = "duel.toml"
+        "#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("fight.default_senario"), "{err}");
+    }
+
+    #[test]
+    fn fight_default_scenario_must_be_a_string() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            default_scenario = 3
+        "#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("fight.default_scenario"), "{err}");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //!
 //! Unknown **top-level** keys → [`ManifestError`] (typo protection).
 //! Unknown keys **inside** known tables → [`ManifestWarning`]
-//! (forward-compat).
+//! (forward-compat), except `[fight]`, whose unknown keys are errors.
 //!
 //! Several tables are recognized but **not interpreted** in v0.1:
 //! `[lsp]`, `[bench]`, `[experimental]`, `[profiles]`, `[workspace]`,
@@ -27,6 +27,6 @@ pub use format::{
 };
 pub use parse::{ManifestError, ManifestWarning};
 pub use types::{
-    BackendKind, BackendSettings, BackendTable, JavaMode, LintTable, Manifest, PathsTable,
-    ProjectTable, TestTable,
+    BackendKind, BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest,
+    PathsTable, ProjectTable, TestTable,
 };
