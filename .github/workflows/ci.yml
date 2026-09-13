@@ -44,6 +44,10 @@ jobs:
         run: cargo xtask check-artifacts
       - name: generated catalog drift
         run: tools/game-item-extract.sh --check
+      # The fight-constant table and the engine's generated consts_gen.rs,
+      # which is what keeps `getCellContent` and the AI's CELL_* agreeing.
+      - name: fight constant drift
+        run: tools/game-builtin-extract.sh --check
 
   clippy:
     name: clippy (-D warnings)

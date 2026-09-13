@@ -24,10 +24,11 @@ pub const USE_NOT_ENOUGH_TP: i64 = -2;
 pub const USE_INVALID_POSITION: i64 = -3;
 pub const USE_TOO_MANY_USES: i64 = -4;
 
-/// Cell contents, mirroring the leek-wars `CELL_*` constants.
-pub const CELL_EMPTY: i64 = 0;
-pub const CELL_OBSTACLE: i64 = 1;
-pub const CELL_PLAYER: i64 = 2;
+// Cell contents (`CELL_EMPTY`, `CELL_ENTITY`, `CELL_OBSTACLE`, `CELL_PLAYER`).
+// Generated from the same table the language side resolves and folds, so the
+// engine's `getCellContent` answers and an AI's `CELL_*` constants cannot
+// drift apart — see tools/game-builtin-extract.sh.
+include!("consts_gen.rs");
 
 /// Dispatch a leek-wars fight function — the game-side analogue of
 /// `leek_runtime::call_builtin`. Returns [`Value::Null`] for an unknown or
@@ -92,10 +93,15 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         "getCellFromXY" => opt_int(host.cell_from_xy(int_arg(0), int_arg(1))),
         "getCellContent" => {
             let cell = int_arg(0);
+            // Obstacle first — an obstacle cell is reported as such whatever
+            // else the map says about it. Keep the order: `CELL_ENTITY` and
+            // its deprecated `CELL_PLAYER` alias are both 1, so swapping the
+            // branches would be invisible to a value assertion, and only the
+            // obstacle case in the tests below catches it.
             if host.is_obstacle(cell) {
                 Value::Int(CELL_OBSTACLE)
             } else if host.entity_at(cell).is_some() {
-                Value::Int(CELL_PLAYER)
+                Value::Int(CELL_ENTITY)
             } else {
                 Value::Int(CELL_EMPTY)
             }
@@ -870,4 +876,64 @@ fn int_array(ids: Vec<i64>) -> Value {
     Value::Array(Rc::new(RefCell::new(
         ids.into_iter().map(Value::Int).collect(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, CELL_PLAYER, call_game_builtin};
+    use crate::{Entity, Fight};
+    use leek_runtime::Value;
+
+    /// The catalog's value for `name`, as the AI sees it — this is what the
+    /// language resolves a bare `CELL_*` to and what the folding pass
+    /// substitutes, so it is the value the engine has to answer with.
+    fn catalog(name: &str) -> i64 {
+        leek_environment::leekwars_constant_values()
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("{name} missing from game_constants.tsv"))
+            .1
+            .parse()
+            .expect("integer constant")
+    }
+
+    /// The generated table must equal the catalog it was generated from.
+    /// This is the check the hand-written table used to fail: it had
+    /// `CELL_OBSTACLE = 1` and `CELL_PLAYER = 2`, the two swapped.
+    #[test]
+    fn cell_constants_match_catalog() {
+        for (name, value) in [
+            ("CELL_EMPTY", CELL_EMPTY),
+            ("CELL_ENTITY", CELL_ENTITY),
+            ("CELL_OBSTACLE", CELL_OBSTACLE),
+            ("CELL_PLAYER", CELL_PLAYER),
+        ] {
+            assert_eq!(value, catalog(name), "{name}");
+        }
+        // Upstream's deprecated alias, so a value assertion alone can't tell
+        // the entity and player branches apart — hence the cell cases below.
+        assert_eq!(CELL_ENTITY, CELL_PLAYER);
+    }
+
+    /// `getCellContent` answers with the catalog values, obstacle included.
+    /// An AI writing `if (getCellContent(c) == CELL_OBSTACLE)` compares
+    /// against `catalog("CELL_OBSTACLE")`, so anything else is the RT-04 bug.
+    #[test]
+    fn get_cell_content_matches_catalog() {
+        let mut fight = Fight::new(10, 10, 1)
+            .with_entity(Entity::new(1, "Bot", 0, 0))
+            .with_entity(Entity::new(2, "Foe", 33, 1))
+            .with_obstacle(22);
+        let content = |host: &mut Fight, cell: i64| match call_game_builtin(
+            host,
+            "getCellContent",
+            &[Value::Int(cell)],
+        ) {
+            Value::Int(v) => v,
+            other => panic!("getCellContent returned {other:?}"),
+        };
+        assert_eq!(content(&mut fight, 22), catalog("CELL_OBSTACLE"));
+        assert_eq!(content(&mut fight, 33), catalog("CELL_ENTITY"));
+        assert_eq!(content(&mut fight, 5), catalog("CELL_EMPTY"));
+    }
 }

@@ -15,5 +15,10 @@ leek-builtins = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 
+[dev-dependencies]
+# Source of truth for the leek-wars fight constants `dispatch_constant`
+# also provides; the tests pin the two together.
+leek-environment = { workspace = true }
+
 [lints]
 workspace = true
