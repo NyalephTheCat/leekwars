@@ -195,3 +195,55 @@ pub unsafe extern "C" fn leek_aot_install(
     }
     meta.install(addrs);
 }
+
+#[cfg(test)]
+mod tests {
+    //! The blob format is the only channel between the compiler process and the
+    //! produced executable, and [`leek_aot_install`] parses it with
+    //! `unwrap_or_default()` — a format break would silently install EMPTY
+    //! dispatch tables rather than fail. So round-trip every table here.
+
+    use super::AotMeta;
+
+    fn populated() -> AotMeta {
+        AotMeta {
+            method_resolve: vec![(7, "m".into(), 3), (7, "n".into(), 4), (9, "m".into(), 5)],
+            static_init: vec![((7, "count".into()), 6)],
+            user_fn_idx: vec![(1, 2), (2, 8)],
+            exact_arity: vec![2],
+            class_string_method: vec![(7, 3)],
+            lambda_byref: vec![(3, vec![true, false]), (4, vec![])],
+            class_parent: vec![(9, Some((7, "C".into()))), (7, None)],
+            class_ctor_thunk: vec![(7, 10)],
+            class_reflect: vec![(7, vec![("m".into(), vec!["x".into(), "y".into()])])],
+            lambda_entries: vec![(3, 2), (4, 1), (10, 0)],
+        }
+    }
+
+    #[test]
+    fn every_dispatch_table_round_trips_through_the_blob() {
+        let meta = populated();
+        let back: AotMeta = serde_json::from_slice(&meta.to_blob()).expect("parse blob");
+        assert_eq!(back.method_resolve, meta.method_resolve);
+        assert_eq!(back.static_init, meta.static_init);
+        assert_eq!(back.user_fn_idx, meta.user_fn_idx);
+        assert_eq!(back.exact_arity, meta.exact_arity);
+        assert_eq!(back.class_string_method, meta.class_string_method);
+        assert_eq!(back.lambda_byref, meta.lambda_byref);
+        assert_eq!(back.class_parent, meta.class_parent);
+        assert_eq!(back.class_ctor_thunk, meta.class_ctor_thunk);
+        assert_eq!(back.class_reflect, meta.class_reflect);
+        assert_eq!(back.lambda_entries(), meta.lambda_entries());
+    }
+
+    #[test]
+    fn the_empty_metadata_of_the_aot_able_subset_round_trips() {
+        // Today's AOT subset (scalars, strings, numeric arrays, direct calls)
+        // always emits empty tables — the shape the generated C harness embeds.
+        let blob = AotMeta::default().to_blob();
+        assert!(!blob.is_empty(), "an empty table set must still serialize");
+        let back: AotMeta = serde_json::from_slice(&blob).expect("parse blob");
+        assert!(back.lambda_entries().is_empty());
+        assert!(back.method_resolve.is_empty());
+    }
+}

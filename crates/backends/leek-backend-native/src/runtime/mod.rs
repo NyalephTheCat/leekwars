@@ -321,6 +321,20 @@ pub unsafe fn read_handle(p: *mut Value) -> Value {
     unsafe { (*p).clone() }
 }
 
+/// Bytes of chunk capacity the per-run value arena currently holds (NOT live
+/// bytes — [`free_run_boxes`]'s `reset` keeps the largest chunk). Crate-internal
+/// probe for the leak tests: a program run repeatedly must reach a steady state
+/// where this stops growing, otherwise boxes are outliving their run.
+#[cfg(test)]
+pub(crate) fn arena_allocated_bytes() -> usize {
+    BOX_STATE.with(|s| {
+        s.borrow()
+            .arena
+            .as_ref()
+            .map_or(0, bumpalo::Bump::allocated_bytes)
+    })
+}
+
 /// Reclaim every value handle allocated during the current run. Call once the
 /// run's result has been read out (cloned) — see [`read_handle`] — so the
 /// result `Value` and anything reachable from it (held by its own `Rc` clones)
@@ -452,4 +466,49 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_enter_frame", leek_enter_frame as *const u8),
         ("leek_leave_frame", leek_leave_frame as *const u8),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    //! The per-run box invariant: every handle a run allocates is dropped by
+    //! [`free_run_boxes`], and the arena backing them reaches a steady size
+    //! instead of growing run after run.
+
+    use std::rc::Rc;
+
+    use leek_runtime::Value;
+
+    use super::{BOX_STATE, arena_allocated_bytes, free_run_boxes, handle};
+
+    #[test]
+    fn free_run_boxes_empties_the_drop_list_and_the_arena_stops_growing() {
+        // Heap-owning values only: `handle` deliberately does not register
+        // trivially-droppable scalars for the sweep (their bump storage is
+        // reclaimed by `reset` regardless).
+        let mut steady = None;
+        for round in 0..200 {
+            for _ in 0..500 {
+                let _ = handle(Value::String(Rc::new("x".repeat(64))));
+            }
+            free_run_boxes();
+            assert_eq!(
+                BOX_STATE.with(|s| s.borrow().boxes.len()),
+                0,
+                "round {round}: handles survived the sweep"
+            );
+            // `reset` retains only the LARGEST chunk, so the first rounds
+            // legitimately grow the arena as bumpalo doubles up to the round's
+            // working set. Steady state is reached well before round 2; compare
+            // against that, never against round 0.
+            if round == 2 {
+                steady = Some(arena_allocated_bytes());
+            }
+        }
+        let steady = steady.expect("round 2 ran");
+        assert_eq!(
+            arena_allocated_bytes(),
+            steady,
+            "the value arena kept growing across rounds: boxes are outliving `free_run_boxes`"
+        );
+    }
 }

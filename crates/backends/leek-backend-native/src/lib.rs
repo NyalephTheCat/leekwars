@@ -1220,3 +1220,53 @@ fn build_isa(opts: &NativeOptions) -> Result<codegen::isa::OwnedTargetIsa, Nativ
 fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Crate-internal repeat-run checks. These live here rather than in
+    //! `tests/` because the only sound leak probe — the per-run value arena's
+    //! retained capacity — is `pub(crate)` (see
+    //! [`runtime::arena_allocated_bytes`]); exposing it publicly would make an
+    //! implementation detail part of the backend's API.
+
+    use leek_hir::HirFile;
+    use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+    use leek_span::SourceId;
+    use leek_syntax::{SyntaxNode, Version};
+
+    use super::{NativeOptions, run, runtime};
+
+    fn hir_v4(src: &str) -> HirFile {
+        let source = SourceId::new(1).unwrap();
+        let parsed = parse(src, source, Version::V4);
+        let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
+        leek_hir::lower_file_versioned(&sf, source, 4).0
+    }
+
+    #[test]
+    fn repeated_runs_of_a_boxing_heavy_program_keep_the_arena_flat() {
+        // Every run allocates ~200 string handles. If `free_run_boxes` stopped
+        // reclaiming them (or a run leaked its globals' handles), the arena's
+        // retained capacity would climb run after run instead of settling.
+        let hir = hir_v4(
+            "var a = [] for (var i = 0; i < 200; i++) { push(a, \"s\" + i) } return count(a)",
+        );
+        let opts = NativeOptions::release().with_lang(4, false);
+        let mut steady = None;
+        for n in 0..300 {
+            let v = run(&hir, &opts).expect("run");
+            assert_eq!(v.to_string(), "200", "run {n}");
+            // The first handful of runs legitimately grow the bump chunk; take
+            // the steady-state reading after them, never from run 0.
+            if n == 5 {
+                steady = Some(runtime::arena_allocated_bytes());
+            }
+        }
+        let steady = steady.expect("run 5 happened");
+        assert_eq!(
+            runtime::arena_allocated_bytes(),
+            steady,
+            "the value arena grew between run 5 and run 300: a run is leaking boxes"
+        );
+    }
+}

@@ -2154,3 +2154,219 @@ fn coerce_target_ty(t: &Type) -> Option<ValTy> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! [`specialize_param_types`] decisions, driven from source text (the pass
+    //! is a whole-program analysis, so a hand-built `MirProgram` would both be
+    //! unreadable and churn on every `leek-mir` refactor).
+    //!
+    //! The must-stay-`Any` cases are the SOUNDNESS gates: pinning a param that
+    //! some call site can reach with another kind silently coerces that
+    //! argument. None of them may flip without a soundness argument. The pinned
+    //! cases are only the canonical shapes the pass exists for.
+
+    use leek_mir::ir::MirProgram;
+    use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+    use leek_span::SourceId;
+    use leek_syntax::{SyntaxNode, Version};
+    use leek_types::Type;
+
+    use super::{Lang, append_ctor_thunks, specialize_param_types};
+
+    /// Lower `src` (v4) to MIR, optionally running the specializer over it.
+    fn lower(src: &str, specialize: bool) -> MirProgram {
+        let source = SourceId::new(1).unwrap();
+        let parsed = parse(src, source, Version::V4);
+        let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
+        let hir = leek_hir::lower_file_versioned(&sf, source, 4).0;
+        let (mut program, errs) = leek_mir::lower_file(&hir);
+        assert!(errs.is_empty(), "MIR lowering failed: {errs:?}");
+        if specialize {
+            // Mirror the order `main_ret` / the JIT path use.
+            let _ = append_ctor_thunks(&mut program, 4);
+            specialize_param_types(
+                &mut program,
+                Lang {
+                    version: 4,
+                    strict: false,
+                },
+            );
+        }
+        program
+    }
+
+    /// The post-specialization declared type of free function `name`'s
+    /// parameter `pi`.
+    fn param_ty(src: &str, name: &str, pi: usize) -> Type {
+        let program = lower(src, true);
+        let f = program
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no function `{name}` in `{src}`"));
+        f.locals[f.params[pi].0 as usize].ty.clone()
+    }
+
+    /// The post-specialization declared type of `class.method`'s user parameter
+    /// `pi` (`params[0]` is the synthetic `this`).
+    fn method_param_ty(src: &str, class: &str, method: &str, pi: usize) -> Type {
+        let program = lower(src, true);
+        let f = &program.functions[method_idx(&program, class, method)];
+        f.locals[f.params[pi + 1].0 as usize].ty.clone()
+    }
+
+    fn method_idx(program: &MirProgram, class: &str, method: &str) -> usize {
+        let c = program
+            .classes
+            .iter()
+            .find(|c| c.name == class)
+            .unwrap_or_else(|| panic!("no class `{class}`"));
+        c.methods
+            .iter()
+            .find(|m| m.name == method)
+            .unwrap_or_else(|| panic!("no method `{class}.{method}`"))
+            .function_idx
+    }
+
+    // ---- pinned: the shapes the pass exists for ----
+
+    #[test]
+    fn a_param_only_ever_passed_an_integer_is_pinned() {
+        assert_eq!(
+            param_ty("function f(n) { return n * 2 }\nreturn f(21)\n", "f", 0),
+            Type::Integer
+        );
+    }
+
+    #[test]
+    fn recursion_is_pinned_by_the_optimistic_fixpoint() {
+        // `fib`'s own `fib(n - 1)` argument is typed from `n`, so a pessimistic
+        // pass would demote it on the first iteration and never recover. This is
+        // why `specialize_pass` pins first and only then demotes to a fixpoint.
+        assert_eq!(
+            param_ty(
+                "function fib(n) { if (n < 2) { return n }\nreturn fib(n - 1) + fib(n - 2) }\nreturn fib(10)\n",
+                "fib",
+                0,
+            ),
+            Type::Integer
+        );
+    }
+
+    #[test]
+    fn a_real_only_param_is_pinned_by_the_second_pass() {
+        // The `integer` pass demotes this one; the `real` pass then picks it up
+        // from the params that stayed `Any`.
+        assert_eq!(
+            param_ty("function g(x) { return x + 1.0 }\nreturn g(1.5)\n", "g", 0),
+            Type::Real
+        );
+    }
+
+    #[test]
+    fn a_unique_standalone_methods_user_param_is_pinned() {
+        assert_eq!(
+            method_param_ty(
+                "class C { m(x) { return x * 2 } }\nvar c = new C()\nreturn c.m(3)\n",
+                "C",
+                "m",
+                0,
+            ),
+            Type::Integer
+        );
+    }
+
+    #[test]
+    fn the_receiver_is_never_pinned() {
+        // `params[0]` is `this` — not part of a call's `args`, so no call site
+        // could inform it. `specialize_param_types` skips it outright.
+        let src = "class C { m(x) { return x * 2 } }\nvar c = new C()\nreturn c.m(3)\n";
+        let this_ty = |specialized: bool| {
+            let program = lower(src, specialized);
+            let f = &program.functions[method_idx(&program, "C", "m")];
+            f.locals[f.params[0].0 as usize].ty.clone()
+        };
+        assert_eq!(this_ty(true), this_ty(false));
+    }
+
+    // ---- soundness gates: these must stay `Any` ----
+
+    #[test]
+    fn mixed_argument_kinds_demote() {
+        let src = "function h(x) { return x }\nh(1)\nh(1.5)\nreturn 0\n";
+        assert_eq!(param_ty(src, "h", 0), Type::Any);
+    }
+
+    #[test]
+    fn a_function_whose_value_escapes_is_never_specialized() {
+        // `var r = k` can be invoked later with arguments no call site shows.
+        let src = "function k(x) { return x }\nvar r = k\nk(1)\nreturn 0\n";
+        assert_eq!(param_ty(src, "k", 0), Type::Any);
+    }
+
+    #[test]
+    fn a_function_with_no_direct_call_site_is_demoted() {
+        // No evidence at all is not evidence of `integer`.
+        let src = "function d(x) { return x }\nreturn 0\n";
+        assert_eq!(param_ty(src, "d", 0), Type::Any);
+    }
+
+    #[test]
+    fn a_by_ref_param_is_not_eligible() {
+        // A `@x` param is passed as a CELL, not an unboxed scalar. Read-only on
+        // purpose: a *reassigned* param is already rejected by
+        // `param_value_only`, so this shape is the one where `is_by_ref` is the
+        // distinguishing property. (`eligible_param`'s `!d.is_by_ref` is belt
+        // and braces here — the cell-typed argument also fails the call-site
+        // kind check — so this pins the OUTCOME, not one particular gate.)
+        let src = "function m(@x) { return x * 2 }\nvar a = 3\nreturn m(a)\n";
+        assert_eq!(param_ty(src, "m", 0), Type::Any);
+    }
+
+    #[test]
+    fn a_callee_filling_a_non_const_default_is_not_specialized() {
+        // `p` uses the `has_defaults` ABI, which `function_sig` shapes
+        // differently — its params stay boxed.
+        let src = "function q(y) { return y }\nfunction p(x, y = q(1)) { return x }\nreturn p(1)\n";
+        assert_eq!(param_ty(src, "p", 0), Type::Any);
+    }
+
+    #[test]
+    fn a_method_read_as_a_value_demotes_its_params() {
+        // `var f = c.m` yields a bound method callable later with unseen args,
+        // so the visible `c.m(1)` site is not the whole picture. Both the field
+        // form and the constant-index form must gate it.
+        for src in [
+            "class C { m(x) { return x } }\nvar c = new C()\nvar f = c.m\nreturn c.m(1)\n",
+            "class C { m(x) { return x } }\nvar c = new C()\nvar f = c['m']\nreturn c.m(1)\n",
+        ] {
+            assert_eq!(method_param_ty(src, "C", "m", 0), Type::Any, "{src}");
+        }
+    }
+
+    #[test]
+    fn a_method_name_shadowed_by_a_field_demotes() {
+        // A `Rvalue::Field(_, "m")` site can't be told apart from a method value
+        // by name alone, so a field named `m` anywhere gates the method `m`.
+        let src =
+            "class C { m(x) { return x } }\nclass D { any m }\nvar c = new C()\nreturn c.m(1)\n";
+        assert_eq!(method_param_ty(src, "C", "m", 0), Type::Any);
+    }
+
+    #[test]
+    fn a_method_of_an_extended_class_demotes() {
+        // A subclass may override `m`, so `c.m(1)` need not reach this body.
+        let src = "class C { m(x) { return x } }\nclass D extends C { }\nvar c = new C()\nreturn c.m(1)\n";
+        assert_eq!(method_param_ty(src, "C", "m", 0), Type::Any);
+    }
+
+    #[test]
+    fn a_method_name_shared_by_two_classes_demotes() {
+        // `Callee::Method` dispatches by NAME: with two `m`s, a call site can't
+        // be attributed to either one.
+        let src = "class C { m(x) { return x } }\nclass D { m(x) { return x } }\nvar c = new C()\nvar d = new D()\nreturn c.m(1) + d.m(2)\n";
+        assert_eq!(method_param_ty(src, "C", "m", 0), Type::Any);
+        assert_eq!(method_param_ty(src, "D", "m", 0), Type::Any);
+    }
+}

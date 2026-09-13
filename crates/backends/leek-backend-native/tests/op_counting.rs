@@ -310,3 +310,29 @@ fn op_budget_stops_loops_whose_ops_are_charged_in_callees() {
         );
     }
 }
+
+#[test]
+fn op_budget_stops_a_lambda_called_by_a_higher_order_builtin() {
+    // The loop that must stop lives in a lambda the *runtime* calls, not in code
+    // the backend emitted a back-edge check for: `arrayMap` & co. drive the
+    // callback from `leek-runtime`, and the abort has to travel back out through
+    // `dispatch_call_value`'s `aborting()` check for the remaining elements.
+    //
+    // NOT the issue's literal `arrayMap(range(0, 1e7), x -> x)`: `range` is
+    // charged by its RESULT LENGTH before dispatch (`charge_builtin_ops`), so
+    // that form trips inside `range` and never enters the lambda — it would test
+    // the opposite of what it looks like. 5000 elements is under the budget, so
+    // the trip happens in the lambda's own inner loop.
+    for src in [
+        "var r = arrayMap(range(0, 5000), x -> { var s = 0 for (var i = 0; i < 1000; i++) { s = s + i } return s }) return count(r)",
+        "var r = arrayFilter(range(0, 5000), x -> { var s = 0 for (var i = 0; i < 1000; i++) { s = s + i } return s > 0 }) return count(r)",
+        "arrayIter(range(0, 5000), x -> { var s = 0 for (var i = 0; i < 1000; i++) { s = s + i } }) return 0",
+        "var r = arrayFoldLeft(range(0, 5000), (a, x) -> { var s = a for (var i = 0; i < 1000; i++) { s = s + i } return s }, 0) return r",
+    ] {
+        assert_eq!(
+            budget_error_within_deadline(src),
+            "TOO_MUCH_OPERATIONS",
+            "{src}"
+        );
+    }
+}

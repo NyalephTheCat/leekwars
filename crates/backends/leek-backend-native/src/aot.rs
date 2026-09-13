@@ -29,6 +29,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use leek_hir::HirFile;
 use leek_runtime::Value;
@@ -201,7 +202,16 @@ pub fn compile_to_executable(
 
     let ret = main_ret(hir, opts)?;
 
-    let tmp = std::env::temp_dir().join(format!("leek-aot-{}", std::process::id()));
+    // Scratch dir for the object + generated C. Unique per *compile*, not just
+    // per process: it is wiped on entry and exit, so a process that compiles two
+    // programs (a test binary, `miku` building several AIs) would otherwise have
+    // one compile delete the other's `program.o` mid-link.
+    static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "leek-aot-{}-{}",
+        std::process::id(),
+        SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&tmp);
     mkdirs(&tmp)?;
 
