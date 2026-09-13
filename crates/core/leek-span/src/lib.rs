@@ -7,6 +7,8 @@
 use std::num::NonZeroU32;
 use std::ops::Range;
 
+pub mod pragma;
+
 /// Define a `u32`-backed index newtype with the workspace's standard
 /// derives (`Copy`/`Eq`/`Hash`/`Ord`, plus salsa's `Update` when the
 /// invoking crate's `salsa` feature is on) and, optionally, a `Display`

@@ -88,14 +88,13 @@ impl Project {
     ) -> Result<(SourceInput, String)> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let version_byte = index::peek_version_byte(&text, self.index.default_version_byte);
-        let strict = index::peek_strict_flag(&text) || self.index.default_strict;
+        let lang = self.index.language_settings(&text);
         Ok((
             SourceInput {
                 source: source_id,
                 text: text.clone(),
-                version_byte,
-                strict,
+                version_byte: lang.version,
+                strict: lang.strict,
             },
             text,
         ))
