@@ -192,9 +192,17 @@ impl Checker {
     /// Index access `base[i]`: element type for arrays, value type for
     /// maps, a one-char string for string indexing.
     pub(crate) fn infer_index(&mut self, idx: &leek_parser::ast::IndexExpr) -> Type {
-        let base_ty = idx.base().map_or(Type::Any, |b| self.infer_expr(&b));
+        let base = idx.base();
+        let base_ty = base.as_ref().map_or(Type::Any, |b| self.infer_expr(b));
         if let Some(i) = idx.index() {
             self.infer_expr(&i);
+        }
+        // Upstream types `m[k]` as `V | null`, and indexing a maybe-null
+        // value keeps the `null` member. Tracked beside the recorded
+        // type (see `Checker::maybe_null_indexes`).
+        if matches!(base_ty, Type::Map(..)) || base.is_some_and(|b| self.expr_may_be_null_index(&b))
+        {
+            self.maybe_null_indexes.insert(idx.syntax().text_range());
         }
         match base_ty {
             Type::Array(el) => *el,
@@ -215,6 +223,19 @@ impl Checker {
             Type::Map(_, v) => *v,
             Type::String => Type::String,
             _ => Type::Any,
+        }
+    }
+
+    /// Whether `e` (through parentheses) is an index expression already
+    /// recorded in [`Checker::maybe_null_indexes`]. Only meaningful once
+    /// `e` has been inferred.
+    pub(crate) fn expr_may_be_null_index(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Paren(p) => p
+                .inner()
+                .is_some_and(|inner| self.expr_may_be_null_index(&inner)),
+            Expr::Index(i) => self.maybe_null_indexes.contains(&i.syntax().text_range()),
+            _ => false,
         }
     }
 

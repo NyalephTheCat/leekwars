@@ -171,7 +171,11 @@ impl Checker {
     }
 
     pub(crate) fn check_return(&mut self, r: &ReturnStmt) {
-        let value_ty = r.value().map(|v| self.infer_expr(&v));
+        let value = r.value();
+        let value_ty = value.as_ref().map(|v| self.infer_expr(v));
+        let value_may_be_null = value
+            .as_ref()
+            .is_some_and(|v| self.expr_may_be_null_index(v));
         if !self.opts.strict {
             return;
         }
@@ -213,7 +217,7 @@ impl Checker {
                 );
             }
             (Some(actual), _) => {
-                if !self.types_assignable(&actual, &expected) {
+                if !self.return_value_may_fit(&actual, value_may_be_null, &expected) {
                     self.err(
                         codes::INCOMPATIBLE_TYPE,
                         span,
@@ -225,6 +229,31 @@ impl Checker {
                     );
                 }
             }
+        }
+    }
+
+    /// Whether a returned value could fit the declared return type,
+    /// following upstream's `LeekReturnInstruction`: only an
+    /// `INCOMPATIBLE` cast is an error, and a value whose type has
+    /// several members is incompatible only when *no* member fits
+    /// (otherwise it is an unsafe downcast, a warning upstream).
+    /// `may_be_null` adds the `null` member upstream gives map access
+    /// (see [`Checker::maybe_null_indexes`]); `null` fits only a
+    /// declared type that admits it.
+    fn return_value_may_fit(&self, actual: &Type, may_be_null: bool, expected: &Type) -> bool {
+        if self.types_assignable(actual, expected) {
+            return true;
+        }
+        let null_member = may_be_null || matches!(actual, Type::Null | Type::Nullable(_));
+        if null_member && matches!(expected, Type::Null | Type::Nullable(_) | Type::Any) {
+            return true;
+        }
+        match actual {
+            Type::Nullable(inner) => self.return_value_may_fit(inner, false, expected),
+            Type::Union(members) => members
+                .iter()
+                .any(|m| self.return_value_may_fit(m, false, expected)),
+            _ => false,
         }
     }
 

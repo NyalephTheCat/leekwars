@@ -45,6 +45,14 @@ pub(crate) struct Checker {
     /// any of these vars is `ASSIGNMENT_INCOMPATIBLE_TYPE` — upstream
     /// infers the literal's element type as "nothing" and rejects.
     pub(crate) empty_collection_vars: std::collections::HashSet<String>,
+    /// Ranges of index expressions whose value may be `null` under
+    /// upstream's typing, even though the recorded type is non-null.
+    /// Upstream types a map access `m[k]` as `V | null`, and indexing a
+    /// maybe-null value keeps the `null` member (`m[k][i]` →
+    /// `E | null`). The recorded type stays `V` because HIR/MIR read
+    /// it; only diagnostics that follow upstream's cast rules (a
+    /// `return` whose `null` member fits) consult this set.
+    pub(crate) maybe_null_indexes: std::collections::HashSet<rowan::TextRange>,
     /// Per top-level user function: declared parameter types
     /// (`Type::Any` when no annotation). Indexed by source order.
     pub(crate) user_fn_param_types: HashMap<String, Vec<Type>>,
@@ -144,6 +152,7 @@ impl Checker {
             version,
             return_types: Vec::new(),
             empty_collection_vars: std::collections::HashSet::new(),
+            maybe_null_indexes: std::collections::HashSet::new(),
             user_fn_param_types: HashMap::new(),
             user_fn_return_type: HashMap::new(),
             user_fn_generic: HashMap::new(),

@@ -1075,4 +1075,50 @@ mod index_tests {
             Type::Array(Box::new(Type::Real))
         );
     }
+
+    fn incompatible_returns(r: &TypeCheckResult) -> Vec<&Diagnostic> {
+        r.diagnostics
+            .iter()
+            .filter(|d| d.code.name() == codes::INCOMPATIBLE_TYPE.name())
+            .collect()
+    }
+
+    #[test]
+    fn strict_return_of_nested_map_index_into_nullable_is_not_an_error() {
+        // #368 (upstream `testMap_array_access_type_mismatch`, strict):
+        // upstream types `cache[key]` as `Array<integer> | null`, so
+        // `cache[key][idx]` is `integer | null`. Its `null` member fits
+        // `Array<integer>?`, making the return an unsafe downcast (a
+        // warning), not INCOMPATIBLE_TYPE.
+        let text = "global Map<string, Array<integer>> cache = [:] \
+            function findBest() -> Array<integer> { return [1, 2, 3] } \
+            function getFromCache(string key, integer idx) -> Array<integer>? { \
+            if (key == '') return null cache[key] = findBest() return cache[key][idx] } \
+            return getFromCache('k', 0)";
+        let r = run_strict(text);
+        assert!(
+            incompatible_returns(&r).is_empty(),
+            "no INCOMPATIBLE_TYPE expected, got {:?}",
+            r.diagnostics
+        );
+        // Parenthesised and direct map access behave the same.
+        let text = "global Map<string, Array<integer>> m = [:] \
+            function f(string k) -> Array<integer>? { return (m[k])[0] }";
+        assert!(incompatible_returns(&run_strict(text)).is_empty());
+    }
+
+    #[test]
+    fn strict_return_keeps_incompatible_type_when_no_member_fits() {
+        // `null` only rescues a declared type that admits it: upstream's
+        // `integer` rejects both `string` and `null`.
+        let text = "global Map<string, string> m = [:] \
+            function f(string k) -> integer { return m[k] }";
+        assert_eq!(incompatible_returns(&run_strict(text)).len(), 1);
+        // Strict array access is non-null upstream, so the element must
+        // fit on its own.
+        let text = "function f(Array<integer> a) -> Array<integer>? { return a[0] }";
+        assert_eq!(incompatible_returns(&run_strict(text)).len(), 1);
+        let text = "function f() -> integer { return 'hello' }";
+        assert_eq!(incompatible_returns(&run_strict(text)).len(), 1);
+    }
 }
