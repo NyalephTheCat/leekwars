@@ -12,12 +12,15 @@
 #     build script prints an informational `cargo:warning` about extracted
 #     upstream cases; that is not a lint and is tolerated.)
 #   * leek-backend-java's parity tests never write into tests/snapshots/ on a
-#     plain run: the per-fixture .diff files and SUMMARY.txt are compared
-#     against their tracked copies, and the four run reports (OPS_DRIFT.txt,
-#     JVM_PARITY.txt, CORPUS_SUMMARY.txt, NATIVE_OPS_DRIFT.txt) go to target/
-#     because the JVM-side op counts drift run-to-run. Set UPDATE_SNAPSHOTS=1
-#     to accept new output into tests/snapshots/ on purpose; the gate asserts
-#     afterwards that a plain test run left no snapshot churn behind.
+#     plain run: every report there — the per-fixture .diff files, SUMMARY.txt
+#     and the four run reports (OPS_DRIFT.txt, JVM_PARITY.txt,
+#     CORPUS_SUMMARY.txt, NATIVE_OPS_DRIFT.txt) — is compared against its
+#     tracked copy, and the fresh output goes to target/. Op counts are made
+#     reproducible by leaving RNG-driven programs out of the exact comparison.
+#     Set UPDATE_SNAPSHOTS=1 to accept new output into tests/snapshots/ on
+#     purpose; the gate asserts afterwards that a plain test run left no
+#     snapshot churn behind. The reports are pinned on Linux (this script's
+#     platform); elsewhere they are skipped unless LEEK_REQUIRE_SNAPSHOTS=1.
 #   * The JVM parity ratchets only run where tools/java-emitter/build.sh has
 #     produced leekscript-emitter.jar. Where it exists this script exports
 #     LEEK_REQUIRE_JVM=1 so a broken harness fails instead of skipping.

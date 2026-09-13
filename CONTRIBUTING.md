@@ -163,18 +163,28 @@ than one sprawling change.
   behind `tools/check.sh --full`; it needs the submodules checked out.
 - **Java-backend snapshots:** nothing under
   `crates/backends/leek-backend-java/tests/snapshots/` is written by a plain
-  test run. The per-fixture `.diff` files and `SUMMARY.txt` are goldens and are
-  *compared*; the four run reports (`OPS_DRIFT.txt`, `JVM_PARITY.txt`,
-  `CORPUS_SUMMARY.txt`, `NATIVE_OPS_DRIFT.txt`) are statistics and go to
-  `target/`. Accept new output on purpose with `UPDATE_SNAPSHOTS=1 cargo test
+  test run. Every report there — the per-fixture `.diff` files, `SUMMARY.txt`
+  and the four run reports (`OPS_DRIFT.txt`, `JVM_PARITY.txt`,
+  `CORPUS_SUMMARY.txt`, `NATIVE_OPS_DRIFT.txt`) — is *compared* against its
+  tracked copy, and each run writes its fresh output under `target/`. Accept
+  new output on purpose with `UPDATE_SNAPSHOTS=1 cargo test
   -p leek-backend-java`, and commit it only when that is the point of the
   change. `tools/check.sh` fails if a run touches the directory without the
-  flag.
+  flag. Programs that call `rand`/`randInt`/`randFloat`/`randReal` are left out
+  of the exact op-count comparison, because their reference counts come from a
+  single unseeded JVM run.
+- **Snapshots are pinned on Linux:** the reports include values from native
+  math builtins, which use the platform libm, and other libms round
+  differently (RT-N1). On macOS/Windows each report comparison prints a
+  `SKIPPED <report>` line and passes; the value/ops ratio gates still run.
+  Set `LEEK_REQUIRE_SNAPSHOTS=1` to compare anyway. `UPDATE_SNAPSHOTS=1` is
+  ignored off Linux, so regenerate reports on Linux.
 - **JVM parity gates:** the Java-backend cross-check against the upstream
-  harness skips (with a `SKIPPED` line) when `leekscript-emitter.jar` or the
-  captured `snapshot.tsv` is missing, so the suite runs without a JDK. Set
+  harness skips (with a `SKIPPED` line) when `leekscript-emitter.jar` is
+  missing or the JVM cannot be spawned, so the suite runs without a JDK. Set
   `LEEK_REQUIRE_JVM=1` to turn those skips into failures; `tools/check.sh`
-  does it for you when the jar is built. See
+  does it for you when the jar is built. The captured `snapshot.tsv` is
+  tracked, so a missing one is a failure, not a skip. See
   [`docs/java-backend.md`](docs/java-backend.md) §8.
 - **Fuzzing:** [`fuzz/`](fuzz/) is a standalone nightly cargo-fuzz workspace
   (excluded from the stable build) — see its README to run a target.
