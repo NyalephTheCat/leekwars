@@ -44,6 +44,17 @@ All server-side logs go to **stderr** (VS Code shows them in the
 `didOpen` / `didClose` / `publishDiagnostics` lines, which stay off by
 default so the output channel isn't one line per keystroke.
 
+## Robustness
+
+Request handlers are panic-guarded: analysis runs over buffers that are
+half-typed by definition, so a panic anywhere in parse/resolve/types/HIR/lint
+fails that one request (the client sees an empty result) instead of unwinding
+out of the server and killing the process. That includes the diagnostic paths
+— the push on every keystroke, `textDocument/diagnostic`, and
+`workspace/diagnostic`, where each file is guarded on its own so one bad
+buffer doesn't blank the report for the whole workspace. Set `LEEK_LSP_LOG=trace`
+to see which handler tripped the guard.
+
 ## Host libraries
 
 Clients can pass `initializationOptions.libraries` (e.g. `["leekwars"]`, or
