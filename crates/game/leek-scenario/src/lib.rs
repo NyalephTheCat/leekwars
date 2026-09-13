@@ -29,8 +29,8 @@ pub use load::{
     compile_ai_source,
 };
 pub use schema::{
-    Bracket, EntitySpec, FarmerSpec, MapSpec, RandomSpec, RandomTarget, Scenario, ScenarioPatch,
-    StatKind, TeamSpec, TestMode, TestingSpec,
+    Bracket, EntitySpec, EntrantScope, FarmerSpec, MapSpec, RandomSpec, RandomTarget, Scenario,
+    ScenarioPatch, StatKind, TeamSpec, TestMode, TestingSpec,
 };
 pub use testing::{
     CellResult, FightResult, MatrixAxes, Standing, TestReport, TournamentSpec, run_matrix,

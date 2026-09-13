@@ -6,11 +6,12 @@
 //!   producing a leaderboard.
 //! - [`run_random`] — randomized point-buy build fuzzing (see [`build_gen`]).
 //!
-//! All classify each fight relative to a *hero team* (the AI under test) and
-//! return a [`TestReport`]. One bad cell never sinks the run: an AI error
-//! inside a fight is contained by the generator and listed on the cell
-//! ([`CellResult::ai_errors`]), and a fight that can't even be set up (an AI
-//! that doesn't compile, say) becomes a [`FightResult::Error`] cell.
+//! All return a [`TestReport`]. [`run_matrix`] and [`run_random`] classify each
+//! fight relative to a *hero team* (the AI under test); a tournament has no
+//! hero and reports a leaderboard instead. One bad cell never sinks the run:
+//! an AI error inside a fight is contained by the generator and listed on the
+//! cell ([`CellResult::ai_errors`]), and a fight that can't even be set up (an
+//! AI that doesn't compile, say) becomes a [`FightResult::Error`] cell.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use leek_hir::HirFile;
 
 use crate::build_gen;
 use crate::load::{build_fight_with_cache, compile_ai};
-use crate::schema::{RandomSpec, RandomTarget, Scenario};
+use crate::schema::{EntrantScope, RandomSpec, RandomTarget, Scenario};
 
 /// Outcome of a single fight relative to the hero team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,14 +213,27 @@ fn team_ids(scn: &Scenario) -> Vec<i64> {
     teams
 }
 
-/// Point the lead (first) entity of `team` at a different AI file.
-fn set_team_lead_ai(scn: &mut Scenario, team: i64, ai: &Path) {
-    if let Some(e) = scn
+/// Point the entities of `team` selected by `scope` at a different AI file.
+///
+/// [`EntrantScope::Lead`] touches only the first-listed entity of the team —
+/// the rest keep the AI the scenario gave them, so a team scenario still runs
+/// its own supporting AIs; [`EntrantScope::Team`] hands the whole team over.
+fn set_team_ai(scn: &mut Scenario, team: i64, ai: &Path, scope: EntrantScope) {
+    let mut members = scn
         .entities
         .iter_mut()
-        .find(|e| e.team.unwrap_or(0) == team)
-    {
-        e.ai = Some(ai.to_path_buf());
+        .filter(|e| e.team.unwrap_or(0) == team);
+    match scope {
+        EntrantScope::Lead => {
+            if let Some(e) = members.next() {
+                e.ai = Some(ai.to_path_buf());
+            }
+        }
+        EntrantScope::Team => {
+            for e in members {
+                e.ai = Some(ai.to_path_buf());
+            }
+        }
     }
 }
 
@@ -280,7 +294,7 @@ pub fn run_matrix(
                 }
                 scn.seed = Some(seed);
                 if let (Some(opp_path), Some(team)) = (opp, opp_team) {
-                    set_team_lead_ai(&mut scn, team, opp_path);
+                    set_team_ai(&mut scn, team, opp_path, EntrantScope::Lead);
                 }
                 let label = format!(
                     "seed={seed} opp={} profile={}",
@@ -303,8 +317,9 @@ pub fn run_matrix(
 // Tournament
 // ---------------------------------------------------------------------------
 
-/// Tournament configuration. Each entrant is an AI file; it is dropped into the
-/// hero team's lead slot and faces the others.
+/// Tournament configuration. Each entrant is an AI file; it takes over a team
+/// of the base scenario — its lead entity only, or all of it, per
+/// [`TournamentSpec::scope`] — and faces the others.
 #[derive(Debug, Clone)]
 pub struct TournamentSpec {
     pub entrants: Vec<PathBuf>,
@@ -313,16 +328,24 @@ pub struct TournamentSpec {
     /// entrants on either side, so a pairing is `2 × seeds` games; the side
     /// winning the most of them takes the match.
     pub seeds: Vec<u64>,
+    /// How much of a team an entrant takes over: only the lead entity
+    /// (default) or every member.
+    pub scope: EntrantScope,
 }
 
 /// Run a tournament among `entrants`, returning a leaderboard in `standings`.
 /// A game that can't be run is reported as a [`FightResult::Error`] cell and
 /// counts for neither side.
 ///
+/// There is no hero here: each cell is classified relative to the side the
+/// first-named entrant of that game played, and the standings — not the
+/// report's win/loss totals — are the result.
+///
 /// Every seed of a pairing is played twice, with the entrants swapping team
 /// slots between the two legs, so no entrant collects whatever edge a slot
-/// carries (#39). A single-elimination match that ends level is decided by
-/// [`tie_break_favors_a`].
+/// carries (#39). A single-elimination match that ends level is still scored
+/// as a draw for both entrants; one of them has to advance, and
+/// [`tie_break_favors_a`] picks which.
 ///
 /// # Errors
 /// Needs at least two entrants and two teams in the base scenario.
@@ -330,7 +353,6 @@ pub fn run_tournament(
     base: &Scenario,
     base_dir: &Path,
     spec: &TournamentSpec,
-    _hero_team: i64,
 ) -> Result<TestReport> {
     if spec.entrants.len() < 2 {
         bail!("a tournament needs at least two entrants");
@@ -378,8 +400,8 @@ pub fn run_tournament(
                 };
                 let mut scn = base.clone();
                 scn.seed = Some(seed);
-                set_team_lead_ai(&mut scn, a_team, a);
-                set_team_lead_ai(&mut scn, b_team, b);
+                set_team_ai(&mut scn, a_team, a, spec.scope);
+                set_team_ai(&mut scn, b_team, b, spec.scope);
                 let sides = if swapped { "swapped" } else { "as-listed" };
                 let label = format!(
                     "{} vs {} @seed={seed} sides={sides}",
@@ -431,18 +453,28 @@ pub fn run_tournament(
                     }
                     let (a, b) = (&pair[0], &pair[1]);
                     let (aw, bw, _dw) = play_match(a, b);
+                    let (la, lb) = (label_of(a), label_of(b));
                     // Someone has to advance; a level match is decided by a
                     // coin that depends on the pair, not on who is listed
                     // first (both legs of every seed were played, so ties are
-                    // common).
+                    // common). The bracket needs that coin, the leaderboard
+                    // doesn't: a level match is a draw for both entrants, not
+                    // a win the tie-break invented.
                     let a_advances = match aw.cmp(&bw) {
-                        std::cmp::Ordering::Greater => true,
-                        std::cmp::Ordering::Less => false,
-                        std::cmp::Ordering::Equal => tie_break_favors_a(a, b, &seeds),
+                        std::cmp::Ordering::Greater => {
+                            award(&mut standings, &la, &lb);
+                            true
+                        }
+                        std::cmp::Ordering::Less => {
+                            award(&mut standings, &lb, &la);
+                            false
+                        }
+                        std::cmp::Ordering::Equal => {
+                            draw(&mut standings, &la, &lb);
+                            tie_break_favors_a(a, b, &seeds)
+                        }
                     };
-                    let (winner, loser) = if a_advances { (a, b) } else { (b, a) };
-                    award(&mut standings, &label_of(winner), &label_of(loser));
-                    next.push(winner.clone());
+                    next.push(if a_advances { a.clone() } else { b.clone() });
                 }
                 round = next;
             }
@@ -630,8 +662,9 @@ mod tests {
             entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
             bracket: crate::schema::Bracket::RoundRobin,
             seeds: vec![1, 2],
+            scope: EntrantScope::Lead,
         };
-        let report = run_tournament(&arena(), &dir, &spec, 0).expect("the tournament runs");
+        let report = run_tournament(&arena(), &dir, &spec).expect("the tournament runs");
         let _ = std::fs::remove_dir_all(&dir);
 
         // Two seeds × two legs, and each seed shows up on both sides.
@@ -648,6 +681,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Regression (#65): a level single-elimination match used to be recorded
+    /// as a win for whoever advanced. It advances someone — the bracket needs
+    /// it — but the leaderboard says draw.
+    #[test]
+    fn single_elim_records_a_level_match_as_a_draw() {
+        let dir = std::env::temp_dir().join(format!("leek-tournament-tie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("a.leek"), "return 0;\n").expect("write AI");
+        std::fs::write(dir.join("b.leek"), "return 1;\n").expect("write AI");
+
+        let spec = TournamentSpec {
+            entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
+            bracket: crate::schema::Bracket::SingleElim,
+            seeds: vec![1],
+            scope: EntrantScope::Lead,
+        };
+        let report = run_tournament(&arena(), &dir, &spec).expect("the tournament runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Every game of the arena is an idle draw, so the match is level.
+        assert!(report.cells.iter().all(|c| c.result == FightResult::Draw));
+        assert_eq!(report.standings.len(), 2);
+        for s in &report.standings {
+            assert_eq!(
+                (s.wins, s.losses, s.draws, s.points),
+                (0, 0, 1, 1),
+                "{} should be level, not a tie-break win",
+                s.label
+            );
+        }
+    }
+
+    /// Regression (#65): an entrant took over its team's lead entity only,
+    /// with no way to ask for the whole team. `scope = Team` hands it all over.
+    #[test]
+    fn entrant_scope_team_replaces_every_member_of_the_team() {
+        let dir =
+            std::env::temp_dir().join(format!("leek-tournament-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("a.leek"), "return 0;\n").expect("write AI");
+        std::fs::write(dir.join("b.leek"), "return 1;\n").expect("write AI");
+        // The support leek of team 0 can't compile, so a game only runs when
+        // the entrant's AI has replaced it too.
+        std::fs::write(dir.join("broken.leek"), "return (;\n").expect("write AI");
+
+        let base = Scenario::from_toml_str(
+            r#"
+            max_turns = 1
+            [map]
+            width = 5
+            height = 5
+            [[entities]]
+            id = 1
+            team = 0
+            cell = 0
+            [[entities]]
+            id = 3
+            team = 0
+            cell = 1
+            ai = "broken.leek"
+            [[entities]]
+            id = 2
+            team = 1
+            cell = 24
+            "#,
+        )
+        .expect("parse arena");
+
+        let mut spec = TournamentSpec {
+            entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
+            bracket: crate::schema::Bracket::RoundRobin,
+            seeds: vec![1],
+            scope: EntrantScope::Lead,
+        };
+        let lead = run_tournament(&base, &dir, &spec).expect("the tournament runs");
+        spec.scope = EntrantScope::Team;
+        let team = run_tournament(&base, &dir, &spec).expect("the tournament runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            (lead.errors, lead.draws),
+            (2, 0),
+            "lead leaves the support AI in place"
+        );
+        assert_eq!((team.errors, team.draws), (0, 2), "team scope replaces it");
     }
 
     /// A level single-elimination match is decided by the pairing, not by the

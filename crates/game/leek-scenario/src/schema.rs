@@ -172,6 +172,9 @@ pub struct TestingSpec {
     pub entrants: Vec<PathBuf>,
     #[serde(default)]
     pub bracket: Option<Bracket>,
+    /// Which entities of a team an entrant's AI replaces.
+    #[serde(default)]
+    pub entrant_scope: Option<EntrantScope>,
     #[serde(default)]
     pub games: Option<u32>,
     #[serde(default)]
@@ -195,6 +198,18 @@ pub enum Bracket {
     #[default]
     RoundRobin,
     SingleElim,
+}
+
+/// Which entities of a team an entrant's AI takes over in a tournament.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntrantScope {
+    /// Only the lead (first-listed) entity of the team; the rest of the team
+    /// keeps whatever AI the base scenario gave it.
+    #[default]
+    Lead,
+    /// Every entity of the team.
+    Team,
 }
 
 /// A combat stat eligible for randomized point-buy.

@@ -405,6 +405,10 @@ pub struct Fight {
     /// Tournament format.
     #[arg(long, value_enum, default_value_t = BracketArg::RoundRobin)]
     pub bracket: BracketArg,
+    /// Whether an entrant takes over its team's lead entity only (default) or
+    /// every member of the team. Tournament mode.
+    #[arg(long, value_enum)]
+    pub entrant_scope: Option<EntrantScopeArg>,
     /// Seeds played per pairing; each is played from both sides. Tournament mode.
     #[arg(long, value_delimiter = ',')]
     pub games: Vec<u64>,
@@ -442,6 +446,12 @@ pub enum FightFormat {
 pub enum BracketArg {
     RoundRobin,
     SingleElim,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EntrantScopeArg {
+    Lead,
+    Team,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

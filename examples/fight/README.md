@@ -91,6 +91,11 @@ miku fight duel.toml --mode tournament \
     --bracket round-robin --games 1,2
 ```
 
+Each entrant takes over the lead entity of a team; `--entrant-scope team` gives
+it every member of the team instead. A single-elimination match that ends level
+counts as a draw for both entrants — one still advances, on a coin drawn from
+the pairing.
+
 ### Randomized point-buy builds
 
 ```sh

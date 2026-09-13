@@ -117,8 +117,16 @@ Turn order is drawn from the fight's seed, like the official generator's
 `StartOrder` — not from the entity ids — so no side opens by construction. In
 a tournament every `--games` seed is played twice, the entrants swapping team
 slots between the legs, so neither entrant keeps whatever edge a slot carries;
-a single-elimination match that ends level is decided by a coin drawn from the
-pairing rather than by bracket position.
+a single-elimination match that ends level is scored as a draw for both
+entrants, and which of them advances is a coin drawn from the pairing rather
+than the bracket position.
+
+An entrant takes over the **lead (first-listed) entity** of a team; the rest of
+the team keeps the AI the scenario gave it. `--entrant-scope team` (or
+`entrant_scope = "team"` in the scenario's `[testing]` table) hands the whole
+team to the entrant instead. A tournament has no hero team: the leaderboard is
+the result, not the report's win/loss totals, which are counted relative to
+whichever entrant was listed first in each game.
 
 Fights work outside a project too: with no `Miku.toml` in scope the defaults
 apply, so `--report` writes under `build/fight-reports/`.

@@ -8,10 +8,11 @@ use anyhow::{Context, Result, anyhow};
 use leek_manifest::FightTable;
 use leek_project::Project;
 use leek_scenario::{
-    Bracket, MatrixAxes, RandomSpec, RandomTarget, Scenario, StatKind, TestReport, TournamentSpec,
+    Bracket, EntrantScope, MatrixAxes, RandomSpec, RandomTarget, Scenario, StatKind, TestReport,
+    TournamentSpec,
 };
 
-use crate::cli::{BracketArg, Fight, FightFormat, FightMode, RandomTargetArg};
+use crate::cli::{BracketArg, EntrantScopeArg, Fight, FightFormat, FightMode, RandomTargetArg};
 
 pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     // A fight always needs the leek-wars game builtins resolvable at compile
@@ -79,7 +80,7 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
             Ok(verdict(&report))
         }
         FightMode::Tournament => {
-            let report = run_tournament_mode(args, &scn, &base_dir, hero_team)?;
+            let report = run_tournament_mode(args, &scn, &base_dir)?;
             render_report(&report, args.format);
             write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
             Ok(ExitCode::SUCCESS)
@@ -228,12 +229,9 @@ fn run_matrix_mode(
     leek_scenario::run_matrix(scn, base_dir, &axes, hero_team)
 }
 
-fn run_tournament_mode(
-    args: &Fight,
-    scn: &Scenario,
-    base_dir: &Path,
-    hero_team: i64,
-) -> Result<TestReport> {
+/// A tournament has no hero: every entrant is under test, and the leaderboard
+/// — not the report's win/loss totals — is the result.
+fn run_tournament_mode(args: &Fight, scn: &Scenario, base_dir: &Path) -> Result<TestReport> {
     let testing = scn.testing.clone().unwrap_or_default();
     let entrants = pick_vec(&args.entrant, &testing.entrants);
     let spec = TournamentSpec {
@@ -243,8 +241,16 @@ fn run_tournament_mode(
             BracketArg::SingleElim => Bracket::SingleElim,
         },
         seeds: pick_vec(&args.games, &testing.seeds),
+        scope: args
+            .entrant_scope
+            .map(|s| match s {
+                EntrantScopeArg::Lead => EntrantScope::Lead,
+                EntrantScopeArg::Team => EntrantScope::Team,
+            })
+            .or(testing.entrant_scope)
+            .unwrap_or_default(),
     };
-    leek_scenario::run_tournament(scn, base_dir, &spec, hero_team)
+    leek_scenario::run_tournament(scn, base_dir, &spec)
 }
 
 fn run_random_mode(
