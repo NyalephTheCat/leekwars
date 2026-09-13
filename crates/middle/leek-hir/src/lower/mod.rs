@@ -200,6 +200,13 @@ pub fn lower_files(
             }
         }
     }
+    // Then every file's globals, in the same order. Kept a separate
+    // sub-loop so `items` stays [functions, classes, enums, globals] —
+    // that order drives the LeekScript backend's emission.
+    for unit in &units {
+        lo.enter_unit(unit);
+        lo.predeclare_globals(unit.ast);
+    }
 
     // Pass 2: lower function/class bodies for every file in the
     // same order. Header functions are bodiless, so header units
@@ -350,7 +357,6 @@ pub(crate) struct Scope {
 pub(crate) enum NameKind {
     Function(DefId),
     Class(DefId),
-    #[allow(dead_code)] // globals aren't pre-declared yet
     Global(DefId),
 }
 
@@ -388,6 +394,7 @@ impl Lowerer {
                 self.lower_enum_decl(&child);
             }
         }
+        self.predeclare_globals(file);
         // Second pass — lower bodies (functions / classes) and the
         // main-block statements in source order.
         for child in file.syntax().children() {
@@ -457,6 +464,42 @@ impl Lowerer {
             scope.locals.insert(name.to_string(), id);
         }
         id
+    }
+
+    /// Register every `global` the file declares, before any body is
+    /// lowered, so a use that appears *above* its declaration still
+    /// resolves to `NameRef::Global` (#53).
+    ///
+    /// Without this, a name used before its `global` statement fell through
+    /// [`Self::resolve_name`] to `NameRef::Builtin(name)`; MIR then keyed
+    /// that write to `Place::Global(DefId(0), name)`, which the `DefId`-based
+    /// HIR passes couldn't see. `lower_files` made it unconditional — it
+    /// lowers every body before any main block.
+    ///
+    /// `global` is legal in any statement position, so this walks the whole
+    /// syntax tree: nested blocks, function, method and lambda bodies
+    /// included. Only *direct* `Ident` tokens of a `VarDeclStmt` are
+    /// declarator names — a leading type is a nested `TypeRef` node and an
+    /// initializer is a nested expression node (the same shape
+    /// [`Self::lower_var_decls`] walks). [`Self::declare_global`] is
+    /// idempotent, so the later `VarDecl` lowering reuses this `DefId`.
+    fn predeclare_globals(&mut self, file: &ast::SourceFile) {
+        for node in file.syntax().descendants() {
+            if node.kind() != SyntaxKind::VarDeclStmt {
+                continue;
+            }
+            let tokens = || {
+                node.children_with_tokens()
+                    .filter_map(rowan::NodeOrToken::into_token)
+            };
+            if !tokens().any(|t| t.kind() == SyntaxKind::KwGlobal) {
+                continue;
+            }
+            for t in tokens().filter(|t| t.kind() == SyntaxKind::Ident) {
+                let span = self.span_of_token(&t);
+                self.declare_global(t.text(), span, None);
+            }
+        }
     }
 
     /// Register a `Def::Global` and expose its name via the file's

@@ -389,6 +389,23 @@ fn foreach_over_existing_bindings() {
     );
 }
 
+/// A global a function body writes must never be constant-folded at O1,
+/// whichever side of the `global` statement the writer sits on, and whether
+/// it writes by assignment or by re-declaring the global (#53).
+#[test]
+fn o1_never_folds_a_global_a_body_writes() {
+    for src in [
+        "global G = 1 function f() { G = 2 } f() return G",
+        "function f() { G = 2 } global G = 1 f() return G",
+        "global G = 1 function f() { global G = 2 } f() return G",
+        "function f() { global G = 2 } global G = 1 f() return G",
+        "global G = 1 var f = function() { global G = 2 } f() return G",
+    ] {
+        assert_eq!(jit(src), "2", "O0: {src}");
+        assert_eq!(jit_o1(src), "2", "O1: {src}");
+    }
+}
+
 #[test]
 fn strings() {
     // Literal (top-level strings render quoted, like the interpreter).
