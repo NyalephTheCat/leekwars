@@ -72,7 +72,14 @@ enum Step {
 }
 
 struct Wait {
-    resume: bool,
+    /// True from the moment the debuggee claims a stop until a [`wake`] frees
+    /// it. The claim is taken *before* `on_stop` fires the DAP `stopped`
+    /// event, so a `continue`/step arriving in that window clears the flag
+    /// rather than being overwritten by a later reset — the debuggee then
+    /// sails straight through the park instead of hanging forever.
+    ///
+    /// [`wake`]: NativeDebugSession::wake
+    stopped: bool,
 }
 
 /// One native debug session. Implements [`leek_backend_native::DebugHook`];
@@ -116,7 +123,7 @@ impl NativeDebugSession {
             stop_next: AtomicBool::new(stop_on_entry),
             entry_stop: AtomicBool::new(stop_on_entry),
             step: Mutex::new(Step::None),
-            wait: Mutex::new(Wait { resume: false }),
+            wait: Mutex::new(Wait { stopped: false }),
             cv: Condvar::new(),
             on_stop,
         }
@@ -168,9 +175,13 @@ impl NativeDebugSession {
         (stack.last().map_or(0, |f| f.line), stack.len())
     }
 
+    /// Release the stop the debuggee is currently in — whether it has already
+    /// parked or is still between claiming the stop and parking. A `wake` with
+    /// no stop in flight is a no-op, so a stray `continue` cannot swallow a
+    /// later breakpoint.
     fn wake(&self) {
         let mut wait = self.wait.lock().expect("debug wait lock poisoned");
-        wait.resume = true;
+        wait.stopped = false;
         self.cv.notify_all();
     }
 
@@ -196,11 +207,16 @@ impl NativeDebugSession {
             .collect();
         *self.snapshot.lock().expect("snapshot lock poisoned") = snapshot;
 
+        // Claim the stop before announcing it. The client may answer the
+        // `stopped` event with `continue` (or a step) before this thread
+        // reaches the condvar; that `wake` clears the flag we just set, so the
+        // loop below sees the resume instead of losing it.
+        self.wait.lock().expect("debug wait lock poisoned").stopped = true;
+
         (self.on_stop)(StopInfo { line, reason });
 
         let mut wait = self.wait.lock().expect("debug wait lock poisoned");
-        wait.resume = false;
-        while !wait.resume {
+        while wait.stopped {
             wait = self.cv.wait(wait).expect("debug wait lock poisoned");
         }
     }
@@ -284,5 +300,129 @@ impl NativeDebugSession {
             *step = Step::None;
         }
         reached
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::mpsc;
+    use std::sync::{Arc, OnceLock, Weak};
+    use std::time::Duration;
+
+    use leek_backend_native::DebugHook;
+
+    use super::{NativeDebugSession, StopInfo};
+
+    const SOURCE: &str = "var a = 1;\nvar b = 2;\n";
+
+    /// How long a released debuggee gets to leave `stop` before we call it
+    /// parked. Generous: the assertion only fires on a genuine hang.
+    const RELEASED: Duration = Duration::from_secs(5);
+    /// How long a parked debuggee is watched to confirm it stays parked.
+    const PARKED: Duration = Duration::from_millis(200);
+
+    /// A session that stops on entry and runs `on_stop` with a handle to
+    /// itself, so the callback can answer the stop the way a DAP client does.
+    fn session_with(
+        on_stop: impl Fn(&NativeDebugSession) + Send + Sync + 'static,
+    ) -> Arc<NativeDebugSession> {
+        let slot: Arc<OnceLock<Weak<NativeDebugSession>>> = Arc::new(OnceLock::new());
+        let slot_for_cb = Arc::clone(&slot);
+        let session = Arc::new(NativeDebugSession::new(
+            SOURCE,
+            HashSet::new(),
+            true,
+            Box::new(move |_: StopInfo| {
+                let me = slot_for_cb
+                    .get()
+                    .expect("session slot filled")
+                    .upgrade()
+                    .expect("session alive");
+                on_stop(&me);
+            }),
+        ));
+        assert!(
+            slot.set(Arc::downgrade(&session)).is_ok(),
+            "session slot set once"
+        );
+        session
+    }
+
+    /// Run one safepoint on a worker thread; the receiver fires when the
+    /// debuggee leaves the stop. Driving it off-thread turns a hang into a
+    /// failed assertion instead of a wedged test binary.
+    fn spawn_safepoint(session: &Arc<NativeDebugSession>) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(session);
+        std::thread::spawn(move || {
+            worker.safepoint(0, 0, 0);
+            let _ = tx.send(());
+        });
+        rx
+    }
+
+    #[test]
+    fn resume_racing_the_stopped_event_is_not_lost() {
+        let session = session_with(NativeDebugSession::resume);
+        assert!(
+            spawn_safepoint(&session).recv_timeout(RELEASED).is_ok(),
+            "debuggee stayed parked after a resume that raced the stopped event"
+        );
+    }
+
+    #[test]
+    fn step_racing_the_stopped_event_is_not_lost() {
+        let session = session_with(NativeDebugSession::step_over);
+        assert!(
+            spawn_safepoint(&session).recv_timeout(RELEASED).is_ok(),
+            "debuggee stayed parked after a step that raced the stopped event"
+        );
+    }
+
+    #[test]
+    fn resume_after_the_debuggee_parks_still_releases_it() {
+        let (announced, stopped) = mpsc::channel();
+        let session = session_with(move |_: &NativeDebugSession| {
+            let _ = announced.send(());
+        });
+
+        let done = spawn_safepoint(&session);
+        stopped.recv_timeout(RELEASED).expect("stopped event fired");
+        assert!(
+            done.recv_timeout(PARKED).is_err(),
+            "debuggee left the stop without being resumed"
+        );
+
+        session.resume();
+        assert!(
+            done.recv_timeout(RELEASED).is_ok(),
+            "debuggee stayed parked after resume"
+        );
+    }
+
+    #[test]
+    fn a_resume_sent_while_running_does_not_swallow_the_next_stop() {
+        let (announced, stopped) = mpsc::channel();
+        let session = session_with(move |_: &NativeDebugSession| {
+            let _ = announced.send(());
+        });
+
+        // No stop is in flight, so this must be a no-op rather than a credit
+        // the next stop can spend.
+        session.resume();
+
+        let done = spawn_safepoint(&session);
+        stopped.recv_timeout(RELEASED).expect("stopped event fired");
+        assert!(
+            done.recv_timeout(PARKED).is_err(),
+            "a stray resume let the debuggee run past the next stop"
+        );
+
+        session.resume();
+        assert!(
+            done.recv_timeout(RELEASED).is_ok(),
+            "debuggee stayed parked after resume"
+        );
     }
 }
