@@ -88,8 +88,8 @@ pub enum Command {
     Fix(Fix),
     /// Start the language server on stdio.
     Lsp,
-    /// Remove the build/ directory.
-    Clean,
+    /// Remove the project's build output directory.
+    Clean(Clean),
     /// Print shell completion script to stdout.
     Completions(Completions),
     /// Migrate .leek sources between language versions.
@@ -157,8 +157,17 @@ pub enum ProfileFormat {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct Clean {
+    /// Only remove the generated documentation (`<build>/doc/`),
+    /// keeping the rest of the build output.
+    #[arg(long)]
+    pub doc: bool,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct Doc {
-    /// Output directory. Defaults to `target/doc/`.
+    /// Output directory. Defaults to `<build>/doc/`, i.e. `build/doc/`
+    /// unless `[paths].build` says otherwise.
     #[arg(long, value_name = "PATH")]
     pub out_dir: Option<PathBuf>,
     /// Open the generated index page in the system browser

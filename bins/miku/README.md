@@ -43,11 +43,11 @@ miku explain <CODE>  extended help for a diagnostic code
 miku migrate         rewrite sources between language versions (v1–v4)
 miku analyze         per-function complexity / big-O
 miku profile         run under the ops profiler
-miku doc             generate HTML API docs
+miku doc             generate HTML API docs into build/doc/
 miku lsp             start the language server on stdio
 miku fight           run / test / debug leek-wars fights
 miku completions     generate shell completions (bash, zsh, fish, …)
-miku clean           remove build artifacts
+miku clean           remove the build output root (--doc: docs only)
 ```
 
 Global flags include `--manifest-path` (point at a `Miku.toml` elsewhere;
@@ -55,6 +55,29 @@ otherwise `miku` walks up from the current directory), `--library leekwars`
 (load host function libraries), `--message-format {human|json|junit}`,
 `--color`, `--quiet`, and `--verbose` (e.g. `miku build --verbose` prints
 per-stage pipeline timings).
+
+## Output layout
+
+Everything `miku` generates goes under **one output root**: `build/` by
+default, overridable per project.
+
+```toml
+[paths]
+src   = "src"          # sources (default)
+tests = "tests"        # tests (default)
+build = "build"        # output root (default)
+```
+
+```text
+build/java/            backend artifacts (java, leekscript, native, …)
+build/doc/             miku doc pages (`--out-dir` overrides)
+build/fight-reports/   bare `miku fight --report` (see [fight].reports_dir)
+```
+
+`miku clean` removes that whole root, generated docs included;
+`miku clean --doc` removes only `<build>/doc/`. Since `miku clean` deletes
+the root wholesale, `paths.build` must be a relative path inside the project
+— `..`, `.` and absolute paths are manifest errors.
 
 ## Fights
 

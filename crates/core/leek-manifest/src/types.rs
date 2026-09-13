@@ -58,6 +58,10 @@ pub struct PathsTable {
     pub src: PathBuf,
     pub tests: PathBuf,
     pub benches: PathBuf,
+    /// The single output root every command writes under: backend
+    /// artifacts, generated docs, fight reports. `miku clean` removes
+    /// it, so the parser keeps it a relative path inside the project.
+    pub build: PathBuf,
 }
 
 impl Default for PathsTable {
@@ -66,6 +70,7 @@ impl Default for PathsTable {
             src: PathBuf::from("src"),
             tests: PathBuf::from("tests"),
             benches: PathBuf::from("benches"),
+            build: PathBuf::from("build"),
         }
     }
 }

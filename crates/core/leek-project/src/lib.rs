@@ -69,8 +69,17 @@ impl Project {
         self.root.join(&self.manifest.paths.tests)
     }
 
+    /// The single output root — `[paths].build` (default `build`).
+    /// Every command that writes artifacts (backends, `miku doc`,
+    /// fight reports) stays under it, and `miku clean` removes it.
     pub fn build_dir(&self) -> PathBuf {
-        self.root.join("build")
+        self.root.join(&self.manifest.paths.build)
+    }
+
+    /// Where `miku doc` writes when given no `--out-dir` —
+    /// `<build>/doc` (default `build/doc`).
+    pub fn doc_dir(&self) -> PathBuf {
+        self.build_dir().join("doc")
     }
 
     /// Where `miku fight --report` writes when given no path —

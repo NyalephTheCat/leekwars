@@ -256,7 +256,7 @@ fn parse_paths(
     tbl: &toml::value::Table,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<PathsTable, ManifestError> {
-    const KNOWN: &[&str] = &["src", "tests", "benches"];
+    const KNOWN: &[&str] = &["src", "tests", "benches", "build"];
     warn_unknown(tbl, "paths", KNOWN, warnings);
     let mut out = PathsTable::default();
     if let Some(v) = tbl.get("src") {
@@ -268,7 +268,29 @@ fn parse_paths(
     if let Some(v) = tbl.get("benches") {
         out.benches = PathBuf::from(string_val(v, "paths.benches")?);
     }
+    if let Some(v) = tbl.get("build") {
+        out.build = build_dir_val(string_val(v, "paths.build")?.as_str())?;
+    }
     Ok(out)
+}
+
+/// `paths.build` names the directory `miku clean` deletes wholesale, so
+/// it must stay a relative path *inside* the project: no absolute paths,
+/// no `..`, no bare `.`.
+fn build_dir_val(raw: &str) -> Result<PathBuf, ManifestError> {
+    let path = PathBuf::from(raw);
+    let mut components = path.components();
+    let ok = components.next().is_some_and(|c| is_plain(&c)) && components.all(|c| is_plain(&c));
+    if !ok {
+        return Err(ManifestError::new(format!(
+            "Miku.toml: paths.build must be a relative path inside the project, got `{raw}`"
+        )));
+    }
+    Ok(path)
+}
+
+fn is_plain(component: &std::path::Component<'_>) -> bool {
+    matches!(component, std::path::Component::Normal(_))
 }
 
 fn parse_backend(
@@ -530,6 +552,50 @@ mod tests {
         assert_eq!(m.project.language, 4);
         assert_eq!(m.project.entry, PathBuf::from("src/main.leek"));
         assert!(w.is_empty());
+    }
+
+    #[test]
+    fn paths_build_defaults_to_build() {
+        let (m, _) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            "#,
+        );
+        assert_eq!(m.paths.build, PathBuf::from("build"));
+    }
+
+    #[test]
+    fn paths_build_is_configurable() {
+        let (m, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [paths]
+            build = "out/artifacts"
+            "#,
+        );
+        assert_eq!(m.paths.build, PathBuf::from("out/artifacts"));
+        assert!(w.is_empty(), "warnings: {w:?}");
+    }
+
+    #[test]
+    fn paths_build_must_stay_inside_the_project() {
+        for bad in ["..", "../elsewhere", "/tmp/elsewhere", ".", ""] {
+            let src = format!(
+                r#"
+                [project]
+                name = "demo"
+                version = "0.1.0"
+                [paths]
+                build = "{bad}"
+                "#
+            );
+            let err = parse(&src).unwrap_err();
+            assert!(err.message.contains("paths.build"), "{bad}: {err:?}");
+        }
     }
 
     #[test]
