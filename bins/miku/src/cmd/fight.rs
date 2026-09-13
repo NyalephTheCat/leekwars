@@ -235,13 +235,23 @@ fn run_matrix_mode(
 fn run_tournament_mode(args: &Fight, scn: &Scenario, base_dir: &Path) -> Result<TestReport> {
     let testing = scn.testing.clone().unwrap_or_default();
     let entrants = pick_vec(&args.entrant, &testing.entrants);
+    // `seeds` and `games` answer the same question, so the command line
+    // overrides the *pair* rather than each key on its own: `--seeds` mustn't
+    // end up contradicting the scenario's `games` (clap already keeps the two
+    // flags apart). With neither flag given, the scenario has the say.
+    let (seeds, games) = if args.seeds.is_empty() && args.games.is_none() {
+        (testing.seeds.clone(), testing.games)
+    } else {
+        (args.seeds.clone(), args.games)
+    };
     let spec = TournamentSpec {
         entrants,
         bracket: match args.bracket {
             BracketArg::RoundRobin => Bracket::RoundRobin,
             BracketArg::SingleElim => Bracket::SingleElim,
         },
-        seeds: pick_vec(&args.games, &testing.seeds),
+        seeds,
+        games,
         scope: args
             .entrant_scope
             .map(|s| match s {

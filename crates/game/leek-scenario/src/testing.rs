@@ -364,13 +364,48 @@ pub fn run_matrix(
 pub struct TournamentSpec {
     pub entrants: Vec<PathBuf>,
     pub bracket: crate::schema::Bracket,
-    /// Seeds played per pairing. Each seed is played twice, once with the
-    /// entrants on either side, so a pairing is `2 × seeds` games; the side
-    /// winning the most of them takes the match.
+    /// The seeds played per pairing, spelled out. Each seed is played twice,
+    /// once with the entrants on either side, so a pairing is `2 × seeds`
+    /// games; the side winning the most of them takes the match. Leave it
+    /// empty to derive the seeds from [`TournamentSpec::games`] instead.
     pub seeds: Vec<u64>,
+    /// How many seeds to play per pairing when [`TournamentSpec::seeds`] is
+    /// empty: the scenario's base seed first, then [`build_gen::mix`]-derived
+    /// ones, so `games = 1` is exactly the single game a bare tournament
+    /// plays. `None` means one game on the base seed. Spelling out both
+    /// `seeds` and `games` is rejected rather than silently resolved.
+    pub games: Option<u32>,
     /// How much of a team an entrant takes over: only the lead entity
     /// (default) or every member.
     pub scope: EntrantScope,
+}
+
+/// The seeds one pairing plays, resolving [`TournamentSpec::seeds`] against
+/// [`TournamentSpec::games`].
+///
+/// # Errors
+/// Both spelled out at once (they would contradict each other), or `games = 0`
+/// (a pairing with no games is a typo, not a request).
+fn tournament_seeds(base_seed: u64, spec: &TournamentSpec) -> Result<Vec<u64>> {
+    if !spec.seeds.is_empty() {
+        if spec.games.is_some() {
+            bail!("a tournament takes either seeds or games, not both");
+        }
+        return Ok(spec.seeds.clone());
+    }
+    let games = spec.games.unwrap_or(1);
+    if games == 0 {
+        bail!("a tournament needs at least one game per pairing (games = 0)");
+    }
+    Ok((0..u64::from(games))
+        .map(|i| {
+            if i == 0 {
+                base_seed
+            } else {
+                build_gen::mix(base_seed, i)
+            }
+        })
+        .collect())
 }
 
 /// Run a tournament among `entrants`, returning a leaderboard in `standings`.
@@ -389,8 +424,13 @@ pub struct TournamentSpec {
 /// as a draw for both entrants; one of them has to advance, and
 /// [`tie_break_favors_a`] picks which.
 ///
+/// A pairing plays the seeds of [`TournamentSpec::seeds`], or — when that is
+/// empty — [`TournamentSpec::games`] seeds derived from the scenario's base
+/// seed (see [`tournament_seeds`]).
+///
 /// # Errors
-/// Needs at least two entrants and two teams in the base scenario.
+/// Needs at least two entrants and two teams in the base scenario, and a seed
+/// list that doesn't contradict itself (see [`tournament_seeds`]).
 pub fn run_tournament(
     base: &Scenario,
     base_dir: &Path,
@@ -404,12 +444,8 @@ pub fn run_tournament(
         bail!("the base scenario needs two teams for a tournament");
     };
 
+    let seeds = tournament_seeds(base.seed.unwrap_or(1), spec)?;
     let cache = precompile(base, base_dir, &spec.entrants);
-    let seeds = if spec.seeds.is_empty() {
-        vec![base.seed.unwrap_or(1)]
-    } else {
-        spec.seeds.clone()
-    };
 
     let mut report = TestReport::new("tournament", Scoring::Leaderboard);
     let mut standings: HashMap<String, Standing> = HashMap::new();
@@ -711,6 +747,7 @@ mod tests {
             entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
             bracket: crate::schema::Bracket::RoundRobin,
             seeds: vec![1, 2],
+            games: None,
             scope: EntrantScope::Lead,
         };
         let report = run_tournament(&arena(), &dir, &spec).expect("the tournament runs");
@@ -730,6 +767,91 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Regression (#91): `[testing] games = N` was parsed and never read, so a
+    /// scenario asking for N games per pairing silently played one. It now
+    /// derives N seeds from the scenario's base seed.
+    #[test]
+    fn tournament_games_derives_one_seed_per_game() {
+        let dir =
+            std::env::temp_dir().join(format!("leek-tournament-games-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("a.leek"), "return 0;\n").expect("write AI");
+        std::fs::write(dir.join("b.leek"), "return 1;\n").expect("write AI");
+
+        let spec = TournamentSpec {
+            entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
+            bracket: crate::schema::Bracket::RoundRobin,
+            seeds: Vec::new(),
+            games: Some(3),
+            scope: EntrantScope::Lead,
+        };
+        let report = run_tournament(&arena(), &dir, &spec).expect("the tournament runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Three seeds × two legs, three *distinct* seeds, the first of them the
+        // scenario's own (no `seed` key, so 1).
+        assert_eq!(report.cells.len(), 6);
+        let mut seeds: Vec<u64> = report.cells.iter().map(|c| c.seed).collect();
+        assert_eq!(seeds[0], 1, "the first game keeps the base seed");
+        seeds.sort_unstable();
+        seeds.dedup();
+        assert_eq!(seeds.len(), 3, "derived seeds collide: {seeds:?}");
+    }
+
+    /// `games = 1` has to be byte-identical to a bare tournament, or the
+    /// derived-seed list would quietly change every existing scenario's fights.
+    #[test]
+    fn tournament_games_of_one_is_the_default_single_game() {
+        let dir =
+            std::env::temp_dir().join(format!("leek-tournament-games1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("a.leek"), "return 0;\n").expect("write AI");
+        std::fs::write(dir.join("b.leek"), "return 1;\n").expect("write AI");
+
+        let mut spec = TournamentSpec {
+            entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
+            bracket: crate::schema::Bracket::RoundRobin,
+            seeds: Vec::new(),
+            games: None,
+            scope: EntrantScope::Lead,
+        };
+        let bare = run_tournament(&arena(), &dir, &spec).expect("the tournament runs");
+        spec.games = Some(1);
+        let one = run_tournament(&arena(), &dir, &spec).expect("the tournament runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let labels = |r: &TestReport| -> Vec<(String, u64)> {
+            r.cells.iter().map(|c| (c.label.clone(), c.seed)).collect()
+        };
+        assert_eq!(labels(&bare), labels(&one));
+    }
+
+    /// Seeds and games contradict each other, so asking for both is rejected —
+    /// the silent-ignore this issue is about is exactly what we don't want back.
+    #[test]
+    fn tournament_rejects_seeds_and_games_together() {
+        let dir = std::env::temp_dir().join(format!("leek-tournament-both-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("a.leek"), "return 0;\n").expect("write AI");
+        std::fs::write(dir.join("b.leek"), "return 1;\n").expect("write AI");
+
+        let mut spec = TournamentSpec {
+            entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
+            bracket: crate::schema::Bracket::RoundRobin,
+            seeds: vec![1, 2],
+            games: Some(3),
+            scope: EntrantScope::Lead,
+        };
+        let both = run_tournament(&arena(), &dir, &spec).expect_err("seeds + games is rejected");
+        spec.seeds = Vec::new();
+        spec.games = Some(0);
+        let none = run_tournament(&arena(), &dir, &spec).expect_err("games = 0 is rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(both.to_string().contains("not both"), "{both}");
+        assert!(none.to_string().contains("at least one game"), "{none}");
     }
 
     /// Regression (#66): every tournament cell used to be classified against
@@ -782,6 +904,7 @@ mod tests {
             entrants: vec![PathBuf::from("shooter.leek"), PathBuf::from("idle.leek")],
             bracket: crate::schema::Bracket::RoundRobin,
             seeds: vec![1],
+            games: None,
             scope: EntrantScope::Lead,
         };
         let report = run_tournament(&base, &dir, &spec).expect("the tournament runs");
@@ -832,6 +955,7 @@ mod tests {
             entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
             bracket: crate::schema::Bracket::SingleElim,
             seeds: vec![1],
+            games: None,
             scope: EntrantScope::Lead,
         };
         let report = run_tournament(&arena(), &dir, &spec).expect("the tournament runs");
@@ -890,6 +1014,7 @@ mod tests {
             entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
             bracket: crate::schema::Bracket::RoundRobin,
             seeds: vec![1],
+            games: None,
             scope: EntrantScope::Lead,
         };
         let lead = run_tournament(&base, &dir, &spec).expect("the tournament runs");

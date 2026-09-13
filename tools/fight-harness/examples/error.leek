@@ -1,0 +1,38 @@
+// contained-error corpus: the AI faults mid-fight and the fight goes on.
+//
+// Every turn it plays like weapon.leek (close in, double-shot), so the
+// golden shows the actions taken BEFORE the fault are kept and the turns
+// after it are played normally — `EntityAI.runTurn` catches per turn, it
+// does not abort the fight.
+//
+// Only the two error classes whose log parameters we reproduce exactly are
+// used, so the golden is a real lock and not a known deviation:
+//   * turn 2 recurses without a base case -> StackOverflowError, logged as
+//     SERROR/STACKOVERFLOW with no parameters.
+//   * turn 4 spins forever -> LeekRunException(TOO_MUCH_OPERATIONS), logged
+//     as SERROR with [null] plus the `too_much_ops` help link.
+// An array out-of-bounds is deliberately avoided: v4 non-strict drops the
+// write silently, and our parameters for it are a documented deviation.
+function recurse(n) {
+	return recurse(n + 1);
+}
+
+var e = getNearestEnemy();
+if (getTurn() == 1) {
+	setWeapon(WEAPON_PISTOL);
+}
+moveToward(e, 10);
+useWeapon(e);
+useWeapon(e);
+
+if (getTurn() == 2) {
+	recurse(0);
+} else if (getTurn() == 4) {
+	// The spin needs a statement in it: an empty `while (true) {}` body emits
+	// no operation tick in the Java we generate, so the budget would never
+	// trip and the fight would hang instead of erroring.
+	var spin = 0;
+	while (true) {
+		spin++;
+	}
+}

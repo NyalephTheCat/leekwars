@@ -43,3 +43,4 @@ necromancer_s42  necromancer.leek  42
 necromancer_s99  necromancer.leek  99
 colossus_s1    colossus.leek  1
 colossus_s42   colossus.leek  42
+error_s42      error.leek     42

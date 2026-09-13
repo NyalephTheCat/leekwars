@@ -1171,6 +1171,83 @@ fn fight_tournament_reports_a_leaderboard_not_a_hero_verdict() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Regression (#91): `[testing] games` was parsed and never read, and the
+/// `--games` flag was really a seed list, so a scenario asking for three games
+/// per pairing silently played one and `--seeds` was ignored in tournament
+/// mode. Both now say what they mean.
+#[test]
+fn fight_tournament_games_and_seeds_mean_what_they_say() {
+    let dir = scratch_dir("fight_tournament_games");
+    write(&dir, "a.leek", "return 0;\n");
+    write(&dir, "b.leek", "return 1;\n");
+    write(&dir, "duel.toml", IDLE_DUEL);
+    write(
+        &dir,
+        "games.toml",
+        &format!("{IDLE_DUEL}\n[testing]\ngames = 3\n"),
+    );
+
+    // The seeds the report's cells actually played, deduplicated in order.
+    let seeds_of = |name: &str| -> Vec<u64> {
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap())
+                .expect("the report is JSON");
+        let mut seeds: Vec<u64> = json["cells"]
+            .as_array()
+            .expect("cells")
+            .iter()
+            .map(|c| c["seed"].as_u64().expect("each cell names its seed"))
+            .collect();
+        seeds.dedup();
+        seeds
+    };
+    let run = |extra: &[&str], scenario: &str, report: &str| {
+        let mut args = vec!["fight", scenario, "--mode", "tournament"];
+        args.extend(["--entrant", "a.leek", "--entrant", "b.leek"]);
+        args.extend_from_slice(extra);
+        args.push(report);
+        let out = miku(&args, &dir);
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    };
+
+    // `[testing] games = 3`: three seeds, each played from both sides.
+    run(&[], "games.toml", "--report=file-games.json");
+    let seeds = seeds_of("file-games.json");
+    assert_eq!(seeds.len(), 3, "three distinct seeds, got {seeds:?}");
+    assert_eq!(seeds[0], 1, "the first game keeps the scenario's seed");
+
+    // `--games 3` does the same from the command line.
+    run(&["--games", "3"], "duel.toml", "--report=cli-games.json");
+    assert_eq!(seeds_of("cli-games.json"), seeds);
+
+    // `--seeds` is honoured in tournament mode, and overrides the file's games.
+    run(&["--seeds", "7,8"], "games.toml", "--report=seeds.json");
+    assert_eq!(seeds_of("seeds.json"), vec![7, 8]);
+
+    // A seed list and a game count contradict each other; saying both fails
+    // loudly instead of silently picking one.
+    let out = miku(
+        &[
+            "fight",
+            "duel.toml",
+            "--mode",
+            "tournament",
+            "--entrant",
+            "a.leek",
+            "--entrant",
+            "b.leek",
+            "--games",
+            "2",
+            "--seeds",
+            "1,2",
+        ],
+        &dir,
+    );
+    assert_ne!(out.status, 0, "stdout: {}", out.stdout);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn fight_without_default_scenario_explains_itself() {
     let dir = scratch_dir("fight_no_scenario");

@@ -388,7 +388,7 @@ pub struct Fight {
     pub emit: Option<PathBuf>,
 
     // --- matrix mode ---
-    /// Sweep these seeds (comma-separated). Matrix mode.
+    /// Sweep these seeds (comma-separated). Matrix and tournament modes.
     #[arg(long, value_delimiter = ',')]
     pub seeds: Vec<u64>,
     /// Swap an opposing AI in (repeatable). Matrix mode.
@@ -409,9 +409,11 @@ pub struct Fight {
     /// every member of the team. Tournament mode.
     #[arg(long, value_enum)]
     pub entrant_scope: Option<EntrantScopeArg>,
-    /// Seeds played per pairing; each is played from both sides. Tournament mode.
-    #[arg(long, value_delimiter = ',')]
-    pub games: Vec<u64>,
+    /// Games played per pairing when no seeds are given: that many seeds are
+    /// derived from the scenario's, each played from both sides. Tournament
+    /// mode.
+    #[arg(long, value_name = "N", conflicts_with = "seeds")]
+    pub games: Option<u32>,
 
     // --- random mode ---
     /// Number of random builds to generate and fight. Random mode.

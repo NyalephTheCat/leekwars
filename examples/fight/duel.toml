@@ -48,6 +48,8 @@ mode = "matrix"
 hero_team = 0
 seeds = [1, 2, 3]
 opponents = ["ais/tank.leek", "ais/villain.leek"]
+# Tournament games per pairing, used only when `seeds` is empty — drop `seeds`
+# above to let this derive its own: `games = 3`.
 
 [testing.random]
 runs = 10
