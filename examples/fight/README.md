@@ -88,8 +88,12 @@ miku fight duel.toml --mode matrix --seeds 1,2,3,4,5 \
 miku fight duel.toml --mode tournament \
     --entrant ais/hero.leek --entrant ais/tank.leek \
     --entrant ais/villain.leek --entrant ais/coward.leek \
-    --bracket round-robin --games 1,2
+    --bracket round-robin --seeds 1,2
 ```
+
+`--seeds` spells the seeds out; `--games N` instead derives `N` of them from the
+scenario's own seed (`--games 3` plays three per pairing, six games with the
+legs). Each seed is played from both sides.
 
 Each entrant takes over the lead entity of a team; `--entrant-scope team` gives
 it every member of the team instead. A single-elimination match that ends level

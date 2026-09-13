@@ -162,6 +162,8 @@ pub struct TestingSpec {
     /// Team treated as "the AI under test" for win/loss accounting.
     #[serde(default)]
     pub hero_team: Option<i64>,
+    /// The seeds to play, spelled out: a matrix sweeps them, a tournament
+    /// plays each of them per pairing from both sides.
     #[serde(default)]
     pub seeds: Vec<u64>,
     #[serde(default)]
@@ -175,6 +177,10 @@ pub struct TestingSpec {
     /// Which entities of a team an entrant's AI replaces.
     #[serde(default)]
     pub entrant_scope: Option<EntrantScope>,
+    /// Games a tournament pairing plays when `seeds` is empty: that many
+    /// seeds are derived from the scenario's own (see
+    /// [`TournamentSpec::games`](crate::TournamentSpec::games)). Setting both
+    /// `seeds` and `games` is an error.
     #[serde(default)]
     pub games: Option<u32>,
     #[serde(default)]

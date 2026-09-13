@@ -115,11 +115,17 @@ run sequentially — it takes effect when they learn to run in parallel.
 
 Turn order is drawn from the fight's seed, like the official generator's
 `StartOrder` — not from the entity ids — so no side opens by construction. In
-a tournament every `--games` seed is played twice, the entrants swapping team
+a tournament every seed is played twice, the entrants swapping team
 slots between the legs, so neither entrant keeps whatever edge a slot carries;
 a single-elimination match that ends level is scored as a draw for both
 entrants, and which of them advances is a coin drawn from the pairing rather
 than the bracket position.
+
+The seeds a pairing plays come from `--seeds` (or `[testing] seeds`). With none
+given, `--games N` (or `[testing] games`) derives `N` of them from the
+scenario's own seed — the first game keeps that seed, so `--games 1` is the
+single game a bare tournament plays. Spelling out both is rejected rather than
+silently resolved.
 
 An entrant takes over the **lead (first-listed) entity** of a team; the rest of
 the team keeps the AI the scenario gave it. `--entrant-scope team` (or
