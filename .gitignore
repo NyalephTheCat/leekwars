@@ -1,6 +1,4 @@
 /target
-crates/testing/leek-test-corpus/data/upstream_cases.json
-crates/testing/leek-test-corpus/data/baseline.json
 
 **/*.rs.bk
 .DS_Store

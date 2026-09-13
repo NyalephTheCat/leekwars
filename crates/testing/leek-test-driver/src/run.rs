@@ -115,37 +115,48 @@ pub fn run_one(case: &TestCase, source: SourceId) -> CaseOutcome {
 }
 
 impl Report {
+    /// This report with every passing outcome dropped — the shape a
+    /// baseline is stored in (see [`crate::backends::MultiReport::save`]).
+    /// The summary is kept whole, so the totals still describe the full run.
+    #[must_use]
+    pub fn failures_only(&self) -> Self {
+        Self {
+            outcomes: self
+                .outcomes
+                .iter()
+                .filter(|(_, o)| !o.is_pass())
+                .map(|(id, &o)| (id.clone(), o))
+                .collect(),
+            summary: self.summary.clone(),
+        }
+    }
+
     /// Compare this report against a stored baseline. Returns
     /// regressions (ids that were passing but now fail) and
-    /// improvements (ids that were failing but now pass). Cases not
-    /// in the baselizne are reported separately.
+    /// improvements (ids that were failing but now pass).
+    ///
+    /// Baselines only store the non-passing ids, so an id the baseline
+    /// does not mention was passing: a missing entry reads as
+    /// [`CaseOutcome::Pass`]. That also makes the check fail closed for
+    /// cases the baseline predates — a brand-new failing case is a
+    /// regression rather than an untracked addition.
     pub fn diff_against(&self, baseline: &Report) -> Diff {
         let mut diff = Diff::default();
         for (id, &now) in &self.outcomes {
-            match baseline.outcomes.get(id) {
-                None => diff.added.push((id.clone(), now)),
-                Some(&before) if before == now => {}
-                Some(&before) => {
-                    if before.is_pass() && !now.is_pass() {
-                        diff.regressions.push(Change {
-                            id: id.clone(),
-                            before,
-                            after: now,
-                        });
-                    } else if !before.is_pass() && now.is_pass() {
-                        diff.improvements.push(Change {
-                            id: id.clone(),
-                            before,
-                            after: now,
-                        });
-                    } else {
-                        diff.churn.push(Change {
-                            id: id.clone(),
-                            before,
-                            after: now,
-                        });
-                    }
-                }
+            let before = baseline
+                .outcomes
+                .get(id)
+                .copied()
+                .unwrap_or(CaseOutcome::Pass);
+            let change = || Change {
+                id: id.clone(),
+                before,
+                after: now,
+            };
+            match (before.is_pass(), now.is_pass()) {
+                (true, false) => diff.regressions.push(change()),
+                (false, true) => diff.improvements.push(change()),
+                _ => {}
             }
         }
         for id in baseline.outcomes.keys() {
@@ -161,8 +172,7 @@ impl Report {
 pub struct Diff {
     pub regressions: Vec<Change>,
     pub improvements: Vec<Change>,
-    pub churn: Vec<Change>,
-    pub added: Vec<(String, CaseOutcome)>,
+    /// Non-passing baseline ids the current run no longer covers.
     pub removed: Vec<String>,
 }
 

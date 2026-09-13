@@ -78,18 +78,41 @@ pub struct MultiReport {
 }
 
 impl MultiReport {
-    pub const SCHEMA_VERSION: u32 = 2;
+    /// Bumped to 3 when baselines became failures-only (see [`Self::save`]).
+    pub const SCHEMA_VERSION: u32 = 3;
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
     }
 
+    /// Write this report as a baseline.
+    ///
+    /// Only *non-passing* outcomes are stored: the corpus is ~11k cases
+    /// per backend and almost all of them pass, so a full pass map costs
+    /// megabytes of tracked data per refresh for no added signal. The
+    /// per-backend summaries are kept whole, and
+    /// [`crate::run::Report::diff_against`] reads an absent id as
+    /// [`crate::run::CaseOutcome::Pass`].
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, toml::to_string_pretty(self)?)?;
+        std::fs::write(path, toml::to_string_pretty(&self.failures_only())?)?;
         Ok(())
+    }
+
+    /// This report with every passing outcome dropped — the on-disk
+    /// baseline shape.
+    #[must_use]
+    pub fn failures_only(&self) -> Self {
+        Self {
+            schema_version: self.schema_version,
+            backends: self
+                .backends
+                .iter()
+                .map(|(name, report)| (name.clone(), report.failures_only()))
+                .collect(),
+        }
     }
 
     pub fn diff_against(&self, baseline: &Self) -> MultiDiff {

@@ -1,4 +1,5 @@
-//! Run the upstream JUnit suite on every linked backend (`upstream_cases.toml`).
+//! Run the upstream JUnit suite on every linked backend (the manifest
+//! `build.rs` embeds) and check it against the committed baseline.
 
 use leek_test_corpus::{MultiReport, baseline_path, embedded_manifest, run_upstream_suite};
 
@@ -11,6 +12,35 @@ fn manifest_has_cases() {
         m.cases.len(),
     );
     assert_eq!(m.schema_version, leek_test_corpus::Manifest::SCHEMA_VERSION);
+}
+
+/// The committed baseline must stay in canonical failures-only form: it
+/// round-trips through `MultiReport::save` byte for byte, so refreshing it
+/// shows the outcomes that actually moved instead of megabytes of churn.
+#[test]
+fn committed_baseline_is_canonical_failures_only() {
+    let path = baseline_path();
+    let text = std::fs::read_to_string(&path).expect("read baseline");
+    let baseline = MultiReport::load(&path).expect("malformed baseline");
+
+    for (backend, report) in &baseline.backends {
+        for (id, outcome) in &report.outcomes {
+            assert!(
+                !outcome.is_pass(),
+                "[{backend}] {id} is stored as {outcome:?}; baselines keep the \
+                 non-passing outcomes only — re-create with \
+                 `cargo run -p leek-test-corpus -- run --save-baseline`",
+            );
+        }
+    }
+
+    let canonical = toml::to_string_pretty(&baseline.failures_only()).expect("serialize baseline");
+    assert_eq!(
+        canonical,
+        text,
+        "{} is not in the shape `run --save-baseline` writes",
+        path.display(),
+    );
 }
 
 #[test]

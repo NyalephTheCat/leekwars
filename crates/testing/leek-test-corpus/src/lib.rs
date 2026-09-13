@@ -10,7 +10,9 @@ pub use leek_test_driver::{
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Manifest embedded at build time from `upstream_cases.toml`.
+/// Manifest embedded at build time. `build.rs` re-extracts it from the
+/// upstream Java sources into `OUT_DIR/upstream_cases.toml` on every
+/// build, so no copy is committed.
 pub fn embedded_manifest() -> &'static Manifest {
     static CACHE: OnceLock<Manifest> = OnceLock::new();
     CACHE.get_or_init(|| {
@@ -51,10 +53,7 @@ pub fn upstream_tests_dir() -> PathBuf {
         .expect("upstream tests dir missing; vendored submodule not checked out")
 }
 
-pub fn manifest_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("data/upstream_cases.toml")
-}
-
+/// Per-backend baseline of *non-passing* outcomes (`run --save-baseline`).
 pub fn baseline_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("data/baseline.toml")
 }
