@@ -50,10 +50,10 @@ impl FnLowerer<'_> {
                     let read_bb = self.new_block();
                     let null_bb = self.new_block();
                     let join = self.new_block();
+                    // The null test is free: upstream emits `?.x` as
+                    // `ops(1); getFieldNullSafe(..)`, the same 1 op as a
+                    // plain field read, already charged above (#78).
                     let is_null = self.null_check(base_local, e.span);
-                    // The `?.` link's null test costs 1 op (flow-control
-                    // charge; the native backend's branches are free).
-                    self.push_stmt(Statement::Charge(1));
                     self.set_terminator(Terminator::Branch {
                         cond: is_null,
                         then_block: null_bb,
@@ -712,9 +712,16 @@ impl FnLowerer<'_> {
             Rvalue::Use(lhs.clone()),
         ));
         let is_null = self.fresh_temp(Type::Boolean, span);
+        // `Synthetic`, as in `lower_null_coalesce`: upstream prices the
+        // `??=` null test as the single flow-control op below
+        // (reference.tsv: `var x = null x ??= 42 return x` = 2 ops, #78).
         self.push_stmt(Statement::Assign(
             Place::Local(is_null),
-            Rvalue::Binary(BinOp::IdentityEq, lhs, Operand::Const(Const::Null)),
+            Rvalue::Synthetic(Box::new(Rvalue::Binary(
+                BinOp::IdentityEq,
+                lhs,
+                Operand::Const(Const::Null),
+            ))),
         ));
         let rhs_bb = self.new_block();
         let join = self.new_block();
@@ -1144,10 +1151,10 @@ impl FnLowerer<'_> {
             let call_bb = self.new_block();
             let null_bb = self.new_block();
             let join = self.new_block();
+            // The null test is free: upstream emits `a?.m()` as
+            // `ops(1); callObjectAccessNullSafe(..)`, the same op a
+            // plain method call pays (#78).
             let is_null = self.null_check(recv, call.span);
-            // The `?.` link's null test costs 1 op (flow-control
-            // charge; the native backend's branches are free).
-            self.push_stmt(Statement::Charge(1));
             self.set_terminator(Terminator::Branch {
                 cond: is_null,
                 then_block: null_bb,
@@ -1172,16 +1179,18 @@ impl FnLowerer<'_> {
     /// `local === null` as a fresh boolean temp — the receiver guard
     /// for an optional-chaining link (`?.`). Identity comparison so no
     /// value coercion is involved, matching upstream's Java-level
-    /// `value == null` reference check.
+    /// `value == null` reference check. The comparison is `Synthetic`:
+    /// the `?.` link's only op is the caller's flow-control charge
+    /// (reference.tsv prices `o?.x` the same as `o.x`, #78).
     pub(crate) fn null_check(&mut self, local: LocalId, span: Span) -> Operand {
         let t = self.fresh_temp(Type::Boolean, span);
         self.push_stmt(Statement::Assign(
             Place::Local(t),
-            Rvalue::Binary(
+            Rvalue::Synthetic(Box::new(Rvalue::Binary(
                 BinOp::IdentityEq,
                 Operand::Local(local),
                 Operand::Const(Const::Null),
-            ),
+            ))),
         ));
         Operand::Local(t)
     }

@@ -35,6 +35,153 @@ fn null_coalesce_charges_a_single_op() {
     assert_eq!(ops("var f = integer? x => x ?? 0 return f(7)"), 3);
 }
 
+/// Check `(version, source, upstream ops)` rows, reporting every mismatch.
+fn assert_rows(rows: &[(u8, &str, u64)]) {
+    let bad: Vec<String> = rows
+        .iter()
+        .filter_map(|&(v, src, want)| {
+            let got = ops_v(src, v);
+            (got != want).then(|| format!("v{v} `{src}`: native {got}, upstream {want}"))
+        })
+        .collect();
+    assert!(bad.is_empty(), "op-count mismatches:\n{}", bad.join("\n"));
+}
+
+#[test]
+fn null_coalesce_assign_charges_a_single_op() {
+    // Upstream counts from leek-test-corpus/data/reference.tsv: the `??=` null
+    // test is one flow-control op, like `??` (#78).
+    assert_rows(&[
+        (4, "var x = null x ??= 42 return x", 2),
+        (4, "var x = 0 x ??= 42 return x", 2),
+        (4, "var x = null return (x ??= 42)", 2),
+    ]);
+    // Upstream `a[0] ??= 5` is `ops(put_coalesce_eq(..), 1)` and `c.v ??= 7`
+    // is `ops(field_coalesce_eq(..), 2)`: the same static cost as `+=` on the
+    // same place (`put_add_eq` / `field_add_eq`). The absolute rows
+    // (`var a = [null] a[0] ??= 5 return a[0]` = 7, `class C { any v; } var c =
+    // new C() c.v ??= 7 return c.v` = 5) still differ natively (9 / 4) because
+    // of two pre-existing charge models shared with `+=`: native charges the
+    // compound index read (`var a = [5] a[0] += 1 return a;` is 8 against
+    // upstream 6) and prices constructors per initialized field rather than
+    // upstream's flat `new` charge.
+    for (coalesce, add) in [
+        (
+            "var a = [null] a[0] ??= 5 return a[0]",
+            "var a = [null] a[0] += 5 return a[0]",
+        ),
+        (
+            "var a = [1] a[0] ??= 5 return a[0]",
+            "var a = [1] a[0] += 5 return a[0]",
+        ),
+        (
+            "class C { any v; } var c = new C() c.v ??= 7 return c.v",
+            "class C { any v; } var c = new C() c.v += 7 return c.v",
+        ),
+    ] {
+        assert_eq!(ops(coalesce), ops(add), "`{coalesce}`");
+    }
+}
+
+#[test]
+fn optional_chaining_charges_like_a_plain_access() {
+    // Upstream counts from leek-test-corpus/data/reference.tsv (#78).
+    assert_rows(&[
+        (
+            4,
+            "class A { public x = 42 } var a = new A() return a?.x",
+            3,
+        ),
+        (
+            4,
+            "class A { method m() { return 7 } } var a = new A() return a?.m()",
+            3,
+        ),
+        (
+            4,
+            "class A { method add(a, b) { return a + b } } var a = new A() return a?.add(3, 4)",
+            4,
+        ),
+        (4, "class A { public x = 42 } A? a = null return a?.x", 2),
+        (
+            4,
+            "class A { method m() { return 7 } } A? a = null return a?.m()",
+            2,
+        ),
+        (4, "var o = {x: 5} return o?.x", 3),
+        (4, "var o = null return o?.x", 2),
+        (
+            4,
+            "class A { public x = 10 } var a = new A() return a?.x + 5",
+            4,
+        ),
+        (
+            4,
+            "class B { public v = 3 } class A { public b = null } var a = new A() a.b = new B() return a.b?.v",
+            7,
+        ),
+    ]);
+    // Chained links cost what the plain chain does. The absolute upstream rows
+    // `a?.next?.v` / `a?.self()?.x` (4 ops) are still 1 over natively because
+    // native prices `new A()` per initialized field, not upstream's flat
+    // constructor charge; that is unrelated to `?.`.
+    assert_eq!(
+        ops("var o = {x: {y: 1}} return o?.x?.y"),
+        ops("var o = {x: {y: 1}} return o.x.y")
+    );
+}
+
+#[test]
+fn switch_charges_one_op_per_case_test() {
+    // Upstream counts from leek-test-corpus/data/reference.tsv (#78).
+    let mut rows = vec![
+        (
+            4,
+            "integer | null x = 5; switch (x) { case null: return 0; default: return abs(x) }",
+            5,
+        ),
+        (
+            4,
+            "integer | null x = null; switch (x) { case null: return 0; default: return abs(x) }",
+            3,
+        ),
+        (
+            4,
+            "integer | null x = 5; switch (x) { case null: return 0; case 5: return abs(x); default: return abs(x) }",
+            6,
+        ),
+    ];
+    for v in [3, 4] {
+        rows.extend([
+            (v, "var x = 1 switch (x) { case 1: return 'one' } return 'none'", 3),
+            (v, "var x = 2 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 4),
+            (v, "var x = 3 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 3),
+            (v, "var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r", 7),
+            (v, "var x = 2 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 7),
+            (v, "var x = 3 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 4),
+            (v, "var x = 3 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 5),
+            (v, "var x = 1 var y = 2 var r = '' switch (x) { case 1: switch (y) { case 1: r = 'x1y1' break case 2: r = 'x1y2' break } break case 2: r = 'x2' break } return r", 11),
+            (v, "function f(x) { switch (x) { case 1: return 'one' case 2: return 'two' default: return 'other' } } return f(5)", 4),
+            (v, "var x = 5 switch (x) { case 2 + 3: return 'five' default: return 'other' }", 4),
+            (v, "var x = null switch (x) { case null: return 'null' default: return 'other' }", 3),
+            (v, "var x = 1 switch (x) {} return 'ok'", 1),
+            (v, "var x = 1 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 4),
+            (v, "var x = 2 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 4),
+            (v, "var x = 5 switch (x) { case 1: return 'one' default: return 'other' }", 3),
+            (v, "var x = 1 switch (x) { case 1: return 'one' default: return 'other' }", 3),
+            (v, "var x = true switch (x) { case true: return 'yes' case false: return 'no' }", 3),
+            (v, "var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 2) { return 99 } case 2: a = 12 case 3: a = 15 } return a", 7),
+            (v, "var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 3) { return 99 } case 2: a = 12 case 3: a = 15 } return a", 11),
+            (v, "var x = 3 var r = '' switch (x) { case 1: r = 'one' break case 2: r = 'two' break default: r = 'default' break } return r", 7),
+            (v, "var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s", 19),
+            (v, "var x = 'hello' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0", 8),
+            (v, "var x = 'world' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0", 14),
+            (v, "var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s", 43),
+        ]);
+    }
+    assert_rows(&rows);
+}
+
 #[test]
 fn nested_index_write_charges_no_writeback() {
     // A nested write costs exactly what the same write through an explicit
