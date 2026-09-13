@@ -27,8 +27,8 @@ step() { printf '\n==> %s\n' "$*"; }
 step "cargo fmt --all --check"
 cargo fmt --all --check
 
-step "layer check (tools/check-layers.sh)"
-tools/check-layers.sh
+step "layer check (cargo xtask check-layers)"
+cargo xtask check-layers
 
 # Generated weapon/chip catalogs must match the upstream JSON (skipped when
 # the official-generator submodule isn't checked out).

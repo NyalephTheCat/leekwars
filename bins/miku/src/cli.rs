@@ -113,7 +113,7 @@ pub struct Dev {
 
 #[derive(Debug, Subcommand)]
 pub enum DevCommand {
-    /// Run `tools/check-layers.sh`.
+    /// Run the layer check (`cargo xtask check-layers`).
     Layers,
     /// Verify builtin Java metadata (`tools/builtin-extract.sh --check`).
     Builtins,
