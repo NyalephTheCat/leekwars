@@ -1,0 +1,11 @@
+5538	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5; switch (x) { case null: return 0; default: return abs(x) }
+5539	line 13: Long u_x = (Long) ops(longintOrNull(null), 1); | Object u_x = longintOrNull(ops(null, 1));	integer | null x = null; switch (x) { case null: return 0; default: return abs(x) }
+5540	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5; switch (x) { case null: return 0; case 5: return abs(x); default: return abs(x) }
+11177	line 24: if (ops(2l == 2l, 2)) { | if (ops(equals_equals(2l, 2l), 2)) {	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 2) { return 99 } case 2: a = 12 case 3: a = 15 } return a
+11179	line 24: if (ops(2l == 3l, 2)) { | if (ops(equals_equals(2l, 3l), 2)) {	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 3) { return 99 } case 2: a = 12 case 3: a = 15 } return a
+11202	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s
+11203	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s
+11212	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: for (var i = 0; i < 3; i++) { s += i } break } return s
+11213	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: for (var i = 0; i < 3; i++) { s += i } break } return s
+11220	line 22: ops(1);ops(u_s = add_eq(u_s, 10l), 1); | ops(1);ops(u_s = (Object) add(u_s, 10l), 1);	var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s
+11221	line 22: ops(1);ops(u_s = add_eq(u_s, 10l), 1); | ops(1);ops(u_s = (Object) add(u_s, 10l), 1);	var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s

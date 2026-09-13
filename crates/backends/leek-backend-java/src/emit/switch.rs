@@ -129,16 +129,25 @@ impl super::Emitter<'_> {
         let cases = group_cases(sw);
 
         self.open_switch_block("{");
+        // The discriminant's own cost rides inside the initializer, the way
+        // every other costed initializer is written (`expr_with_ops`, and
+        // upstream's `Object u_x = ops(1l, 1);`). A free discriminant — a bare
+        // variable, which is what every reference row has — keeps the plain
+        // `Object __sw_N = u_x;` form rather than an `ops(…, 0)` wrapper.
         let disc = self.expr_to_string(&sw.discriminant);
+        let cost = if self.opts.emit_ops {
+            self.emit_cost(&sw.discriminant)
+        } else {
+            0
+        };
+        let init = if cost > 0 {
+            format!("ops({disc}, {cost})")
+        } else {
+            disc
+        };
         let line = self.line_of(sw.span);
         self.writer
-            .add_line_at(&format!("Object {sw_var} = {disc};"), line);
-        if self.opts.emit_ops {
-            let cost = self.emit_cost(&sw.discriminant);
-            if cost > 0 {
-                self.writer.add_code(&format!("ops({cost});"));
-            }
-        }
+            .add_line_at(&format!("Object {sw_var} = {init};"), line);
         self.writer.add_line(&format!("int {si_var} = -1;"));
         let dispatch = if self.opts.native_switch {
             int_dispatch(sw, &cases)
