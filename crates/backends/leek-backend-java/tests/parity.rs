@@ -108,9 +108,10 @@ struct SnapshotPolicy {
 /// On Linux, `UPDATE_SNAPSHOTS=1` updates and anything else compares.
 /// Elsewhere the reports are skipped unless `LEEK_REQUIRE_SNAPSHOTS=1`
 /// asks to compare anyway, and `UPDATE_SNAPSHOTS=1` is refused so a
-/// non-Linux libm never overwrites the Linux-pinned reports.
+/// non-Linux libm never overwrites the Linux-pinned reports. Both flags
+/// follow [`flag_enabled`]: unset, empty and `0` mean off.
 fn snapshot_policy(target_os: &str, env: impl Fn(&str) -> Option<String>) -> SnapshotPolicy {
-    let flag = |name: &str| env(name).is_some_and(|v| v == "1");
+    let flag = |name: &str| flag_enabled(env(name).as_deref());
     let (update, require) = (flag("UPDATE_SNAPSHOTS"), flag("LEEK_REQUIRE_SNAPSHOTS"));
     if target_os == PINNED_SNAPSHOT_OS {
         let action = if update {
@@ -227,11 +228,17 @@ fn assert_snapshots(failures: &[String]) {
     );
 }
 
+/// Whether an opt-in environment flag is set: anything but unset, empty
+/// or `0` counts as on.
+fn flag_enabled(flag: Option<&str>) -> bool {
+    matches!(flag, Some(v) if !v.is_empty() && v != "0")
+}
+
 /// Skip a JVM-dependent test with a visible `SKIPPED` line, or fail when
 /// `LEEK_REQUIRE_JVM=1` says the JVM path must run.
 fn skip_jvm_test(test: &str, reason: &str) {
     assert!(
-        std::env::var_os("LEEK_REQUIRE_JVM").is_none_or(|v| v != "1"),
+        !flag_enabled(std::env::var("LEEK_REQUIRE_JVM").ok().as_deref()),
         "{test}: LEEK_REQUIRE_JVM=1 but {reason}"
     );
     eprintln!("SKIPPED {test}: {reason} (set LEEK_REQUIRE_JVM=1 to fail instead)");
@@ -443,10 +450,10 @@ fn byte_parity_10_ternary() {
 /// `HashMap` iteration order (`MainLeekBlock.mFunctions`). That's
 /// implementation-defined and unreproducible from Rust without
 /// reimplementing the JVM's hash semantics. The doc explicitly
-/// documents this as a determinism gap (`doc/java-backend.md` §9);
+/// documents this as a determinism gap (`docs/java-backend.md` §9);
 /// the test is kept ignored as a marker.
 #[test]
-#[ignore = "Java HashMap iteration order is not byte-reproducible — see doc/java-backend.md §9"]
+#[ignore = "Java HashMap iteration order is not byte-reproducible — see docs/java-backend.md §9"]
 fn byte_parity_09_multi_func() {
     assert_byte_parity("09_multi_func");
 }
@@ -918,6 +925,9 @@ fn rust_emit_matches_snapshot_on_jvm() {
 
     let contents = fs::read_to_string(&snapshot_path).expect("read tracked snapshot.tsv");
     let mut cases: Vec<JvmCase> = Vec::new();
+    // Rows the Rust backend could not emit at all are dropped from the
+    // cross-check; the count is printed so the hole is never invisible.
+    let mut emit_skipped = 0u32;
     for (lineno, line) in contents.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -947,6 +957,7 @@ fn rust_emit_matches_snapshot_on_jvm() {
         // case (rather than failing) when emission itself blows up —
         // those are reported by the static parity tests, not here.
         let Some(java) = emit_via_rust(&code, version_byte, lineno) else {
+            emit_skipped += 1;
             continue;
         };
         cases.push(JvmCase {
@@ -1014,26 +1025,14 @@ fn rust_emit_matches_snapshot_on_jvm() {
     );
     failures.extend(check_snapshot("JVM_PARITY.txt", &format!("{report}\n{mismatches}")).err());
     eprintln!("{report}");
+    // Not part of the compared report: it counts rows that never reached
+    // the JVM, which the static parity tests own.
+    eprintln!("rows skipped before the JVM (Rust emit failed): {emit_skipped}");
 
     // Three ratchets — each tightens as emit gaps close. Bump them
     // up after every batch of fixes so regressions can't sneak in.
-    // Remaining gaps (track per case in `JVM_PARITY.txt`):
-    //  - Block-bodied lambdas can't see outer locals — emit needs
-    //    to outline them into top-level helper methods.
-    //  - Assignment to a builtin / function / class name
-    //    (`count = 1; return count`) — broken without a HIR-level
-    //    rewrite that shadows the name with a local.
-    //  - v1–v3 receiver-method calls into `LegacyArrayLeekValue`
-    //    methods that don't exist on it (`arrayMap`, `arrayFilter`,
-    //    `arrayFind`, etc.). Upstream emits per-call-site
-    //    `Array_<name>_<sig>` helpers via
-    //    `JavaWriter.writeGenericFunctions`; we don't yet.
-    //  - Default parameter values aren't lowered into call-site
-    //    null-fill or synthesized overloads.
-    //  - Index l-value chains with promote-on-write semantics
-    //    (`tabmulti[i][j] = v` where the inner array morphs into
-    //    a sparse map in v1-v3).
-    //  - Bit-XOR `^` in v1 means POWER, not XOR — we lower as XOR.
+    // The emit gaps behind the current numbers are catalogued in
+    // `docs/java-backend.md` §9; `JVM_PARITY.txt` tracks them per case.
     let value_ratio = f64::from(value_ok) / f64::from(total.max(1));
     let ops_ratio = f64::from(ops_ok) / f64::from(ops_total.max(1));
     let breakdown = snapshot_out_dir().join("JVM_PARITY.txt");
@@ -1324,6 +1323,27 @@ fn snapshot_skip_mode_passes_and_keeps_tracked_file() {
     assert_eq!(fs::read_to_string(out.join("R.txt")).unwrap(), "new\n");
 }
 
+/// An opt-in flag is on for any value but unset, empty or `0`.
+#[test]
+fn env_flags_are_on_for_anything_but_unset_empty_or_zero() {
+    assert!(!flag_enabled(None));
+    assert!(!flag_enabled(Some("")));
+    assert!(!flag_enabled(Some("0")));
+    assert!(flag_enabled(Some("1")));
+    assert!(flag_enabled(Some("yes")));
+}
+
+/// Fresh reports never land inside the crate's source tree, whatever the
+/// snapshot action: only an `Update` run writes into `tests/snapshots/`.
+#[test]
+fn fresh_reports_are_written_outside_the_crate() {
+    assert!(
+        !snapshot_out_dir().starts_with(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+        "fresh report dir {} is inside the crate source tree",
+        snapshot_out_dir().display()
+    );
+}
+
 /// Exact reports are compared (or updated) on Linux only; elsewhere they
 /// are skipped unless `LEEK_REQUIRE_SNAPSHOTS=1`, and `UPDATE_SNAPSHOTS=1`
 /// is refused with a notice (RT-N1).
@@ -1451,4 +1471,18 @@ fn rng_dependent_programs_are_detected_by_identifier() {
     assert!(is_rng_dependent("return randFloat(1, 2) + randReal(1, 2)"));
     assert!(!is_rng_dependent("var operand = 1 return operand"));
     assert!(!is_rng_dependent("var randomize = 1 return my_randInt"));
+
+    // The exclusion must actually bite: if the corpus stopped matching,
+    // the ops reports would go back to churning without anyone noticing.
+    let contents =
+        fs::read_to_string(fixtures_dir().join("ops/snapshot.tsv")).expect("read snapshot.tsv");
+    let tagged = contents
+        .lines()
+        .filter(|l| {
+            let cols: Vec<&str> = l.splitn(6, '\t').collect();
+            cols.len() == 6 && cols[1] != "S" && cols[2] == "equals"
+        })
+        .filter(|l| is_rng_dependent(&unescape(l.splitn(6, '\t').nth(5).unwrap())))
+        .count();
+    assert!(tagged > 0, "no RNG rows found in snapshot.tsv");
 }
