@@ -18,10 +18,12 @@
 //! - [`format_source`] — lex+parse a string then format.
 
 pub mod doc;
+pub mod equivalence;
 pub mod format;
 pub mod pipeline;
 pub mod printer;
 
+pub use equivalence::{EquivalenceError, check_edit_equivalence, check_equivalence};
 pub use leek_manifest::{
     BraceStyle, ControlBraces, FormatOptions, IndentStyle, LineEnding, OperatorPosition,
     QuoteStyle, Semicolons, TrailingComma,
@@ -280,6 +282,23 @@ pub fn format_source(
 ) -> String {
     let parsed = leek_parser::parse(text, source, version);
     format(&parsed.green, opts)
+}
+
+/// [`format_source`] followed by the [`check_equivalence`] safety net.
+///
+/// Returns the formatted text only when it provably keeps every
+/// comment and significant token of `text`. Callers that write the
+/// result back to disk or into an editor buffer should use this rather
+/// than [`format_source`], and leave the source untouched on error.
+pub fn format_source_checked(
+    text: &str,
+    source: SourceId,
+    version: Version,
+    opts: &FormatOptions,
+) -> Result<String, EquivalenceError> {
+    let formatted = format_source(text, source, version, opts);
+    check_equivalence(text, &formatted, version)?;
+    Ok(formatted)
 }
 
 /// Format the smallest CST subtree that fully contains `range`.

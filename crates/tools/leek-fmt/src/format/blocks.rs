@@ -40,17 +40,21 @@ pub(super) fn format_block(node: &SyntaxNode) -> Doc {
     ])
 }
 
-/// Is there at least one significant child *inside* the `{ }` of
-/// `node`? Used to short-circuit empty blocks to `{}`.
+/// Is there at least one significant child or comment *inside* the
+/// `{ }` of `node`? Used to short-circuit empty blocks to `{}`.
 fn find_block_inner(node: &SyntaxNode) -> Option<()> {
     let mut in_body = false;
     for el in node.children_with_tokens() {
         match el {
             NodeOrToken::Token(t) if t.kind() == S::LBrace => in_body = true,
             NodeOrToken::Token(t) if t.kind() == S::RBrace => return None,
-            NodeOrToken::Token(t) if in_body && (is_trivia(&t) || t.kind() == S::Semicolon) => {
-                // Bare semicolons inside an otherwise empty block
-                // don't count as "has content" for the `{}` shortcut.
+            NodeOrToken::Token(t)
+                if in_body && matches!(t.kind(), S::Whitespace | S::Semicolon) =>
+            {
+                // Whitespace and bare semicolons inside an otherwise
+                // empty block don't count as "has content" for the
+                // `{}` shortcut. Comments do: `{ // todo }` must keep
+                // its comment.
             }
             NodeOrToken::Token(_) | NodeOrToken::Node(_) if in_body => return Some(()),
             _ => {}

@@ -6,8 +6,8 @@ use leek_syntax::{SyntaxKind as S, SyntaxNode};
 use crate::doc::{Doc, concat, group, indent, line, softline, space, text};
 
 use super::{
-    child_nodes, comma_sep, fmt_node, is_trivia, lone_child_node, parens_redundant_around,
-    token_text, trailing_comma_doc, with_ctx,
+    child_nodes, comma_sep, fmt_node, has_unplaced_comment, is_trivia, lone_child_node,
+    parens_redundant_around, token_text, trailing_comma_doc, with_ctx,
 };
 
 /// `LiteralExpr` / `NameRef` — leaf expressions, emit their tokens
@@ -196,6 +196,13 @@ fn try_format_method_chain(node: &SyntaxNode) -> Option<Doc> {
     let mut links: Vec<ChainLink> = Vec::new();
     let mut current = node.clone();
     let base = loop {
+        // The chain layout reads the intermediate `CallExpr` /
+        // `FieldExpr` nodes itself instead of going through `fmt_node`,
+        // so it would drop comments attached to them. Fall back to the
+        // plain layout, whose `fmt_node` calls keep them.
+        if matches!(current.kind(), S::CallExpr | S::FieldExpr) && has_unplaced_comment(&current) {
+            return None;
+        }
         match current.kind() {
             S::CallExpr => {
                 let mut callee: Option<SyntaxNode> = None;
@@ -208,6 +215,9 @@ fn try_format_method_chain(node: &SyntaxNode) -> Option<Doc> {
                     }
                 }
                 let callee = callee?;
+                if has_unplaced_comment(&callee) {
+                    return None;
+                }
                 if callee.kind() != S::FieldExpr {
                     // Innermost call (`f(x)` in `f(x).a().b()`) — the
                     // chain's base.
@@ -341,14 +351,6 @@ pub(super) fn format_index(node: &SyntaxNode) -> Doc {
         index.unwrap_or_else(|| text("")),
         text("]"),
     ])
-}
-
-/// `base[i:j]` / `base[i:j:k]`.
-pub(super) fn format_slice(node: &SyntaxNode) -> Doc {
-    // Pass through — preserves user spacing between slice parts;
-    // these are uncommon enough that a dedicated layout isn't worth
-    // the complexity in v0.1.
-    super::format_raw(node)
 }
 
 /// `base.field`.
