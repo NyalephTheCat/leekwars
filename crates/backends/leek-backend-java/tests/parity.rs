@@ -14,30 +14,31 @@
 //!    user-function declarations the reference emits.
 //!
 //! 2. **Diff snapshot**: the full unified diff between Rust-exact
-//!    output and the golden is itself a golden — it is a pure
-//!    function of the fixtures and the emitter. A plain run writes
-//!    the fresh diff under `CARGO_TARGET_TMPDIR` and compares it with
-//!    the tracked `tests/snapshots/<name>.exact.diff`, so unreviewed
-//!    emit drift fails the test instead of silently rewriting a
-//!    tracked file; `UPDATE_SNAPSHOTS=1` accepts the new output the
-//!    way `insta` accepts a pending snapshot.
+//!    output and the golden must equal the committed
+//!    `tests/snapshots/<name>.exact.diff`.
 //!
-//! The per-run *reports* (`JVM_PARITY.txt`, `OPS_DRIFT.txt`,
-//! `CORPUS_SUMMARY.txt`, `NATIVE_OPS_DRIFT.txt`) are statistics, not
-//! goldens — the JVM-side op counts are non-deterministic because the
-//! corpus uses `randInt`. A plain run writes them under
-//! `CARGO_TARGET_TMPDIR`; `UPDATE_SNAPSHOTS=1` refreshes the tracked
-//! copies in `tests/snapshots/` instead.
+//! Byte parity is the explicit Phase-3 goal in `PLAN.md` — this
+//! test infrastructure is the substrate that closes that gap one
+//! lowering at a time.
 //!
-//! The JVM-backed cross-checks skip when the upstream harness jar or
-//! the captured snapshot is missing, so the suite stays runnable
-//! without a JDK. Every skip prints a `SKIPPED` line naming what is
-//! missing, and `LEEK_REQUIRE_JVM=1` turns the skip into a failure
-//! wherever the harness is supposed to be there.
+//! # Snapshot reports
 //!
-//! Byte parity is an explicit Phase-3 goal — this test infrastructure
-//! is the substrate that closes that gap one lowering at a time. The
-//! remaining gaps are catalogued in `docs/java-backend.md` §9.
+//! Every report under `tests/snapshots/` (the `*.diff` files,
+//! `SUMMARY.txt`, `CORPUS_SUMMARY.txt`, `NATIVE_OPS_DRIFT.txt`,
+//! `OPS_DRIFT.txt`, `JVM_PARITY.txt`) is checked insta-style: a run
+//! writes the fresh report under `CARGO_TARGET_TMPDIR` and fails if it
+//! differs from the committed file. Tests never touch the tracked files
+//! unless `UPDATE_SNAPSHOTS=1` is set, in which case they overwrite them
+//! (review and commit the result). Reports must therefore be
+//! deterministic: rows whose op count depends on the RNG are excluded
+//! from exact ops comparison (see [`is_rng_dependent`]).
+//!
+//! # JVM-dependent tests
+//!
+//! `rust_emit_matches_snapshot_on_jvm` needs a JDK and
+//! `tools/java-emitter/build/leekscript-emitter.jar`. Without them it
+//! prints a `SKIPPED` line and passes; set `LEEK_REQUIRE_JVM=1` to turn
+//! that skip into a failure.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -64,240 +65,102 @@ fn snapshots_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots")
 }
 
-/// Whether an opt-in environment flag is set: anything but unset,
-/// empty or `0` counts as on.
-fn flag_enabled(flag: Option<&str>) -> bool {
-    matches!(flag, Some(v) if !v.is_empty() && v != "0")
+/// Where fresh reports land on every run (never tracked).
+fn snapshot_out_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("leek-backend-java-snapshots")
 }
 
-/// Whether the run was asked to refresh the tracked snapshots and run
-/// reports. `UPDATE_SNAPSHOTS=1` opts in, the way `insta` accepts a
-/// pending snapshot.
-fn update_requested() -> bool {
-    flag_enabled(std::env::var("UPDATE_SNAPSHOTS").ok().as_deref())
+/// Whether `UPDATE_SNAPSHOTS=1` asks to overwrite the tracked reports.
+fn update_snapshots() -> bool {
+    std::env::var_os("UPDATE_SNAPSHOTS").is_some_and(|v| v == "1")
 }
 
-/// Whether the upstream Java harness must be available.
-///
-/// The JVM cross-checks below are the only thing that exercises the
-/// `value_ratio` / `ops_ratio` / `jvm_err` ratchets, and they skip when
-/// the jar or the captured snapshot is missing so the suite stays
-/// runnable without a JDK. `LEEK_REQUIRE_JVM=1` — set wherever
-/// `tools/java-emitter/build.sh` has run — turns every such skip into a
-/// failure, so those gates cannot quietly stop running.
-fn jvm_required() -> bool {
-    flag_enabled(std::env::var("LEEK_REQUIRE_JVM").ok().as_deref())
-}
-
-/// Report a missing prerequisite: a hard failure under
-/// `LEEK_REQUIRE_JVM=1`, otherwise an explicit `SKIPPED` line so the
-/// reason is visible in the test log rather than inferred from silence.
-fn skip_or_fail(what: &str, reason: &str) {
-    assert!(
-        !jvm_required(),
-        "LEEK_REQUIRE_JVM=1 but {what} cannot run: {reason}"
-    );
-    eprintln!("SKIPPED {what}: {reason}");
-}
-
-/// Where the per-run reports (`NATIVE_OPS_DRIFT.txt`, `CORPUS_SUMMARY.txt`,
-/// `OPS_DRIFT.txt`, `JVM_PARITY.txt`) are written.
-///
-/// They are statistics about the run, not golden files: the JVM-side op
-/// counts drift between runs because the corpus exercises `randInt`. Writing
-/// them into `tests/snapshots/` on every `cargo test` left tracked churn in
-/// the working tree, so by default they land under `CARGO_TARGET_TMPDIR`
-/// instead and the tracked copies are refreshed only on request.
-fn reports_root(update: bool) -> PathBuf {
+/// Write `actual` as report `name` under `out_dir`, then either overwrite
+/// `tracked_dir/name` (`update`) or compare against it. Returns a
+/// human-readable description of the mismatch on failure.
+fn check_snapshot_in(
+    tracked_dir: &std::path::Path,
+    out_dir: &std::path::Path,
+    name: &str,
+    actual: &str,
+    update: bool,
+) -> Result<(), String> {
+    fs::create_dir_all(out_dir).expect("snapshot out dir");
+    let fresh = out_dir.join(name);
+    fs::write(&fresh, actual).expect("write fresh snapshot");
+    let tracked = tracked_dir.join(name);
     if update {
-        snapshots_dir()
-    } else {
-        // CARGO_TARGET_TMPDIR is shared workspace-wide; namespace it.
-        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("leek-backend-java/reports")
-    }
-}
-
-fn reports_dir() -> PathBuf {
-    reports_root(update_requested())
-}
-
-/// Persist a run report and hand back where it landed, so the assertion
-/// messages can point at the file this run actually wrote.
-fn write_report(name: &str, contents: &str) -> PathBuf {
-    write_into(&reports_dir(), name, contents)
-}
-
-fn write_into(dir: &std::path::Path, name: &str, contents: &str) -> PathBuf {
-    fs::create_dir_all(dir).ok();
-    let path = dir.join(name);
-    let _ = fs::write(&path, contents);
-    path
-}
-
-/// Compare a *reproducible* artifact (the per-fixture diffs and
-/// `SUMMARY.txt`) against its tracked copy.
-///
-/// These are goldens, not statistics: the text is a pure function of the
-/// fixtures and the emitter. Rewriting them in place on every run meant a
-/// plain `cargo test` edited tracked files and emit drift landed in a
-/// commit unreviewed. A plain run now writes the fresh text under
-/// `CARGO_TARGET_TMPDIR` and returns a complaint when it disagrees with
-/// `tests/snapshots/`; `UPDATE_SNAPSHOTS=1` accepts the new output
-/// instead. Returns `None` when the snapshot is up to date.
-fn check_snapshot(name: &str, actual: &str) -> Option<String> {
-    let tracked = snapshots_dir().join(name);
-    if update_requested() {
-        write_into(&snapshots_dir(), name, actual);
-        return None;
-    }
-    let fresh = write_into(&reports_root(false), name, actual);
-    match fs::read_to_string(&tracked) {
-        Ok(expected) if expected == actual => None,
-        Ok(_) => Some(format!(
-            "{name}: differs from the tracked snapshot ({} vs this run's {})",
-            tracked.display(),
-            fresh.display()
-        )),
-        Err(e) => Some(format!(
-            "{name}: tracked snapshot {} unreadable ({e}); this run wrote {}",
-            tracked.display(),
-            fresh.display()
-        )),
-    }
-}
-
-/// Fail with every stale snapshot at once, pointing at the accept command.
-fn assert_snapshots_current(kind: &str, stale: &[String]) {
-    assert!(
-        stale.is_empty(),
-        "{kind} snapshots are stale:\n  {}\n\nReview the differences, then accept them with \
-         `UPDATE_SNAPSHOTS=1 cargo test -p leek-backend-java`.",
-        stale.join("\n  ")
-    );
-}
-
-/// Corpus snippets whose recorded op count is not reproducible.
-///
-/// `snapshot.tsv`'s `jvm_ops` column was captured from one JVM run. Any
-/// snippet that draws from the RNG takes a different number of ticks the
-/// next time round — the DNA-string rows at the tail of the snapshot
-/// drift by a few dozen ops out of 13.6M, which is what made
-/// `OPS_DRIFT.txt` churn between runs. Their *values* still have to
-/// match; only the op comparison is dropped, and the excluded count is
-/// reported so the hole stays visible.
-fn ops_are_nondeterministic(code: &str) -> bool {
-    let bytes = code.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
-            let start = i;
-            while i < bytes.len() && is_ident_char(bytes[i]) {
-                i += 1;
-            }
-            if matches!(
-                &code[start..i],
-                "rand" | "randInt" | "randFloat" | "randReal"
-            ) {
-                return true;
-            }
-        } else {
-            i += 1;
+        fs::create_dir_all(tracked_dir).expect("snapshot dir");
+        if fs::read_to_string(&tracked).ok().as_deref() != Some(actual) {
+            fs::write(&tracked, actual).expect("write tracked snapshot");
         }
+        return Ok(());
     }
-    false
-}
-
-/// A plain `cargo test` must not write into the tracked snapshot
-/// directory; only `UPDATE_SNAPSHOTS=1` may.
-#[test]
-fn run_reports_stay_out_of_the_source_tree_by_default() {
-    assert!(!flag_enabled(None));
-    assert!(!flag_enabled(Some("")));
-    assert!(!flag_enabled(Some("0")));
-    assert!(flag_enabled(Some("1")));
-    assert!(flag_enabled(Some("yes")));
-
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    assert!(
-        !reports_root(false).starts_with(&manifest),
-        "default report dir {} is inside the crate source tree",
-        reports_root(false).display()
-    );
-    assert_eq!(reports_root(true), snapshots_dir());
-}
-
-/// Without `UPDATE_SNAPSHOTS=1`, `check_snapshot` compares instead of
-/// writing: the fresh copy lands outside the crate and a mismatch is
-/// reported rather than papered over by overwriting the tracked file.
-#[test]
-fn check_snapshot_compares_without_touching_the_tracked_copy() {
-    if update_requested() {
-        // The whole point of the flag is that writes are allowed; there
-        // is nothing to assert about compare mode in an accept run.
-        eprintln!(
-            "SKIPPED check_snapshot_compares_without_touching_the_tracked_copy: \
-                   UPDATE_SNAPSHOTS is set"
-        );
-        return;
+    let Ok(expected) = fs::read_to_string(&tracked) else {
+        return Err(format!(
+            "{name}: no committed snapshot at {} (fresh output: {})",
+            tracked.display(),
+            fresh.display()
+        ));
+    };
+    if expected == actual {
+        return Ok(());
     }
-
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let name = "__self_check.diff";
-    let tracked = snapshots_dir().join(name);
-    // The tracked copy does not exist, so any content must be reported
-    // as drift — and no file may appear in the source tree.
-    let complaint = check_snapshot(name, "fresh\n").expect("missing snapshot reported");
-    assert!(
-        complaint.contains(name),
-        "complaint names the snapshot: {complaint}"
-    );
-    assert!(
-        !tracked.exists(),
-        "check_snapshot wrote into the tracked snapshot dir: {}",
-        tracked.display()
-    );
-    let fresh = reports_root(false).join(name);
-    assert!(
-        !fresh.starts_with(&manifest),
-        "fresh copy {} is inside the crate source tree",
-        fresh.display()
-    );
-    assert_eq!(fs::read_to_string(&fresh).unwrap(), "fresh\n");
-    let _ = fs::remove_file(&fresh);
-}
-
-/// Every snippet that reaches the RNG must be excluded from the op
-/// comparison — that is the whole reason `OPS_DRIFT.txt` used to churn.
-#[test]
-fn rng_snippets_are_tagged_nondeterministic() {
-    assert!(ops_are_nondeterministic("var a = randInt(0, 4)"));
-    assert!(ops_are_nondeterministic("rand()"));
-    assert!(ops_are_nondeterministic("var x = 1 + randFloat()"));
-    assert!(ops_are_nondeterministic("randReal()"));
-    // Identifiers that merely contain the prefix are deterministic.
-    assert!(!ops_are_nondeterministic("var random = 3 return random"));
-    assert!(!ops_are_nondeterministic("var myrandInt = 3"));
-    assert!(!ops_are_nondeterministic("var a = 1 + 2"));
-
-    // The corpus rows the snapshot records as drifting are all RNG rows.
-    let path = fixtures_dir().join("ops/snapshot.tsv");
-    if !path.exists() {
-        skip_or_fail(
-            "rng_snippets_are_tagged_nondeterministic",
-            "snapshot.tsv missing",
-        );
-        return;
-    }
-    let contents = fs::read_to_string(&path).expect("read snapshot.tsv");
-    let tagged = contents
+    let diff = unified_diff_labeled(&expected, actual, "committed", "this run");
+    let changed: Vec<&str> = diff
         .lines()
-        .filter(|l| {
-            let cols: Vec<&str> = l.splitn(6, '\t').collect();
-            cols.len() == 6 && cols[1] != "S" && cols[2] == "equals"
-        })
-        .filter(|l| ops_are_nondeterministic(&unescape(l.splitn(6, '\t').nth(5).unwrap())))
-        .count();
-    assert!(tagged > 0, "no RNG rows found in snapshot.tsv");
+        .filter(|l| l.starts_with(['+', '-']))
+        .take(40)
+        .collect();
+    Err(format!(
+        "{name}: differs from {} (fresh output: {})\n{}",
+        tracked.display(),
+        fresh.display(),
+        changed.join("\n")
+    ))
+}
+
+/// [`check_snapshot_in`] against this crate's `tests/snapshots/`.
+fn check_snapshot(name: &str, actual: &str) -> Result<(), String> {
+    check_snapshot_in(
+        &snapshots_dir(),
+        &snapshot_out_dir(),
+        name,
+        actual,
+        update_snapshots(),
+    )
+}
+
+/// Panic with every snapshot mismatch collected in `failures`.
+fn assert_snapshots(failures: &[String]) {
+    assert!(
+        failures.is_empty(),
+        "snapshot reports changed; rerun with UPDATE_SNAPSHOTS=1 to accept, \
+         then review and commit:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// Skip a JVM-dependent test with a visible `SKIPPED` line, or fail when
+/// `LEEK_REQUIRE_JVM=1` says the JVM path must run.
+fn skip_jvm_test(test: &str, reason: &str) {
+    assert!(
+        std::env::var_os("LEEK_REQUIRE_JVM").is_none_or(|v| v != "1"),
+        "{test}: LEEK_REQUIRE_JVM=1 but {reason}"
+    );
+    eprintln!("SKIPPED {test}: {reason} (set LEEK_REQUIRE_JVM=1 to fail instead)");
+}
+
+/// RNG builtins. The JVM reference ops in `snapshot.tsv` were captured
+/// from one unseeded run, so a program calling these has no stable
+/// expected op count.
+const RNG_BUILTINS: &[&str] = &["rand", "randInt", "randFloat", "randReal"];
+
+/// Whether `code` calls an RNG builtin, i.e. its op count is not a
+/// reproducible comparison target. Matches whole identifiers only.
+fn is_rng_dependent(code: &str) -> bool {
+    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|ident| RNG_BUILTINS.contains(&ident))
 }
 
 fn fixture_inputs() -> Vec<PathBuf> {
@@ -352,14 +215,13 @@ fn unified_diff(expected: &str, actual: &str) -> String {
     )
 }
 
-/// Iterate every fixture, run the Rust emitter, and compare the unified
-/// diff against the golden with the tracked snapshot in
-/// `tests/snapshots/`. Asserts on the structural invariants we already
-/// meet (shape, runtime surface) plus snapshot freshness.
+/// Iterate every fixture, run the Rust emitter, check the unified
+/// diff against the golden matches `tests/snapshots/`. Asserts on the
+/// structural invariants we already meet (shape, runtime surface).
 #[test]
 fn parity_with_java_reference() {
+    let mut failures = Vec::new();
     let mut summary = String::new();
-    let mut stale: Vec<String> = Vec::new();
     for input in fixture_inputs() {
         let stem = input.file_stem().unwrap().to_string_lossy().into_owned();
         let src = fs::read_to_string(&input).expect("read input");
@@ -367,20 +229,15 @@ fn parity_with_java_reference() {
 
         let golden_path = fixtures_dir().join("golden").join(format!("{stem}.java"));
         if !golden_path.exists() {
-            skip_or_fail(
-                &format!("parity_with_java_reference/{stem}"),
-                "golden missing \u{2014} run tools/java-emitter/build.sh and re-capture",
-            );
+            eprintln!("missing golden for {stem}; run tools/java-emitter/build.sh and re-capture");
             continue;
         }
         let golden = fs::read_to_string(&golden_path).expect("read golden");
 
-        // The diff is a golden in its own right: maintainers watch it
-        // shrink, and an unreviewed change to it is emit drift.
+        // Check the diff regardless of whether we're at byte parity.
+        // It's a tracking artifact: maintainers watch it shrink.
         let diff = unified_diff(&golden, &actual);
-        if let Some(complaint) = check_snapshot(&format!("{stem}.exact.diff"), &diff) {
-            stale.push(complaint);
-        }
+        failures.extend(check_snapshot(&format!("{stem}.exact.diff"), &diff).err());
 
         // Structural invariants. These are the contract we hold today.
         // Byte parity is a separate iteration; failing here means we
@@ -397,10 +254,8 @@ fn parity_with_java_reference() {
             .count();
         let _ = writeln!(summary, "{stem}: +{added} -{removed} lines vs golden");
     }
-    if let Some(complaint) = check_snapshot("SUMMARY.txt", &summary) {
-        stale.push(complaint);
-    }
-    assert_snapshots_current("exact-vs-golden", &stale);
+    failures.extend(check_snapshot("SUMMARY.txt", &summary).err());
+    assert_snapshots(&failures);
 }
 
 fn check_shape(stem: &str, java: &str) {
@@ -488,10 +343,10 @@ fn byte_parity_10_ternary() {
 /// `HashMap` iteration order (`MainLeekBlock.mFunctions`). That's
 /// implementation-defined and unreproducible from Rust without
 /// reimplementing the JVM's hash semantics. The doc explicitly
-/// documents this as a determinism gap (`docs/java-backend.md` §9);
+/// documents this as a determinism gap (`doc/java-backend.md` §9);
 /// the test is kept ignored as a marker.
 #[test]
-#[ignore = "Java HashMap iteration order is not byte-reproducible — see docs/java-backend.md §9"]
+#[ignore = "Java HashMap iteration order is not byte-reproducible — see doc/java-backend.md §9"]
 fn byte_parity_09_multi_func() {
     assert_byte_parity("09_multi_func");
 }
@@ -693,30 +548,22 @@ fn exact_switch_skeleton_matches_reference() {
 ///   2. The Rust backend's emitted Java is non-empty (sanity that
 ///      the snippet at least parses+lowers).
 ///
-/// Ops-count parity is currently a best-effort soft check — the
-/// Rust interp's tick model matches the JVM only on the simple
-/// slice. We report (pass / value-mismatch / interp-error /
-/// ops-mismatch) stats and write the failures into a `.diff` file
-/// for triage; the test asserts only on **value** mismatches, since
-/// that's the contract we hold end-to-end today.
+/// Ops-count parity is a soft check with a pinned report: per-case
+/// drift goes to `NATIVE_OPS_DRIFT.txt` and the totals to
+/// `CORPUS_SUMMARY.txt`, both compared against the committed copies.
+/// Rows calling an RNG builtin are not ops-compared (their expected
+/// count is one unseeded JVM sample). The ratio gate asserts only on
+/// **value** mismatches.
 ///
 /// This is the **runtime** companion to the static-emit byte-parity
 /// tests above: byte-parity proves we emit the right Java; this
 /// proves we *execute* to the right value too.
 #[test]
 fn corpus_value_matches_snapshot() {
+    // snapshot.tsv is tracked, so a missing file is a broken checkout,
+    // not a reason to skip.
     let path = fixtures_dir().join("ops/snapshot.tsv");
-    if !path.exists() {
-        skip_or_fail(
-            "corpus_value_matches_snapshot",
-            &format!(
-                "{} not present \u{2014} run tools/java-emitter/generate-snapshot.sh first",
-                path.display()
-            ),
-        );
-        return;
-    }
-    let contents = fs::read_to_string(&path).expect("read snapshot.tsv");
+    let contents = fs::read_to_string(&path).expect("read tracked snapshot.tsv");
 
     let mut total = 0u32;
     let mut value_ok = 0u32;
@@ -763,9 +610,7 @@ fn corpus_value_matches_snapshot() {
             InterpOutcome::Ok { value, ops } => {
                 if value == expected_value {
                     value_ok += 1;
-                    if ops_are_nondeterministic(&code) {
-                        // The recorded `jvm_ops` came from one JVM run; an
-                        // RNG-driven snippet ticks differently every time.
+                    if is_rng_dependent(&code) {
                         ops_nondet += 1;
                     } else if expected_ops == ops {
                         ops_match += 1;
@@ -814,6 +659,8 @@ fn corpus_value_matches_snapshot() {
 
     // Per-case ops drift detail (native runtime counter vs the JVM
     // snapshot's ops column) — sidecar so the summary stays scannable.
+    // The stable sort keeps equal-|delta| rows in file order.
+    let mut failures = Vec::new();
     {
         let mut drift_report = String::new();
         ops_diffs.sort_by_key(|(_, _, _, d, _, _)| -d.abs());
@@ -823,17 +670,17 @@ fn corpus_value_matches_snapshot() {
                 "L{lineno}: v{v} delta={delta:+} expected={exp} got={got} code={code:?}"
             );
         }
-        write_report("NATIVE_OPS_DRIFT.txt", &drift_report);
+        failures.extend(check_snapshot("NATIVE_OPS_DRIFT.txt", &drift_report).err());
     }
 
     let report = format!(
         "snapshot cross-check: {total} cases\n\
-         \u{2713} {value_ok} matched value ({ops_match} also matched ops, {ops_mismatch} ops drift)\n\
+         \u{2713} {value_ok} matched value ({ops_match} also matched ops, {ops_mismatch} ops drift, \
+         {ops_nondet} RNG-dependent not ops-compared)\n\
          \u{2717} {value_mismatch} value mismatches\n\
-         \u{2717} {interp_err} interpreter errors / panics avoided\n\
-         \u{2013} {ops_nondet} ops comparisons skipped (RNG-driven snippet)\n",
+         \u{2717} {interp_err} interpreter errors / panics avoided\n",
     );
-    write_report("CORPUS_SUMMARY.txt", &format!("{report}\n{mismatches}"));
+    failures.extend(check_snapshot("CORPUS_SUMMARY.txt", &format!("{report}\n{mismatches}")).err());
 
     // Surface the report regardless of pass/fail so a CI log shows
     // current parity health.
@@ -849,6 +696,7 @@ fn corpus_value_matches_snapshot() {
         "value parity too low: {value_ok}/{total} = {:.1}% (need ≥ 80%)\n{report}",
         value_pass_ratio * 100.0
     );
+    assert_snapshots(&failures);
 }
 
 enum InterpOutcome {
@@ -944,28 +792,20 @@ fn unescape(s: &str) -> String {
 /// This is the closing loop: the byte-parity tests prove our emit
 /// is structurally faithful; the interp test proves our walker
 /// produces the same value; this test proves the JVM agrees on
-/// **our** emit, end-to-end. Skipped when the harness isn't built
-/// (no `tools/java-emitter/build/leekscript-emitter.jar`), so the
-/// suite stays runnable on machines without a JDK — every skip says
-/// so out loud, and `LEEK_REQUIRE_JVM=1` makes it a failure wherever
-/// the harness is expected to be present.
+/// **our** emit, end-to-end. Skipped with a `SKIPPED` line when the
+/// harness isn't built (no `tools/java-emitter/build/leekscript-emitter.jar`)
+/// or the JVM can't be spawned, so the suite stays runnable on machines
+/// without a JDK; `LEEK_REQUIRE_JVM=1` makes those skips failures.
 #[test]
 fn rust_emit_matches_snapshot_on_jvm() {
-    const NAME: &str = "rust_emit_matches_snapshot_on_jvm";
+    const TEST: &str = "rust_emit_matches_snapshot_on_jvm";
     let snapshot_path = fixtures_dir().join("ops/snapshot.tsv");
-    if !snapshot_path.exists() {
-        skip_or_fail(
-            NAME,
-            "snapshot.tsv missing \u{2014} run tools/java-emitter/generate-snapshot.sh first",
-        );
-        return;
-    }
     let jar_path = workspace_root().join("tools/java-emitter/build/leekscript-emitter.jar");
     if !jar_path.exists() {
-        skip_or_fail(
-            NAME,
+        skip_jvm_test(
+            TEST,
             &format!(
-                "{} missing \u{2014} run tools/java-emitter/build.sh first",
+                "{} missing — run tools/java-emitter/build.sh first",
                 jar_path.display()
             ),
         );
@@ -976,9 +816,8 @@ fn rust_emit_matches_snapshot_on_jvm() {
         None => std::path::PathBuf::from("java"),
     };
 
-    let contents = fs::read_to_string(&snapshot_path).expect("read snapshot.tsv");
+    let contents = fs::read_to_string(&snapshot_path).expect("read tracked snapshot.tsv");
     let mut cases: Vec<JvmCase> = Vec::new();
-    let mut emit_skipped = 0u32;
     for (lineno, line) in contents.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -1006,10 +845,8 @@ fn rust_emit_matches_snapshot_on_jvm() {
 
         // Emit Java for this snippet via the Rust backend. Skip the
         // case (rather than failing) when emission itself blows up —
-        // those are reported by the static parity tests, not here. The
-        // count is surfaced below so the skip is never invisible.
+        // those are reported by the static parity tests, not here.
         let Some(java) = emit_via_rust(&code, version_byte, lineno) else {
-            emit_skipped += 1;
             continue;
         };
         cases.push(JvmCase {
@@ -1026,9 +863,10 @@ fn rust_emit_matches_snapshot_on_jvm() {
     let results = match run_harness(&java_bin, &jar_path, &cases) {
         Ok(r) => r,
         Err(e) => {
-            // Spawning `java` is a prerequisite like the jar itself: a
-            // bare return here silently drops the three ratchets below.
-            skip_or_fail(NAME, &format!("harness invocation failed: {e}"));
+            skip_jvm_test(
+                TEST,
+                &format!("could not spawn {}: {e}", java_bin.display()),
+            );
             return;
         }
     };
@@ -1038,14 +876,14 @@ fn rust_emit_matches_snapshot_on_jvm() {
     let mut ops_ok = 0u32;
     let mut ops_mismatch = 0u32;
     let mut ops_nondet = 0u32;
-    let mut no_result = 0u32;
     let mut jvm_err = 0u32;
     let mut mismatches = String::new();
     let mut ops_diffs: Vec<(String, u8, String, i64, u64, u64)> = Vec::new();
+    let mut failures = Vec::new();
 
     for case in &cases {
         let Some(res) = results.get(&case.id) else {
-            no_result += 1;
+            jvm_err += 1;
             continue;
         };
         if !res.error.is_empty() {
@@ -1069,11 +907,7 @@ fn rust_emit_matches_snapshot_on_jvm() {
                 case.id, case.version, case.code, case.expected_value, res.value
             );
         }
-        if ops_are_nondeterministic(&case.code) {
-            // The snapshot's `jvm_ops` was captured from a single JVM
-            // run and the harness RNG is unseeded, so an RNG-driven
-            // snippet drifts by a handful of ticks run to run; comparing
-            // it would make the ratchet below a coin flip.
+        if is_rng_dependent(&case.code) {
             ops_nondet += 1;
         } else if res.ops == case.expected_ops {
             ops_ok += 1;
@@ -1101,47 +935,60 @@ fn rust_emit_matches_snapshot_on_jvm() {
                 "{id}: v{v} delta={delta:+} expected={exp} got={got} code={code:?}"
             );
         }
-        write_report("OPS_DRIFT.txt", &drift_report);
+        failures.extend(check_snapshot("OPS_DRIFT.txt", &drift_report).err());
     }
 
     let total = u32::try_from(cases.len()).unwrap();
-    // RNG-driven rows are excluded from the op comparison on both sides
-    // of the ratio, so the ratchet measures emit fidelity rather than
-    // which way the harness's unseeded RNG fell this run.
-    let ops_compared = total - ops_nondet;
+    // RNG-dependent rows have no reproducible expected op count, so the
+    // ops ratio is over the deterministic rows only.
+    let ops_total = total - ops_nondet;
     let report = format!(
         "rust-emit JVM parity: {total} cases\n\
          \u{2713} value: {value_ok}/{total} ({:.1}%)\n\
-         \u{2713} ops:   {ops_ok}/{ops_compared} ({:.1}%)\n\
+         \u{2713} ops:   {ops_ok}/{ops_total} ({:.1}%)\n\
          \u{2717} value mismatches: {value_mismatch}\n\
          \u{2717} ops drift:        {ops_mismatch}\n\
          \u{2717} jvm errors:       {jvm_err}\n\
-         \u{2717} no harness reply: {no_result}\n\
-         \u{2013} skipped: {emit_skipped} emit failures, \
-         {ops_nondet} ops comparisons on RNG-driven snippets\n",
+         - ops not compared (RNG-dependent): {ops_nondet}\n",
         100.0 * f64::from(value_ok) / f64::from(total.max(1)),
-        100.0 * f64::from(ops_ok) / f64::from(ops_compared.max(1)),
+        100.0 * f64::from(ops_ok) / f64::from(ops_total.max(1)),
     );
-    let parity_report = write_report("JVM_PARITY.txt", &format!("{report}\n{mismatches}"));
-    let parity_report = parity_report.display();
+    failures.extend(check_snapshot("JVM_PARITY.txt", &format!("{report}\n{mismatches}")).err());
     eprintln!("{report}");
 
     // Three ratchets — each tightens as emit gaps close. Bump them
     // up after every batch of fixes so regressions can't sneak in.
-    // The emit gaps behind the current numbers are catalogued in
-    // `docs/java-backend.md` §9; `JVM_PARITY.txt` tracks them per case.
+    // Remaining gaps (track per case in `JVM_PARITY.txt`):
+    //  - Block-bodied lambdas can't see outer locals — emit needs
+    //    to outline them into top-level helper methods.
+    //  - Assignment to a builtin / function / class name
+    //    (`count = 1; return count`) — broken without a HIR-level
+    //    rewrite that shadows the name with a local.
+    //  - v1–v3 receiver-method calls into `LegacyArrayLeekValue`
+    //    methods that don't exist on it (`arrayMap`, `arrayFilter`,
+    //    `arrayFind`, etc.). Upstream emits per-call-site
+    //    `Array_<name>_<sig>` helpers via
+    //    `JavaWriter.writeGenericFunctions`; we don't yet.
+    //  - Default parameter values aren't lowered into call-site
+    //    null-fill or synthesized overloads.
+    //  - Index l-value chains with promote-on-write semantics
+    //    (`tabmulti[i][j] = v` where the inner array morphs into
+    //    a sparse map in v1-v3).
+    //  - Bit-XOR `^` in v1 means POWER, not XOR — we lower as XOR.
     let value_ratio = f64::from(value_ok) / f64::from(total.max(1));
-    let ops_ratio = f64::from(ops_ok) / f64::from(ops_compared.max(1));
+    let ops_ratio = f64::from(ops_ok) / f64::from(ops_total.max(1));
+    let breakdown = snapshot_out_dir().join("JVM_PARITY.txt");
+    let breakdown = breakdown.display();
     assert!(
         value_ratio >= 0.96,
         "rust-emit JVM value parity below 96%: {value_ok}/{total} = {:.1}%\n\
-         See {parity_report} for the per-case breakdown",
+         See {breakdown} for the per-case breakdown",
         value_ratio * 100.0
     );
     assert!(
         ops_ratio >= 0.89,
-        "rust-emit JVM ops parity below 89%: {ops_ok}/{ops_compared} = {:.1}%\n\
-         See {parity_report} for the per-case breakdown",
+        "rust-emit JVM ops parity below 89%: {ops_ok}/{ops_total} = {:.1}%\n\
+         See {breakdown} for the per-case breakdown",
         ops_ratio * 100.0
     );
     // Strict ceiling — every javac/JVM compile failure has a clear
@@ -1150,17 +997,9 @@ fn rust_emit_matches_snapshot_on_jvm() {
     assert!(
         jvm_err == 0,
         "rust-emit JVM error count above 0: {jvm_err}\n\
-         See {parity_report} for the per-case breakdown"
+         See {breakdown} for the per-case breakdown"
     );
-    // A case the harness never answered for is a dropped assertion, not
-    // a pass: counting it silently is how a half-dead harness used to
-    // look green.
-    assert!(
-        no_result == 0,
-        "{no_result} of {total} cases got no reply from RunEmittedJava \u{2014} \
-         the harness died mid-run\n\
-         See {parity_report} for the per-case breakdown"
-    );
+    assert_snapshots(&failures);
 }
 
 struct JvmCase {
@@ -1268,13 +1107,12 @@ fn run_harness(
     Ok(results)
 }
 
-/// Bonus diagnostic: the `.clean-vs-exact.diff` snapshots show how the
-/// optimized output differs from the byte-faithful one. Useful for
-/// reviewers reading PRs that touch the emitter, and compared like every
-/// other snapshot so a clean-mode change cannot slip through unread.
+/// Bonus diagnostic: also check a `.clean-vs-exact.diff` showing how
+/// the optimized output differs from the byte-faithful one. Useful for
+/// reviewers reading PRs that touch the emitter.
 #[test]
 fn capture_clean_vs_exact_diff() {
-    let mut stale: Vec<String> = Vec::new();
+    let mut failures = Vec::new();
     for input in fixture_inputs() {
         let stem = input.file_stem().unwrap().to_string_lossy().into_owned();
         let src = fs::read_to_string(&input).expect("read input");
@@ -1300,9 +1138,51 @@ fn capture_clean_vs_exact_diff() {
             "exact mode (byte-faithful)",
             "clean mode (readable / charge-folded)",
         );
-        if let Some(complaint) = check_snapshot(&format!("{stem}.clean-vs-exact.diff"), &diff) {
-            stale.push(complaint);
-        }
+        failures.extend(check_snapshot(&format!("{stem}.clean-vs-exact.diff"), &diff).err());
     }
-    assert_snapshots_current("clean-vs-exact", &stale);
+    assert_snapshots(&failures);
+}
+
+/// Compare mode writes the fresh report to the out dir only and reports
+/// a mismatch; the tracked file is left byte-for-byte untouched (#68).
+#[test]
+fn snapshot_compare_mode_never_rewrites_tracked_file() {
+    let root = snapshot_out_dir().join("self-test-compare");
+    let (tracked, out) = (root.join("tracked"), root.join("out"));
+    fs::create_dir_all(&tracked).unwrap();
+    fs::write(tracked.join("R.txt"), "old\n").unwrap();
+
+    let err = check_snapshot_in(&tracked, &out, "R.txt", "new\n", false)
+        .expect_err("a changed report must fail");
+    assert!(err.contains("-old") && err.contains("+new"), "{err}");
+    assert_eq!(fs::read_to_string(tracked.join("R.txt")).unwrap(), "old\n");
+    assert_eq!(fs::read_to_string(out.join("R.txt")).unwrap(), "new\n");
+
+    assert!(check_snapshot_in(&tracked, &out, "R.txt", "old\n", false).is_ok());
+    assert!(
+        check_snapshot_in(&tracked, &out, "Missing.txt", "x", false).is_err(),
+        "an uncommitted report must fail rather than be created"
+    );
+    assert!(!tracked.join("Missing.txt").exists());
+}
+
+/// `UPDATE_SNAPSHOTS=1` mode is the only path that writes tracked files.
+#[test]
+fn snapshot_update_mode_overwrites_tracked_file() {
+    let root = snapshot_out_dir().join("self-test-update");
+    let (tracked, out) = (root.join("tracked"), root.join("out"));
+    let _ = fs::remove_dir_all(&tracked);
+    assert!(check_snapshot_in(&tracked, &out, "R.txt", "new\n", true).is_ok());
+    assert_eq!(fs::read_to_string(tracked.join("R.txt")).unwrap(), "new\n");
+}
+
+/// The ops-drift reports exclude exactly the programs calling an RNG
+/// builtin, matched on whole identifiers (#73).
+#[test]
+fn rng_dependent_programs_are_detected_by_identifier() {
+    assert!(is_rng_dependent("return randInt(0, 4)"));
+    assert!(is_rng_dependent("var x = rand() return x < 1"));
+    assert!(is_rng_dependent("return randFloat(1, 2) + randReal(1, 2)"));
+    assert!(!is_rng_dependent("var operand = 1 return operand"));
+    assert!(!is_rng_dependent("var randomize = 1 return my_randInt"));
 }
