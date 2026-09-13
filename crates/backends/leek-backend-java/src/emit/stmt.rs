@@ -603,9 +603,13 @@ impl Emitter<'_> {
         let key_captured = fe
             .key
             .as_ref()
-            .is_some_and(|k| k.is_new && captured_by_nested_lambda_stmts(body_slice, k.def));
-        let value_captured =
-            fe.value.is_new && captured_by_nested_lambda_stmts(body_slice, fe.value.def);
+            .and_then(|k| k.local_def().filter(|_| k.is_new))
+            .is_some_and(|d| captured_by_nested_lambda_stmts(body_slice, d));
+        let value_captured = fe
+            .value
+            .local_def()
+            .filter(|_| fe.value.is_new)
+            .is_some_and(|d| captured_by_nested_lambda_stmts(body_slice, d));
         // Only declare the binding when the foreach actually
         // introduces a new variable (`for (var x in …)` vs.
         // `for (x in …)` reusing an outer slot). Without this we'd
@@ -618,7 +622,7 @@ impl Emitter<'_> {
                 self.writer
                     .add_line(&format!("final Box {k} = new Box({ai}, null);"));
                 if let Some(kb) = &fe.key {
-                    self.ref_boxes.borrow_mut().insert(kb.def);
+                    self.ref_boxes.borrow_mut().extend(kb.local_def());
                 }
             } else {
                 self.writer.add_line(&format!("Object {k} = null;"));
@@ -629,7 +633,7 @@ impl Emitter<'_> {
                 let ai = self.ai_this();
                 self.writer
                     .add_line(&format!("final Box {value} = new Box({ai}, null);"));
-                self.ref_boxes.borrow_mut().insert(fe.value.def);
+                self.ref_boxes.borrow_mut().extend(fe.value.local_def());
             } else {
                 self.writer.add_line(&format!("Object {value} = null;"));
             }
@@ -660,20 +664,20 @@ impl Emitter<'_> {
         self.writer.add_line(&format!("var {it} = iterator({ar});"));
         self.writer.add_line(&format!("while ({it}.hasNext()) {{"));
         self.writer.add_line(&format!("var {entry} = {it}.next();"));
-        if let Some(k) = &key_decl {
+        if let (Some(k), Some(kb)) = (&key_decl, &fe.key) {
             if key_captured {
                 self.writer.add_line(&format!("{k}.set({entry}.getKey());"));
             } else {
-                self.writer
-                    .add_line(&format!("{k} = (Object) {entry}.getKey();"));
+                let store = self.foreach_store(kb, k, &format!("{entry}.getKey()"));
+                self.writer.add_line(&format!("{store};"));
             }
         }
         if value_captured {
             self.writer
                 .add_line(&format!("{value}.set({entry}.getValue());"));
         } else {
-            self.writer
-                .add_line(&format!("{value} = (Object) {entry}.getValue();"));
+            let store = self.foreach_store(&fe.value, &value, &format!("{entry}.getValue()"));
+            self.writer.add_line(&format!("{store};"));
         }
         // Per-iteration tick. Value-only (`ForeachBlock`): one
         // unconditional `addCounter(1)` per iteration, plus at v1 a
@@ -700,6 +704,27 @@ impl Emitter<'_> {
         self.emit_stmt_or_block(&fe.body);
         self.writer.add_line("}");
         self.writer.add_line("}");
+    }
+
+    /// `<lhs> = <value>` storing one foreach slot into a binding that isn't a
+    /// runtime `Box`: its Java local (`local`), or — for a bare binding over a
+    /// global or an own instance field — that storage, coerced to its
+    /// declared scalar type the way a plain `=` is.
+    fn foreach_store(&self, bind: &leek_hir::ForeachBind, local: &str, value: &str) -> String {
+        let value = format!("(Object) {value}");
+        match &bind.target.kind {
+            ExprKind::Name(NameRef::Global(_)) => format!(
+                "{} = {}",
+                mangle::global(self.opts, &bind.name),
+                Self::coerce_decl(self.assign_target_scalar_ty(&bind.target), value)
+            ),
+            ExprKind::Field(base, field, _) if self.is_own_instance_field(base, field) => format!(
+                "{} = {}",
+                self.own_instance_field_ref(field),
+                Self::coerce_decl(self.own_field_ty(field).as_ref(), value)
+            ),
+            _ => format!("{local} = {value}"),
+        }
     }
 
     /// Monotonically increasing id for foreach-temp names so nested

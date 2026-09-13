@@ -1310,10 +1310,12 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
     // collect their defs so the marking pass skips them.
     fn collect_foreach_binds(s: &Stmt, out: &mut HashSet<leek_hir::DefId>) {
         if let Stmt::Foreach(fe) = s {
-            if let Some(k) = &fe.key {
-                out.insert(k.def);
-            }
-            out.insert(fe.value.def);
+            out.extend(
+                fe.key
+                    .iter()
+                    .chain([&fe.value])
+                    .filter_map(leek_hir::ForeachBind::local_def),
+            );
         }
     }
 

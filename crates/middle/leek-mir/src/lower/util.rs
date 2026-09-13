@@ -337,10 +337,17 @@ pub(crate) fn walk_stmt_captures(
         }
         Stmt::Foreach(fe) => {
             walk_expr_captures(&fe.iter, declared, captures, seen, needs_this);
-            if let Some(k) = &fe.key {
-                declared.insert(k.def);
+            // A `var` binding is declared by the loop; a bare one writes
+            // through its l-value, which may be an outer local (a capture)
+            // or `this.field`.
+            for bind in fe.key.iter().chain(std::iter::once(&fe.value)) {
+                match bind.local_def() {
+                    Some(d) if bind.is_new => {
+                        declared.insert(d);
+                    }
+                    _ => walk_expr_captures(&bind.target, declared, captures, seen, needs_this),
+                }
             }
-            declared.insert(fe.value.def);
             walk_stmt_captures(&fe.body, declared, captures, seen, needs_this);
         }
         Stmt::Block(b) => {

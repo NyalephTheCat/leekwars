@@ -333,9 +333,10 @@ fn fp_stmt(s: &Stmt, o: &mut String) {
             fp_stmt(&fr.body, o);
         }
         Stmt::Foreach(fe) => {
-            let _ = write!(o, "E{:?}", fe.value.def);
+            o.push('E');
+            fp_expr(&fe.value.target, o);
             if let Some(k) = &fe.key {
-                let _ = write!(o, "{:?}", k.def);
+                fp_expr(&k.target, o);
             }
             fp_expr(&fe.iter, o);
             fp_stmt(&fe.body, o);

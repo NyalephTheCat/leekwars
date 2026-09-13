@@ -301,7 +301,15 @@ pub struct ForeachStmt {
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForeachBind {
-    pub def: DefId,
+    /// Where each iteration stores its key/value — an l-value expression
+    /// resolved exactly like the left-hand side of an assignment to `name`:
+    /// - `Name(Local(def))` for a `var` declaration (a fresh local) or a
+    ///   reused local / lambda capture;
+    /// - `Name(Global(def))` for a declared global;
+    /// - `Name(Builtin(name))` for a name HIR can't resolve yet (a global
+    ///   declared after this body was lowered — a name-keyed global write);
+    /// - `Field(this | class, name)` for a class field inside a method.
+    pub target: Expr,
     pub name: String,
     pub is_new: bool,
     /// `@`-by-reference iterator (`for (var @v in arr)`). At v1 a by-ref value
@@ -309,6 +317,28 @@ pub struct ForeachBind {
     /// where a by-value declaration costs two.
     pub is_by_ref: bool,
     pub span: Span,
+}
+
+impl ForeachBind {
+    /// The local this binding stores into, when [`Self::target`] is a local
+    /// (always the case for a `var` declaration).
+    #[must_use]
+    pub fn local_def(&self) -> Option<DefId> {
+        match &self.target.kind {
+            ExprKind::Name(NameRef::Local(d)) => Some(*d),
+            _ => None,
+        }
+    }
+
+    /// The global this binding writes, when [`Self::target`] is a declared
+    /// global.
+    #[must_use]
+    pub fn global_def(&self) -> Option<DefId> {
+        match &self.target.kind {
+            ExprKind::Name(NameRef::Global(d)) => Some(*d),
+            _ => None,
+        }
+    }
 }
 
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]

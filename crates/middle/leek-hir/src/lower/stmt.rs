@@ -3,10 +3,11 @@
 use leek_parser::ast::{self, AstNode, Expr as AstExpr, Stmt as AstStmt};
 use leek_span::Span;
 use leek_syntax::{SyntaxKind, SyntaxToken};
+use leek_types::Type;
 
 use crate::ir::{
-    Block, Def, DefId, DoWhileStmt, Expr, ForStmt, ForeachBind, ForeachStmt, IfStmt, ImportStmt,
-    IncludeStmt, Stmt, SwitchArm, SwitchStmt, VarDecl, WhileStmt,
+    Block, Def, DefId, DoWhileStmt, Expr, ExprKind, ForStmt, ForeachBind, ForeachStmt, IfStmt,
+    ImportStmt, IncludeStmt, NameRef, Stmt, SwitchArm, SwitchStmt, VarDecl, WhileStmt,
 };
 
 use super::Lowerer;
@@ -347,13 +348,22 @@ impl Lowerer {
                     let tspan = self.span_of_token(&t);
                     let is_new = pending_var;
                     let is_by_ref = pending_ref;
-                    let def = if is_new {
-                        self.declare_local(&nm, tspan, None)
+                    // A `var` binding declares a fresh local; a bare one
+                    // stores into whatever `nm` names here, resolved like
+                    // an assignment l-value (local / capture, global,
+                    // class field, or a name-keyed global).
+                    let kind = if is_new {
+                        ExprKind::Name(NameRef::Local(self.declare_local(&nm, tspan, None)))
                     } else {
-                        self.lookup_local(&nm).unwrap_or(DefId(0))
+                        let nr = self.resolve_name(&nm);
+                        self.name_expr_kind(nr, tspan)
                     };
                     let bind = ForeachBind {
-                        def,
+                        target: Expr {
+                            kind,
+                            ty: Type::Any,
+                            span: tspan,
+                        },
                         name: nm,
                         is_new,
                         is_by_ref,
@@ -384,8 +394,14 @@ impl Lowerer {
         self.pop_scope();
         Stmt::Foreach(ForeachStmt {
             key,
-            value: value.unwrap_or(ForeachBind {
-                def: DefId(0),
+            // No binding at all only happens on a parse error; store into an
+            // unresolved name rather than an arbitrary def.
+            value: value.unwrap_or_else(|| ForeachBind {
+                target: Expr {
+                    kind: ExprKind::Name(NameRef::Unresolved(String::new())),
+                    ty: Type::Any,
+                    span,
+                },
                 name: String::new(),
                 is_new: false,
                 is_by_ref: false,

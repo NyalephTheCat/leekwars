@@ -33,6 +33,16 @@ fn jit(src: &str) -> String {
     }
 }
 
+/// [`jit`] after the O1 HIR optimizer (`optimize_hir`) has run.
+fn jit_o1(src: &str) -> String {
+    let mut h = hir(src);
+    leek_hir::transform::optimize_hir(&mut h);
+    match run(&h, &NativeOptions::debug()) {
+        Ok(v) => v.to_string(),
+        Err(e) => format!("ERR: {e}"),
+    }
+}
+
 /// Run `src` under `version` semantics, rendering the result with the
 /// matching display version (so v1 real formatting etc. is honored).
 fn jit_v(src: &str, version: u8) -> String {
@@ -327,6 +337,55 @@ fn foreach_loops() {
     assert_eq!(
         jit_v("var s = 0 for (var x in [1, 2]) { s = s + x } return s", 1),
         "3"
+    );
+}
+
+#[test]
+fn foreach_over_existing_bindings() {
+    // A bare binding (no `var`) stores into the variable it names (#86).
+    assert_eq!(jit("global g = 0 for (g in [1, 2, 3]) {} return g"), "3");
+    assert_eq!(
+        jit("global k = 0 global v = 0 for (k : v in [10, 20]) {} return [k, v]"),
+        "[1, 20]"
+    );
+    assert_eq!(jit("var x = 0 for (x in [4, 5]) {} return x"), "5");
+    // An empty loop leaves the reused variable untouched.
+    assert_eq!(jit("var x = 7 for (x in []) {} return x"), "7");
+    // Function scope: a reused local, and a global written from a function.
+    assert_eq!(
+        jit("function f() { var x = 0 for (x in [1, 9]) {} return x } return f()"),
+        "9"
+    );
+    assert_eq!(
+        jit("global g = 0 function f() { for (g in [1, 2]) {} } f() return g"),
+        "2"
+    );
+    // A global declared after the function body is written by name.
+    assert_eq!(
+        jit("function f() { for (g in [3, 4]) {} } global g = 0 f() return g"),
+        "4"
+    );
+    // A captured outer local is written through the capture.
+    assert_eq!(
+        jit("var x = 0 var f = function() { for (x in [6, 8]) {} } f() return x"),
+        "8"
+    );
+    // The same programs after the O1 optimizer: constant propagation must see
+    // the foreach writes (including the one inside the lambda).
+    assert_eq!(
+        jit_o1("var x = 0 var f = function() { for (x in [6, 8]) {} } f() return x"),
+        "8"
+    );
+    assert_eq!(jit_o1("var x = 0 for (x in [4, 5]) {} return x"), "5");
+    assert_eq!(jit_o1("global g = 0 for (g in [1, 2, 3]) {} return g"), "3");
+    assert_eq!(
+        jit_o1("global g = 0 function f() { for (g in [1, 2]) {} } f() return g"),
+        "2"
+    );
+    // A class field inside a method.
+    assert_eq!(
+        jit("class A { x = 0 m() { for (x in [1, 2]) {} return this.x } } return new A().m()"),
+        "2"
     );
 }
 

@@ -42,11 +42,15 @@ impl LintPass for UselessForeachWrite {
         if fe.value.is_by_ref {
             return; // `@` binding — writes are the point
         }
+        // Globals and fields are written by name, not as a local copy.
+        let Some(def) = fe.value.local_def() else {
+            return;
+        };
         let mut findings = Vec::new();
         for_each_stmt(std::slice::from_ref(fe.body.as_ref()), &mut |st| {
             leek_hir::walk_stmt_child_exprs(st, &mut |e| {
                 for_each_expr_deep(e, &mut |e| {
-                    if let Some(span) = write_to(e, fe.value.def) {
+                    if let Some(span) = write_to(e, def) {
                         findings.push(diagnostic(&fe.value.name, span));
                     }
                 });

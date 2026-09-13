@@ -2,12 +2,14 @@
 
 use leek_diagnostics::convert;
 use leek_hir::{
-    Callee as HirCallee, DoWhileStmt, Expr, ExprKind, ForStmt, ForeachStmt, IfStmt, NameRef, Stmt,
-    SwitchStmt, VarDecl, WhileStmt,
+    Callee as HirCallee, DoWhileStmt, Expr, ExprKind, ForStmt, ForeachBind, ForeachStmt, IfStmt,
+    NameRef, Stmt, SwitchStmt, VarDecl, WhileStmt,
 };
 use leek_types::Type;
 
-use crate::ir::{BinOp, BlockId, Const, LocalKind, Operand, Place, Rvalue, Statement, Terminator};
+use crate::ir::{
+    BinOp, BlockId, Const, LocalId, LocalKind, Operand, Place, Rvalue, Statement, Terminator,
+};
 
 use super::util::{collect_lambda_captures, infer_simple_init_ty};
 use super::{FnLowerer, LoopCtx};
@@ -396,24 +398,14 @@ impl FnLowerer<'_> {
             Rvalue::ForeachLen(iter_local),
         ));
 
-        // Declare key/value user locals so body references resolve.
-        let key_local = fe.key.as_ref().map(|k| {
-            let id = self.declare_local(
-                Some(k.name.clone()),
-                Type::Any,
-                LocalKind::UserLocal,
-                k.span,
-            );
-            self.local_map.insert(k.def, id);
-            id
-        });
-        let value_local = self.declare_local(
-            Some(fe.value.name.clone()),
-            Type::Any,
-            LocalKind::UserLocal,
-            fe.value.span,
-        );
-        self.local_map.insert(fe.value.def, value_local);
+        // A `var` binding declares a fresh user local so body references
+        // resolve; a bare binding (`for (x in …)`) has no slot of its own —
+        // each iteration stores through its l-value instead.
+        let key_local = fe
+            .key
+            .as_ref()
+            .and_then(|k| self.declare_foreach_binding(k));
+        let value_local = self.declare_foreach_binding(&fe.value);
 
         let header = self.new_block();
         let body_bb = self.new_block();
@@ -453,22 +445,10 @@ impl FnLowerer<'_> {
                 Operand::Local(pos_local),
             ))),
         ));
-        if let Some(key) = key_local {
-            self.push_stmt(Statement::Assign(
-                Place::Local(key),
-                Rvalue::Synthetic(Box::new(Rvalue::Index(
-                    pair_local,
-                    Operand::Const(Const::Int(0)),
-                ))),
-            ));
+        if let Some(k) = &fe.key {
+            self.store_foreach_binding(k, key_local, pair_local, 0);
         }
-        self.push_stmt(Statement::Assign(
-            Place::Local(value_local),
-            Rvalue::Synthetic(Box::new(Rvalue::Index(
-                pair_local,
-                Operand::Const(Const::Int(1)),
-            ))),
-        ));
+        self.store_foreach_binding(&fe.value, value_local, pair_local, 1);
         // Per-iteration tick. Value form: 1 op, except v1's by-value
         // copy-on-set path which pays 2 (`@ref` skips the copy → 1).
         // Key:value form: v2+ charges nothing, v1 charges 1 per
@@ -514,6 +494,45 @@ impl FnLowerer<'_> {
         self.goto(header);
 
         self.resume(exit);
+    }
+
+    /// Declare the fresh user local of a `var` foreach binding and map its
+    /// `DefId` to it. `None` for a bare binding, which reuses existing storage.
+    fn declare_foreach_binding(&mut self, bind: &ForeachBind) -> Option<LocalId> {
+        let def = bind.local_def().filter(|_| bind.is_new)?;
+        let id = self.declare_local(
+            Some(bind.name.clone()),
+            Type::Any,
+            LocalKind::UserLocal,
+            bind.span,
+        );
+        self.local_map.insert(def, id);
+        Some(id)
+    }
+
+    /// Store slot `slot` (0 = key, 1 = value) of the current foreach pair into
+    /// a binding: its declared local, or — for a bare binding — the same
+    /// [`Place`] an assignment to that name writes (reused local or capture
+    /// cell, global, name-keyed global, class field). The pair read is
+    /// synthesized machinery (upstream's `getKey()` / `getValue()` are free).
+    fn store_foreach_binding(
+        &mut self,
+        bind: &ForeachBind,
+        declared: Option<LocalId>,
+        pair: LocalId,
+        slot: i64,
+    ) {
+        let place = match declared {
+            Some(id) => Place::Local(id),
+            None => self.lower_place(&bind.target),
+        };
+        self.push_stmt(Statement::Assign(
+            place,
+            Rvalue::Synthetic(Box::new(Rvalue::Index(
+                pair,
+                Operand::Const(Const::Int(slot)),
+            ))),
+        ));
     }
 
     pub(crate) fn lower_switch(&mut self, sw: &SwitchStmt) {
