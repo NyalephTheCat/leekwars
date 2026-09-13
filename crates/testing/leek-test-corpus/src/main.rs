@@ -51,8 +51,14 @@ COMMANDS:
     help                          Show this message
 
 FAILURES FILTERS:
-    BACKEND   one of: pipeline | interp | java
-    CATEGORY  substring of a category label, e.g. `value`, `ops`, `compile`, `missing`";
+    BACKEND   one of: pipeline | native | java-emit   (`java` is an alias for `java-emit`)
+    CATEGORY  substring of a category label, e.g. `value`, `ops`, `compile`, `missing`
+
+WHAT EACH BACKEND COLUMN MEANS:
+    pipeline    compile gate — parses, resolves, typechecks, lowers to HIR
+    native      value check — runs the program on the Cranelift JIT
+    java-emit   emit-only — the Java emitter produced a file without panicking;
+                nothing compiles or runs that file";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -115,12 +121,12 @@ fn cmd_run(args: &[String]) -> Result<()> {
         print_summary(&report.summary);
     }
 
-    if save {
-        multi.save(&baseline_path())?;
-        eprintln!("\nbaseline written to {}", baseline_path().display());
-    }
-
-    if check {
+    // Diff *before* `--save-baseline` overwrites the file, so the two flags
+    // compose: `run --save-baseline --check-baseline` costs one suite run and
+    // still compares against what was committed, instead of against what this
+    // very run just wrote (which is green by construction). CI uses that to
+    // gate and to publish the refreshed baseline from a single pass.
+    let regressions = if check {
         let baseline = MultiReport::load(&baseline_path())
             .with_context(|| format!("loading baseline {}", baseline_path().display()))?;
         let diff = multi.diff_against(&baseline);
@@ -134,8 +140,25 @@ fn cmd_run(args: &[String]) -> Result<()> {
                 }
             }
         }
+        // A backend the baseline has never seen is ungated, not passing: a
+        // renamed or added column would otherwise diff against nothing and
+        // report a silent zero regressions.
+        for backend in &diff.new_backends {
+            eprintln!("\n!! backend `{backend}` has no baseline entry — it is ungated");
+        }
+        regressions + diff.new_backends.len()
+    } else {
+        0
+    };
+
+    if save {
+        multi.save(&baseline_path())?;
+        eprintln!("\nbaseline written to {}", baseline_path().display());
+    }
+
+    if check {
         if regressions > 0 {
-            bail!("{regressions} regression(s) vs baseline");
+            bail!("{regressions} regression(s) / ungated backend(s) vs baseline");
         }
         eprintln!("\nno regressions across backends");
     }

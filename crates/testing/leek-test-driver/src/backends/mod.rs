@@ -19,11 +19,22 @@ use crate::checks::CheckKind;
 use crate::run::CaseOutcome;
 
 /// Corpus runner target — includes the shared pipeline plus each linked backend.
+///
+/// The variant names are the baseline column names, and each one states what
+/// that column is allowed to claim:
+///
+/// * `pipeline` — compile gate. The program parses, resolves, typechecks and
+///   lowers to HIR. It says nothing about the value.
+/// * `native` — the value-checking column. It runs the program on the
+///   Cranelift JIT and compares the value (and, where the expectation carries
+///   one, the operation count).
+/// * `java-emit` — emit-only. It proves the Java emitter turned this HIR into
+///   a file without panicking; it never compiles or executes that file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum SuiteBackend {
     Pipeline,
-    Java,
+    JavaEmit,
     Native,
 }
 
@@ -31,7 +42,7 @@ impl SuiteBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pipeline => "pipeline",
-            Self::Java => "java",
+            Self::JavaEmit => "java-emit",
             Self::Native => "native",
         }
     }
@@ -39,7 +50,12 @@ impl SuiteBackend {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "pipeline" => Self::Pipeline,
-            "java" => Self::Java,
+            // `java` is the pre-rename spelling, kept as an alias so existing
+            // `leek-test-corpus -- failures java` invocations keep working.
+            // `parse` returns `None` for an unknown name and the caller then
+            // reads the argument as a *category* filter, so dropping the alias
+            // would print a plausible empty table instead of an error.
+            "java-emit" | "java" => Self::JavaEmit,
             "native" => Self::Native,
             _ => return None,
         })
@@ -47,7 +63,7 @@ impl SuiteBackend {
 
     fn from_manifest_kind(kind: BackendKind) -> Option<Self> {
         match kind {
-            BackendKind::Java => Some(Self::Java),
+            BackendKind::Java => Some(Self::JavaEmit),
             BackendKind::Native => Some(Self::Native),
             BackendKind::Jar | BackendKind::Wasm | BackendKind::LeekScript => None,
         }
@@ -229,7 +245,7 @@ fn run_case_with_ctx(
 ) -> CaseOutcome {
     match backend {
         SuiteBackend::Pipeline => run_pipeline(case, ctx, source),
-        SuiteBackend::Java => run_java(case, ctx),
+        SuiteBackend::JavaEmit => run_java_emit(case, ctx),
         SuiteBackend::Native => run_native(case, ctx),
     }
 }
@@ -1137,15 +1153,10 @@ fn actual_display(case: &TestCase, source: SourceId, backend: SuiteBackend) -> S
     };
     leek_runtime::DISPLAY_VERSION.with(|c| c.set(case.version));
     match backend {
-        SuiteBackend::Java => {
-            let version = version_from_byte(case.version);
-            let emitted = leek_backend_java::emit_clean(hir, version, 1);
-            if emitted.java.contains("class AI_") && !emitted.java.is_empty() {
-                "emit ok".into()
-            } else {
-                "emit failed".into()
-            }
-        }
+        SuiteBackend::JavaEmit => match java_emit(case, hir) {
+            JavaEmitRun::Emitted { bytes } => format!("emit ok, {bytes} bytes (not compiled)"),
+            JavaEmitRun::Panicked => "emitter panicked".into(),
+        },
         SuiteBackend::Native => {
             let opts =
                 leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
@@ -1158,7 +1169,53 @@ fn actual_display(case: &TestCase, source: SourceId, backend: SuiteBackend) -> S
     }
 }
 
-fn run_java(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
+/// Outcome of one Java emission. There is no "emitted the wrong thing" arm:
+/// `emit_clean` is infallible by construction, so the only failure it can
+/// report is a panic.
+enum JavaEmitRun {
+    Emitted { bytes: usize },
+    Panicked,
+}
+
+/// Emit Java for a case, converting a panic in the emitter into
+/// [`JavaEmitRun::Panicked`]. Mirrors the `catch_unwind` discipline in
+/// [`native_run`]: without it a single panicking case aborts the whole corpus
+/// worker (`run_on_large_stack` re-panics on `join`), so an emitter defect
+/// would take the suite down instead of being recorded against its case.
+fn java_emit(case: &TestCase, hir: &leek_hir::HirFile) -> JavaEmitRun {
+    let version = version_from_byte(case.version);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        leek_backend_java::emit_clean(hir, version, 1).java.len()
+    }));
+    match result {
+        Ok(bytes) => JavaEmitRun::Emitted { bytes },
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+            // Surface for the triage pass — an emitter panic is a real defect.
+            eprintln!("java emitter panicked on case {}: {msg}", case.id);
+            JavaEmitRun::Panicked
+        }
+    }
+}
+
+/// Emit-only backend. It proves exactly one thing: the Java emitter turned
+/// this HIR into a file without panicking. It does **not** compile or execute
+/// the output, so it cannot see a miscompile — values are verified by
+/// `native`, and against a real JVM by `leek-bench`'s
+/// `run_fast_java_corpus` and `leek-backend-java`'s parity tests, neither of
+/// which is wired into this corpus yet (see #70).
+///
+/// This used to assert `emitted.java.contains("class AI_")`, which is a
+/// tautology: `emit_file` writes `public class AI_<id> extends …` before it
+/// emits any body, so the check was true for every HIR that did not panic the
+/// emitter, and the column was a strictly weaker restatement of `pipeline`.
+/// Error expectations are still verified for real, by the shared frontend
+/// ([`compile_error_outcome`]).
+fn run_java_emit(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
     if !case.check_plan().kinds.contains(&CheckKind::JavaEmit) {
         return CaseOutcome::SkippedUnknown;
     }
@@ -1167,29 +1224,21 @@ fn run_java(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
         return compile_error_outcome(case, ctx);
     }
 
-    if equals_ops_expectation(case).is_some() {
-        // Emit-only backend: if the program compiles to HIR, treat as pass
-        // (value/ops are verified on interp).
-        let Some(hir) = ctx.hir.as_deref() else {
-            return CaseOutcome::FailParseError;
-        };
-        let version = version_from_byte(case.version);
-        let emitted = leek_backend_java::emit_clean(hir, version, 1);
-        if emitted.java.contains("class AI_") && !emitted.java.is_empty() {
-            return CaseOutcome::Pass;
-        }
-        return CaseOutcome::FailWrongValue;
+    // A case that expects a value but does not compile is a failure here for
+    // the same reason it is on `pipeline`. Lowering recovers HIR from an
+    // erroring parse, so `ctx.hir` alone is not evidence the program was
+    // accepted — without this check `java-emit` reported `Pass` for programs
+    // `pipeline` reported as `FailParseError`.
+    if ctx.has_compile_error {
+        return CaseOutcome::FailParseError;
     }
 
     let Some(hir) = ctx.hir.as_deref() else {
         return CaseOutcome::FailParseError;
     };
 
-    let version = version_from_byte(case.version);
-    let emitted = leek_backend_java::emit_clean(hir, version, 1);
-    if emitted.java.contains("class AI_") && !emitted.java.is_empty() {
-        CaseOutcome::Pass
-    } else {
-        CaseOutcome::FailWrongValue
+    match java_emit(case, hir) {
+        JavaEmitRun::Emitted { .. } => CaseOutcome::Pass,
+        JavaEmitRun::Panicked => CaseOutcome::FailWrongValue,
     }
 }

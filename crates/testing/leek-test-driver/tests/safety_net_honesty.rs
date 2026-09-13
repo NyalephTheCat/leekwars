@@ -3,8 +3,12 @@
 //! the value-checking run path since the interpreter backend was removed —
 //! must value-check `Equals` (not pass on clean compilation alone), and the
 //! `.almost(...)` path must evaluate Java-math expectations rather than
-//! waving through an expectation it can't parse. The pipeline backend is a
-//! compile-gate only and is pinned as such.
+//! waving through an expectation it can't parse.
+//!
+//! The other two columns are weaker *on purpose*, and the pins below say by
+//! how much, so nobody reads a green corpus column as "this backend is
+//! correct": `pipeline` is a compile gate, and `java-emit` only proves the
+//! Java emitter produced a file without panicking.
 
 use leek_span::SourceId;
 use leek_test_driver::CaseOutcome;
@@ -108,4 +112,63 @@ fn pipeline_is_a_compile_gate() {
         run_case_backend(&broken, src, SuiteBackend::Pipeline),
         CaseOutcome::FailParseError,
     );
+}
+
+/// The `java-emit` column is emit-only, and this test pins that weakness in
+/// place: a program whose expected value is plainly wrong still passes,
+/// because nothing here compiles or runs the emitted Java.
+///
+/// That is the documented meaning of the column, not an oversight. It used to
+/// be spelled `java` and checked `emitted.java.contains("class AI_")`, which
+/// `emit_file` makes unconditionally true (it writes `public class AI_<id>`
+/// before any body) — so the column read like a correctness result while
+/// measuring "HIR was produced". If you make this test fail by teaching
+/// `java-emit` to check values, rename the column with it; value checking
+/// against a real JVM belongs to a separate `java-jvm` column (#70).
+#[test]
+fn java_emit_is_emit_only_not_value_checked() {
+    let src = SourceId::new(1).unwrap();
+
+    let wrong_value = case(
+        "return 1 + 1",
+        Expectation::Equals {
+            value: "999".into(),
+        },
+    );
+    assert_eq!(
+        run_case_backend(&wrong_value, src, SuiteBackend::JavaEmit),
+        CaseOutcome::Pass,
+    );
+}
+
+/// The one thing `java-emit` does gate: the program has to compile. Lowering
+/// recovers HIR from an erroring parse, so "we produced HIR" is not evidence
+/// the program was accepted — before the emit-only rewrite this case emitted
+/// Java from the recovered HIR and reported `Pass`, while `pipeline` reported
+/// the same case as `FailParseError`.
+#[test]
+fn java_emit_fails_when_the_program_does_not_compile() {
+    let src = SourceId::new(1).unwrap();
+
+    let broken = case("return 1 +", Expectation::Equals { value: "2".into() });
+    assert_eq!(
+        run_case_backend(&broken, src, SuiteBackend::JavaEmit),
+        CaseOutcome::FailParseError,
+    );
+}
+
+/// The column *name* is the only place the emit-only caveat reaches someone
+/// reading `baseline.toml` or a `failures` table, so it is load-bearing. The
+/// old `java` spelling stays parseable as an alias: `SuiteBackend::parse`
+/// returns `None` for an unknown name and the CLI then reads the argument as
+/// a *category* filter, which would turn a stale `failures java` into a
+/// plausible-looking empty table instead of an error.
+#[test]
+fn java_emit_column_is_named_for_what_it_measures() {
+    assert_eq!(SuiteBackend::JavaEmit.as_str(), "java-emit");
+    assert_eq!(
+        SuiteBackend::parse("java-emit"),
+        Some(SuiteBackend::JavaEmit),
+    );
+    assert_eq!(SuiteBackend::parse("java"), Some(SuiteBackend::JavaEmit));
 }

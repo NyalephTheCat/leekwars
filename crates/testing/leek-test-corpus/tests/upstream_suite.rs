@@ -43,6 +43,41 @@ fn committed_baseline_is_canonical_failures_only() {
     );
 }
 
+/// The three columns are checked by visibly different logic — `native` runs
+/// the program and compares the value, `pipeline` only compiles it, and
+/// `java-emit` only emits Java — so they cannot all agree on every one of
+/// ~11k cases. When they do, the baseline was saved while the backends shared
+/// a code path (or was never re-run), and a green corpus says nothing about
+/// any individual backend.
+///
+/// `native` is the discriminator: it is the only column that can report a
+/// wrong value, and the only one that skips constructs outside the compiled
+/// subset.
+#[test]
+fn backends_with_different_check_logic_do_not_share_a_column() {
+    let path = baseline_path();
+    let baseline = MultiReport::load(&path).expect("malformed baseline");
+
+    let Some(native) = baseline.backends.get("native") else {
+        return; // native isn't linked in this build — nothing to compare.
+    };
+
+    for other in ["pipeline", "java-emit"] {
+        let Some(report) = baseline.backends.get(other) else {
+            continue;
+        };
+        assert!(
+            native.outcomes != report.outcomes || native.summary != report.summary,
+            "baseline columns `native` and `{other}` are identical across the \
+             whole corpus, but they are checked by different logic (native \
+             runs and value-checks; pipeline is a compile gate; java-emit only \
+             emits). The baseline was saved while the backends shared a code \
+             path, or predates the split — re-create it with \
+             `cargo run -p leek-test-corpus -- run --save-baseline`",
+        );
+    }
+}
+
 #[test]
 fn no_regressions_against_baseline() {
     let multi = run_upstream_suite();
@@ -60,6 +95,24 @@ fn no_regressions_against_baseline() {
         );
     }
 
+    // Fail closed on a missing submodule. `build.rs` embeds an empty manifest
+    // when `official-generator/` is not checked out; the diff below then
+    // iterates zero outcomes and reports zero regressions, so without this the
+    // gate passes vacuously on exactly the checkout where it is most likely to
+    // be misconfigured.
+    let largest = multi
+        .backends
+        .values()
+        .map(|r| r.summary.total)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        largest > 5_000,
+        "the suite ran {largest} cases — the upstream submodules are probably \
+         not checked out (`git submodule update --init --recursive`). The \
+         regression check must not pass by having nothing to run.",
+    );
+
     let baseline_path = baseline_path();
     assert!(
         baseline_path.exists(),
@@ -72,6 +125,17 @@ fn no_regressions_against_baseline() {
     let baseline =
         MultiReport::load(&baseline_path).expect("malformed baseline — delete and re-create");
     let diff = multi.diff_against(&baseline);
+
+    // A column the baseline has never seen diffs against nothing, so every one
+    // of its cases reads as "was passing, still passing". Renaming or adding a
+    // backend without refreshing the baseline would therefore leave the new
+    // column completely ungated while the gate stays green.
+    assert!(
+        diff.new_backends.is_empty(),
+        "backend(s) {:?} have no baseline entry, so they are ungated — refresh \
+         with `cargo run -p leek-test-corpus -- run --save-baseline`",
+        diff.new_backends,
+    );
 
     if !diff.regressions.is_empty() {
         for (backend, regs) in &diff.regressions {

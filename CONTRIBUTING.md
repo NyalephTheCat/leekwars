@@ -160,7 +160,12 @@ than one sprawling change.
   `cargo test -p leek-scenario`).
 - The **upstream corpus** (`leek-test-corpus`) checks thousands of
   `equals(...)` cases against the reference implementation. It's slow and gated
-  behind `tools/check.sh --full`; it needs the submodules checked out.
+  behind `tools/check.sh --full`; it needs the submodules checked out. CI runs
+  it in its own workflow (`.github/workflows/corpus.yml`) nightly and on PRs
+  touching the compiler, not in the per-push gate.
+  Its three columns claim different things: `pipeline` is a compile gate,
+  `native` is the value check, and `java-emit` is emit-only — it proves the
+  Java emitter didn't panic, and never compiles or runs the emitted file.
 - **Java-backend snapshots:** nothing under
   `crates/backends/leek-backend-java/tests/snapshots/` is written by a plain
   test run. Every report there — the per-fixture `.diff` files, `SUMMARY.txt`
