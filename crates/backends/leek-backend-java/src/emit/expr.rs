@@ -1028,7 +1028,7 @@ impl Emitter<'_> {
     /// The declared scalar type of an assignment l-value, when it's a local or
     /// global declared `integer`/`real`/`boolean`. Used to coerce the RHS of a
     /// plain `=` the same way the var-decl initializer is coerced.
-    fn assign_target_scalar_ty(&self, l: &Expr) -> Option<&Type> {
+    pub(crate) fn assign_target_scalar_ty(&self, l: &Expr) -> Option<&Type> {
         let ty = match &l.kind {
             ExprKind::Name(NameRef::Local(id)) => match self.hir.defs.get(id.0 as usize) {
                 Some(Def::Local(d)) => d.ty.as_ref(),
@@ -1074,7 +1074,7 @@ impl Emitter<'_> {
     /// and it can't be shadowed by a same-named param (clean mode doesn't prefix
     /// params). Falls back to bare `this.` if no class context (shouldn't happen
     /// — `is_own_instance_field` already gates on `current_class`).
-    fn own_instance_field_ref(&self, field: &str) -> String {
+    pub(crate) fn own_instance_field_ref(&self, field: &str) -> String {
         match self.current_class.get() {
             Some(c) => format!("{}.this.{}", mangle::class_name(self.opts, &c.name), field),
             None => format!("this.{field}"),

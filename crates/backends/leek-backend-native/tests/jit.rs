@@ -331,6 +331,43 @@ fn foreach_loops() {
 }
 
 #[test]
+fn foreach_over_existing_bindings() {
+    // A bare binding (no `var`) stores into the variable it names (#86).
+    assert_eq!(jit("global g = 0 for (g in [1, 2, 3]) {} return g"), "3");
+    assert_eq!(
+        jit("global k = 0 global v = 0 for (k : v in [10, 20]) {} return [k, v]"),
+        "[1, 20]"
+    );
+    assert_eq!(jit("var x = 0 for (x in [4, 5]) {} return x"), "5");
+    // An empty loop leaves the reused variable untouched.
+    assert_eq!(jit("var x = 7 for (x in []) {} return x"), "7");
+    // Function scope: a reused local, and a global written from a function.
+    assert_eq!(
+        jit("function f() { var x = 0 for (x in [1, 9]) {} return x } return f()"),
+        "9"
+    );
+    assert_eq!(
+        jit("global g = 0 function f() { for (g in [1, 2]) {} } f() return g"),
+        "2"
+    );
+    // A global declared after the function body is written by name.
+    assert_eq!(
+        jit("function f() { for (g in [3, 4]) {} } global g = 0 f() return g"),
+        "4"
+    );
+    // A captured outer local is written through the capture.
+    assert_eq!(
+        jit("var x = 0 var f = function() { for (x in [6, 8]) {} } f() return x"),
+        "8"
+    );
+    // A class field inside a method.
+    assert_eq!(
+        jit("class A { x = 0 m() { for (x in [1, 2]) {} return this.x } } return new A().m()"),
+        "2"
+    );
+}
+
+#[test]
 fn strings() {
     // Literal (top-level strings render quoted, like the interpreter).
     assert_eq!(jit("return 'hello'"), "\"hello\"");

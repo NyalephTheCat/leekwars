@@ -550,10 +550,12 @@ pub(crate) fn collect_inner_decls(
                 // bound by the loop header, not separate VarDecl
                 // statements. Add them so they're not treated as
                 // outer captures.
-                inner.insert(fe.value.def);
-                if let Some(k) = &fe.key {
-                    inner.insert(k.def);
-                }
+                inner.extend(
+                    fe.key
+                        .iter()
+                        .chain([&fe.value])
+                        .filter_map(leek_hir::ForeachBind::local_def),
+                );
                 stmt(&fe.body, inner);
             }
             Stmt::Switch(sw) => {

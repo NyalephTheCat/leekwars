@@ -1,6 +1,7 @@
 //! Lower the parser AST into HIR — expression lowering for the public API.
 
 use leek_parser::ast::{self, AstNode, Expr as AstExpr};
+use leek_span::Span;
 use leek_syntax::SyntaxKind;
 use leek_types::Type;
 
@@ -23,54 +24,7 @@ impl LowerExpr for Lowerer {
             AstExpr::Literal(lit) => ExprKind::Literal(self.lower_literal(lit)),
             AstExpr::Name(n) => {
                 let nr = self.lower_name_ref(n);
-                // Inside a method/ctor body, an unresolved bare
-                // identifier that names a class field rewrites to
-                // `this.field`. Method names stay as Builtin so a
-                // bare `m()` call still goes through the normal
-                // callee resolution path.
-                if let NameRef::Builtin(name) = &nr {
-                    let in_class = self.class_ctx.last();
-                    if let Some(c) = in_class {
-                        if c.field_names.contains(name) {
-                            let this_expr = Expr {
-                                kind: ExprKind::Name(NameRef::This),
-                                ty: Type::Any,
-                                span,
-                            };
-                            ExprKind::Field(Box::new(this_expr), name.clone(), false)
-                        } else if c.static_field_names.contains(name)
-                            || c.static_method_names.contains(name)
-                        {
-                            // Static field or static method — treat
-                            // a bare reference as `ClassName.x`. The
-                            // interp returns a `Value::Function` for
-                            // static methods so `x == item` works.
-                            let class_expr = Expr {
-                                kind: ExprKind::Name(NameRef::Class_),
-                                ty: Type::Any,
-                                span,
-                            };
-                            ExprKind::Field(Box::new(class_expr), name.clone(), false)
-                        } else if c.method_names.contains(name) {
-                            // Bare reference to an instance method
-                            // value — rewrite to `this.method`. The
-                            // interp returns a `BoundMethod` so
-                            // `var f = m; f(args)` works.
-                            let this_expr = Expr {
-                                kind: ExprKind::Name(NameRef::This),
-                                ty: Type::Any,
-                                span,
-                            };
-                            ExprKind::Field(Box::new(this_expr), name.clone(), false)
-                        } else {
-                            ExprKind::Name(nr)
-                        }
-                    } else {
-                        ExprKind::Name(nr)
-                    }
-                } else {
-                    ExprKind::Name(nr)
-                }
+                self.name_expr_kind(nr, span)
             }
             AstExpr::Binary(b) => self.lower_binary(b),
             AstExpr::Unary(u) => self.lower_unary(u),
@@ -343,7 +297,13 @@ impl Lowerer {
         let Some(ident) = n.ident() else {
             return NameRef::Unresolved(String::new());
         };
-        let name = ident.text();
+        self.resolve_name(ident.text())
+    }
+
+    /// Resolve a bare identifier: innermost local (crossing lambda
+    /// boundaries, so captures resolve), then a file-level function /
+    /// class / global, else `Builtin`.
+    pub(crate) fn resolve_name(&self, name: &str) -> NameRef {
         if let Some(id) = self.lookup_local(name) {
             return NameRef::Local(id);
         }
@@ -358,6 +318,43 @@ impl Lowerer {
         // interpreter knows the builtin set; we tag everything as
         // `Builtin` here and let the interpreter sort it out.
         NameRef::Builtin(name.to_string())
+    }
+
+    /// The expression a resolved bare name stands for. Inside a method/ctor
+    /// body, an unresolved (`Builtin`) identifier that names a class field
+    /// rewrites to `this.field` (static: `class.field`), and a bare method
+    /// value to `this.method`. Method names in *call* position stay `Builtin`
+    /// (see [`Self::lower_call`]) so the arity-aware dispatch runs.
+    ///
+    /// Shared by name reads, assignment l-values and foreach bindings, so all
+    /// three resolve a name to the same storage.
+    pub(crate) fn name_expr_kind(&self, nr: NameRef, span: Span) -> ExprKind {
+        let NameRef::Builtin(name) = &nr else {
+            return ExprKind::Name(nr);
+        };
+        let Some(c) = self.class_ctx.last() else {
+            return ExprKind::Name(nr);
+        };
+        let receiver = if c.field_names.contains(name) {
+            NameRef::This
+        } else if c.static_field_names.contains(name) || c.static_method_names.contains(name) {
+            // Static field or static method — treat a bare reference as
+            // `ClassName.x`. The interp returns a `Value::Function` for
+            // static methods so `x == item` works.
+            NameRef::Class_
+        } else if c.method_names.contains(name) {
+            // Bare reference to an instance method value — the interp
+            // returns a `BoundMethod` so `var f = m; f(args)` works.
+            NameRef::This
+        } else {
+            return ExprKind::Name(nr);
+        };
+        let base = Expr {
+            kind: ExprKind::Name(receiver),
+            ty: Type::Any,
+            span,
+        };
+        ExprKind::Field(Box::new(base), name.clone(), false)
     }
 
     pub(crate) fn lower_binary(&mut self, b: &ast::BinaryExpr) -> ExprKind {
