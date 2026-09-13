@@ -2,6 +2,8 @@
 
 mod expr;
 
+use std::collections::BTreeSet;
+
 use leek_hir::{
     Block, Def, DefId, ForeachBind, Function, Global, HirFile, MethodDef, Param, Stmt, VarDecl,
 };
@@ -62,12 +64,19 @@ pub(crate) struct Emitter<'a> {
 
 impl Emitter<'_> {
     fn emit_file(&mut self) {
+        // Globals whose `global x = …;` statement survives in the emitted
+        // program: their `Def::Global` item would be a redeclaration.
+        let declared = declared_global_defs(self.hir, self.opts);
+
         let mut first = true;
         for &item in &self.hir.items {
             let Some(def) = self.hir.defs.get(item.0 as usize) else {
                 continue;
             };
             if !will_emit(def, self.opts) {
+                continue;
+            }
+            if matches!(def, Def::Global(_)) && declared.contains(&item) {
                 continue;
             }
 
@@ -522,16 +531,76 @@ fn directive_body(f: &Function) -> Option<&str> {
         .map(|(_, body)| body.as_str())
 }
 
-/// True when a span comes from a merged prelude / included file rather
-/// than the user's own source.
-pub(crate) fn is_prelude_span(span: Span, user_source: leek_span::SourceId) -> bool {
-    span.source != user_source && span.source != Span::SYNTHETIC_SOURCE
+/// True when a span comes from a merged library/prelude header.
+///
+/// Origin is read from [`Options::prelude_sources`] rather than inferred
+/// from `user_source`: an included file carries its own `SourceId`, and
+/// its definitions belong in the output just like the entry's own.
+pub(crate) fn is_prelude_span(span: Span, opts: &Options) -> bool {
+    span.source != Span::SYNTHETIC_SOURCE && opts.prelude_sources.contains(&span.source)
+}
+
+/// The `DefId`s of globals that a `global x = …;` statement in the emitted
+/// program already declares.
+///
+/// HIR keeps both forms: `declare_global` pushes a `Def::Global` item with
+/// no initializer, and the declaration site stays in place as a
+/// `Stmt::VarDecl { is_global: true }`. Emitting both yields a
+/// redeclaration, which the official compiler rejects — so the item form is
+/// skipped for every global a surviving statement covers. A `Def::Global`
+/// with no such statement left (the shape `propagate_const_globals` leaves
+/// behind) still emits `global x;`, so no declaration is ever lost.
+///
+/// Lambda bodies are leaves in [`leek_hir::visit::walk_stmt_child_stmts`],
+/// so a global declared only inside a lambda is not counted and keeps its
+/// item — the safe direction: over-counting would drop the sole
+/// file-scope declaration.
+fn declared_global_defs(hir: &HirFile, opts: &Options) -> BTreeSet<DefId> {
+    fn collect(s: &Stmt, out: &mut BTreeSet<DefId>) {
+        if let Stmt::VarDecl(v) = s
+            && v.is_global
+        {
+            out.insert(v.def);
+        }
+        leek_hir::visit::walk_stmt_child_stmts(s, &mut |child| collect(child, out));
+    }
+
+    let mut out = BTreeSet::new();
+    for stmt in &hir.main {
+        collect(stmt, &mut out);
+    }
+    // Bodies of emitted definitions run too, so a `global` declared inside
+    // one is just as real as one in the main block.
+    for &item in &hir.items {
+        let Some(def) = hir.defs.get(item.0 as usize) else {
+            continue;
+        };
+        if !will_emit(def, opts) {
+            continue;
+        }
+        let bodies: Vec<&Block> = match def {
+            Def::Function(f) => f.body.iter().collect(),
+            Def::Class(c) => c
+                .methods
+                .iter()
+                .chain(&c.constructors)
+                .filter_map(|m: &MethodDef| m.body.as_ref())
+                .collect(),
+            Def::Global(_) | Def::Local(_) => Vec::new(),
+        };
+        for body in bodies {
+            for stmt in &body.stmts {
+                collect(stmt, &mut out);
+            }
+        }
+    }
+    out
 }
 
 /// Whether a top-level definition will actually be emitted (shared by the
 /// emitter and the overload-rename pass so renaming ignores dropped defs).
 pub(crate) fn will_emit(def: &Def, opts: &Options) -> bool {
-    if opts.drop_prelude_defs && is_prelude_span(def.span(), opts.user_source) {
+    if opts.drop_prelude_defs && is_prelude_span(def.span(), opts) {
         return false;
     }
     match def {

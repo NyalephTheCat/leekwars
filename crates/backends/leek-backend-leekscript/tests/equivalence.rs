@@ -8,12 +8,16 @@
 //!      asserting no error diagnostics (proves it is official LeekScript);
 //!   4. JIT-run the re-lowered program and assert the result matches (1).
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use leek_backend_leekscript::{Options, emit};
 use leek_backend_native::{NativeOptions, run};
 use leek_diagnostics::Severity;
 use leek_hir::HirFile;
 use leek_hir::lower::lower_file_versioned_with_flags;
-use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
+use leek_hir::{LowerUnit, lower_files};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse, parse_with_features};
 use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::{SyntaxNode, Version};
 
@@ -74,7 +78,14 @@ fn jit(hir: &HirFile) -> String {
 fn check(src: &str) {
     let (orig, orig_err) = lower(src, all_parse_features(), experimental_flags());
     assert!(!orig_err, "original program failed to lower:\n{src}");
-    let expected = jit(&orig);
+    check_hir(&orig, src);
+}
+
+/// The body of [`check`] on an already-lowered program, so HIR built by
+/// hand (multi-file projects) goes through the same round-trip.
+/// `src` is only used for comment recovery and failure messages.
+fn check_hir(orig: &HirFile, src: &str) {
+    let expected = jit(orig);
 
     let configs = [
         ("pretty", Options::pretty(Version::V4).with_source_text(src)),
@@ -86,7 +97,7 @@ fn check(src: &str) {
     ];
 
     for (label, opts) in configs {
-        let out = emit(&orig, &opts).source;
+        let out = emit(orig, &opts).source;
         let (rel, err) = lower(&out, ParseFeatures::default(), FeatureFlags::none());
         assert!(
             !err,
@@ -222,4 +233,180 @@ fn constant_folding_preserves_result() {
     check("return 2 + 3 * 4;");
     check("var x = true ? 100 : 200; return x;");
     check("function f() { return 1; if (false) { return 2; } } return f();");
+}
+
+// ---- globals ----
+
+/// How many top-level `global <name>` declarations the output holds.
+fn count_global_decls(out: &str, name: &str) -> usize {
+    out.match_indices("global ")
+        .filter(|(i, _)| out[i + "global ".len()..].starts_with(name))
+        .filter(|(i, _)| {
+            let rest = &out[i + "global ".len() + name.len()..];
+            // Not a prefix of a longer identifier.
+            !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        })
+        .count()
+}
+
+#[test]
+fn file_level_global_emitted_once() {
+    // HIR keeps both a `Def::Global` item and the `global g = 3;`
+    // statement; emitting both is a redeclaration upstream rejects.
+    // The reads stay in main: a bare `g` inside a function body is
+    // lowered before `declare_global` runs, so it would not be a
+    // `NameRef::Global` and the assertion would test the wrong thing.
+    for src in [
+        "global g = 3; g = g + 1; return g;",
+        "global g; g = 2; return g;",
+    ] {
+        let (hir, err) = lower(src, all_parse_features(), experimental_flags());
+        assert!(!err, "program failed to lower:\n{src}");
+
+        for opts in [Options::pretty(Version::V4), Options::compact(Version::V4)] {
+            let out = emit(&hir, &opts).source;
+            assert_eq!(
+                count_global_decls(&out, "g"),
+                1,
+                "global declared more than once for `{src}`:\n{out}"
+            );
+        }
+        check(src);
+    }
+}
+
+// ---- multi-file projects ----
+
+struct Unit {
+    path: PathBuf,
+    source: SourceId,
+    ast: SourceFile,
+}
+
+fn parse_unit(path: &str, source: SourceId, text: &str) -> Unit {
+    let parsed = parse(text, source, Version::V4);
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != Severity::Error),
+        "unit {path} failed to parse"
+    );
+    Unit {
+        path: PathBuf::from(path),
+        source,
+        ast: SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse root"),
+    }
+}
+
+/// Lower an entry plus one included file into a single `HirFile`, the way
+/// the include-aware pipeline does. `resolved` is the include map the
+/// resolver would have produced; `None` leaves the units unrelated (the
+/// merged-header shape).
+fn lower_two_units(entry: &Unit, other: &Unit, resolved: bool) -> HirFile {
+    let entry_unit = LowerUnit {
+        ast: &entry.ast,
+        source: entry.source,
+        path: &entry.path,
+        version: Version::V4,
+    };
+    let includes = [LowerUnit {
+        ast: &other.ast,
+        source: other.source,
+        path: &other.path,
+        version: Version::V4,
+    }];
+    let map: BTreeMap<(PathBuf, String), PathBuf> = if resolved {
+        let name = other
+            .path
+            .file_stem()
+            .expect("stem")
+            .to_string_lossy()
+            .into_owned();
+        BTreeMap::from([((entry.path.clone(), name), other.path.clone())])
+    } else {
+        BTreeMap::new()
+    };
+    let (hir, diags) = lower_files(
+        entry_unit,
+        &includes,
+        resolved.then_some(&map),
+        FeatureFlags::none(),
+    );
+    assert!(
+        diags.iter().all(|d| d.severity != Severity::Error),
+        "multi-file lowering failed: {diags:?}"
+    );
+    hir
+}
+
+const INCLUDED_SOURCE: SourceId = match SourceId::new(2) {
+    Some(s) => s,
+    None => unreachable!(),
+};
+
+#[test]
+fn included_defs_are_emitted() {
+    // An included file carries its own `SourceId`; its definitions used to
+    // be mistaken for prelude signatures and dropped, leaving calls to
+    // functions the output never defines.
+    let entry = parse_unit(
+        "/main.leek",
+        SOURCE,
+        "include(\"util\")\nglobal n = helper(2);\nreturn n + TOP;\n",
+    );
+    let util = parse_unit(
+        "/util.leek",
+        INCLUDED_SOURCE,
+        "function helper(x) { return x * 21; }\nglobal TOP = 5;\n",
+    );
+    let hir = lower_two_units(&entry, &util, true);
+
+    let out = emit(&hir, &Options::pretty(Version::V4).with_user_source(SOURCE)).source;
+    assert!(
+        out.contains("function helper("),
+        "included function dropped:\n{out}"
+    );
+    assert_eq!(
+        count_global_decls(&out, "TOP"),
+        1,
+        "included global not declared exactly once:\n{out}"
+    );
+    assert!(
+        !out.contains("include("),
+        "include site survived emission:\n{out}"
+    );
+
+    // The emitted single file is official LeekScript and runs the same.
+    check_hir(&hir, "");
+}
+
+#[test]
+fn prelude_defs_still_dropped() {
+    // Regression guard for the fix above: library headers merged under
+    // `leek_prelude::source_id()` are still dropped, unlike includes.
+    let entry = parse_unit("/main.leek", SOURCE, "return lib_helper(2);\n");
+    let header = parse_unit(
+        "/<prelude>",
+        leek_prelude::source_id(),
+        "function lib_helper(x) { return x * 21; }\n",
+    );
+    let hir = lower_two_units(&entry, &header, false);
+
+    let dropped = emit(&hir, &Options::pretty(Version::V4).with_user_source(SOURCE)).source;
+    assert!(
+        !dropped.contains("function lib_helper("),
+        "prelude definition leaked into the output:\n{dropped}"
+    );
+    let kept = emit(
+        &hir,
+        &Options::pretty(Version::V4)
+            .with_user_source(SOURCE)
+            .keep_prelude_defs(),
+    )
+    .source;
+    assert!(
+        kept.contains("function lib_helper("),
+        "keep_prelude_defs() did not keep the definition:\n{kept}"
+    );
 }
