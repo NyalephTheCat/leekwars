@@ -29,6 +29,24 @@ pub struct LintLevels<'a> {
     pub allow: &'a [String],
 }
 
+impl SeverityConfig {
+    /// Build the overrides for a manifest `[lint]` table. Errors on a
+    /// code the catalog doesn't know.
+    pub fn from_levels(lint: LintLevels<'_>) -> Result<Self, String> {
+        let mut severity = SeverityConfig::new();
+        for raw in lint.deny {
+            severity.deny(resolve_code(raw)?);
+        }
+        for raw in lint.warn {
+            severity.warn(resolve_code(raw)?);
+        }
+        for raw in lint.allow {
+            severity.allow(resolve_code(raw)?);
+        }
+        Ok(severity)
+    }
+}
+
 /// One additional source file diagnostics may point into (an included
 /// file), for [`Reporter::emit_run_sources`].
 #[derive(Clone, Copy)]
@@ -51,16 +69,7 @@ impl Reporter {
         format: MessageFormat,
         lint: LintLevels<'_>,
     ) -> Result<Self, String> {
-        let mut severity = SeverityConfig::new();
-        for raw in lint.deny {
-            severity.deny(resolve_code(raw)?);
-        }
-        for raw in lint.warn {
-            severity.warn(resolve_code(raw)?);
-        }
-        for raw in lint.allow {
-            severity.allow(resolve_code(raw)?);
-        }
+        let severity = SeverityConfig::from_levels(lint)?;
         let want_color = matches!(format, MessageFormat::Human) && should_color(color_when);
         let renderer = if want_color {
             Renderer::ansi()
@@ -72,6 +81,15 @@ impl Reporter {
             renderer,
             format,
         })
+    }
+
+    /// The diagnostics this reporter would emit, with the manifest's
+    /// `[lint]` levels applied: allowed codes dropped, denied/warned
+    /// codes re-leveled. Tools that act on diagnostics without
+    /// rendering them (`miku fix`, `miku test` expectations) filter
+    /// through this so they agree with what `check`/`lint` show.
+    pub fn apply_levels(&self, diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
+        self.severity.apply_all(diagnostics)
     }
 
     pub fn emit_run(

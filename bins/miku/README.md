@@ -107,7 +107,9 @@ jobs             = 4                  # sweep workers
 ```
 
 All four keys are optional. A scenario argument is resolved as given first,
-then under `scenarios_dir`, then against the project root. A bare `--report`
+then under `scenarios_dir`, then against the project root. A bare `miku fight`
+with no `default_scenario` set lists the `.toml`/`.json` scenarios sitting in
+`scenarios_dir`, so you can pick one. A bare `--report`
 writes `<mode>.json` (`single.json`, `matrix.json`, …) under `reports_dir`;
 `--report=<PATH>` overrides it. `jobs` is parsed, validated (`>= 1`) and
 exposed on the manifest, but the matrix / tournament / random drivers still

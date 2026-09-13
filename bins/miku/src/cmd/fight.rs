@@ -1,6 +1,7 @@
 //! `miku fight` — run a leek-wars fight from a scenario file, or test the hero
 //! AI against many settings (matrix sweep, tournament, randomized builds).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -28,6 +29,11 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
         Some(path) => Some(Project::discover(Some(path))?),
         None => Project::discover(None).ok(),
     };
+    if let Some(project) = &project {
+        for w in &project.warnings {
+            eprintln!("warning: {w}");
+        }
+    }
 
     let scenario_path = resolve_scenario(args, project.as_ref())?;
     let base_dir = scenario_path
@@ -100,16 +106,74 @@ fn resolve_scenario(args: &Fight, project: Option<&Project>) -> Result<PathBuf> 
     match (args.scenario.as_deref(), project) {
         (Some(path), Some(project)) => Ok(project.scenario_path(path)),
         (Some(path), None) => Ok(path.to_path_buf()),
-        (None, Some(project)) => project.default_scenario().ok_or_else(|| {
-            anyhow!(
-                "no scenario file given and no `[fight].default_scenario` in the manifest \
-                 (usage: miku fight <scenario.toml>)"
-            )
-        }),
+        (None, Some(project)) => match project.default_scenario() {
+            Some(path) if path.is_file() => Ok(path),
+            Some(path) => Err(anyhow!(
+                "Miku.toml: `[fight].default_scenario` = `{}` does not exist ({})",
+                project
+                    .manifest
+                    .fight
+                    .default_scenario
+                    .as_deref()
+                    .unwrap_or(&path)
+                    .display(),
+                path.display()
+            )),
+            None => Err(anyhow!(no_default_scenario_message(project))),
+        },
         (None, None) => Err(anyhow!(
             "no scenario file given (usage: miku fight <scenario.toml>)"
         )),
     }
+}
+
+/// The error for a bare `miku fight` in a project whose manifest sets no
+/// `[fight].default_scenario`. When `[fight].scenarios_dir` is set, the
+/// scenarios sitting there are listed, so the user can pick one instead of
+/// having to go looking.
+fn no_default_scenario_message(project: &Project) -> String {
+    let mut message = "no scenario file given and no `[fight].default_scenario` in the manifest \
+         (usage: miku fight <scenario.toml>)"
+        .to_string();
+    let Some(dir) = &project.manifest.fight.scenarios_dir else {
+        return message;
+    };
+    let dir = project.root.join(dir);
+    match list_scenarios(&dir) {
+        Ok(scenarios) if scenarios.is_empty() => {
+            let _ = write!(message, "; no scenarios in {}", dir.display());
+        }
+        Ok(scenarios) => {
+            let _ = write!(message, "; scenarios in {}:", dir.display());
+            for scenario in scenarios {
+                let rel = scenario.strip_prefix(&project.root).unwrap_or(&scenario);
+                let _ = write!(message, "\n  {}", rel.display());
+            }
+        }
+        Err(e) => {
+            let _ = write!(message, "; {e}");
+        }
+    }
+    message
+}
+
+/// Scenario files (`.toml`/`.json`, the manifest itself excluded) directly
+/// inside `dir`, sorted.
+fn list_scenarios(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| anyhow!("reading `[fight].scenarios_dir` {}: {e}", dir.display()))?;
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name().is_some_and(|n| n != "Miku.toml")
+                && p.extension()
+                    .is_some_and(|ext| ext == "toml" || ext == "json")
+        })
+        .collect();
+    out.sort();
+    Ok(out)
 }
 
 /// Where `--report` writes, or `None` when it wasn't asked for. A bare

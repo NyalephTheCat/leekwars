@@ -373,6 +373,18 @@ impl SeverityConfig {
         }
         true
     }
+
+    /// Apply overrides to a whole run: allowed codes are dropped, the
+    /// rest come back re-leveled, in their original order.
+    pub fn apply_all(&self, diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
+        diagnostics
+            .iter()
+            .filter_map(|d| {
+                let mut adjusted = d.clone();
+                self.apply_mut(&mut adjusted).then_some(adjusted)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

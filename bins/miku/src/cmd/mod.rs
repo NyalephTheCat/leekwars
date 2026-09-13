@@ -65,7 +65,7 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Fmt(args) => fmt::run(&args, manifest_path.as_deref(), quiet),
         Command::Lint(args) => lint::run(&args, manifest_path.as_deref(), color, format, quiet),
         Command::Explain(args) => Ok(explain::run(&args)),
-        Command::Fix(args) => fix::run(&args, manifest_path.as_deref(), quiet),
+        Command::Fix(args) => fix::run(&args, manifest_path.as_deref(), color, format, quiet),
         Command::Lsp => Ok(lsp::run()),
         Command::Clean(args) => clean::run(&args, manifest_path.as_deref(), quiet).map(to_exit),
         Command::Completions(args) => {
