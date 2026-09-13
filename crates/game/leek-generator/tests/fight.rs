@@ -27,6 +27,19 @@ fn compile(src: &str) -> HirFile {
     lower_file_versioned(&sf, source, 4).0
 }
 
+/// A fight constant as the extracted `game_constants.tsv` defines it, rendered
+/// the way `run` renders an AI's return value. The engine and the language
+/// both derive their `CELL_*` / `WEAPON_*` values from this table, so an
+/// assertion against it can't be satisfied by the two agreeing on a wrong one.
+fn catalog_const(name: &str) -> String {
+    leek_environment::leekwars_constant_values()
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("{name} missing from game_constants.tsv"))
+        .1
+        .to_string()
+}
+
 fn run(fight: &FightRef, src: &str) -> String {
     let hir = compile(src);
     run_ai(fight, &hir, 4, false).map_or_else(|e| format!("ERR: {e}"), |v| v.to_string())
@@ -683,7 +696,41 @@ fn line_of_sight_blocks_attacks() {
     assert_eq!(run(&f, "return lineOfSight(0, 33)"), "false");
     assert_eq!(run(&f, "return lineOfSight(0, 3)"), "true"); // clear horizontal line
     assert_eq!(run(&f, "return useWeapon(2)"), "-3"); // USE_INVALID_POSITION
-    assert_eq!(run(&f, "return getCellContent(22)"), "1"); // CELL_OBSTACLE
+}
+
+#[test]
+fn cell_content_matches_catalog() {
+    // Obstacle at (2,2)=22, Foe at 33, Bot at 0; cell 5 is empty.
+    let f = shared(
+        Fight::new(10, 10, 1)
+            .with_entity(Entity::new(1, "Bot", 0, 0))
+            .with_entity(Entity::new(2, "Foe", 33, 1))
+            .with_obstacle(22),
+    );
+    // Against the catalog, not a literal: a literal here is what hid the
+    // engine/language disagreement (the engine used to answer 1 for an
+    // obstacle while a compiled `CELL_OBSTACLE` resolved to 2).
+    assert_eq!(
+        run(&f, "return getCellContent(22)"),
+        catalog_const("CELL_OBSTACLE")
+    );
+    assert_eq!(
+        run(&f, "return getCellContent(33)"),
+        catalog_const("CELL_ENTITY")
+    );
+    assert_eq!(
+        run(&f, "return getCellContent(5)"),
+        catalog_const("CELL_EMPTY")
+    );
+    // And end-to-end in one expression — this is the user-visible bug: the
+    // bare constant is resolved by the native backend at translate time,
+    // independently of what the engine returns.
+    assert_eq!(
+        run(&f, "return getCellContent(22) == CELL_OBSTACLE"),
+        "true"
+    );
+    assert_eq!(run(&f, "return getCellContent(33) == CELL_ENTITY"), "true");
+    assert_eq!(run(&f, "return getCellContent(5) == CELL_EMPTY"), "true");
 }
 
 #[test]

@@ -49,6 +49,12 @@ if [[ -d official-generator/leek-wars-generator/data ]]; then
   tools/game-item-extract.sh --check
 fi
 
+# The fight-constant table and the engine's generated `consts_gen.rs`. The
+# engine half is derived from the committed TSV, so this runs with or without
+# the submodule (the script skips only the TSV-vs-Java half).
+step "fight constant drift (tools/game-builtin-extract.sh --check)"
+tools/game-builtin-extract.sh --check
+
 step "cargo clippy --workspace --all-targets (-D warnings)"
 cargo clippy --workspace --all-targets --quiet -- -D warnings
 

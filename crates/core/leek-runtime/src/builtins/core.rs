@@ -19,7 +19,13 @@ pub(crate) fn dispatch_constant(name: &str) -> Option<Value> {
         // see upstream `runner/LeekConstants.java`.
         "INSTRUCTIONS_LIMIT" => Value::Int(300_000),
         "OPERATIONS_LIMIT" => Value::Int(20_000_000),
+        // `CELL_PLAYER` is upstream's deprecated alias of `CELL_ENTITY`.
+        // These must stay equal to `game_constants.tsv` — the fight engine
+        // returns the same values from `getCellContent`, and a fight AI is
+        // compiled with no library loaded, so this table is what resolves a
+        // bare `CELL_OBSTACLE` (see `cell_constants_match_catalog`).
         "CELL_EMPTY" => Value::Int(0),
+        "CELL_ENTITY" => Value::Int(1),
         "CELL_PLAYER" => Value::Int(1),
         "CELL_OBSTACLE" => Value::Int(2),
         "COLOR_RED" => Value::Int(0xFF_00_00),
@@ -188,3 +194,32 @@ pub(crate) fn length_of(v: &Value) -> Option<Value> {
 }
 
 // ---- Array operations ----
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_constant;
+    use crate::value::Value;
+
+    /// The fight constants this table hands a compiled AI must equal the
+    /// environment catalog, which is also what the constant-folding pass and
+    /// the fight engine use. Two providers, one set of values.
+    #[test]
+    fn cell_constants_match_catalog() {
+        let catalog = leek_environment::leekwars_constant_values();
+        for name in ["CELL_EMPTY", "CELL_ENTITY", "CELL_OBSTACLE", "CELL_PLAYER"] {
+            let expected: i64 = catalog
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("{name} missing from game_constants.tsv"))
+                .1
+                .parse()
+                .expect("integer constant");
+            // `Value` is not `PartialEq`, so match the variant out.
+            let got = dispatch_constant(name);
+            assert!(
+                matches!(got, Some(Value::Int(v)) if v == expected),
+                "{name}: expected {expected}, got {got:?}"
+            );
+        }
+    }
+}

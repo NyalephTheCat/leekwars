@@ -1172,6 +1172,7 @@ name = "leek-game-runtime"
 version = "0.0.1"
 dependencies = [
  "bitflags 2.11.1",
+ "leek-environment",
  "leek-runtime",
  "serde_json",
 ]
@@ -1181,6 +1182,7 @@ name = "leek-generator"
 version = "0.0.1"
 dependencies = [
  "leek-backend-native",
+ "leek-environment",
  "leek-game-runtime",
  "leek-hir",
  "leek-parser",
@@ -1418,6 +1420,7 @@ name = "leek-runtime"
 version = "0.0.1"
 dependencies = [
  "leek-builtins",
+ "leek-environment",
  "leek-hir",
  "num-bigint",
  "num-traits",

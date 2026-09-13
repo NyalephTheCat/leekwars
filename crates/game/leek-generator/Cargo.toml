@@ -17,6 +17,9 @@ serde_json          = { workspace = true }
 leek-parser = { workspace = true }
 leek-syntax = { workspace = true }
 leek-span   = { workspace = true }
+# Fight-constant catalog: the end-to-end tests assert engine answers
+# against it rather than against literals.
+leek-environment = { workspace = true }
 
 [lints]
 workspace = true

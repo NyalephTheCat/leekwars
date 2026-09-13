@@ -11,5 +11,10 @@ bitflags     = { workspace = true }
 leek-runtime = { workspace = true }
 serde_json   = { workspace = true }
 
+[dev-dependencies]
+# The fight-constant catalog `src/consts_gen.rs` is generated from; the
+# tests assert the generated values still match it.
+leek-environment = { workspace = true }
+
 [lints]
 workspace = true
