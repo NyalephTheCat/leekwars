@@ -11,10 +11,11 @@ By participating you agree to abide by our
 
 ## Prerequisites
 
-- **Rust** — the toolchain is pinned in
-  [`rust-toolchain.toml`](rust-toolchain.toml) (stable, with `rustfmt` and
+- **Rust** — the toolchain is pinned to an *exact* release in
+  [`rust-toolchain.toml`](rust-toolchain.toml) (1.94.1, with `rustfmt` and
   `clippy`). With `rustup` installed it is selected automatically; no manual
-  `rustup install` needed.
+  `rustup install` needed. That pin is also the workspace MSRV — see
+  [Bumping the Rust toolchain](#bumping-the-rust-toolchain).
 - **Git submodules** — the upstream reference implementations
   (`official/`, `official-generator/`) are vendored as submodules. They power
   the corpus tests and the generated weapon/chip catalog drift check.
@@ -52,7 +53,7 @@ cargo install --path bins/miku    # likewise leekc, leek-lsp, leek-dap, leekbenc
 exactly what CI runs. **Run it before opening a pull request:**
 
 ```sh
-tools/check.sh          # fmt + layer check + catalog drift + clippy + tests
+tools/check.sh          # fmt + pin/layer checks + catalog drift + clippy + tests
 tools/check.sh --full   # also runs the slow upstream corpus suite (>10 min)
 ```
 
@@ -61,6 +62,7 @@ want to run one in isolation:
 
 ```sh
 cargo fmt --all                          # format (--check to verify only)
+cargo xtask check-toolchain              # Rust pin and MSRV agree, and are exact
 cargo xtask check-layers                 # enforce the crate-layering rule
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude leek-test-corpus   # fast tests
@@ -101,6 +103,27 @@ on `core`. Known exceptions live in
 shrink. If you find yourself wanting an "upward" dependency, that's usually a
 sign the abstraction belongs in a lower layer — see
 [`docs/architecture.md`](docs/architecture.md).
+
+### Bumping the Rust toolchain
+
+[`rust-toolchain.toml`](rust-toolchain.toml) pins an **exact** release, not
+`stable`. Clippy runs at `pedantic` with `-D warnings`, so a floating channel
+lets any new Rust release turn CI red with no commit in this repo — that is
+what commit fb6e336 ("Fix CI pipeline failures on current toolchains") had to
+clean up, seven files edited only to satisfy newer lints.
+
+The pin is also the MSRV: `[workspace.package] rust-version` in
+[`Cargo.toml`](Cargo.toml) names the pin's `MAJOR.MINOR`, which is what makes
+it a real promise — every build in CI uses exactly that compiler, so no extra
+job is needed to check it. `cargo xtask check-toolchain` enforces both halves
+(exact pin, matching MSRV, `rustfmt`/`clippy` still requested) and CI runs it.
+
+Moving to a newer release is its **own pull request**, so the lint fixes it
+drags in never hide inside an unrelated change:
+
+1. bump `channel` in [`rust-toolchain.toml`](rust-toolchain.toml);
+2. set `rust-version` in [`Cargo.toml`](Cargo.toml) to the same `MAJOR.MINOR`;
+3. run `tools/check.sh` and fix whatever the new clippy release flags.
 
 ## Commit messages
 

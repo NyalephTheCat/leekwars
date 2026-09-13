@@ -249,8 +249,11 @@ official/, official-generator/   upstream reference impls (git submodules)
 
 ## Building & developing
 
-Requires stable Rust (pinned in `rust-toolchain.toml`, with `rustfmt` and
-`clippy`).
+Requires the exact Rust release pinned in `rust-toolchain.toml` (1.94.1, with
+`rustfmt` and `clippy`); `rustup` selects it automatically. That pin is also
+the workspace MSRV — see
+[CONTRIBUTING.md](CONTRIBUTING.md#bumping-the-rust-toolchain) before bumping
+it.
 
 ```sh
 cargo build                 # whole workspace

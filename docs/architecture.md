@@ -143,6 +143,8 @@ drift. The scripts live in [`tools/`](../tools/):
 - `game-item-extract.sh` — weapon/chip catalogs (see above).
 - `builtin-extract.sh` / `game-builtin-extract.sh` — builtin function tables.
 - `cargo xtask check-layers` ([`xtask/`](../xtask/)) — the layering rule.
+- `cargo xtask check-toolchain` ([`xtask/`](../xtask/)) — the Rust pin is an
+  exact release and matches the advertised MSRV.
 - `check.sh` — the full quality gate (and the contract CI honors).
 
 When you change one of these inputs, regenerate the output in the same commit so

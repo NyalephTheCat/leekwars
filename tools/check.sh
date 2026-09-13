@@ -2,7 +2,8 @@
 # Repo-wide quality gate: formatting, lints, build, and tests.
 #
 # Usage:
-#   tools/check.sh          # fast gate: fmt + clippy + tests (skips leek-test-corpus)
+#   tools/check.sh          # fast gate: fmt + pin/layer checks + clippy + tests
+#                           (skips leek-test-corpus)
 #   tools/check.sh --full   # also runs leek-test-corpus (upstream_suite — takes >10 min)
 #
 # Notes:
@@ -26,6 +27,9 @@ step() { printf '\n==> %s\n' "$*"; }
 
 step "cargo fmt --all --check"
 cargo fmt --all --check
+
+step "toolchain pin check (cargo xtask check-toolchain)"
+cargo xtask check-toolchain
 
 step "layer check (cargo xtask check-layers)"
 cargo xtask check-layers
