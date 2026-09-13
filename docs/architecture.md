@@ -163,7 +163,9 @@ the drift checks stay green.
   (`cargo test --workspace --exclude leek-test-corpus`).
 - **`leek-test-corpus`** validates thousands of `equals(...)` cases against the
   upstream reference. It is slow and submodule-dependent, gated behind
-  `tools/check.sh --full`.
+  `tools/check.sh --full` locally and by the `corpus` workflow (nightly + PRs
+  touching the compiler) in CI. Of its three columns only `native` checks
+  values; `pipeline` is a compile gate and `java-emit` is emit-only.
 - **`leek-bench` / `leekbench`** measure backend performance against upstream.
 - **`fuzz/`** holds nightly cargo-fuzz targets (e.g. parser round-trip).
 

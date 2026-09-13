@@ -1,0 +1,110 @@
+name: corpus
+
+# The upstream JUnit corpus (~11k cases per backend) checked against
+# crates/testing/leek-test-corpus/data/baseline.toml. It is the only thing that
+# can see a native / pipeline / java-emit regression across the whole language,
+# and it is far too slow for the per-push gate in ci.yml — so it lives here:
+# nightly, plus on PRs that touch the compiler.
+#
+# This is a *gate*, not a report. No step carries `continue-on-error`, and the
+# run fails on a regression, on a backend the baseline does not cover, and on a
+# checkout whose submodules are missing (which would otherwise run zero cases
+# and pass silently).
+on:
+  schedule:
+    # 03:00 UTC nightly. Scheduled runs only ever fire on the default branch.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/frontend/**"
+      - "crates/middle/**"
+      - "crates/backends/**"
+      - "crates/core/**"
+      - "crates/db/**"
+      - "crates/testing/leek-test-driver/**"
+      - "crates/testing/leek-test-corpus/**"
+      - ".github/workflows/corpus.yml"
+
+# Deliberately *not* ci.yml's `ci-…` group: a scheduled run happens on
+# refs/heads/main, so sharing that group would let any push to main cancel the
+# nightly corpus run.
+concurrency:
+  group: corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+# Keep this block minimal and boring. `FeatureFlags::from_env()` is read once
+# per case, so any LEEK_* variable added here silently shifts outcomes away
+# from the committed baseline (see #216).
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # `reference.rs` decides the committed 13 MB data/reference.tsv is stale by
+  # comparing mtimes, and a fresh checkout stamps every file "now" in arbitrary
+  # order. Without this, `cargo build` can shell out to a multi-minute JVM suite
+  # and then write into a tracked file.
+  LEEK_SKIP_REFERENCE_REGEN: "1"
+
+jobs:
+  corpus:
+    name: upstream corpus vs baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Required: `build.rs` embeds an *empty* manifest when
+          # official-generator/ is absent, and an empty suite has nothing to
+          # regress against.
+          submodules: recursive
+      - name: upstream sources are actually present
+        run: test -d official-generator/leek-wars-generator/leekscript/src/test/java/test
+      - name: Install Rust (exact version pinned by rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+
+      # The whole gate, in one suite run: a non-empty manifest, a canonical
+      # failures-only baseline, columns that are not all identical (#71), and
+      # no case that used to pass and now doesn't. `--nocapture` so the
+      # per-backend pass/fail/skip lines reach the log and the job summary.
+      # `--release` because the suite is >10 min even optimised; parallelising
+      # it is #149.
+      - name: corpus regression gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p leek-test-corpus --release --locked -- --nocapture 2>&1 \
+            | tee corpus-report.txt
+
+      # Only when the gate is red (or you asked by hand): re-run the suite and
+      # write the baseline it *would* have. That is exactly what you need once
+      # you have decided the new numbers are correct — download it and commit it
+      # verbatim, because `committed_baseline_is_canonical_failures_only`
+      # rejects a hand-edited file. Costs a second suite run, so the green
+      # nightly path never pays for it.
+      - name: refreshed baseline
+        if: failure() || github.event_name == 'workflow_dispatch'
+        run: cargo run -p leek-test-corpus --release --locked -- run --save-baseline
+      - uses: actions/upload-artifact@v4
+        if: failure() || github.event_name == 'workflow_dispatch'
+        with:
+          name: baseline
+          path: crates/testing/leek-test-corpus/data/baseline.toml
+          retention-days: 30
+
+      - name: job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Upstream corpus'
+            echo '```'
+            tail -c 60000 corpus-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-report
+          path: corpus-report.txt
+          retention-days: 30

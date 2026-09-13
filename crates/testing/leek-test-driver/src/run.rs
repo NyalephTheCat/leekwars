@@ -61,7 +61,7 @@ pub struct Report {
     pub summary: Summary,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Summary {
     pub total: u32,

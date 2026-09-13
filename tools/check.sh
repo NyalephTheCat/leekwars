@@ -6,6 +6,10 @@
 #                           (skips leek-test-corpus)
 #   tools/check.sh --full   # also runs leek-test-corpus (upstream_suite — takes >10 min)
 #
+#   CI mirrors this split: ci.yml runs the fast gate on every push/PR, and
+#   .github/workflows/corpus.yml runs leek-test-corpus nightly and on PRs that
+#   touch the compiler.
+#
 # Notes:
 #   * `cargo clippy --workspace --all-targets` must be completely quiet — the
 #     workspace denies warnings here via `-D warnings`. (The leek-test-corpus

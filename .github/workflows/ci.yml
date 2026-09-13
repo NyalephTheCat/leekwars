@@ -93,7 +93,9 @@ jobs:
       - name: cargo build --workspace
         run: cargo build --workspace --locked
       # Mirrors `tools/check.sh`: the fast gate excludes the multi-minute
-      # upstream corpus suite (run separately in the nightly job below).
+      # upstream corpus suite. That one runs in the separate `corpus` workflow
+      # (.github/workflows/corpus.yml) — nightly, and on PRs touching the
+      # compiler.
       - name: cargo test --workspace (fast)
         run: cargo test --workspace --exclude leek-test-corpus --locked
       # The Java-backend parity tests compare against tests/snapshots/ and
