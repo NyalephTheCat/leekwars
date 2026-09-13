@@ -26,7 +26,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use leek_migrate::migrate_text;
 use leek_span::SourceId;
-use leek_syntax::{Version, parse_pragmas};
+use leek_syntax::Version;
 
 use crate::cli::{Migrate, MigrateVersion};
 use leek_project::Project;
@@ -57,7 +57,7 @@ pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<
 
         let from = match args.from {
             Some(v) => v.to_syntax(),
-            None => detect_version(&text, source_id),
+            None => detect_version(&project, &text),
         };
 
         if from == target {
@@ -208,11 +208,11 @@ fn walk_dir(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Read the file's `@version:N` pragma if present (defaults to v4
-/// per the rest of the toolchain).
-fn detect_version(text: &str, source_id: SourceId) -> Version {
-    let (pragmas, _) = parse_pragmas(text, source_id);
-    pragmas.version
+/// The file's source version: its `@version:N` pragma if present, else
+/// the manifest's `[project].language` — the same resolution
+/// [`Project::pipeline_input`] applies for every other subcommand.
+fn detect_version(project: &Project, text: &str) -> Version {
+    Version::from_byte(project.index().language_settings(text).version)
 }
 
 fn version_label(v: Version) -> &'static str {

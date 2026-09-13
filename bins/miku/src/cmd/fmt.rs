@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use leek_manifest::FormatOptions;
 use leek_span::SourceId;
+use leek_span::pragma::LanguageSettings;
 use leek_syntax::Version;
 
 use crate::cli::Fmt;
@@ -34,7 +35,7 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     let opts = resolve_options(args, project.as_ref())?;
 
     if args.stdin {
-        return run_stdin(args, &opts);
+        return run_stdin(args, &opts, project.as_ref());
     }
 
     let sources = collect_sources(args, project.as_ref())?;
@@ -53,7 +54,7 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         let original =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
-        let version = detect_version(&original, source);
+        let version = detect_version(&original, project.as_ref());
         let formatted = leek_fmt::format_source(&original, source, version, &opts);
         if formatted == original {
             continue;
@@ -96,10 +97,10 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
 
 /// `--stdin`: format stdin to stdout. `--check`/`--diff` suppress the
 /// formatted output and exit non-zero when the input isn't formatted.
-fn run_stdin(args: &Fmt, opts: &FormatOptions) -> Result<ExitCode> {
+fn run_stdin(args: &Fmt, opts: &FormatOptions, project: Option<&Project>) -> Result<ExitCode> {
     let original = std::io::read_to_string(std::io::stdin()).context("reading stdin")?;
     let source = SourceId::new(1).unwrap();
-    let version = detect_version(&original, source);
+    let version = detect_version(&original, project);
     let formatted = leek_fmt::format_source(&original, source, version, opts);
     if args.diff {
         print!(
@@ -167,12 +168,13 @@ fn unified_diff(original: &str, formatted: &str, path: &Path) -> String {
     )
 }
 
-fn detect_version(text: &str, source: SourceId) -> Version {
-    let (pragmas, _) = leek_syntax::parse_pragmas(text, source);
-    version_from_byte(match pragmas.version {
-        Version::V1 => 1,
-        Version::V2 => 2,
-        Version::V3 => 3,
-        Version::V4 => 4,
-    })
+/// The source's language version: its `@version:N` pragma, else the
+/// manifest's `[project].language` inside a project, else v4 — the same
+/// resolution every other subcommand gets from `Project::pipeline_input`.
+fn detect_version(text: &str, project: Option<&Project>) -> Version {
+    let lang = project.map_or_else(
+        || LanguageSettings::resolve(text, None, leek_span::pragma::LATEST_VERSION, false),
+        |p| p.index().language_settings(text),
+    );
+    version_from_byte(lang.version)
 }
