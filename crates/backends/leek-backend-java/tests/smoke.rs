@@ -397,6 +397,25 @@ fn exact_switch_matches_upstream_lowering_shape() {
 }
 
 #[test]
+fn costed_switch_discriminant_charges_inside_its_initializer() {
+    // #75: a discriminant that costs ops charges them inside the `__sw_N`
+    // initializer, like every other costed initializer (`Object u_x =
+    // ops(1l, 1);`). It used to be a standalone `ops(N);` glued to the front
+    // of the `int __si_N = -1;` line, a shape upstream never writes. No
+    // reference row has a costed discriminant — they are all bare variables —
+    // so this is the only guard on that branch.
+    let java = java_for(
+        "var x = 1 switch (x + 1) { case 2: return 'a' } return 'none'",
+        &Options::exact(Version::V4, 1),
+    );
+    assert!(
+        java.contains("Object __sw_0 = ops((Object) add(u_x, 1l), 1);\nint __si_0 = -1;\n"),
+        "{java}"
+    );
+    assert!(!java.contains("ops(1);int __si_0"), "{java}");
+}
+
+#[test]
 fn switch_arms_get_their_own_java_scope() {
     // #42: the same local declared in two arms collided in the single scope
     // of an unbraced Java switch block.

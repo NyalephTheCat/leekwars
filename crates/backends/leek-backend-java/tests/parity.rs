@@ -643,6 +643,104 @@ fn exact_switch_skeleton_matches_reference() {
     assert!(failures.is_empty(), "switch skeleton drift:\n{failures}");
 }
 
+/// How many `reference.tsv` rows lower a switch today. A shrinking row set
+/// would quietly weaken both switch tests, so it is asserted, not inferred.
+const SWITCH_REFERENCE_ROWS: usize = 65;
+
+/// The AI id the reference was captured under, read back from its class
+/// declaration. It drives the emitted class name, the `getErrorFilesID`
+/// trailer and — through `<snippet N>` — the `getAIString` / `getErrorFiles`
+/// strings, so reconstructing it is what makes a whole-file comparison
+/// against a reference row possible at all.
+fn reference_ai_id(reference: &str) -> Option<u64> {
+    let rest = reference.split("public class AI_").nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// A one-line description of where two files first disagree, for the
+/// baseline: `line <n>: <expected> | <actual>`, or the two line counts when
+/// one file is a prefix of the other.
+fn first_difference(expected: &str, actual: &str) -> String {
+    for (i, (e, a)) in expected.lines().zip(actual.lines()).enumerate() {
+        if e != a {
+            return format!("line {}: {e} | {a}", i + 1);
+        }
+    }
+    let (e, a) = (expected.lines().count(), actual.lines().count());
+    format!("line count: {e} | {a}")
+}
+
+/// Whole-file byte ratchet for the switch rows of `reference.tsv` (#75).
+///
+/// [`exact_switch_skeleton_matches_reference`] proves the lowering's own
+/// lines match upstream; this compares the **entire** emitted file with the
+/// reference, so nothing inside or around a switch can drift unnoticed. No
+/// captured golden is involved: the reference carries its AI id in the class
+/// name, and the corpus always compiles under the source path
+/// `<snippet <id>>`, so `Options::exact(version, ai_id)` reproduces the class
+/// shell and the trailer exactly. That matters here because the jar that
+/// captures goldens needs the official submodules, which are not checked out.
+///
+/// Rows that are *not* byte-equal are listed in the tracked
+/// `tests/snapshots/SWITCH_ROWS.txt` baseline with the line they first
+/// diverge on. Each one diverges in a lowering outside the switch (typed
+/// `integer | null` declarations, `==`, `+=`) — closing those is separate
+/// work, catalogued in `docs/java-backend.md` §9. The point of the snapshot
+/// is that the list may only move under review: a row that silently leaves
+/// the byte-equal set fails the test.
+#[test]
+fn exact_switch_body_matches_reference() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/leek-test-corpus/data/reference.tsv");
+    let contents = fs::read_to_string(&path).expect("read reference.tsv");
+    let mut checked = 0;
+    let mut report = String::new();
+    for (row, line) in contents.lines().enumerate() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 7 || cols[1] == "S" || !cols[6].contains("__si_") {
+            continue;
+        }
+        let version = match cols[0] {
+            "1" => Version::V1,
+            "2" => Version::V2,
+            "3" => Version::V3,
+            _ => Version::V4,
+        };
+        let code = unescape(cols[5]);
+        let reference = unescape(cols[6]);
+        let ai_id = reference_ai_id(&reference)
+            .unwrap_or_else(|| panic!("row {}: no `public class AI_<id>`", row + 1));
+        let source = SourceId::new(1).unwrap();
+        let parsed = parse(&code, source, version);
+        let sf =
+            leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
+        let version_byte = cols[0].parse().unwrap_or(4);
+        let (hir, _diags) = leek_hir::lower_file_versioned(&sf, source, version_byte);
+        let opts = Options::exact(version, ai_id).with_source_path(format!("<snippet {ai_id}>"));
+        let java = emit(&hir, &opts).java;
+        checked += 1;
+        if java != reference {
+            let _ = writeln!(
+                report,
+                "{}\t{}\t{code}",
+                row + 1,
+                first_difference(&reference, &java)
+            );
+        }
+    }
+    assert!(
+        checked >= SWITCH_REFERENCE_ROWS,
+        "switch row set shrank: {checked} rows contain `__si_`, expected at least \
+         {SWITCH_REFERENCE_ROWS}"
+    );
+    let failures: Vec<String> = check_snapshot("SWITCH_ROWS.txt", &report)
+        .err()
+        .into_iter()
+        .collect();
+    assert_snapshots(&failures);
+}
+
 /// Cross-side cross-check against the upstream-captured snapshot.
 ///
 /// For every passing inline assertion in the Java suite we record

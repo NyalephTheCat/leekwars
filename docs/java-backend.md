@@ -35,8 +35,11 @@ be diffed against captured goldens:
 
 - full `u_` / `g_` / `f_` mangling (§4), never dropped;
 - per-statement `ai.ops(1)` ticks and `ops(value, n)` wrappers (§5);
-- runtime-comparison `switch` lowering (chained `equals_equals` tests) rather
-  than a native Java `switch`;
+- upstream's `SwitchBlock` lowering rather than a native Java `switch`: one
+  `{ … }` block per switch holding `Object __sw_N = <discriminant>;` and
+  `int __si_N = -1;`, an `if` / `else if` chain of `eq(…)` tests charging one
+  op per case label (`if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;`),
+  then `switch (__si_N)` with braced `case N: {` / `default: {` arms;
 - `add(...)` / `sub(...)` / `mul(...)` helpers for arithmetic whose operands
   are not statically numeric;
 - no dead-code elimination — statements after a definite `return` are still
@@ -56,8 +59,12 @@ liberalizations the reference does not take:
   ticks;
 - unreachable statements after a definite `return` / `break` / `continue` are
   dropped (`Options::dead_code_elim`);
-- a native Java `switch` is emitted when every case label is a constant
-  (`Options::native_switch`);
+- the `eq` chain that picks `__si_N` is replaced by an O(1) native Java
+  `switch` (`Options::native_switch`) when every case label is a distinct
+  integer constant in `int` range and the discriminant is not statically a
+  string, real, boolean or null. Because `eq` is loose (`eq(1.0, 1)` holds),
+  the native dispatch sits behind an `instanceof Long` plus int-range guard and
+  the `eq` chain stays as the `else` arm;
 - output is indented for readability — cosmetic only.
 
 Clean mode is not diffed against the goldens; its contract is "compiles and
@@ -290,6 +297,18 @@ Byte parity is a Phase-3 goal. What stands between here and there:
   iteration over `MainLeekBlock.mFunctions` — implementation-defined and not
   reproducible from Rust without reimplementing the JVM's hash semantics. The
   `byte_parity_09_multi_func` test is kept `#[ignore]`d as a marker.
+- **Switch temporary numbering.** `__sw_N` / `__si_N` are numbered by emission
+  order, and user functions are emitted before `runIA`. Upstream is believed to
+  number at parse time in source order, possibly sharing one counter with
+  `foreach` and `return`, so a file mixing a main-block switch with a switch in
+  a later-declared function — or a `foreach` with a switch — would not be
+  byte-equal. No corpus row covers either shape and the jar that would settle it
+  needs the uninitialized official submodules; tracked as #384. Every shape the
+  corpus *does* cover is byte-equal today
+  (`exact_switch_body_matches_reference`, whose `tests/snapshots/SWITCH_ROWS.txt`
+  baseline lists the 11 of 65 switch rows that still differ — all of them in
+  lowerings outside the switch: typed `integer | null` declarations, `==`
+  vs `equals_equals`, `+=` vs `add_eq`).
 - **Block-bodied lambdas cannot see outer locals.** Emit needs to outline them
   into top-level helper methods.
 - **Assignment to a builtin / function / class name** (`count = 1; return count`)
