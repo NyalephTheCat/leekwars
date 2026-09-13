@@ -351,6 +351,78 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// The lines of a lowered switch that `SwitchBlock` itself writes (block
+/// braces aside): temp declarations, the index chain, the body `switch`, its
+/// arm labels, and the per-arm `ops(1)` prologue. Arm bodies are other
+/// lowerings, so they are left out of the comparison.
+fn switch_skeleton(java: &str) -> Vec<String> {
+    java.lines()
+        .map(str::trim)
+        .filter_map(|l| {
+            let is_skeleton = l.starts_with("Object __sw_")
+                || l.starts_with("int __si_")
+                || l.starts_with("if (ops(eq(__sw_")
+                || l.starts_with("else if (ops(eq(__sw_")
+                || l.starts_with("switch (__si_")
+                || (l.starts_with("case ") && l.ends_with(": {"))
+                || l == "default: {";
+            let arm_prologue = l.starts_with("ops(1);") && !l.starts_with("ops(1);{");
+            if is_skeleton {
+                Some(l.to_string())
+            } else if arm_prologue {
+                Some("ops(1);".to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Exact-mode switch lowering against upstream (#75). Every non-strict
+/// `reference.tsv` row whose reference Java contains a switch must emit the
+/// same switch skeleton: numbered `__sw_N` / `__si_N` temps, the grouped
+/// `if` / `else if` index chain with its op charges, and braced arms.
+#[test]
+fn exact_switch_skeleton_matches_reference() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/leek-test-corpus/data/reference.tsv");
+    let contents = fs::read_to_string(&path).expect("read reference.tsv");
+    let mut checked = 0;
+    let mut failures = String::new();
+    for line in contents.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 7 || cols[1] == "S" || !cols[6].contains("__si_") {
+            continue;
+        }
+        let version = match cols[0] {
+            "1" => Version::V1,
+            "2" => Version::V2,
+            "3" => Version::V3,
+            _ => Version::V4,
+        };
+        let code = unescape(cols[5]);
+        let reference = unescape(cols[6]);
+        let source = SourceId::new(1).unwrap();
+        let parsed = parse(&code, source, version);
+        let sf =
+            leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
+        let version_byte = cols[0].parse().unwrap_or(4);
+        let (hir, _diags) = leek_hir::lower_file_versioned(&sf, source, version_byte);
+        let java = emit(&hir, &Options::exact(version, 1)).java;
+        let (expected, actual) = (switch_skeleton(&reference), switch_skeleton(&java));
+        if expected != actual {
+            let _ = writeln!(
+                failures,
+                "v{}: {code}\n  expected {expected:?}\n  actual   {actual:?}",
+                cols[0]
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no switch rows found in reference.tsv");
+    assert!(failures.is_empty(), "switch skeleton drift:\n{failures}");
+}
+
 /// Cross-side cross-check against the upstream-captured snapshot.
 ///
 /// For every passing inline assertion in the Java suite we record
