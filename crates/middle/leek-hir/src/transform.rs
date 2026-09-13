@@ -620,14 +620,17 @@ fn collect_local_reads(e: &Expr, set: &mut HashSet<DefId>) {
             }
         }
         match &lam.body {
-            LambdaBody::Block(b) => {
-                for st in &b.stmts {
-                    walk_stmt_child_exprs(st, &mut |x| collect_local_reads(x, set));
-                    walk_stmt_child_stmts(st, &mut |c| {
-                        walk_stmt_child_exprs(c, &mut |x| collect_local_reads(x, set));
-                    });
+            // Every statement at any depth (nested lambdas are reached through
+            // the expression walk), including bare foreach binding targets,
+            // which the child-expression walk doesn't yield (#86).
+            LambdaBody::Block(b) => for_each_stmt_deep(&b.stmts, &mut |st| {
+                if let Stmt::Foreach(fe) = st {
+                    for bind in fe.key.iter().chain([&fe.value]) {
+                        collect_local_reads(&bind.target, set);
+                    }
                 }
-            }
+                walk_stmt_child_exprs(st, &mut |x| collect_local_reads(x, set));
+            }),
             LambdaBody::Expr(x) => collect_local_reads(x, set),
         }
     } else {
@@ -1667,6 +1670,27 @@ mod tests {
     #[test]
     fn local_bound_by_foreach_is_not_propagated() {
         let mut hir = lower("var x = 5\nfor (x in [1, 2]) {}\nvar y = x\n");
+        assert_eq!(propagate_const_locals(&mut hir), 0);
+    }
+
+    #[test]
+    fn local_bound_by_foreach_in_lambda_is_not_propagated() {
+        // The captured `x` is written by the lambda's foreach (#86).
+        let mut hir =
+            lower("var x = 5\nvar f = function() { for (x in [1]) {} }\nf()\nvar y = x\n");
+        assert_eq!(propagate_const_locals(&mut hir), 0);
+        // Deeply nested inside the lambda body.
+        let mut hir = lower(
+            "var x = 5\nvar f = function() { if (true) { while (true) { for (x in [1]) {} } } }\nf()\nvar y = x\n",
+        );
+        assert_eq!(propagate_const_locals(&mut hir), 0);
+    }
+
+    #[test]
+    fn local_written_three_levels_deep_in_lambda_is_not_propagated() {
+        let mut hir = lower(
+            "var x = 5\nvar f = function() { if (true) { if (true) { x = 2 } } }\nf()\nvar y = x\n",
+        );
         assert_eq!(propagate_const_locals(&mut hir), 0);
     }
 

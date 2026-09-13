@@ -33,6 +33,16 @@ fn jit(src: &str) -> String {
     }
 }
 
+/// [`jit`] after the O1 HIR optimizer (`optimize_hir`) has run.
+fn jit_o1(src: &str) -> String {
+    let mut h = hir(src);
+    leek_hir::transform::optimize_hir(&mut h);
+    match run(&h, &NativeOptions::debug()) {
+        Ok(v) => v.to_string(),
+        Err(e) => format!("ERR: {e}"),
+    }
+}
+
 /// Run `src` under `version` semantics, rendering the result with the
 /// matching display version (so v1 real formatting etc. is honored).
 fn jit_v(src: &str, version: u8) -> String {
@@ -359,6 +369,18 @@ fn foreach_over_existing_bindings() {
     assert_eq!(
         jit("var x = 0 var f = function() { for (x in [6, 8]) {} } f() return x"),
         "8"
+    );
+    // The same programs after the O1 optimizer: constant propagation must see
+    // the foreach writes (including the one inside the lambda).
+    assert_eq!(
+        jit_o1("var x = 0 var f = function() { for (x in [6, 8]) {} } f() return x"),
+        "8"
+    );
+    assert_eq!(jit_o1("var x = 0 for (x in [4, 5]) {} return x"), "5");
+    assert_eq!(jit_o1("global g = 0 for (g in [1, 2, 3]) {} return g"), "3");
+    assert_eq!(
+        jit_o1("global g = 0 function f() { for (g in [1, 2]) {} } f() return g"),
+        "2"
     );
     // A class field inside a method.
     assert_eq!(
