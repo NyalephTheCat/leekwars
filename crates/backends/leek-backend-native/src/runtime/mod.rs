@@ -311,6 +311,14 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_array_get_int", leek_array_get_int as *const u8),
         ("leek_array_get_real", leek_array_get_real as *const u8),
         ("leek_value_set_index", leek_value_set_index as *const u8),
+        (
+            "leek_value_set_index_raw",
+            leek_value_set_index_raw as *const u8,
+        ),
+        (
+            "leek_set_index_int_raw",
+            leek_set_index_int_raw as *const u8,
+        ),
         ("leek_map_new", leek_map_new as *const u8),
         ("leek_map_put", leek_map_put as *const u8),
         ("leek_set_new", leek_set_new as *const u8),
