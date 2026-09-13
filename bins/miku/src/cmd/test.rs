@@ -34,9 +34,6 @@ use leek_project::Project;
 use crate::cli::{ColorWhen, MessageFormat, Test};
 use crate::util::reporter_from_cli;
 
-/// Default op budget per test file when no `timeout` annotation is given.
-const DEFAULT_OP_BUDGET: u64 = 20_000_000;
-
 pub fn run(
     args: &Test,
     manifest_path: Option<&Path>,
@@ -145,7 +142,6 @@ fn run_one(
 ) -> Result<TestOutcome> {
     let (src, text) = project.pipeline_input(source, path)?;
     let input = Input::from(src);
-    let version_byte = input.version_byte;
     let annotations = parse_annotations(&text);
 
     let pipeline =
@@ -163,12 +159,14 @@ fn run_one(
         return Ok(TestOutcome::Fail("HIR lowering produced no output".into()));
     };
 
-    let budget = annotations.timeout.unwrap_or(DEFAULT_OP_BUDGET);
-    // Execute via the native JIT (the interpreter backend was removed). A
-    // runtime error surfaces as `Err(NativeError::Runtime(..))`.
-    let mut opts = leek_backend_native::NativeOptions::debug();
-    opts.version = version_byte;
-    opts.op_limit = budget;
+    // Default op budget per test file when no `timeout` annotation is given.
+    let budget = annotations
+        .timeout
+        .unwrap_or(leek_backend_native::DEFAULT_OP_BUDGET);
+    // Execute via the native JIT (the interpreter backend was removed), at the
+    // input's settled version and strict mode. A runtime error surfaces as
+    // `Err(NativeError::Runtime(..))`.
+    let mut opts = leek_backend_native::NativeOptions::jit_for_input(result.input(), budget);
     if let Some(depth) = project
         .manifest
         .backend
@@ -178,7 +176,6 @@ fn run_one(
     {
         opts.max_call_depth = depth;
     }
-    opts.emit = leek_backend_native::NativeEmit::Jit;
     let err = leek_backend_native::compile(hir.0.as_ref(), &opts).err();
 
     match (&err, annotations.expect_fail) {

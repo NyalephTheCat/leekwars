@@ -12,8 +12,9 @@ use leek_lexer::pipeline::TokensArtifact;
 use leek_mir::pipeline::MirArtifact;
 use leek_parser::pipeline::GreenTreeArtifact;
 use leek_pipeline::Input;
+use leek_span::pragma::LanguageSettings;
 use leek_span::{LineTable, SourceId};
-use leek_syntax::{SyntaxNode, Version, build_flat_tree, parse_pragmas};
+use leek_syntax::{SyntaxNode, Version, build_flat_tree};
 
 use crate::cli::{Cli, Emit, MessageFormat};
 use crate::pipeline::{is_stderr_tty, pipeline_for, resolve_code};
@@ -26,23 +27,22 @@ pub fn run() -> Result<ExitCode> {
 
     let source = SourceId::new(1).unwrap();
 
-    // Resolve the active version from the file's pragma, with the
-    // CLI flag taking precedence. The pipeline itself runs a pragma
-    // step too; this early read just picks the lexer's keyword set.
-    let (pragmas, _pragma_diags) = parse_pragmas(&text, source);
-    let version = cli.version_pragma.unwrap_or(pragmas.version);
-
-    let version_byte = match version {
-        Version::V1 => 1,
-        Version::V2 => 2,
-        Version::V3 => 3,
-        Version::V4 => 4,
-    };
+    // Settle the language settings once, here at the input boundary:
+    // `--version-pragma` > the file's `@version` pragma > v4, and
+    // `@strict`. Every pass (lexer through HIR) and every backend reads
+    // them back from the `Input`; nothing re-derives them from pragmas.
+    let lang = LanguageSettings::resolve(
+        &text,
+        cli.version_pragma.map(u8::from),
+        leek_span::pragma::LATEST_VERSION,
+        false,
+    );
+    let version = Version::from_byte(lang.version);
     let input = Input {
         source,
         text: text.clone().into(),
-        version_byte,
-        strict: pragmas.strict,
+        version_byte: lang.version,
+        strict: lang.strict,
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
 
@@ -237,23 +237,13 @@ pub fn run() -> Result<ExitCode> {
         }
         Emit::Run => {
             if let Some(hir) = result.get::<HirArtifact>() {
-                let v_byte = match version {
-                    Version::V1 => 1,
-                    Version::V2 => 2,
-                    Version::V3 => 3,
-                    Version::V4 => 4,
-                };
                 // `--emit run` executes via the native JIT (the interpreter was
-                // removed). The 20M op budget matches the prior behaviour.
-                use leek_backend_native::{NativeArtifact, NativeEmit, NativeOptions};
-                let mut opts = NativeOptions::debug();
-                opts.version = v_byte;
-                opts.strict = pragmas.strict;
-                opts.op_limit = 20_000_000;
+                // removed), with the same helper and budget as `miku run`.
+                use leek_backend_native::{DEFAULT_OP_BUDGET, NativeArtifact, NativeOptions};
+                let mut opts = NativeOptions::jit_for_input(result.input(), DEFAULT_OP_BUDGET);
                 if let Some(depth) = cli.max_call_depth {
                     opts.max_call_depth = depth;
                 }
-                opts.emit = NativeEmit::Jit;
                 match leek_backend_native::compile(hir.0.as_ref(), &opts) {
                     Ok(NativeArtifact::Value(v)) => println!("{v}"),
                     Ok(_) => unreachable!("Jit emit yields a Value"),
@@ -287,8 +277,8 @@ pub fn run() -> Result<ExitCode> {
                 if cli.no_verifier {
                     opts.enable_verifier = false;
                 }
-                opts.version = version_byte;
-                opts.strict = pragmas.strict;
+                let input = result.input();
+                opts = opts.with_lang(input.version_byte, input.strict);
                 opts.link_game = cli.link_game;
                 if let Some(depth) = cli.max_call_depth {
                     opts.max_call_depth = depth;

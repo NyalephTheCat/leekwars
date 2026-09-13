@@ -19,11 +19,13 @@
 //! resynchronizes to the next `;` or close bracket.
 
 mod grammar;
+mod header;
 mod parser;
 
 pub mod ast;
 pub mod pipeline;
 
+pub use header::parse_signature_header;
 pub use parser::{
     ParseFeatures, ParseResult, parse, parse_tokens, parse_tokens_with, parse_tokens_with_classes,
     parse_with_features, scan_class_names,

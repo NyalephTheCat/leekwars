@@ -50,7 +50,7 @@ mod translate;
 
 pub use debug::{DebugHook, frame_name, render_frame_vars, set_debug_hook};
 pub use game::{GameRuntime, set_game_runtime};
-pub use options::{NativeEmit, NativeError, NativeOptions, OptLevel};
+pub use options::{DEFAULT_OP_BUDGET, NativeEmit, NativeError, NativeOptions, OptLevel};
 pub use runtime::ops_used;
 
 use std::collections::HashMap;

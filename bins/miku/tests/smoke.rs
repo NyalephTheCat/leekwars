@@ -136,6 +136,77 @@ default = true
 }
 
 #[test]
+fn run_honors_file_version_pragma_over_manifest_language() {
+    // Regression (#36): the project pre-scan never matched `// @version:N`,
+    // so a v1 file in a `language = 4` project was lexed/parsed at v4 (where
+    // `class` is a keyword) while HIR lowered it at v1.
+    let dir = scratch_dir("run_v1_pragma");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name     = "oldleek"
+version  = "0.1.0"
+language = 4
+
+[backend.native]
+enable  = true
+default = true
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:1\nvar class = 5;\nreturn class;\n",
+    );
+
+    let out = miku(&["run"], &dir);
+    assert_eq!(
+        out.status, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
+    assert_eq!(out.stdout.trim(), "5");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn run_honors_strict_pragma() {
+    // Regression (#58): `miku run` never passed strict mode to the native
+    // JIT. Strict typing pins an untyped `var a = 10` slot to integer, so
+    // `a += 0.5` stays `10`; non-strict it becomes `10.5`.
+    let dir = scratch_dir("run_strict");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "strictleek"
+version = "0.1.0"
+
+[backend.native]
+enable  = true
+default = true
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4\n// @strict\nvar a = 10;\na += 0.5;\nreturn a;\n",
+    );
+
+    let out = miku(&["run"], &dir);
+    assert_eq!(
+        out.status, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
+    assert_eq!(out.stdout.trim(), "10");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn build_java_writes_artifact() {
     let dir = scratch_dir("build");
     write(
@@ -560,6 +631,32 @@ x = 1
         "expected error to mention moonbeam: {}",
         out.stderr
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn migrate_uses_manifest_language_for_pragmaless_files() {
+    // A pragma-less file in a `language = 1` project is v1 source, the
+    // same as every other subcommand reads it. `migrate` used to assume v4
+    // and skip it as "already at target".
+    let dir = scratch_dir("migrate_manifest_lang");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name     = "migme"
+version  = "0.1.0"
+language = 1
+"#,
+    );
+    write(&dir, "src/main.leek", "var x = 5\nx ^= 2\nreturn x\n");
+
+    let out = miku(&["migrate", "--to", "v2"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+
+    let after = std::fs::read_to_string(dir.join("src/main.leek")).unwrap();
+    assert!(after.contains("x **= 2"), "operator not rewritten: {after}");
 
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -2,6 +2,11 @@
 
 use std::path::PathBuf;
 
+/// Default operation budget for a single CLI run (`miku run`, `miku test`
+/// without a `timeout` annotation, `leekc --emit run`): 20M, the in-game
+/// `OPERATIONS_LIMIT`.
+pub const DEFAULT_OP_BUDGET: u64 = 20_000_000;
+
 /// Cranelift optimization level — the debug/release switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptLevel {
@@ -193,6 +198,17 @@ impl NativeOptions {
         self
     }
 
+    /// Debug-profile JIT options for running a pipeline result: always at
+    /// the input's settled language version **and** strict mode (so `miku
+    /// run`, `miku test` and `leekc --emit run` can't drift from each other or
+    /// from `miku build --backend native`), with the given op budget.
+    pub fn jit_for_input(input: &leek_pipeline::Input, op_limit: u64) -> Self {
+        Self::debug()
+            .with_emit(NativeEmit::Jit)
+            .with_lang(input.version_byte, input.strict)
+            .with_op_limit(op_limit)
+    }
+
     /// Set the language semantics (version + strict typing) the compiled
     /// code should honor.
     pub fn with_lang(mut self, version: u8, strict: bool) -> Self {
@@ -239,3 +255,27 @@ impl std::fmt::Display for NativeError {
 }
 
 impl std::error::Error for NativeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jit_for_input_carries_version_and_strict() {
+        // Regression: `miku run` / `miku test` built `NativeOptions::debug()`
+        // and set only the version, so a `@strict` file (or `strict = true`
+        // manifest) ran non-strict under the JIT.
+        let input = leek_pipeline::Input {
+            source: leek_span::SourceId::new(1).unwrap(),
+            text: "".into(),
+            version_byte: 2,
+            strict: true,
+            flags: leek_pipeline::FeatureFlags::none(),
+        };
+        let opts = NativeOptions::jit_for_input(&input, 1234);
+        assert_eq!(opts.version, 2);
+        assert!(opts.strict);
+        assert_eq!(opts.op_limit, 1234);
+        assert_eq!(opts.emit, NativeEmit::Jit);
+    }
+}

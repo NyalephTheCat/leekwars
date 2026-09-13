@@ -231,15 +231,18 @@ pub(crate) fn parse_bigint_text(text: &str) -> String {
 pub(crate) fn strip_string_quotes_and_unescape(text: &str) -> String {
     // Default (and historical) behavior — modern dialect, unescape
     // every standard sequence.
-    strip_string_quotes_and_unescape_versioned(text, 4)
+    strip_string_quotes_and_unescape_versioned(text, leek_syntax::Version::LATEST)
 }
 
-pub(crate) fn strip_string_quotes_and_unescape_versioned(text: &str, version: u8) -> String {
+pub(crate) fn strip_string_quotes_and_unescape_versioned(
+    text: &str,
+    version: leek_syntax::Version,
+) -> String {
     // Shared codec — see `leek_text::unescape`. The v1 quote quirk
     // (`length("abc\"def") == 8` at v1, pinned by
     // `TestString::testString_lexerEdgeCases::7@v1`) lives there too,
     // selected by `EscapeMode`.
-    leek_text::unescape(text, leek_text::EscapeMode::from_version(version))
+    leek_text::unescape(text, leek_text::EscapeMode::from_version(u8::from(version)))
 }
 
 pub(crate) fn binary_op_from_token(k: SyntaxKind) -> Option<BinaryOp> {

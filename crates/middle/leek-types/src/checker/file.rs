@@ -3,18 +3,8 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 use leek_span::SourceId;
 use leek_syntax::Version;
-use rowan::GreenNode;
 
 use super::prelude::*;
-
-/// Memoized parses of the static stdlib / leekwars signature headers, keyed
-/// by `(header tag, version)`. The headers never change, but the LSP builds a
-/// fresh `Checker` per keystroke (when prelude seeding is enabled), so without
-/// this each keystroke re-parsed both headers. The cached value is a cheap
-/// Arc-backed `GreenNode` clone. Poison-safe so one panicking thread can't
-/// wedge the cache for the rest of the process.
-static PRELUDE_PARSE_CACHE: LazyLock<Mutex<HashMap<(u8, Version), GreenNode>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The function-signature maps a `Checker` collects from the embedded library
 /// headers. The headers depend only on the language version, so the collected
@@ -33,36 +23,6 @@ struct SeededSigs {
 /// every compile (which dominates small-file / per-keystroke latency).
 static SEEDED_SIG_CACHE: LazyLock<Mutex<HashMap<Version, SeededSigs>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Parse a static prelude header once per `(tag, version)` and return a clone
-/// of the cached green tree.
-fn cached_prelude_parse(tag: u8, version: Version, src: &str) -> GreenNode {
-    use leek_parser::{ParseFeatures, parse_with_features};
-    let key = (tag, version);
-    if let Some(g) = PRELUDE_PARSE_CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return g.clone();
-    }
-    let parsed = parse_with_features(
-        src,
-        leek_prelude::source_id(),
-        version,
-        ParseFeatures {
-            function_signatures: true,
-            generics: true,
-            ..Default::default()
-        },
-    );
-    PRELUDE_PARSE_CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(key)
-        .or_insert(parsed.green)
-        .clone()
-}
 
 impl Checker {
     /// Seed the function-signature maps from the embedded *typed*
@@ -98,8 +58,8 @@ impl Checker {
         // (`getCell`, `getLife`, …) so in-game scripts infer their
         // declared returns too. Same-named entries: last wins, but the
         // two sets are effectively disjoint.
-        self.seed_header(0, leek_prelude::STDLIB_SRC);
-        self.seed_header(1, leek_prelude::LEEKWARS_SRC);
+        self.seed_header(leek_prelude::STDLIB_SRC);
+        self.seed_header(leek_prelude::LEEKWARS_SRC);
 
         // Snapshot the freshly collected library signatures (the maps hold
         // nothing else yet) so the next `Checker` at this version reuses them.
@@ -118,10 +78,12 @@ impl Checker {
     /// Parse one typed signature header and collect its top-level
     /// function signatures into the maps. No diagnostics, no type-table
     /// entries — the header isn't user source.
-    fn seed_header(&mut self, tag: u8, src: &str) {
+    fn seed_header(&mut self, src: &str) {
         use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
         use leek_syntax::SyntaxNode;
-        let green = cached_prelude_parse(tag, self.version, src);
+        // Shared with HIR lowering's prelude merge, keyed on the program
+        // version, so both passes see the same header tree.
+        let green = leek_parser::parse_signature_header(src, self.version);
         let Some(lib) = AstSourceFile::cast(SyntaxNode::new_root(green)) else {
             return;
         };

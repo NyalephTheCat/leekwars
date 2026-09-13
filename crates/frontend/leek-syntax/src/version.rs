@@ -29,6 +29,19 @@ impl Version {
     pub fn as_u32(self) -> u32 {
         self as u32
     }
+
+    /// Decode the pipeline's byte representation (`Input::version_byte`).
+    /// Out-of-range values collapse to [`Version::LATEST`].
+    #[must_use]
+    pub fn from_byte(b: u8) -> Self {
+        Self::from_pragma(u32::from(b)).unwrap_or(Self::LATEST)
+    }
+}
+
+impl From<Version> for u8 {
+    fn from(v: Version) -> Self {
+        v as u8
+    }
 }
 
 impl Default for Version {

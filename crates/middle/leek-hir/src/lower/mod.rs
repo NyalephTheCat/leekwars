@@ -14,12 +14,13 @@
 //! - No desugaring yet — compound assigns, postfix ops, and `for`
 //!   loops keep their source shape so backends can preserve them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{self, AstNode, Stmt as AstStmt};
 use leek_span::{SourceId, Span};
-use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken, Version};
 use leek_types::Type;
 
 use crate::ir::{Block, Def, DefId, Expr, ExprKind, Global, HirFile, Literal, Local, Stmt};
@@ -34,21 +35,23 @@ pub use traits::{LowerExpr, LowerStmt};
 
 /// Lower a source file into HIR.
 ///
-/// The language version is taken from the file's `@version:N`
-/// pragma if present, defaulting to v4. Use
-/// [`lower_file_versioned`] when the caller already knows the
-/// version (corpus runner, etc.) and the source text lacks a
-/// pragma.
+/// This convenience entry has no out-of-band version, so it settles one
+/// itself at this boundary: the file's `@version:N` pragma, else v4. Every
+/// caller that knows the version (the pipeline's `LowerHir` step, the
+/// corpus runner) uses [`lower_file_versioned`] instead, and the lowerer
+/// never re-derives the version from pragmas.
 pub fn lower_file(file: &ast::SourceFile, source: SourceId) -> (HirFile, Vec<Diagnostic>) {
-    let mut lo = Lowerer::new(source);
+    let text = file.syntax().text().to_string();
+    let (pragmas, _) = leek_syntax::parse_pragmas(&text, source);
+    let mut lo = Lowerer::new(source, pragmas.effective_version(Version::LATEST));
     lo.flags = leek_span::FeatureFlags::from_env();
     lo.lower_file(file);
     (lo.out, lo.diagnostics)
 }
 
-/// Like [`lower_file`] but overrides the language version. Used
-/// by the corpus runner and other callers that know the target
-/// version out-of-band (without a source pragma).
+/// Like [`lower_file`] but at an explicit language version (a pipeline
+/// `version_byte`, 1..=4; out-of-range values mean v4). Any `@version`
+/// pragma in the text is ignored: the caller's version is authoritative.
 pub fn lower_file_versioned(
     file: &ast::SourceFile,
     source: SourceId,
@@ -65,9 +68,8 @@ pub fn lower_file_versioned_with_flags(
     version: u8,
     flags: leek_span::FeatureFlags,
 ) -> (HirFile, Vec<Diagnostic>) {
-    let mut lo = Lowerer::new(source);
+    let mut lo = Lowerer::new(source, Version::from_byte(version));
     lo.flags = flags;
-    lo.version_override = Some(version);
     lo.lower_file(file);
     (lo.out, lo.diagnostics)
 }
@@ -98,6 +100,10 @@ pub fn lower_file_with_prelude(
 
 /// As [`lower_file_with_prelude`] but with explicit experimental
 /// [`FeatureFlags`] (threaded by the pipeline instead of read from env).
+///
+/// The prelude is lowered as a leading unit of [`lower_files`] with no
+/// include graph: it contributes declarations but no main block, and the
+/// user file's `include(...)` statements are kept as `Stmt::Include`.
 pub fn lower_file_with_prelude_with_flags(
     file: &ast::SourceFile,
     source: SourceId,
@@ -106,67 +112,53 @@ pub fn lower_file_with_prelude_with_flags(
     prelude_source: SourceId,
     flags: leek_span::FeatureFlags,
 ) -> (HirFile, Vec<Diagnostic>) {
-    let mut lo = Lowerer::new(source);
-    lo.flags = flags;
-    lo.version_override = Some(version);
-    lo.version = version;
+    let version = Version::from_byte(version);
+    let prelude_unit = LowerUnit {
+        ast: prelude,
+        source: prelude_source,
+        path: Path::new(PRELUDE_UNIT_PATH),
+        version,
+    };
+    let entry = LowerUnit {
+        ast: file,
+        source,
+        path: Path::new(""),
+        version,
+    };
+    lower_files(entry, &[prelude_unit], None, flags)
+}
 
-    // Pass 1: pre-declare the prelude's items first, then the user
-    // file's, so user calls can resolve to prelude signatures.
-    for (f, src) in [(prelude, prelude_source), (file, source)] {
-        lo.source = src;
-        lo.source_text = f.syntax().text().to_string();
-        for child in f.syntax().children() {
-            if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
-                lo.predeclare_function(&fn_decl);
-            } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
-                lo.predeclare_class(&cls);
-            } else if child.kind() == SyntaxKind::EnumDecl {
-                lo.lower_enum_decl(&child);
-            }
-        }
-    }
+/// Synthetic path of the library/prelude header unit. No `include`
+/// statement resolves to it, so it never contributes a main block.
+pub const PRELUDE_UNIT_PATH: &str = "<prelude>";
 
-    // Pass 2: lower bodies. Prelude functions are bodiless, so this
-    // only registers the user file's function/class bodies.
-    for (f, src) in [(prelude, prelude_source), (file, source)] {
-        lo.source = src;
-        lo.source_text = f.syntax().text().to_string();
-        for child in f.syntax().children() {
-            if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
-                lo.lower_function_body(&fn_decl);
-            } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
-                lo.lower_class_body(&cls);
-            }
-        }
-    }
-
-    // The user file's main block (the prelude has none).
-    for child in file.syntax().children() {
-        if ast::FnDecl::cast(child.clone()).is_some()
-            || ast::ClassDecl::cast(child.clone()).is_some()
-        {
-            continue;
-        }
-        if let Some(stmt) = AstStmt::cast(child.clone()) {
-            let mut buf = Vec::new();
-            lo.lower_stmt_flat(&stmt, &mut buf);
-            lo.out.main.extend(buf);
-        }
-    }
-    (lo.out, lo.diagnostics)
+/// One file of a multi-file lowering: its AST, source id, canonical path,
+/// and the language version it was lexed/parsed at (its own explicit
+/// `@version` pragma, or the entry's settled version).
+#[derive(Debug, Clone, Copy)]
+pub struct LowerUnit<'a> {
+    pub ast: &'a ast::SourceFile,
+    pub source: SourceId,
+    pub path: &'a Path,
+    pub version: Version,
 }
 
 /// Lower a multi-file Leekscript project into a single [`HirFile`].
 ///
 /// Inputs:
 /// - `includes` — every file the entry transitively includes, in
-///   topological order (leaves first). Each carries its parsed AST,
-///   `SourceId`, and canonical path.
-/// - `entry` — the entry file's AST + source id + canonical path.
+///   topological order (leaves first), plus any signature-only
+///   library/prelude header units (put these first).
+/// - `entry` — the entry file.
 /// - `resolved_includes` — `(includer_canonical, include_name)` →
 ///   `included_canonical`, built by
-///   `leek_resolver::include_graph::build_include_graph`.
+///   `leek_resolver::include_graph::build_include_graph`. `None` when
+///   there is no include graph: `include(...)` statements are then kept
+///   as `Stmt::Include` instead of being spliced (or dropped).
+/// - `flags` — the pipeline's experimental feature flags.
+///
+/// Each unit is lowered at its **own** version (string-escape rules and
+/// other version-dependent lowering follow the file, not a v4 default).
 ///
 /// Semantics (per `doc/pipeline.md` §5.1.3):
 /// - Top-level declarations from every file are visible everywhere
@@ -180,23 +172,25 @@ pub fn lower_file_with_prelude_with_flags(
 /// (resolver, type-checker, MIR, codegen) sees — no consumer needs
 /// to know about includes.
 pub fn lower_files(
-    entry: (&ast::SourceFile, SourceId, &std::path::Path),
-    includes: &[(ast::SourceFile, SourceId, std::path::PathBuf)],
-    resolved_includes: &std::collections::BTreeMap<
-        (std::path::PathBuf, String),
-        std::path::PathBuf,
-    >,
+    entry: LowerUnit<'_>,
+    includes: &[LowerUnit<'_>],
+    resolved_includes: Option<&BTreeMap<(PathBuf, String), PathBuf>>,
+    flags: leek_span::FeatureFlags,
 ) -> (HirFile, Vec<Diagnostic>) {
-    let mut lo = Lowerer::new(entry.1);
-    lo.flags = leek_span::FeatureFlags::from_env();
+    let mut lo = Lowerer::new(entry.source, entry.version);
+    lo.flags = flags;
+    let units: Vec<LowerUnit<'_>> = includes
+        .iter()
+        .copied()
+        .chain(std::iter::once(entry))
+        .collect();
 
     // Pass 1: pre-declare top-level items across every file
     // (included files first, entry last) so cross-file references
     // resolve via `file_decls`.
-    for (file, src, _path) in includes {
-        lo.source = *src;
-        lo.source_text = file.syntax().text().to_string();
-        for child in file.syntax().children() {
+    for unit in &units {
+        lo.enter_unit(unit);
+        for child in unit.ast.syntax().children() {
             if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
                 lo.predeclare_function(&fn_decl);
             } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
@@ -206,23 +200,13 @@ pub fn lower_files(
             }
         }
     }
-    lo.source = entry.1;
-    lo.source_text = entry.0.syntax().text().to_string();
-    for child in entry.0.syntax().children() {
-        if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
-            lo.predeclare_function(&fn_decl);
-        } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
-            lo.predeclare_class(&cls);
-        } else if child.kind() == SyntaxKind::EnumDecl {
-            lo.lower_enum_decl(&child);
-        }
-    }
 
     // Pass 2: lower function/class bodies for every file in the
-    // same order.
-    for (file, src, _path) in includes {
-        lo.source = *src;
-        for child in file.syntax().children() {
+    // same order. Header functions are bodiless, so header units
+    // contribute nothing here.
+    for unit in &units {
+        lo.enter_unit(unit);
+        for child in unit.ast.syntax().children() {
             if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
                 lo.lower_function_body(&fn_decl);
             } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
@@ -230,73 +214,50 @@ pub fn lower_files(
             }
         }
     }
-    lo.source = entry.1;
-    for child in entry.0.syntax().children() {
-        if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
-            lo.lower_function_body(&fn_decl);
-        } else if let Some(cls) = ast::ClassDecl::cast(child.clone()) {
-            lo.lower_class_body(&cls);
-        }
-    }
 
-    // Pass 3: lower each file's main block separately into a
-    // path-keyed map. Statements that are themselves `Stmt::Include`
-    // get post-processed by `splice_includes` once the per-file maps
-    // are complete.
-    use std::collections::BTreeMap;
-    let mut per_file_main: BTreeMap<std::path::PathBuf, Vec<Stmt>> = BTreeMap::new();
-    for (file, src, path) in includes {
-        lo.source = *src;
-        let mut main_stmts = Vec::new();
-        for child in file.syntax().children() {
-            if ast::FnDecl::cast(child.clone()).is_some()
-                || ast::ClassDecl::cast(child.clone()).is_some()
-            {
-                continue;
-            }
-            if let Some(stmt) = AstStmt::cast(child.clone()) {
-                lo.lower_stmt_flat(&stmt, &mut main_stmts);
-            }
+    // Pass 3: lower the main block of every file some `include` resolves
+    // to into a path-keyed map (header units are never included, so they
+    // contribute no main block). `Stmt::Include` sites are spliced by
+    // `splice_includes` once the per-file maps are complete.
+    let mut per_file_main: BTreeMap<PathBuf, Vec<Stmt>> = BTreeMap::new();
+    if let Some(resolved) = resolved_includes {
+        let included: BTreeSet<&Path> = resolved.values().map(PathBuf::as_path).collect();
+        for unit in includes.iter().filter(|u| included.contains(u.path)) {
+            lo.enter_unit(unit);
+            let mut main_stmts = Vec::new();
+            lo.lower_main_block(unit.ast, &mut main_stmts);
+            per_file_main.insert(unit.path.to_path_buf(), main_stmts);
         }
-        per_file_main.insert(path.clone(), main_stmts);
     }
-    lo.source = entry.1;
+    lo.enter_unit(&entry);
     let mut entry_main = Vec::new();
-    for child in entry.0.syntax().children() {
-        if ast::FnDecl::cast(child.clone()).is_some()
-            || ast::ClassDecl::cast(child.clone()).is_some()
-        {
-            continue;
-        }
-        if let Some(stmt) = AstStmt::cast(child.clone()) {
-            lo.lower_stmt_flat(&stmt, &mut entry_main);
-        }
-    }
+    lo.lower_main_block(entry.ast, &mut entry_main);
 
     // Splice. Walk the entry's main; each `Stmt::Include("name")`
     // becomes the included file's already-lowered main statements
     // (which themselves may have been spliced). Cycle detection
     // happens at the include-graph layer; here we just dedupe by
     // path so a diamond import doesn't double the body.
-    let mut already_spliced: std::collections::BTreeSet<std::path::PathBuf> =
-        std::collections::BTreeSet::new();
-    lo.out.main = splice_includes(
-        entry_main,
-        entry.2,
-        &per_file_main,
-        resolved_includes,
-        &mut already_spliced,
-    );
+    lo.out.main = match resolved_includes {
+        Some(resolved) => splice_includes(
+            entry_main,
+            entry.path,
+            &per_file_main,
+            resolved,
+            &mut BTreeSet::new(),
+        ),
+        None => entry_main,
+    };
 
     (lo.out, lo.diagnostics)
 }
 
 fn splice_includes(
     stmts: Vec<Stmt>,
-    current_path: &std::path::Path,
-    per_file_main: &std::collections::BTreeMap<std::path::PathBuf, Vec<Stmt>>,
-    resolved: &std::collections::BTreeMap<(std::path::PathBuf, String), std::path::PathBuf>,
-    already: &mut std::collections::BTreeSet<std::path::PathBuf>,
+    current_path: &Path,
+    per_file_main: &BTreeMap<PathBuf, Vec<Stmt>>,
+    resolved: &BTreeMap<(PathBuf, String), PathBuf>,
+    already: &mut BTreeSet<PathBuf>,
 ) -> Vec<Stmt> {
     let mut out = Vec::with_capacity(stmts.len());
     for stmt in stmts {
@@ -341,16 +302,12 @@ pub(crate) struct Lowerer {
     /// with the flags threaded through its `Input` so the lowering query stays
     /// pure (no env reads).
     pub(crate) flags: leek_span::FeatureFlags,
-    /// Source language version, detected from the file's
-    /// `@version:N` pragma in [`Lowerer::lower_file`]. Used for the
-    /// handful of version-specific lowering decisions (v1 doesn't
-    /// process the `\"` escape inside `"…"` strings, etc.).
-    pub(crate) version: u8,
-    /// External override for [`Self::version`]. When `Some(v)`,
-    /// the pragma-detection step in `lower_file` is skipped and
-    /// `v` is used directly. Set by
-    /// [`lower_file_versioned`](super::lower_file_versioned).
-    pub(crate) version_override: Option<u8>,
+    /// Language version of the file currently being lowered, supplied
+    /// by the caller (the settled `Input::version_byte`, or a
+    /// [`LowerUnit`]'s own version). Never re-derived from pragmas here.
+    /// Used for the handful of version-specific lowering decisions (v1
+    /// doesn't process the `\"` escape inside `"…"` strings, etc.).
+    pub(crate) version: Version,
     /// Stack of lexical scopes mapping names to their `DefId`. The
     /// innermost scope is at the back.
     pub(crate) scopes: Vec<Scope>,
@@ -398,13 +355,10 @@ pub(crate) enum NameKind {
 }
 
 impl Lowerer {
-    fn new(source: SourceId) -> Self {
+    fn new(source: SourceId, version: Version) -> Self {
         Self {
             source,
-            // Default to v4 (the latest); `lower_file` overrides
-            // from the file's `@version:N` pragma if present.
-            version: 4,
-            version_override: None,
+            version,
             out: HirFile::default(),
             diagnostics: Vec::new(),
             source_text: String::new(),
@@ -423,20 +377,6 @@ impl Lowerer {
         // Capture the source text up front so pre-declaration can read
         // doc comments (and their backend directives).
         self.source_text = file.syntax().text().to_string();
-        // Pin the version. Explicit override wins; otherwise sniff
-        // the file's `@version:N` pragma. Falls back to v4 so
-        // pragma-less files keep modern semantics.
-        if let Some(v) = self.version_override {
-            self.version = v;
-        } else {
-            let (pragmas, _) = leek_syntax::parse_pragmas(&self.source_text, self.source);
-            self.version = match pragmas.version {
-                leek_syntax::Version::V1 => 1,
-                leek_syntax::Version::V2 => 2,
-                leek_syntax::Version::V3 => 3,
-                leek_syntax::Version::V4 => 4,
-            };
-        }
         // First pass — register every top-level item so bodies can
         // reference each other in any order.
         for child in file.syntax().children() {
@@ -459,6 +399,29 @@ impl Lowerer {
                 let mut buf = Vec::new();
                 self.lower_stmt_flat(&stmt, &mut buf);
                 self.out.main.extend(buf);
+            }
+        }
+    }
+
+    /// Switch the per-file state (source id, version, doc-comment text)
+    /// to `unit` before lowering any of its items.
+    fn enter_unit(&mut self, unit: &LowerUnit<'_>) {
+        self.source = unit.source;
+        self.version = unit.version;
+        self.source_text = unit.ast.syntax().text().to_string();
+    }
+
+    /// Lower `file`'s top-level main-block statements (everything but
+    /// function and class declarations) into `out`.
+    fn lower_main_block(&mut self, file: &ast::SourceFile, out: &mut Vec<Stmt>) {
+        for child in file.syntax().children() {
+            if ast::FnDecl::cast(child.clone()).is_some()
+                || ast::ClassDecl::cast(child.clone()).is_some()
+            {
+                continue;
+            }
+            if let Some(stmt) = AstStmt::cast(child) {
+                self.lower_stmt_flat(&stmt, out);
             }
         }
     }

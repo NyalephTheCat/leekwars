@@ -37,6 +37,24 @@ pub struct Pragmas {
     pub experimental: Vec<String>,
 }
 
+impl Pragmas {
+    /// The version an explicit `// @version:N` pragma selects, else
+    /// `fallback` (the out-of-band version: manifest default, corpus case,
+    /// or an included file's entry version).
+    ///
+    /// Use this only at an input boundary (drivers, the include walker).
+    /// Passes downstream of the pipeline `Input` read `Input::version_byte`,
+    /// which was already settled with this rule.
+    #[must_use]
+    pub fn effective_version(&self, fallback: Version) -> Version {
+        if self.version_explicit {
+            self.version
+        } else {
+            fallback
+        }
+    }
+}
+
 /// Parse pragmas from `text`. Returns the resolved settings and any
 /// diagnostics produced. The text itself is not modified — pragmas stay
 /// in the byte stream as line comments so spans remain stable.
@@ -46,10 +64,11 @@ pub fn parse_pragmas(text: &str, source: SourceId) -> (Pragmas, Vec<Diagnostic>)
     let mut version_set = false;
     let mut strict_set = false;
 
-    for (line_offset, line) in line_offsets(text) {
-        let Some((name, value, name_span)) = extract_directive(line, source, line_offset) else {
-            continue;
-        };
+    // The directive scanner is shared with `leek_span::pragma::language_pragmas`
+    // (used by project loading and drivers), so both agree on what a pragma is.
+    for directive in leek_span::pragma::directives(text) {
+        let name_span = Span::new(source, directive.name_start, directive.name_end);
+        let (name, value) = (directive.name, directive.value);
 
         match name {
             "version" => {
@@ -130,99 +149,6 @@ pub fn parse_pragmas(text: &str, source: SourceId) -> (Pragmas, Vec<Diagnostic>)
     }
 
     (out, diags)
-}
-
-/// Iterator over `(byte_offset, line_without_terminator)` pairs.
-fn line_offsets(text: &str) -> impl Iterator<Item = (u32, &str)> {
-    let mut pos = 0u32;
-    text.split_inclusive('\n').map(move |chunk| {
-        let start = pos;
-        pos += leek_span::offset(chunk.len());
-        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        (start, line)
-    })
-}
-
-/// Try to extract a `// @name` or `// @name:value` directive from a
-/// single line. Returns `(name, value, name_span)` where `name_span`
-/// covers the `@name` portion for diagnostic placement.
-///
-/// Accepts arbitrary leading whitespace; rejects anything else after
-/// the directive (so e.g. `// @foo trailing` is not a directive).
-fn extract_directive(
-    line: &str,
-    source: SourceId,
-    line_offset: u32,
-) -> Option<(&str, Option<&str>, Span)> {
-    let mut cursor = 0;
-    let bytes = line.as_bytes();
-
-    // Skip leading ASCII whitespace.
-    while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-        cursor += 1;
-    }
-    // Must start with `//`.
-    if !line[cursor..].starts_with("//") {
-        return None;
-    }
-    cursor += 2;
-    // Skip whitespace after the slashes.
-    while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-        cursor += 1;
-    }
-    // Must be an `@`.
-    if cursor >= bytes.len() || bytes[cursor] != b'@' {
-        return None;
-    }
-    let name_start = cursor;
-    cursor += 1;
-
-    // Identifier: [A-Za-z_][A-Za-z0-9_]*
-    let id_start = cursor;
-    if !bytes
-        .get(cursor)
-        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
-    {
-        return None;
-    }
-    while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_') {
-        cursor += 1;
-    }
-    let name = &line[id_start..cursor];
-    let name_end = cursor;
-
-    // Optional `:value`.
-    let mut value: Option<&str> = None;
-    // Skip whitespace before optional colon.
-    while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-        cursor += 1;
-    }
-    if cursor < bytes.len() && bytes[cursor] == b':' {
-        cursor += 1;
-        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
-            cursor += 1;
-        }
-        let val_start = cursor;
-        while cursor < bytes.len() && !matches!(bytes[cursor], b' ' | b'\t') {
-            cursor += 1;
-        }
-        value = Some(&line[val_start..cursor]);
-    }
-    // Reject trailing junk (any non-whitespace beyond what we accepted).
-    while cursor < bytes.len() {
-        if !matches!(bytes[cursor], b' ' | b'\t') {
-            return None;
-        }
-        cursor += 1;
-    }
-
-    let span = Span::new(
-        source,
-        line_offset + leek_span::offset(name_start),
-        line_offset + leek_span::offset(name_end),
-    );
-    Some((name, value, span))
 }
 
 #[cfg(test)]
@@ -308,6 +234,36 @@ mod tests {
         // a normal comment.
         let (p, _) = parse("// @version:2 oops\n");
         assert_eq!(p.version, Version::LATEST);
+    }
+
+    #[test]
+    fn effective_version_prefers_explicit_pragma() {
+        let (p, _) = parse("// @version:2\n");
+        assert_eq!(p.effective_version(Version::V4), Version::V2);
+        let (p, _) = parse("return 1;\n");
+        assert_eq!(p.effective_version(Version::V1), Version::V1);
+        // An invalid value is not explicit: the fallback applies.
+        let (p, _) = parse("// @version:9\n");
+        assert_eq!(p.effective_version(Version::V3), Version::V3);
+    }
+
+    #[test]
+    fn agrees_with_shared_language_scan() {
+        for text in [
+            "// @version:1\n// @strict\n",
+            "//@version:2",
+            " // @version:3\n",
+            "// @version:0\n// @version:2\n",
+            "// @strict:true\n",
+            "/* @version:3 */ return 1;",
+            "var x = 1;\n// @version:3\n",
+        ] {
+            let (p, _) = parse(text);
+            let scan = leek_span::pragma::language_pragmas(text);
+            let explicit = p.version_explicit.then(|| u8::from(p.version));
+            assert_eq!(explicit, scan.version, "{text:?}");
+            assert_eq!(p.strict, scan.strict, "{text:?}");
+        }
     }
 
     #[test]
