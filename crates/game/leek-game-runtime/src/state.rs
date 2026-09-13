@@ -122,6 +122,18 @@ pub const FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED: i32 = 1009;
 pub const FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION: i32 = 1010;
 /// `Error.HELP_PAGE_LINK.ordinal()`.
 pub const ERROR_HELP_PAGE_LINK: i32 = 113;
+/// `AILog.SERROR` — system-log level a `LeekLog.ERROR` log is upgraded to by
+/// `EntityAI.addSystemLog`.
+pub const LOG_SERROR: i32 = 8;
+/// `Error.AI_INTERRUPTED.ordinal()` — the catch-all key `EntityAI.runTurn`
+/// logs for an AI fault that isn't a `LeekRunException`.
+pub const ERROR_AI_INTERRUPTED: i32 = 64;
+/// `Error.STACKOVERFLOW.ordinal()`.
+pub const ERROR_STACKOVERFLOW: i32 = 76;
+/// `Error.ARRAY_OUT_OF_BOUND.ordinal()`.
+pub const ERROR_ARRAY_OUT_OF_BOUND: i32 = 96;
+/// `Error.TOO_MUCH_OPERATIONS.ordinal()`.
+pub const ERROR_TOO_MUCH_OPERATIONS: i32 = 101;
 
 /// `EntityAI.HookPhase` — which lifecycle hook (if any) the running AI is
 /// inside. Combat/movement actions are gated while a hook is active, and
@@ -2019,10 +2031,24 @@ impl State {
     /// budget (500k / `TOO_MUCH_DEBUG`) is out of scope — corpus logs are
     /// tiny.
     pub fn add_system_log(&mut self, fid: usize, log_type: i32, key: i32, params: Option<&[&str]>) {
+        self.add_system_log_json(fid, log_type, key, params.map(|p| json!(p)));
+    }
+
+    /// [`add_system_log`](Self::add_system_log) with the params already as a
+    /// JSON array, for entries whose Java `String[]` holds `null`s — e.g.
+    /// `handleLeekRunException`'s `new String[] { e.getMessage() }` for an
+    /// exception built without a message renders `[null]`.
+    pub fn add_system_log_json(
+        &mut self,
+        fid: usize,
+        log_type: i32,
+        key: i32,
+        params: Option<Value>,
+    ) {
         let action_key = self.actions.get_next_id().saturating_sub(1);
         let mut entry = vec![json!(fid), json!(log_type), json!(""), json!(key)];
         if let Some(params) = params {
-            entry.push(json!(params));
+            entry.push(params);
         }
         let farmer = self.fighters[fid].farmer;
         self.farmer_logs

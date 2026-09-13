@@ -47,9 +47,17 @@ fn run() -> anyhow::Result<()> {
         ais.insert(*id, hir);
     }
     let fight = leek_generator::shared(world.fight);
-    let outcome =
-        leek_generator::run_fight_release(&fight, &ais, world.max_turns, world.version, world.strict)
-            .map_err(|e| anyhow::anyhow!("fight error: {e}"))?;
+    let outcome = leek_generator::run_fight_release(
+        &fight,
+        &ais,
+        world.max_turns,
+        world.version,
+        world.strict,
+        world.max_ops_per_turn,
+    );
+    for e in &outcome.errors {
+        eprintln!("AI error: {e}");
+    }
     match outcome.winner_team {
         Some(t) => println!("winner: team {t} ({} turns)", outcome.turns),
         None => println!("draw ({} turns)", outcome.turns),

@@ -60,35 +60,40 @@ pub(crate) fn run_fight_debug(config: &LaunchConfig, program: &Compiled) -> RunO
     ais.insert(debug_entity, program.hir.clone());
 
     let fight = leek_generator::shared(lf.fight);
+    // Every AI turn runs under the scenario's per-turn op budget — the debugged
+    // one too (ops aren't charged while paused), so a runaway loop in it ends
+    // its turn instead of hanging the session.
     let debug_opts = NativeOptions::debug()
         .with_lang(program.version, program.strict)
         .with_link_game(true)
-        .with_debug_hooks(true);
-    let other_opts = NativeOptions::release()
-        .with_lang(lf.version, lf.strict)
-        .with_link_game(true);
+        .with_debug_hooks(true)
+        .with_op_limit(leek_generator::fight_op_limit(lf.max_ops_per_turn));
+    let other_opts = leek_generator::fight_options(lf.version, lf.strict, lf.max_ops_per_turn);
 
-    match leek_generator::run_fight_debug(
+    let outcome = leek_generator::run_fight_debug(
         &fight,
         &ais,
         lf.max_turns,
         debug_entity,
         &debug_opts,
         &other_opts,
-    ) {
-        Ok(outcome) => {
-            let winner = outcome
-                .winner_team
-                .map_or_else(|| "draw".to_string(), |t| format!("team {t}"));
-            RunOutcome {
-                output: format!(
-                    "fight over after {} turns — winner: {winner}\n",
-                    outcome.turns
-                ),
-                exit_code: 0,
-            }
-        }
-        Err(e) => RunOutcome::failed(format!("fight execution error: {e}")),
+    );
+    let winner = outcome
+        .winner_team
+        .map_or_else(|| "draw".to_string(), |t| format!("team {t}"));
+    let mut lines: Vec<String> = outcome
+        .errors
+        .iter()
+        .map(|e| format!("AI error: {e}\n"))
+        .collect();
+    lines.push(format!(
+        "fight over after {} turns — winner: {winner}\n",
+        outcome.turns
+    ));
+    let output = lines.concat();
+    RunOutcome {
+        output,
+        exit_code: 0,
     }
 }
 

@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 
 use leek_game_runtime::{EffectKind, GameHost}; // `life`/… accessors on `Fight`
-use leek_generator::{ActiveEffect, Entity, Fight, FightRef, run_ai, run_fight, shared};
+use leek_generator::{
+    ActiveEffect, AiError, DEFAULT_MAX_OPS_PER_TURN, Entity, Fight, FightRef, NativeError,
+    fight_options, run_ai, run_ai_with, run_fight, shared,
+};
 use leek_hir::{HirFile, lower_file_versioned};
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::SourceId;
@@ -200,7 +203,14 @@ fn poison_over_time() {
         .push(ActiveEffect::injected(EffectKind::Poison, 10, 3));
     let f = arena(Entity::new(1, "Bot", 0, 0), foe);
     // Neither has an AI; the turn loop still ticks poison on the foe's turn.
-    let outcome = run_fight(&f, &std::collections::HashMap::new(), 10, 4, false).expect("runs");
+    let outcome = run_fight(
+        &f,
+        &std::collections::HashMap::new(),
+        10,
+        4,
+        false,
+        DEFAULT_MAX_OPS_PER_TURN,
+    );
     assert!(
         f.borrow().life(2).unwrap() <= 0,
         "poison should kill the foe"
@@ -682,7 +692,7 @@ fn team_and_turn_queries() {
     // getTurn reflects the turn loop: a passive AI logs the turn each round.
     let mut ais: HashMap<i64, HirFile> = HashMap::new();
     ais.insert(1, compile("say(\"\" + getTurn())"));
-    run_fight(&f, &ais, 3, 4, false).expect("runs");
+    run_fight(&f, &ais, 3, 4, false, DEFAULT_MAX_OPS_PER_TURN);
     assert_eq!(
         f.borrow().log().first().map(|(_, m)| m.clone()),
         Some("1".to_string())
@@ -702,7 +712,87 @@ fn turn_loop_to_victory() {
     );
     let mut ais: HashMap<i64, HirFile> = HashMap::new();
     ais.insert(1, compile("while (getTP() >= 3) { useWeapon(2) }"));
-    let outcome = run_fight(&f, &ais, 10, 4, false).expect("fight runs");
+    let outcome = run_fight(&f, &ais, 10, 4, false, DEFAULT_MAX_OPS_PER_TURN);
     assert_eq!(outcome.winner_team, Some(0));
     assert!(f.borrow().life(2).unwrap() <= 0, "foe should be dead");
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+}
+
+/// Regression (#38): fights ran with an unlimited op budget, so one
+/// `while (true) {}` hung the whole fight (and every matrix/tournament driving
+/// it). The per-turn budget now ends that entity's turn — keeping what it did
+/// before the loop — and the other entity still plays every turn.
+#[test]
+fn looping_ai_loses_its_turn_not_the_fight() {
+    let f = arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
+    let mut ais: HashMap<i64, HirFile> = HashMap::new();
+    ais.insert(1, compile("say(\"bot\" + getTurn()) while (true) {}"));
+    ais.insert(2, compile("say(\"foe\" + getTurn())"));
+
+    let outcome = run_fight(&f, &ais, 3, 4, false, 100_000);
+
+    assert_eq!(outcome.turns, 3);
+    let errors: Vec<(u32, i64, &str)> = outcome
+        .errors
+        .iter()
+        .map(|e| (e.turn, e.entity, e.error.as_str()))
+        .collect();
+    assert_eq!(
+        errors,
+        [1, 2, 3].map(|t| (t, 1, "TOO_MUCH_OPERATIONS")).to_vec()
+    );
+    let log: Vec<String> = f.borrow().log().iter().map(|(_, m)| m.clone()).collect();
+    assert_eq!(log, ["bot1", "foe1", "bot2", "foe2", "bot3", "foe3"]);
+}
+
+/// Regression (#67): an AI runtime error propagated out of the turn loop and
+/// aborted the fight. It is now recorded against the entity for that turn and
+/// the entity plays its later turns normally.
+#[test]
+fn runtime_error_mid_fight_is_recorded_and_the_fight_continues() {
+    let f = arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
+    let mut ais: HashMap<i64, HirFile> = HashMap::new();
+    ais.insert(
+        1,
+        compile(
+            "function dive(x) { return dive(x) }\n\
+             if (getTurn() == 2) { dive(1) }\n\
+             say(\"bot\" + getTurn())",
+        ),
+    );
+
+    let outcome = run_fight(&f, &ais, 3, 4, false, DEFAULT_MAX_OPS_PER_TURN);
+
+    assert_eq!(outcome.turns, 3);
+    assert_eq!(
+        outcome.errors,
+        vec![AiError {
+            turn: 2,
+            entity: 1,
+            error: "STACKOVERFLOW".into(),
+        }]
+    );
+    let log: Vec<String> = f.borrow().log().iter().map(|(_, m)| m.clone()).collect();
+    assert_eq!(log, ["bot1", "bot3"]);
+}
+
+/// Boundary (#38): Java's `AI.ops` throws `TOO_MUCH_OPERATIONS` once the count
+/// *reaches* the budget, so a turn whose charges land exactly on
+/// `max_ops_per_turn` errors; one more op of budget lets it finish.
+#[test]
+fn turn_budget_trips_when_ops_reach_it_like_java() {
+    let hir = compile("var s = 0\nfor (var i = 0; i < 10; i++) { s += i }\nsay(\"\" + s)");
+    let fight = || arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
+
+    run_ai_with(&fight(), &hir, &fight_options(4, false, u64::MAX)).expect("unbounded run");
+    let used = leek_backend_native::ops_used();
+    assert!(used > 0, "the AI charges ops");
+
+    let at_budget = run_ai_with(&fight(), &hir, &fight_options(4, false, used));
+    assert!(
+        matches!(&at_budget, Err(NativeError::Runtime(code)) if code == "TOO_MUCH_OPERATIONS"),
+        "ops == budget must error, got {at_budget:?}"
+    );
+    run_ai_with(&fight(), &hir, &fight_options(4, false, used + 1))
+        .expect("one op of headroom completes");
 }

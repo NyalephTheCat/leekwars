@@ -114,7 +114,7 @@ fn lifecycle_hooks_run_through_the_jit() {
     let opts = NativeOptions::release()
         .with_lang(4, false)
         .with_link_game(true);
-    let outcome = run_official_fight(state, &ais, &[100], &opts).expect("fight runs");
+    let outcome = run_official_fight(state, &ais, &[100], &opts);
 
     // beforeFight's setLoadout took effect before the snapshot: team-0 leek
     // shows the loadout's 1000 max life.
@@ -162,7 +162,7 @@ fn set_loadout_unknown_name_warns_through_hook() {
     let opts = NativeOptions::release()
         .with_lang(4, false)
         .with_link_game(true);
-    let outcome = run_official_fight(state, &ais, &[100], &opts).expect("fight runs");
+    let outcome = run_official_fight(state, &ais, &[100], &opts);
 
     assert!(logged(&outcome, 100, 1006), "LOADOUT_NOT_FOUND warning");
     // Unchanged life: still the base 500.
@@ -172,4 +172,72 @@ fn set_loadout_unknown_name_warns_through_hook() {
         .find(|l| l["id"] == serde_json::json!(0))
         .expect("snapshot for fid 0");
     assert_eq!(a_snap["life"], serde_json::json!(500));
+}
+
+/// Regression (#38, #67): an AI that never stops, in a hook and on every turn,
+/// used to hang the official runner (no op budget), and any other AI error
+/// aborted it with `?`. Now each run hits the per-turn budget, and the error is
+/// logged the way `EntityAI.handleLeekRunException` logs it: an
+/// `ActionAIError` (`[1002, fid]`), a `TOO_MUCH_OPERATIONS` (101) system error
+/// and the `too_much_ops` help link (113). The fight then plays out.
+#[test]
+fn looping_ai_is_logged_per_turn_and_the_fight_goes_on() {
+    let mut state = State::new(1);
+    state.add_entity(0, leek(1, "A", 100));
+    state.add_entity(1, leek(2, "B", 200));
+    state.weapon_specs.insert(37, pistol());
+
+    let mut ais: HashMap<usize, Arc<HirFile>> = HashMap::new();
+    ais.insert(
+        0,
+        compile("function beforeFight() { while (true) {} }\nwhile (true) {}"),
+    );
+    ais.insert(1, compile("return 0;"));
+
+    let opts = leek_generator::fight_options(4, false, 50_000);
+    let outcome = run_official_fight(state, &ais, &[100], &opts);
+
+    assert!(logged(&outcome, 100, 101), "TOO_MUCH_OPERATIONS logged");
+    assert!(logged(&outcome, 100, 113), "too_much_ops help link logged");
+    let actions = serde_json::to_string(&outcome).expect("outcome serializes");
+    let ai_errors = actions.matches("[1002,0]").count();
+    // The hook plus every turn fid 0 played (the idle stalemate runs them all).
+    assert!(
+        ai_errors > 2,
+        "one ActionAIError per errored run, got {ai_errors}"
+    );
+    assert!(!actions.contains("[1002,1]"), "fid 1 never errored");
+}
+
+/// Regression: an AI the native backend can't compile errors before the op
+/// counter is armed, so the counter still holds the previous run's count (here
+/// fid 0's). That stale count must not be charged to the failing entity: it
+/// reports no ops, while its error is still logged every turn.
+#[test]
+fn uncompilable_ai_is_not_charged_a_stale_op_count() {
+    let mut state = State::new(1);
+    state.add_entity(0, leek(1, "A", 100));
+    state.add_entity(1, leek(2, "B", 200));
+    state.weapon_specs.insert(37, pistol());
+
+    let mut ais: HashMap<usize, Arc<HirFile>> = HashMap::new();
+    ais.insert(
+        0,
+        compile("var s = 0; for (var i = 0; i < 100; i++) { s += i; } return s;"),
+    );
+    // A `break` outside any loop fails MIR lowering: a compile error raised
+    // before the op counter is armed.
+    ais.insert(1, compile("break;"));
+
+    let opts = leek_generator::fight_options(4, false, 1_000_000);
+    let outcome = run_official_fight(state, &ais, &[100, 200], &opts);
+
+    let actions = serde_json::to_string(&outcome).expect("outcome serializes");
+    assert!(actions.contains("[1002,1]"), "fid 1's compile error logged");
+    let ops = &outcome["fight"]["ops"];
+    assert!(ops["0"].as_i64().is_some_and(|n| n > 0), "fid 0 ran: {ops}");
+    assert!(
+        ops.get("1").is_none_or(|n| n == &serde_json::json!(0)),
+        "fid 1 never ran, so no ops: {ops}"
+    );
 }

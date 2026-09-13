@@ -26,9 +26,14 @@ pub use leek_game_runtime::state::{
 };
 
 use leek_backend_native::{NativeError, NativeOptions, ops_used};
+use leek_game_runtime::actions::Action;
 use leek_game_runtime::official_builtins::call_official_builtin;
 use leek_game_runtime::outcome::build_outcome;
-use leek_game_runtime::state::{BeginTurn, HookPhase, MAX_TURNS};
+use leek_game_runtime::state::{
+    BeginTurn, ERROR_AI_INTERRUPTED, ERROR_ARRAY_OUT_OF_BOUND, ERROR_HELP_PAGE_LINK,
+    ERROR_STACKOVERFLOW, ERROR_TOO_MUCH_OPERATIONS, HookPhase, LOG_SERROR, LOG_SSTANDARD,
+    MAX_TURNS,
+};
 use leek_hir::{Def, DefId, HirFile};
 use leek_runtime::{Function, Value};
 
@@ -46,22 +51,55 @@ impl leek_backend_native::GameRuntime for OfficialRuntime {
     }
 }
 
+/// `EntityAI.HOOK_OPS_BONUS`: a `beforeFight()` / `afterFight()` hook runs
+/// with this many operations on top of the per-turn budget.
+const HOOK_OPS_BONUS: u64 = 1_000_000;
+
 /// Run one entity's AI for its turn: install the runtime, execute the
 /// compiled HIR, harvest the op count. Mirrors `Fight.startTurn`'s
-/// `entity.getAi().runTurn()`.
+/// `entity.getAi().runTurn()`, including its catch blocks: an error ends the
+/// turn and is logged against the entity (see [`log_ai_error`]) instead of
+/// escaping. See [`harvest_run`] for which ops count.
 fn run_entity_ai(
     state: &Rc<RefCell<State>>,
     fid: usize,
     hir: &HirFile,
     opts: &NativeOptions,
-) -> Result<u64, NativeError> {
+) -> u64 {
     leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
         state: Rc::clone(state),
         current: fid,
     })));
     let result = leek_backend_native::run(hir, opts);
     leek_backend_native::set_game_runtime(None);
-    result.map(|_| ops_used())
+    harvest_run(state, fid, fid, &result)
+}
+
+/// Finish an AI run: log its error, if any (see [`log_ai_error`]), and return
+/// the ops it used.
+///
+/// Only a run that actually executed has ops to report. A runtime error
+/// (fault, exhausted budget) ends a program that ran, so the ops it used up to
+/// the error count. A compile or unsupported error happens before the backend
+/// arms its op counter, which then still holds a previous run's count (often
+/// another entity's), so that run reports 0.
+fn harvest_run(
+    state: &Rc<RefCell<State>>,
+    acting: usize,
+    log_fid: usize,
+    result: &Result<Value, NativeError>,
+) -> u64 {
+    match result {
+        Ok(_) => ops_used(),
+        Err(e) => {
+            log_ai_error(&mut state.borrow_mut(), acting, log_fid, e);
+            if matches!(e, NativeError::Runtime(_)) {
+                ops_used()
+            } else {
+                0
+            }
+        }
+    }
 }
 
 /// Run a bulb's turn: invoke the AI function stored at `summon()` time inside
@@ -69,20 +107,64 @@ fn run_entity_ai(
 /// Mirrors `BulbAI.runIA` (`mOwnerAI.mEntity = mEntity` + `mAIFunction.run`);
 /// the owner's `runTurn` resets its entity back at its next turn, which our
 /// per-run `current` models for free.
+///
+/// An error is contained like [`run_entity_ai`]'s. `BulbAI` shares its
+/// owner's `LeekLog`, so the log entry carries the owner's fid while the
+/// `ActionAIError` names the bulb.
 fn run_bulb_ai(
     state: &Rc<RefCell<State>>,
     fid: usize,
+    owner: usize,
     ai_fn: &Value,
     hir: &HirFile,
     opts: &NativeOptions,
-) -> Result<u64, NativeError> {
+) -> u64 {
     leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
         state: Rc::clone(state),
         current: fid,
     })));
     let result = leek_backend_native::run_call(hir, opts, ai_fn, Vec::new());
     leek_backend_native::set_game_runtime(None);
-    result.map(|_| ops_used())
+    harvest_run(state, fid, owner, &result)
+}
+
+/// Record a contained AI error the way `EntityAI.runTurn` /
+/// `handleLeekRunException` do: an `ActionAIError` for `acting` (the entity
+/// whose AI was running), then a `SERROR` system log on `log_fid`'s farmer
+/// log, plus the `too_much_ops` help link after an exhausted budget.
+///
+/// Log keys and params follow the Java throw sites: `TOO_MUCH_OPERATIONS` and
+/// `ARRAY_OUT_OF_BOUND` are `LeekRunException`s, logged under their own
+/// ordinal with `[e.getMessage()]` (`[null]`; the Java out-of-bounds message
+/// parameters aren't reproduced), `STACKOVERFLOW` is a JVM
+/// `StackOverflowError` logged with no params, and anything else — including
+/// code the native backend can't compile — is `AI_INTERRUPTED` with the
+/// message as its one param.
+fn log_ai_error(state: &mut State, acting: usize, log_fid: usize, err: &NativeError) {
+    let entity_id = i64::try_from(acting).expect("fid fits in i64");
+    state.actions.log(Action::AiError { entity_id });
+    let null_message = || Some(serde_json::json!([null]));
+    let (key, params) = match err {
+        NativeError::Runtime(code) => match code.as_str() {
+            "TOO_MUCH_OPERATIONS" => (ERROR_TOO_MUCH_OPERATIONS, null_message()),
+            "ARRAY_OUT_OF_BOUND" => (ERROR_ARRAY_OUT_OF_BOUND, null_message()),
+            "STACKOVERFLOW" => (ERROR_STACKOVERFLOW, Some(serde_json::json!([]))),
+            other => (ERROR_AI_INTERRUPTED, Some(serde_json::json!([other]))),
+        },
+        other => (
+            ERROR_AI_INTERRUPTED,
+            Some(serde_json::json!([other.to_string()])),
+        ),
+    };
+    state.add_system_log_json(log_fid, LOG_SERROR, key, params);
+    if key == ERROR_TOO_MUCH_OPERATIONS {
+        state.add_system_log(
+            log_fid,
+            LOG_SSTANDARD,
+            ERROR_HELP_PAGE_LINK,
+            Some(&["too_much_ops"]),
+        );
+    }
 }
 
 /// A `Function::User` value for the top-level zero-arg function named `name`
@@ -104,15 +186,23 @@ fn find_hook(hir: &HirFile, name: &str) -> Option<Value> {
 /// [`HookPhase`] set (so `setLoadout` is allowed and combat actions are gated)
 /// and the AI's `current` entity installed. Hook operations are NOT charged to
 /// the entity (`runHook` doesn't feed `statistics`), matching the reference.
+/// A hook gets the turn budget plus `HOOK_OPS_BONUS` (`EntityAI.runHook`): since
+/// `opts.op_limit` already carries the reach-the-budget adjustment of
+/// [`crate::fight_op_limit`], adding the bonus to it gives the hook the same
+/// boundary as Java. An error in a hook is logged like a turn error without
+/// stopping the other hooks or the fight.
 fn run_hooks(
     state: &Rc<RefCell<State>>,
     ais: &HashMap<usize, std::sync::Arc<HirFile>>,
     opts: &NativeOptions,
     phase: HookPhase,
     hook_name: &str,
-) -> Result<(), NativeError> {
+) {
     let fids = state.borrow().order.fids().to_vec();
-    let hook_opts = opts.clone().with_hook_roots(vec![hook_name.to_string()]);
+    let hook_opts = opts
+        .clone()
+        .with_hook_roots(vec![hook_name.to_string()])
+        .with_op_limit(opts.op_limit.saturating_add(HOOK_OPS_BONUS));
     for fid in fids {
         let Some(hir) = ais.get(&fid) else { continue };
         let Some(hook_fn) = find_hook(hir, hook_name) else {
@@ -125,10 +215,12 @@ fn run_hooks(
         })));
         let result = leek_backend_native::run_call(hir, &hook_opts, &hook_fn, Vec::new());
         leek_backend_native::set_game_runtime(None);
-        state.borrow_mut().hook_phase = HookPhase::None;
-        result?;
+        let mut s = state.borrow_mut();
+        s.hook_phase = HookPhase::None;
+        if let Err(e) = result {
+            log_ai_error(&mut s, fid, fid, &e);
+        }
     }
-    Ok(())
 }
 
 /// `Fight.startFight(true)` + Outcome assembly: run the official turn loop
@@ -138,18 +230,17 @@ fn run_hooks(
 /// per-farmer `logs` object, like the Java harness. Returns the official
 /// Outcome JSON document.
 ///
-/// `opts` is expected to carry `with_link_game(true)` and the language
-/// version; conformance runs want the release profile.
-///
-/// # Errors
-/// Propagates the first [`NativeError`] from launching an AI — conformance
-/// fights are expected not to error, so we fail fast rather than play on.
+/// `opts` is expected to carry `with_link_game(true)`, the language version,
+/// and the per-turn op budget as its `op_limit` (`crate::fight_options` builds
+/// all three; conformance runs want the release profile). An AI error never
+/// aborts the fight: it ends that entity's turn and lands in the farmer logs
+/// and actions, as in the Java generator.
 pub fn run_official_fight(
     state: State,
     ais: &HashMap<usize, std::sync::Arc<HirFile>>,
     farmers: &[i64],
     opts: &NativeOptions,
-) -> Result<serde_json::Value, NativeError> {
+) -> serde_json::Value {
     let state = Rc::new(RefCell::new(state));
     // Total operations per fid, reported once at the end like
     // `Actions.addOpsAndTimes(state.statistics)`.
@@ -160,7 +251,7 @@ pub fn run_official_fight(
     // `Fight.startFight`: the `beforeFight()` hooks run after init but before
     // the initial-state snapshot, so any `setLoadout()` they apply is reflected
     // in the report's max-life / displayed stats.
-    run_hooks(&state, ais, opts, HookPhase::BeforeFight, "beforeFight")?;
+    run_hooks(&state, ais, opts, HookPhase::BeforeFight, "beforeFight");
 
     state.borrow_mut().record_initial_state();
 
@@ -187,11 +278,11 @@ pub fn run_official_fight(
                 };
                 if let Some((owner, ai_fn)) = summon {
                     if let (Some(ai_fn), Some(hir)) = (ai_fn, ais.get(&owner)) {
-                        let ops = run_bulb_ai(&state, fid, &ai_fn, hir, opts)?;
+                        let ops = run_bulb_ai(&state, fid, owner, &ai_fn, hir, opts);
                         *total_ops.entry(owner).or_insert(0) += ops;
                     }
                 } else if let Some(hir) = ais.get(&fid) {
-                    let ops = run_entity_ai(&state, fid, hir, opts)?;
+                    let ops = run_entity_ai(&state, fid, hir, opts);
                     *total_ops.entry(fid).or_insert(0) += ops;
                 }
                 let mut s = state.borrow_mut();
@@ -224,10 +315,10 @@ pub fn run_official_fight(
     }
 
     // `afterFight()` hooks run after the winner is computed.
-    run_hooks(&state, ais, opts, HookPhase::AfterFight, "afterFight")?;
+    run_hooks(&state, ais, opts, HookPhase::AfterFight, "afterFight");
 
     let s = state.borrow();
-    Ok(build_outcome(
+    build_outcome(
         &s.leek_snapshots,
         &s.map,
         &s.actions,
@@ -237,5 +328,5 @@ pub fn run_official_fight(
         &s.farmer_logs,
         s.win_team,
         s.duration(),
-    ))
+    )
 }

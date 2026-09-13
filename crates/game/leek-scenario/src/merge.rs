@@ -33,6 +33,9 @@ impl Scenario {
         if patch.max_turns.is_some() {
             self.max_turns = patch.max_turns;
         }
+        if patch.max_ops_per_turn.is_some() {
+            self.max_ops_per_turn = patch.max_ops_per_turn;
+        }
         if patch.version.is_some() {
             self.version = patch.version;
         }
@@ -55,6 +58,9 @@ pub fn overlay_scenario(base: &mut Scenario, child: &Scenario) {
     }
     if child.max_turns.is_some() {
         base.max_turns = child.max_turns;
+    }
+    if child.max_ops_per_turn.is_some() {
+        base.max_ops_per_turn = child.max_ops_per_turn;
     }
     if child.version.is_some() {
         base.version = child.version;
