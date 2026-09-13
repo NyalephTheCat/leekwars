@@ -56,9 +56,11 @@ javac -d "$TEST_CLASSES" -cp "$CP_TEST" --release 25 @"$SOURCES"
 JUNIT_CP="$JUNIT_API:$JUNIT_ENGINE:$JUNIT_PLAT_COMM:$JUNIT_PLAT_ENG:$JUNIT_LAUNCHER:$OPENTEST:$APIGUARDIAN"
 javac -d "$RUNNER_OUT" -cp "$JUNIT_CP" --release 25 "$TOOL/GenerateReference.java"
 
-# Run from the repo root so file-based tests' relative paths resolve
-# (their rows are skipped, but the suite still tries to load them).
-cd "$ROOT"
+# Run from a scratch directory (see `jvm_workdir`): the upstream compiler
+# writes its `ai/` output tree relative to the cwd. The file-based tests
+# (`ai/euler/*.leek`) live in the generator submodule and resolve from
+# neither location; their rows are skipped either way.
+cd "$(jvm_workdir "$TOOL")"
 RUN_CP="$RUNNER_OUT:$TEST_CLASSES:$MAIN_CLASSES:$JACKSON_DB:$JACKSON_CORE:$JACKSON_ANN:$JUNIT_CP"
 LEEK_REFERENCE="$REFERENCE" java -cp "$RUN_CP" GenerateReference > /tmp/reference-run.log 2>&1 || true
 

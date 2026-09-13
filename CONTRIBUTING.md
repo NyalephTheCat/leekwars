@@ -53,7 +53,7 @@ cargo install --path bins/miku    # likewise leekc, leek-lsp, leek-dap, leekbenc
 exactly what CI runs. **Run it before opening a pull request:**
 
 ```sh
-tools/check.sh          # fmt + pin/layer checks + catalog drift + clippy + tests
+tools/check.sh          # fmt + pin/layer/artifact checks + catalog drift + clippy + tests
 tools/check.sh --full   # also runs the slow upstream corpus suite (>10 min)
 ```
 
@@ -64,6 +64,7 @@ want to run one in isolation:
 cargo fmt --all                          # format (--check to verify only)
 cargo xtask check-toolchain              # Rust pin and MSRV agree, and are exact
 cargo xtask check-layers                 # enforce the crate-layering rule
+cargo xtask check-artifacts              # generated output stays untracked
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude leek-test-corpus   # fast tests
 ```

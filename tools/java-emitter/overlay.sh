@@ -1,5 +1,6 @@
-# Sourced helper (not executable): javac source-list construction with
-# the overlay shadowing the upstream submodule.
+# Sourced helpers (not executable) shared by the java-emitter scripts:
+# javac source-list construction with the overlay shadowing the upstream
+# submodule, and the scratch directory the JVM runs from.
 #
 # The upstream `leekscript` submodule stays PRISTINE — our
 # instrumentation lives in `tools/java-emitter/overlay/src/…` instead
@@ -27,4 +28,19 @@ list_sources() {
   if [[ -d "$ov" ]]; then
     find "$ov" -name '*.java'
   fi
+}
+
+# `jvm_workdir <java-emitter-dir>` creates and echoes the directory the
+# JVM should be run from. Nothing may run it from the repository root:
+# the upstream compiler hard-codes its output to `./ai`
+# (`JavaCompiler.IA_PATH`) relative to the working directory, and
+# `TestCommon` writes `opérations.txt` the same way, so a run from the
+# root drops hundreds of generated files next to `Cargo.toml` — which is
+# exactly how an `ai/` tree once ended up committed. `build/` is
+# git-ignored at any depth, so the scratch dir never shows up in
+# `git status`.
+jvm_workdir() {
+  local dir="$1/build/jvm-cwd"
+  mkdir -p "$dir"
+  printf '%s\n' "$dir"
 }

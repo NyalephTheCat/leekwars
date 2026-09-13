@@ -20,7 +20,7 @@ jobs:
   # generated-catalog drift. Cheap and fast, so it runs on its own and fails
   # early.
   fmt:
-    name: rustfmt + toolchain + layer check
+    name: rustfmt + toolchain + layer + artifact checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,10 @@ jobs:
         run: cargo xtask check-toolchain
       - name: layer check
         run: cargo xtask check-layers
+      # Generated output (the upstream compiler's `ai/` tree) must stay out of
+      # git; a stray `git add -A` once committed 387 files of it.
+      - name: generated-artifact check
+        run: cargo xtask check-artifacts
       - name: generated catalog drift
         run: tools/game-item-extract.sh --check
 

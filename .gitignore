@@ -13,6 +13,11 @@ __pycache__/
 # Build output (leek `build/`, Java `build/` class dirs, …) at any depth
 build/
 
+# Upstream LeekScript compiler output. `JavaCompiler.IA_PATH` is hard-coded to
+# "ai", so any JVM run drops AI_<id>.java/.class/.lines/.sig into ./ai relative
+# to its working directory. `cargo xtask check-artifacts` keeps this honest.
+/ai/
+
 # Node / VS Code extension build artifacts
 node_modules/
 editors/vscode/dist/

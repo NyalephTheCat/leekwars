@@ -145,6 +145,11 @@ drift. The scripts live in [`tools/`](../tools/):
 - `cargo xtask check-layers` ([`xtask/`](../xtask/)) — the layering rule.
 - `cargo xtask check-toolchain` ([`xtask/`](../xtask/)) — the Rust pin is an
   exact release and matches the advertised MSRV.
+- `cargo xtask check-artifacts` ([`xtask/`](../xtask/)) — generated output
+  stays untracked and git-ignored. The upstream LeekScript compiler writes
+  `AI_<id>.java/.class/.lines/.sig` into `./ai` relative to its working
+  directory, so the java-emitter scripts run the JVM from a scratch dir under
+  `tools/java-emitter/build/` and this check catches anything that slips.
 - `check.sh` — the full quality gate (and the contract CI honors).
 
 When you change one of these inputs, regenerate the output in the same commit so

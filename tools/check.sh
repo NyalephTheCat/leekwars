@@ -2,7 +2,7 @@
 # Repo-wide quality gate: formatting, lints, build, and tests.
 #
 # Usage:
-#   tools/check.sh          # fast gate: fmt + pin/layer checks + clippy + tests
+#   tools/check.sh          # fast gate: fmt + pin/layer/artifact checks + clippy + tests
 #                           (skips leek-test-corpus)
 #   tools/check.sh --full   # also runs leek-test-corpus (upstream_suite — takes >10 min)
 #
@@ -33,6 +33,9 @@ cargo xtask check-toolchain
 
 step "layer check (cargo xtask check-layers)"
 cargo xtask check-layers
+
+step "generated-artifact check (cargo xtask check-artifacts)"
+cargo xtask check-artifacts
 
 # Generated weapon/chip catalogs must match the upstream JSON (skipped when
 # the official-generator submodule isn't checked out).
