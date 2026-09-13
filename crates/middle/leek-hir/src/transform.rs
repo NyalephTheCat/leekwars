@@ -852,9 +852,11 @@ fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
 /// initializer lives in a `VarDecl { is_global: true }` in `main`; reads from
 /// any function, method, field initializer, or `main` resolve to the same
 /// [`NameRef::Global`]. A global qualifies only when:
-/// - it is declared exactly once in `main` (nested declarations count), at
-///   top level, and that initializer is a type-matched literal (so a coercing
-///   slot like `global real G = 5` is left alone);
+/// - it is declared exactly once in the whole file — `global` is legal in
+///   any statement position, and a declaration in a nested block, a function
+///   body or a lambda body counts — and that one declaration is a top-level
+///   `main` statement whose initializer is a type-matched literal (so a
+///   coercing slot like `global real G = 5` is left alone);
 /// - it is never assigned, incremented/decremented, `@`-referenced, passed as
 ///   a call argument, or bound by a bare foreach anywhere — including inside
 ///   lambda bodies (globals are accessed directly, not captured, so a lambda
@@ -866,19 +868,22 @@ fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
 ///   field initializer (run before `main`) disqualifies outright;
 /// - its name is never used as a [`NameRef::Builtin`] / [`NameRef::Unresolved`].
 ///
-/// The last rule is the interim fix for #53: HIR doesn't pre-declare globals,
-/// so a use lowered before the `global` statement (a function body above it
-/// in a single file; *every* function body in `lower_files`, which lowers
-/// bodies before any main block) resolves by name, and its writes and reads
-/// are invisible to the `DefId`-based checks. Remaining (R3): once globals are
-/// pre-declared through resolver bindings those uses become `Global` and the
-/// name rule can go — the ordering rule stays.
+/// The last rule is belt and braces. HIR now pre-declares every file-level
+/// `global` before it lowers any body (see `Lowerer::predeclare_globals`), so
+/// a use above its declaration resolves to `Global` and the `DefId` checks
+/// see it. The name rule stays until `Builtin` means a *real* builtin and
+/// everything else is `Unresolved` (#53): today a genuinely unresolved name
+/// is still tagged `Builtin`, and MIR keys such a write to a name-matched
+/// global. It only costs precision.
 pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
     // 1. Candidate globals from their top-level initializers in `main`, with
-    //    the index of the initializing statement. A global declared more
-    //    than once (a nested `global G = 2` included) isn't a simple constant.
+    //    the index of the initializing statement. A global declared more than
+    //    once isn't a simple constant. `global` is legal in any statement
+    //    position, so count declarations across the whole file: one inside a
+    //    function or lambda body is a store that runs when that body is
+    //    called, which the ordering rules below can't reason about.
     let mut decl_counts: HashMap<DefId, usize> = HashMap::new();
-    for_each_stmt_deep(&hir.main, &mut |s| {
+    for_each_file_stmt(hir, &mut |s| {
         if let Stmt::VarDecl(v) = s
             && v.is_global
         {
@@ -1697,9 +1702,18 @@ mod tests {
 
     #[test]
     fn global_written_by_function_above_its_declaration_is_not_propagated() {
-        // `f` is lowered before `global G` exists, so its write is the
-        // name-keyed `Builtin("G")` — still a write to `G` (#53).
+        // `f` is lowered before the `global G` statement, but globals are
+        // pre-declared, so the write is a real `Global` write (#53).
         let mut hir = lower("function f() { G = 2 }\nglobal G = 1\nf()\nvar y = G\n");
+        let mut writes_global = false;
+        for_each_def_expr(&hir, &mut |e| {
+            if let ExprKind::Binary(op, lhs, _) = &e.kind
+                && op.is_assignment()
+            {
+                writes_global |= matches!(lhs.kind, ExprKind::Name(NameRef::Global(_)));
+            }
+        });
+        assert!(writes_global, "the write in `f` must resolve to the global");
         assert_eq!(propagate_const_globals(&mut hir), 0);
     }
 
@@ -1719,6 +1733,26 @@ mod tests {
     #[test]
     fn global_redeclared_in_nested_block_is_not_propagated() {
         let mut hir = lower("global G = 1\nif (true) { global G = 2 }\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_redeclared_in_function_body_is_not_propagated() {
+        // A `global G = 2` in a body is a store that runs when `f` is called,
+        // not at its textual position, so the ordering rules can't see it.
+        let mut hir = lower("global G = 1\nfunction f() { global G = 2 }\nf()\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_redeclared_in_function_body_above_main_decl_is_not_propagated() {
+        let mut hir = lower("function f() { global G = 2 }\nglobal G = 1\nf()\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_redeclared_in_lambda_body_is_not_propagated() {
+        let mut hir = lower("global G = 1\nvar f = function() { global G = 2 }\nf()\nvar y = G\n");
         assert_eq!(propagate_const_globals(&mut hir), 0);
     }
 

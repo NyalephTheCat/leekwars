@@ -139,15 +139,12 @@ fn bare_binding_over_a_class_field() {
 }
 
 #[test]
-fn bare_binding_over_a_global_declared_later_is_name_keyed() {
-    // `f` is lowered before `global g` is declared: the write is by name,
-    // exactly like `g = 1` would be there — not `DefId(0)`.
+fn bare_binding_over_a_global_declared_later() {
+    // `f` is lowered before the `global g` statement, but globals are
+    // pre-declared, so the binding still targets the global (#53).
     let hir = lower("function f() { for (g in [1]) {} }\nglobal g = 0\n");
     let fe = function_foreach(&hir, "f");
-    assert_eq!(
-        fe.value.target.kind,
-        ExprKind::Name(NameRef::Builtin("g".into()))
-    );
+    assert_eq!(fe.value.global_def(), Some(global(&hir, "g")));
 }
 
 #[test]
@@ -180,10 +177,11 @@ fn bare_binding_over_an_include_level_global() {
         main_foreach(&hir).value.global_def(),
         Some(global(&hir, "g"))
     );
-    // Function bodies are lowered before every main block, so `g` is still
-    // undeclared there: the binding is the name-keyed global.
+    // Function bodies are lowered before every main block, but pass 1
+    // pre-declares every file's globals, so `f`'s binding targets the same
+    // global as the main block's (#53).
     assert_eq!(
-        function_foreach(&hir, "f").value.target.kind,
-        ExprKind::Name(NameRef::Builtin("g".into()))
+        function_foreach(&hir, "f").value.global_def(),
+        Some(global(&hir, "g"))
     );
 }
