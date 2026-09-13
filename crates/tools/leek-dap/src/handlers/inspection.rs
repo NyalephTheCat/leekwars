@@ -35,15 +35,6 @@ pub(crate) fn stack_trace<R: Read, W: Write>(
     server: &mut Server<R, W>,
     req: Request,
 ) -> anyhow::Result<Flow> {
-    let source = session.program_path.as_ref().map(|path| Source {
-        name: std::path::Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(String::from),
-        path: Some(path.clone()),
-        ..Default::default()
-    });
-
     let frames: Vec<StackFrame> = session
         .native_debug
         .as_ref()
@@ -54,7 +45,14 @@ pub(crate) fn stack_trace<R: Read, W: Write>(
         .map(|(idx, frame)| StackFrame {
             id: i64::try_from(idx).unwrap_or(0),
             name: frame.name,
-            source: source.clone(),
+            // The frame's own file — an included one when the program was
+            // compiled through the project include graph — falling back to
+            // the launched program.
+            source: frame
+                .path
+                .as_ref()
+                .or(session.program_path.as_ref())
+                .map(|path| source_ref(path)),
             line: i64::from(frame.line),
             column: 1,
             ..Default::default()
@@ -68,6 +66,18 @@ pub(crate) fn stack_trace<R: Read, W: Write>(
     };
     server.respond(req.success(ResponseBody::StackTrace(response)))?;
     Ok(Flow::Continue)
+}
+
+/// A DAP `source` reference for a file path.
+fn source_ref(path: &str) -> Source {
+    Source {
+        name: std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(String::from),
+        path: Some(path.to_string()),
+        ..Default::default()
+    }
 }
 
 /// `scopes`: a single "Locals" scope for the requested frame. Its

@@ -90,7 +90,12 @@ fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfi
 /// `SourceId`s allocated sequentially from the entry's own id (the
 /// graph walker seeds the entry first, so it keeps `source_id` and
 /// each included file gets the next id).
-fn includes_step(path: &Path, source_id: leek_span::SourceId) -> Box<dyn leek_pipeline::Step> {
+///
+/// Public so other front-ends that drive the pipeline themselves (the debug
+/// adapter, which reports diagnostics over DAP rather than rendering them)
+/// resolve includes and number sources exactly as the `miku` commands here
+/// do.
+pub fn includes_step(path: &Path, source_id: leek_span::SourceId) -> Box<dyn leek_pipeline::Step> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     Box::new(leek_resolver::pipeline::ResolveIncludes::with_counter(
         std::sync::Arc::new(leek_resolver::folder::DiskFolder),

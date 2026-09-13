@@ -431,11 +431,12 @@ impl BuiltinHost for NativeHost {
 
 shim! {
     /// Per-statement debug safepoint. Emitted by the backend when
-    /// `debug_hooks` is on; forwards the statement's source byte offset and the
-    /// current frame's local-variable pointers to the installed
-    /// [`crate::debug::DebugHook`] (which may pause execution).
-    pub extern "C" fn leek_dbg_safepoint(offset: i64, desc: i64, values: i64) {
-        crate::debug::fire_safepoint(offset as u32, desc as usize, values as usize);
+    /// `debug_hooks` is on; forwards the statement's packed
+    /// `(source, byte offset)` position and the current frame's
+    /// local-variable pointers to the installed [`crate::debug::DebugHook`]
+    /// (which may pause execution).
+    pub extern "C" fn leek_dbg_safepoint(pos: i64, desc: i64, values: i64) {
+        crate::debug::fire_safepoint(pos, desc as usize, values as usize);
     }
 }
 

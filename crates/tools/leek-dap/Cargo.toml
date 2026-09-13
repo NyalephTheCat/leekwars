@@ -15,6 +15,12 @@ leek-span        = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-recipes     = { workspace = true }
 leek-diagnostics = { workspace = true }
+# Compile the way the rest of the toolchain does: the project manifest
+# settles the language defaults and `leek-driver`'s include step resolves
+# `include()` off disk with the same `SourceId` numbering as `miku run`.
+leek-driver      = { workspace = true }
+leek-manifest    = { workspace = true }
+leek-resolver    = { workspace = true }
 # Debugging an AI inside a fight: build the fight from a scenario and drive it.
 leek-scenario    = { workspace = true }
 leek-generator   = { workspace = true }

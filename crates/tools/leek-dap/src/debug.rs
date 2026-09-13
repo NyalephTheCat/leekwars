@@ -11,11 +11,20 @@
 //!
 //! [`resume`]: NativeDebugSession::resume
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use leek_span::LineTable;
+
+/// One file the debuggee was compiled from, keyed by the `SourceId` its spans
+/// carry. A program built through the project include graph is spliced from
+/// several files, so an offset only means something together with its source.
+pub(crate) struct DebugSource {
+    /// Path reported to the client in stack frames.
+    pub path: String,
+    pub line_table: LineTable,
+}
 
 /// Why the debuggee paused — maps to a DAP `stopped` reason.
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +49,8 @@ struct Frame {
     values: usize,
     /// Current source line within the frame.
     line: u32,
+    /// Raw `SourceId` of the file that line belongs to.
+    source: u32,
 }
 
 /// A frame captured at a stop, ready to serve `stackTrace`/`variables`.
@@ -47,6 +58,10 @@ struct Frame {
 pub(crate) struct FrameSnapshot {
     pub name: String,
     pub line: u32,
+    /// Path of the file the frame is executing in — an included file when the
+    /// program was compiled through the project include graph. `None` for a
+    /// source the adapter has no text for (a synthetic span).
+    pub path: Option<String>,
     pub vars: Vec<(String, String)>,
 }
 
@@ -86,8 +101,11 @@ struct Wait {
 /// install it with `leek_backend_native::set_debug_hook` before running an
 /// instrumented program.
 pub(crate) struct NativeDebugSession {
-    line_table: LineTable,
-    breakpoint_lines: HashSet<u32>,
+    /// Line tables and paths, keyed by raw `SourceId`.
+    sources: HashMap<u32, DebugSource>,
+    /// Breakpoint lines per raw `SourceId`, so a breakpoint in an included
+    /// file is matched against that file's own lines.
+    breakpoint_lines: HashMap<u32, HashSet<u32>>,
     /// The shadow call stack (bottom .. top).
     stack: Mutex<Vec<Frame>>,
     /// Frames captured at the most recent stop, top-first.
@@ -95,6 +113,9 @@ pub(crate) struct NativeDebugSession {
     /// Line of the previous safepoint (breakpoints fire on arrival from a
     /// different line — see the breakpoint check).
     prev_line: AtomicU32,
+    /// Source of the previous safepoint, paired with [`Self::prev_line`]:
+    /// crossing into another file is an arrival even at the same line number.
+    prev_source: AtomicU32,
     /// Force a stop at the next safepoint (program entry or client `pause`).
     stop_next: AtomicBool,
     /// The pending forced stop is program entry.
@@ -109,17 +130,18 @@ pub(crate) struct NativeDebugSession {
 
 impl NativeDebugSession {
     pub(crate) fn new(
-        source: &str,
-        breakpoint_lines: HashSet<u32>,
+        sources: HashMap<u32, DebugSource>,
+        breakpoint_lines: HashMap<u32, HashSet<u32>>,
         stop_on_entry: bool,
         on_stop: Box<dyn Fn(StopInfo) + Send + Sync>,
     ) -> Self {
         Self {
-            line_table: LineTable::new(source),
+            sources,
             breakpoint_lines,
             stack: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Vec::new()),
             prev_line: AtomicU32::new(0),
+            prev_source: AtomicU32::new(0),
             stop_next: AtomicBool::new(stop_on_entry),
             entry_stop: AtomicBool::new(stop_on_entry),
             step: Mutex::new(Step::None),
@@ -189,19 +211,20 @@ impl NativeDebugSession {
     /// alive), publish the snapshot, then park until resumed.
     fn stop(&self, line: u32, reason: StopReason) {
         // Clone the frame pointers out under the lock, then render outside it.
-        let frames: Vec<(usize, usize, u32)> = {
+        let frames: Vec<(usize, usize, u32, u32)> = {
             let stack = self.stack.lock().expect("stack lock poisoned");
             stack
                 .iter()
                 .rev()
-                .map(|f| (f.desc, f.values, f.line))
+                .map(|f| (f.desc, f.values, f.line, f.source))
                 .collect()
         };
         let snapshot = frames
             .into_iter()
-            .map(|(desc, values, fline)| FrameSnapshot {
+            .map(|(desc, values, fline, fsource)| FrameSnapshot {
                 name: leek_backend_native::frame_name(desc).unwrap_or_else(|| "<unknown>".into()),
                 line: fline,
+                path: self.sources.get(&fsource).map(|s| s.path.clone()),
                 vars: leek_backend_native::render_frame_vars(desc, values),
             })
             .collect();
@@ -223,9 +246,17 @@ impl NativeDebugSession {
 }
 
 impl leek_backend_native::DebugHook for NativeDebugSession {
-    fn safepoint(&self, offset: u32, frame_desc: usize, frame_values: usize) {
-        let line = self.line_table.line_col(offset).line;
+    fn safepoint(&self, source: u32, offset: u32, frame_desc: usize, frame_values: usize) {
+        // An offset only means something in its own file: look it up in that
+        // source's line table, not the entry file's. A source the adapter has
+        // no text for (a synthetic span) reports line 0 and never matches a
+        // breakpoint.
+        let line = self
+            .sources
+            .get(&source)
+            .map_or(0, |s| s.line_table.line_col(offset).line);
         let prev = self.prev_line.swap(line, Ordering::SeqCst);
+        let prev_source = self.prev_source.swap(source, Ordering::SeqCst);
 
         // Update the top frame and read the current depth.
         let depth = {
@@ -234,6 +265,7 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
                 top.line = line;
                 top.values = frame_values;
                 top.desc = frame_desc;
+                top.source = source;
             }
             stack.len()
         };
@@ -246,7 +278,12 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
             }
         } else if self.step_reached(line, depth) {
             StopReason::Step
-        } else if line != prev && self.breakpoint_lines.contains(&line) {
+        } else if (line != prev || source != prev_source)
+            && self
+                .breakpoint_lines
+                .get(&source)
+                .is_some_and(|lines| lines.contains(&line))
+        {
             StopReason::Breakpoint
         } else {
             return;
@@ -260,6 +297,7 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
             desc: frame_desc,
             values: 0,
             line: 0,
+            source: 0,
         });
     }
 
@@ -305,16 +343,40 @@ impl NativeDebugSession {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::mpsc;
     use std::sync::{Arc, OnceLock, Weak};
     use std::time::Duration;
 
     use leek_backend_native::DebugHook;
 
-    use super::{NativeDebugSession, StopInfo};
+    use leek_span::LineTable;
+
+    use super::{DebugSource, NativeDebugSession, StopInfo};
 
     const SOURCE: &str = "var a = 1;\nvar b = 2;\n";
+    /// Raw `SourceId` of the entry file (the pipeline seeds it with 1).
+    const ENTRY: u32 = 1;
+
+    /// One-file source table, as a single-file launch builds.
+    fn entry_sources() -> HashMap<u32, DebugSource> {
+        sources([(ENTRY, "main.leek", SOURCE)])
+    }
+
+    fn sources<const N: usize>(files: [(u32, &str, &str); N]) -> HashMap<u32, DebugSource> {
+        files
+            .into_iter()
+            .map(|(id, path, text)| {
+                (
+                    id,
+                    DebugSource {
+                        path: path.to_string(),
+                        line_table: LineTable::new(text),
+                    },
+                )
+            })
+            .collect()
+    }
 
     /// How long a released debuggee gets to leave `stop` before we call it
     /// parked. Generous: the assertion only fires on a genuine hang.
@@ -322,24 +384,27 @@ mod tests {
     /// How long a parked debuggee is watched to confirm it stays parked.
     const PARKED: Duration = Duration::from_millis(200);
 
-    /// A session that stops on entry and runs `on_stop` with a handle to
-    /// itself, so the callback can answer the stop the way a DAP client does.
-    fn session_with(
-        on_stop: impl Fn(&NativeDebugSession) + Send + Sync + 'static,
+    /// A session that runs `on_stop` with a handle to itself and the stop
+    /// info, so the callback can answer the stop the way a DAP client does.
+    fn session_from(
+        sources: HashMap<u32, DebugSource>,
+        breakpoints: HashMap<u32, HashSet<u32>>,
+        stop_on_entry: bool,
+        on_stop: impl Fn(&NativeDebugSession, &StopInfo) + Send + Sync + 'static,
     ) -> Arc<NativeDebugSession> {
         let slot: Arc<OnceLock<Weak<NativeDebugSession>>> = Arc::new(OnceLock::new());
         let slot_for_cb = Arc::clone(&slot);
         let session = Arc::new(NativeDebugSession::new(
-            SOURCE,
-            HashSet::new(),
-            true,
-            Box::new(move |_: StopInfo| {
+            sources,
+            breakpoints,
+            stop_on_entry,
+            Box::new(move |info: StopInfo| {
                 let me = slot_for_cb
                     .get()
                     .expect("session slot filled")
                     .upgrade()
                     .expect("session alive");
-                on_stop(&me);
+                on_stop(&me, &info);
             }),
         ));
         assert!(
@@ -349,6 +414,15 @@ mod tests {
         session
     }
 
+    /// A single-file session that stops on entry.
+    fn session_with(
+        on_stop: impl Fn(&NativeDebugSession) + Send + Sync + 'static,
+    ) -> Arc<NativeDebugSession> {
+        session_from(entry_sources(), HashMap::new(), true, move |session, _| {
+            on_stop(session);
+        })
+    }
+
     /// Run one safepoint on a worker thread; the receiver fires when the
     /// debuggee leaves the stop. Driving it off-thread turns a hang into a
     /// failed assertion instead of a wedged test binary.
@@ -356,7 +430,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let worker = Arc::clone(session);
         std::thread::spawn(move || {
-            worker.safepoint(0, 0, 0);
+            worker.safepoint(ENTRY, 0, 0, 0);
             let _ = tx.send(());
         });
         rx
@@ -398,6 +472,68 @@ mod tests {
         assert!(
             done.recv_timeout(RELEASED).is_ok(),
             "debuggee stayed parked after resume"
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_in_an_included_file_uses_that_files_lines() {
+        const LIB: u32 = 2;
+        // Byte 15 is line 3 of the included file but line 2 of the entry, so
+        // resolving it against the entry's line table would report the wrong
+        // line (and fire the entry's breakpoint instead of this one).
+        let lib = "// leek\n// lib\nvar z = 9;\n";
+        let (announced, stopped) = mpsc::channel();
+        let session = session_from(
+            sources([(ENTRY, "main.leek", SOURCE), (LIB, "lib.leek", lib)]),
+            HashMap::from([(ENTRY, HashSet::from([2])), (LIB, HashSet::from([3]))]),
+            false,
+            move |session, info| {
+                let _ = announced.send(info.line);
+                session.resume();
+            },
+        );
+
+        let worker = Arc::clone(&session);
+        let (finished, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            worker.safepoint(LIB, 15, 0, 0);
+            let _ = finished.send(());
+        });
+
+        assert_eq!(
+            stopped.recv_timeout(RELEASED).ok(),
+            Some(3),
+            "included-file breakpoint reported the entry file's line"
+        );
+        assert!(
+            done.recv_timeout(RELEASED).is_ok(),
+            "debuggee stayed parked after resume"
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_in_the_entry_does_not_fire_in_an_included_file() {
+        const LIB: u32 = 2;
+        let (announced, stopped) = mpsc::channel();
+        let session = session_from(
+            sources([
+                (ENTRY, "main.leek", SOURCE),
+                (LIB, "lib.leek", "var z = 9;\n"),
+            ]),
+            HashMap::from([(ENTRY, HashSet::from([1]))]),
+            false,
+            move |session, info| {
+                let _ = announced.send(info.line);
+                session.resume();
+            },
+        );
+
+        // Line 1 of the *included* file: the entry's line-1 breakpoint is a
+        // different file's and must not claim it.
+        session.safepoint(LIB, 0, 0, 0);
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "an entry-file breakpoint fired inside an included file"
         );
     }
 

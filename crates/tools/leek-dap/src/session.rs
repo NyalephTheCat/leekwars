@@ -26,6 +26,10 @@ pub(crate) struct Session {
     pub native_debug: Option<Arc<NativeDebugSession>>,
     /// Absolute path of the launched program, for `stackTrace` source refs.
     pub program_path: Option<String>,
+    /// The worker running the debuggee. The debuggee never runs on the
+    /// request loop's thread, so a long run (a whole fight) can't leave
+    /// `terminate`/`disconnect` unanswered.
+    pub run_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Session {
@@ -36,6 +40,7 @@ impl Session {
             started: false,
             native_debug: None,
             program_path: None,
+            run_thread: None,
         }
     }
 }
