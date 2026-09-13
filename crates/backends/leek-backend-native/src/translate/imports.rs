@@ -456,6 +456,9 @@ pub(super) fn declare_imports(
             ("leek_array_get_int", &[i, i, i], Some(i)),
             ("leek_array_get_real", &[i, i, i], Some(types::F64)),
             ("leek_value_set_index", &[i, i, i, i], None),
+            // Uncharged variants for the nested-index promotion write-back.
+            ("leek_value_set_index_raw", &[i, i, i, i], None),
+            ("leek_set_index_int_raw", &[i, i, i, i], None),
             ("leek_map_new", &[], Some(i)),
             ("leek_map_put", &[i, i, i, i], None),
             ("leek_set_new", &[], Some(i)),
