@@ -122,21 +122,32 @@ impl Workspace {
     // across both branches, and all call sites hand over an owned `Url`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn open(&mut self, uri: Url, text: String) {
+        // An indexed file keeps its entry (and salsa inputs) while open:
+        // `analysis_targets` already skips indexed files with an open
+        // buffer, and keeping the entry lets `close` hand the file back to
+        // the project index instead of losing it.
         if let Some(path) = uri_to_path(&uri)
-            && let Some(indexed) = self.indexed.remove(&path)
+            && let Some((source_file, project_file)) = self
+                .indexed
+                .get(&path)
+                .map(|indexed| (indexed.source_file, indexed.project_file))
         {
             let lang = self.settle(&text);
-            self.apply_language(indexed.source_file, Some(indexed.project_file), lang);
-            let source = indexed.source_file.source(&self.db);
+            self.apply_language(source_file, Some(project_file), lang);
+            let source = source_file.source(&self.db);
             let classes = Self::scan_classes(&text, source, lang.version);
             let line_table = LineTable::new(&text);
             let arc_text: Arc<str> = Arc::from(text.as_str());
-            indexed.source_file.set_text(&mut self.db).to(text.clone());
-            indexed.project_file.set_text(&mut self.db).to(text);
+            source_file.set_text(&mut self.db).to(text.clone());
+            project_file.set_text(&mut self.db).to(text);
+            if let Some(indexed) = self.indexed.get_mut(&path) {
+                indexed.line_table = line_table.clone();
+                indexed.text = Arc::clone(&arc_text);
+            }
             self.docs.insert(
                 uri.clone(),
                 DocHandle {
-                    source_file: indexed.source_file,
+                    source_file,
                     line_table,
                     text: arc_text,
                     version: 0,
@@ -214,8 +225,19 @@ impl Workspace {
         self.refresh_classes(uri, Some(classes));
     }
 
+    /// Drop every piece of per-URI state the closed buffer owns: the open
+    /// handle and its semantic-token delta baseline (a full token vector
+    /// that would otherwise live for the rest of the session). A file the
+    /// project still indexes goes back to its on-disk text, so its classes
+    /// stay in the union and the project keeps analyzing it; a buffer with
+    /// no indexed file behind it contributes nothing once closed, so its
+    /// class names go away instead of lingering.
     pub fn close(&mut self, uri: &Url) {
         self.docs.remove(uri);
+        self.semantic_tokens_cache.remove(uri);
+        if !self.reload_indexed_from_disk(uri) {
+            self.refresh_classes(uri, None);
+        }
     }
 
     pub fn doc(&self, uri: &Url) -> Option<&DocHandle> {
@@ -490,14 +512,22 @@ impl Workspace {
         if self.docs.contains_key(uri) {
             return; // open buffer wins
         }
+        self.reload_indexed_from_disk(uri);
+    }
+
+    /// Re-read `uri`'s indexed entry from disk and refresh its classes.
+    /// Returns `false` — leaving the workspace untouched — when `uri` is
+    /// not an indexed file or its text can't be read, so the caller can
+    /// fall back to dropping the file's state.
+    fn reload_indexed_from_disk(&mut self, uri: &Url) -> bool {
         let Some(path) = uri_to_path(uri) else {
-            return;
+            return false;
         };
         let Some(indexed) = self.indexed.get_mut(&path) else {
-            return;
+            return false;
         };
         let Ok(text) = std::fs::read_to_string(&path) else {
-            return;
+            return false;
         };
         indexed.line_table = LineTable::new(&text);
         indexed.text = Arc::from(text.as_str());
@@ -510,6 +540,7 @@ impl Workspace {
         source_file.set_text(&mut self.db).to(text.clone());
         project_file.set_text(&mut self.db).to(text);
         self.refresh_classes(uri, Some(classes));
+        true
     }
 
     /// Drop all state for a deleted file.
@@ -656,5 +687,52 @@ mod tests {
         fs::remove_dir_all(&root).expect("remove project");
 
         assert_eq!(lang_of(&ws, &uri), (3, true));
+    }
+
+    #[test]
+    fn closing_a_scratch_buffer_drops_all_its_state() {
+        let mut ws = Workspace::default();
+        let uri = Url::parse("untitled:scratch.leek").expect("uri");
+        ws.open(uri.clone(), "class Scratch {}\n".into());
+        let result_id = ws.cache_semantic_tokens(&uri, Vec::new());
+        assert!(ws.semantic_tokens_baseline(&uri, &result_id).is_some());
+        assert_eq!(ws.class_union, vec!["Scratch".to_string()]);
+
+        ws.close(&uri);
+
+        assert!(ws.docs.is_empty());
+        assert!(ws.semantic_tokens_cache.is_empty());
+        assert!(ws.semantic_tokens_baseline(&uri, &result_id).is_none());
+        assert!(ws.class_names.is_empty());
+        assert!(ws.class_union.is_empty());
+    }
+
+    #[test]
+    fn closing_an_indexed_file_restores_its_disk_classes() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        let main = root.join("main.leek");
+        fs::write(&main, "class OnDisk {}\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = main.canonicalize().expect("canonical entry");
+        let uri = path_to_uri(&path);
+
+        // An unsaved buffer replaces the file's classes while it is open.
+        ws.open(uri.clone(), "class InBuffer {}\n".into());
+        let result_id = ws.cache_semantic_tokens(&uri, Vec::new());
+        assert_eq!(ws.class_union, vec!["InBuffer".to_string()]);
+
+        ws.close(&uri);
+        let union = ws.class_union.clone();
+        let targets = ws.analysis_targets().len();
+        let baseline = ws.semantic_tokens_baseline(&uri, &result_id);
+        fs::remove_dir_all(&root).expect("remove project");
+
+        // The buffer's state is gone, but the file is still a project file.
+        assert!(baseline.is_none());
+        assert_eq!(union, vec!["OnDisk".to_string()]);
+        assert_eq!(targets, 1);
     }
 }
