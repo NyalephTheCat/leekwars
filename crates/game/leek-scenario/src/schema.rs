@@ -127,7 +127,8 @@ pub struct EntitySpec {
     /// Owned weapons (`WEAPON_*` ids); the first is equipped.
     #[serde(default)]
     pub weapons: Vec<i64>,
-    /// Owned chips (`CHIP_*` ids); validated, invoked by the AI at runtime.
+    /// Owned chips (`CHIP_*` ids); no equip step, but `useChip` refuses any
+    /// chip outside this list.
     #[serde(default)]
     pub chips: Vec<i64>,
 }

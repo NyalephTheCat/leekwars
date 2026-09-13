@@ -360,6 +360,11 @@ impl GameHost for Fight {
             _ => false,
         }
     }
+    fn chips(&self, entity: i64) -> Vec<i64> {
+        self.get(entity)
+            .map(|e| e.chips.clone())
+            .unwrap_or_default()
+    }
     fn relative_shield(&self, entity: i64) -> i64 {
         self.get(entity).map_or(0, |e| {
             e.relative_shield + e.effect_sum(EffectKind::RelativeShield)

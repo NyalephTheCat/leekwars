@@ -51,6 +51,10 @@ A leek starts a fight **unequipped**: the `weapons` in its build are owned
 `useWeapon(...)`. The example AIs equip their primary weapon with
 `setWeapon(getWeapons()[0])`, then fire while `useWeapon` returns `> 0` (a hit).
 
+Chips need no equip step, but a leek can only cast the `chips` its build lists
+(`getChips()` returns them). `useChip` on any other chip returns
+`USE_INVALID_TARGET` (`-1`) without spending TP.
+
 
 ## Running
 

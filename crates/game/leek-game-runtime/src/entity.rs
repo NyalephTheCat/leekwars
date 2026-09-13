@@ -34,6 +34,8 @@ pub struct Entity {
     pub weapon: Option<i64>,
     /// Owned weapons (`WEAPON_*` item ids).
     pub inventory: Vec<i64>,
+    /// Owned chips (`CHIP_*` item ids). `useChip` refuses anything not here.
+    pub chips: Vec<i64>,
     /// Base relative (percent) damage shield.
     pub relative_shield: i64,
     /// Base absolute (flat) damage shield.
@@ -73,6 +75,7 @@ impl Entity {
             damage_return: 0,
             weapon: None,
             inventory: Vec::new(),
+            chips: Vec::new(),
             relative_shield: 0,
             absolute_shield: 0,
             effects: Vec::new(),
@@ -105,6 +108,17 @@ impl Entity {
             self.inventory.push(item);
         }
         self.weapon = Some(item);
+        self
+    }
+
+    /// Add `items` to the owned chips (`CHIP_*` item ids), skipping duplicates.
+    #[must_use]
+    pub fn with_chips(mut self, items: impl IntoIterator<Item = i64>) -> Self {
+        for item in items {
+            if !self.chips.contains(&item) {
+                self.chips.push(item);
+            }
+        }
         self
     }
 
