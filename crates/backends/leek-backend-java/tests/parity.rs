@@ -19,9 +19,9 @@
 //!    on diff churn once we close the parity gap; today the file is
 //!    purely a tracking artifact, not a hard gate.
 //!
-//! Byte parity is the explicit Phase-3 goal in `PLAN.md` — this
-//! test infrastructure is the substrate that closes that gap one
-//! lowering at a time.
+//! Byte parity is an explicit Phase-3 goal — this test infrastructure
+//! is the substrate that closes that gap one lowering at a time. The
+//! remaining gaps are catalogued in `docs/java-backend.md` §9.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -230,10 +230,10 @@ fn byte_parity_10_ternary() {
 /// `HashMap` iteration order (`MainLeekBlock.mFunctions`). That's
 /// implementation-defined and unreproducible from Rust without
 /// reimplementing the JVM's hash semantics. The doc explicitly
-/// documents this as a determinism gap (`doc/java-backend.md` §9);
+/// documents this as a determinism gap (`docs/java-backend.md` §9);
 /// the test is kept ignored as a marker.
 #[test]
-#[ignore = "Java HashMap iteration order is not byte-reproducible — see doc/java-backend.md §9"]
+#[ignore = "Java HashMap iteration order is not byte-reproducible — see docs/java-backend.md §9"]
 fn byte_parity_09_multi_func() {
     assert_byte_parity("09_multi_func");
 }
@@ -843,23 +843,8 @@ fn rust_emit_matches_snapshot_on_jvm() {
 
     // Three ratchets — each tightens as emit gaps close. Bump them
     // up after every batch of fixes so regressions can't sneak in.
-    // Remaining gaps (track per case in `JVM_PARITY.txt`):
-    //  - Block-bodied lambdas can't see outer locals — emit needs
-    //    to outline them into top-level helper methods.
-    //  - Assignment to a builtin / function / class name
-    //    (`count = 1; return count`) — broken without a HIR-level
-    //    rewrite that shadows the name with a local.
-    //  - v1–v3 receiver-method calls into `LegacyArrayLeekValue`
-    //    methods that don't exist on it (`arrayMap`, `arrayFilter`,
-    //    `arrayFind`, etc.). Upstream emits per-call-site
-    //    `Array_<name>_<sig>` helpers via
-    //    `JavaWriter.writeGenericFunctions`; we don't yet.
-    //  - Default parameter values aren't lowered into call-site
-    //    null-fill or synthesized overloads.
-    //  - Index l-value chains with promote-on-write semantics
-    //    (`tabmulti[i][j] = v` where the inner array morphs into
-    //    a sparse map in v1-v3).
-    //  - Bit-XOR `^` in v1 means POWER, not XOR — we lower as XOR.
+    // The emit gaps behind the current numbers are catalogued in
+    // `docs/java-backend.md` §9; `JVM_PARITY.txt` tracks them per case.
     let value_ratio = f64::from(value_ok) / f64::from(total.max(1));
     let ops_ratio = f64::from(ops_ok) / f64::from(total.max(1));
     assert!(

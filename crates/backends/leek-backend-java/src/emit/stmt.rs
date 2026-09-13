@@ -4,12 +4,11 @@ use leek_hir::{
 };
 
 use super::lambda::captured_by_nested_lambda_stmts;
-use super::traits::EmitStmt;
 use super::{Emitter, JavaWriter, is_pure_value_expr, is_terminator, is_valid_statement_expr};
 use crate::mangle;
 
-impl EmitStmt for Emitter<'_> {
-    fn emit_stmt(&mut self, s: &Stmt) {
+impl Emitter<'_> {
+    pub(crate) fn emit_stmt(&mut self, s: &Stmt) {
         // Exact mode folds the per-statement op tick into the
         // value-producing expression via the `ops(value, n)`
         // overload (see `emit_var_decl` / `Stmt::Return`). The
@@ -191,7 +190,8 @@ impl Emitter<'_> {
         if v.is_global {
             let name = mangle::global(self.opts, &v.name);
             self.writer.add_line_at(&format!("{name} = {init};"), line);
-            self.writer.add_line(&format!("g_init_{} = true;", v.name));
+            self.writer
+                .add_line(&format!("{} = true;", mangle::global_init_flag(&v.name)));
         } else {
             let name = mangle::local(self.opts, &v.name);
             if self.ref_boxes.borrow().contains(&v.def) {
