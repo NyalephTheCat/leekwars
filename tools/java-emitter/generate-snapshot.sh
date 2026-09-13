@@ -50,10 +50,12 @@ javac -d "$TEST_CLASSES" -cp "$CP_TEST" --release 25 @"$SOURCES"
 JUNIT_CP="$JUNIT_API:$JUNIT_ENGINE:$JUNIT_PLAT_COMM:$JUNIT_PLAT_ENG:$JUNIT_LAUNCHER:$OPENTEST:$APIGUARDIAN"
 javac -d "$RUNNER_OUT" -cp "$JUNIT_CP" --release 25 "$TOOL/GenerateSnapshot.java"
 
-# Run from the repo root so file-based tests' relative paths resolve
-# correctly (we skip those in the snapshot but they still need to
-# *attempt* to load without crashing the suite).
-cd "$ROOT"
+# Run from a scratch directory (see `jvm_workdir`): the upstream compiler
+# writes its `ai/` output tree relative to the cwd. The file-based tests
+# (`ai/euler/*.leek`) live in the generator submodule and resolve from
+# neither location; we skip those in the snapshot, and they still only
+# need to *attempt* to load without crashing the suite.
+cd "$(jvm_workdir "$TOOL")"
 RUN_CP="$RUNNER_OUT:$TEST_CLASSES:$MAIN_CLASSES:$JACKSON_DB:$JACKSON_CORE:$JACKSON_ANN:$JUNIT_CP"
 LEEK_SNAPSHOT="$SNAPSHOT" java -cp "$RUN_CP" GenerateSnapshot > /tmp/snapshot-run.log 2>&1 || true
 

@@ -1,13 +1,17 @@
-//! Identifier mangling. Mirrors `doc/java-backend.md` §4.
+//! Identifier mangling. Mirrors `docs/java-backend.md` §4.
 //!
 //! Exact mode: `u_x` for locals/params, `g_x` for globals, `f_x` for
-//! top-level functions, `u_C` for user classes, `m_m` for methods,
-//! `s_n` for static class fields. Non-ASCII characters in identifiers
-//! escape to `_uXXXX`. Java reserved words can never collide with
-//! prefixed names so we don't special-case them in exact mode.
+//! top-level functions, `u_C` for user classes, `u_m` for methods.
+//! Static class fields are registered on the `ClassLeekValue` by
+//! their source name and never mangled. Non-ASCII characters in
+//! identifiers escape to `_uXXXX`. Java reserved words can never
+//! collide with prefixed names so we don't special-case them in
+//! exact mode.
 //!
 //! Clean mode drops the prefix when the bare name doesn't collide
-//! with a Java keyword.
+//! with a Java keyword — locals and top-level functions only;
+//! globals, classes and methods stay prefixed (see [`global`],
+//! [`class_name`]).
 
 use std::fmt::Write as _;
 
@@ -112,13 +116,17 @@ fn collides_with_runtime(s: &str) -> bool {
     RUNTIME_RESERVED.contains(&s)
 }
 
-fn safe_chars(name: &str) -> String {
+/// Strip characters that can't appear in a Java identifier, escaping
+/// each one as the `_uXXXX` UTF-16 code-unit form. The single source of
+/// truth for character-level escaping: every mangled *and* every
+/// synthesized identifier routes its stem through this.
+pub(crate) fn safe_chars(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
         if c.is_ascii_alphanumeric() || c == '_' {
             out.push(c);
         } else {
-            // `_uXXXX` escape, matching doc/java-backend.md §4.
+            // `_uXXXX` escape, matching docs/java-backend.md §4.
             for unit in c.to_string().encode_utf16() {
                 write!(out, "_u{unit:04X}").unwrap();
             }
@@ -162,4 +170,23 @@ pub fn global(_opts: &Options, name: &str) -> String {
 /// returning null. The prefix is a runtime contract, not just disambiguation.
 pub fn class_name(_opts: &Options, name: &str) -> String {
     format!("u_{}", safe_chars(name))
+}
+
+/// Per-global "already initialized" flag field: `var global x` → `g_init_x`.
+/// Synthesized, so it never reaches [`global`] — but its stem still has to
+/// be escaped or a non-ASCII global name emits an invalid field name.
+pub fn global_init_flag(name: &str) -> String {
+    format!("g_init_{}", safe_chars(name))
+}
+
+/// `staticInit` hook that declares a class's static fields:
+/// `class Cat` → `createStaticClass_Cat`.
+pub fn create_static_class(name: &str) -> String {
+    format!("createStaticClass_{}", safe_chars(name))
+}
+
+/// `staticInit` hook that assigns a class's static field values:
+/// `class Cat` → `initClass_Cat`.
+pub fn init_class(name: &str) -> String {
+    format!("initClass_{}", safe_chars(name))
 }

@@ -91,7 +91,20 @@ miku fight duel.toml --mode tournament \   # round-robin / single-elim leaderboa
 miku fight duel.toml --mode random \       # fuzz the AI against random point-buy builds
     --runs 50 --capital 800 --random-stats strength,agility,wisdom
 miku fight duel.toml --emit ./duel-fight   # generate a standalone native executable
+miku fight duel.toml --mode matrix --report   # also write the JSON report to a file
 ```
+
+The manifest's `[fight]` table supplies the defaults: `default_scenario` (what
+a bare `miku fight` plays), `scenarios_dir` (where scenario names are looked
+up), `reports_dir` (where a bare `--report` writes, default
+`build/fight-reports`), and `jobs` (sweep workers).
+
+Turn order follows the fight's seed (the official `StartOrder` draw), not the
+entity ids, and a tournament plays every seed from both sides — so neither the
+lowest id nor the first entrant opens by construction. A tournament entrant
+takes over its team's lead entity, or the whole team with
+`--entrant-scope team`; with no hero to win or lose, each game names the
+entrant that won it and the leaderboard is the result.
 
 Scenarios are **composable**: a file can `extends` a base arena, pull reusable
 leek builds from separate files (`leek = "leeks/hero.toml"`), and carry named
@@ -243,8 +256,11 @@ official/, official-generator/   upstream reference impls (git submodules)
 
 ## Building & developing
 
-Requires stable Rust (pinned in `rust-toolchain.toml`, with `rustfmt` and
-`clippy`).
+Requires the exact Rust release pinned in `rust-toolchain.toml` (1.94.1, with
+`rustfmt` and `clippy`); `rustup` selects it automatically. That pin is also
+the workspace MSRV — see
+[CONTRIBUTING.md](CONTRIBUTING.md#bumping-the-rust-toolchain) before bumping
+it.
 
 ```sh
 cargo build                 # whole workspace

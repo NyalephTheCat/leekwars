@@ -453,6 +453,7 @@ impl Lowerer {
 
     pub(crate) fn lower_call(&mut self, c: &ast::CallExpr) -> Call {
         let span = self.span_of_node(c.syntax());
+        let callee_span = self.callee_span(c, span);
         let args = c
             .arg_list()
             .map(|al| al.args().map(|a| self.lower_expr(&a)).collect::<Vec<_>>())
@@ -526,7 +527,30 @@ impl Lowerer {
             Some(other) => Callee::Expr(self.lower_expr(&other)),
             None => Callee::Expr(self.null_expr(span)),
         };
-        Call { callee, args, span }
+        Call {
+            callee,
+            args,
+            callee_span,
+            span,
+        }
+    }
+
+    /// Span of the callee's *name* token, so rewriters can rename a
+    /// call without touching its argument list. Falls back to the
+    /// callee expression's own span for a computed callee, and to
+    /// `fallback` (the whole call) when there is no callee node at
+    /// all — a parse error.
+    fn callee_span(&self, c: &ast::CallExpr, fallback: Span) -> Span {
+        match c.callee() {
+            Some(AstExpr::Name(n)) => n
+                .ident()
+                .map_or_else(|| self.span_of_node(n.syntax()), |t| self.span_of_token(&t)),
+            Some(AstExpr::Field(f)) => f
+                .field()
+                .map_or_else(|| self.span_of_node(f.syntax()), |t| self.span_of_token(&t)),
+            Some(other) => self.span_of_node(other.syntax()),
+            None => fallback,
+        }
     }
 
     pub(crate) fn lower_lambda(&mut self, l: &ast::LambdaExpr) -> ExprKind {

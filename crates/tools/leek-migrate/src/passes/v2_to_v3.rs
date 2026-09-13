@@ -17,6 +17,7 @@ use leek_rewrite::EditSet;
 use leek_span::SourceId;
 use leek_syntax::Version;
 
+use super::util::record_edit;
 use crate::MigrationPass;
 
 pub struct V2ToV3;
@@ -36,7 +37,7 @@ impl MigrationPass for V2ToV3 {
         source: &str,
         source_id: SourceId,
         edits: &mut EditSet,
-        _diagnostics: &mut Vec<Diagnostic>,
+        diagnostics: &mut Vec<Diagnostic>,
     ) {
         let lexed = leek_lexer::lex(source, source_id, Version::V2);
         for tok in &lexed.tokens {
@@ -45,7 +46,12 @@ impl MigrationPass for V2ToV3 {
             }
             let text = &source[tok.span.range()];
             if text.bytes().any(|b| b.is_ascii_uppercase()) {
-                let _ = edits.replace_span(tok.span, text.to_ascii_lowercase());
+                record_edit(
+                    edits.replace_span(tok.span, text.to_ascii_lowercase()),
+                    tok.span,
+                    "keyword lowercasing",
+                    diagnostics,
+                );
             }
         }
     }

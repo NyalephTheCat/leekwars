@@ -19,7 +19,7 @@
 //! Entry point: [`emit`]. Convenience wrappers [`emit_exact`] and
 //! [`emit_clean`] preset the option struct.
 //!
-//! See `doc/java-backend.md` for the full spec.
+//! See `docs/java-backend.md` for the full spec.
 
 mod builtins;
 mod emit;

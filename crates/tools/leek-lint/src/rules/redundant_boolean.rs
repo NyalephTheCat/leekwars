@@ -164,4 +164,18 @@ mod tests {
         let d = run("function f(x, y) {\n  return x == y\n}\n");
         assert!(d.is_empty(), "got {d:?}");
     }
+
+    /// Every suggestion this rule emits must apply cleanly: the
+    /// rewritten source still parses and the finding is gone.
+    #[test]
+    fn suggestions_are_applicable() {
+        for src in [
+            "function f(x) {\n  return x == true\n}\n",
+            "function f(x) {\n  return x == false\n}\n",
+            "function f(x) {\n  return true == x\n}\n",
+            "function f(x) {\n  return false == x\n}\n",
+        ] {
+            crate::testing::assert_suggestions_fix(|| RedundantBoolean, src);
+        }
+    }
 }

@@ -69,6 +69,8 @@ pub trait GameHost {
     fn weapons(&self, entity: i64) -> Vec<i64>;
     /// Equip `item` if the entity owns it; returns whether it did.
     fn set_weapon(&mut self, entity: i64, item: i64) -> bool;
+    /// The entity's owned chips (`CHIP_*` item ids).
+    fn chips(&self, entity: i64) -> Vec<i64>;
     /// Relative (percent) damage shield, 0 if none.
     fn relative_shield(&self, entity: i64) -> i64;
     /// Absolute (flat) damage shield, 0 if none.

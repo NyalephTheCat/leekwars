@@ -173,9 +173,6 @@ mod lambda;
 mod literals;
 mod stmt;
 mod switch;
-mod traits;
-
-pub(crate) use traits::EmitExpr;
 
 impl<'a> Emitter<'a> {
     pub(crate) fn new(opts: &'a Options, hir: &'a HirFile) -> Self {
@@ -349,8 +346,10 @@ impl<'a> Emitter<'a> {
                 let name = mangle::global(self.opts, &g.name);
                 let ty = java_type_for(g.ty.as_ref());
                 self.writer.add_line(&format!("private {ty} {name};"));
-                self.writer
-                    .add_line(&format!("private boolean g_init_{} = false;", g.name));
+                self.writer.add_line(&format!(
+                    "private boolean {} = false;",
+                    mangle::global_init_flag(&g.name)
+                ));
             }
         }
 
@@ -391,12 +390,13 @@ impl<'a> Emitter<'a> {
         for def in &hir.defs {
             if let Def::Class(c) = def {
                 self.writer
-                    .add_line(&format!("createStaticClass_{}();", c.name));
+                    .add_line(&format!("{}();", mangle::create_static_class(&c.name)));
             }
         }
         for def in &hir.defs {
             if let Def::Class(c) = def {
-                self.writer.add_line(&format!("initClass_{}();", c.name));
+                self.writer
+                    .add_line(&format!("{}();", mangle::init_class(&c.name)));
             }
         }
         if self.opts.is_clean() {
@@ -507,9 +507,6 @@ impl<'a> Emitter<'a> {
 
 // ---- free-standing helpers --------------------------------------------------
 
-/// Strip non-identifier characters for inclusion in a Java
-/// identifier. Mirrors `mangle::safe_chars` but kept free-standing
-/// because the function-prologue rebind needs the raw stem.
 /// Instruction count for `super(n, version)` — mirrors upstream
 /// `MainLeekBlock.mInstructions.size()`: top-level main-block
 /// instructions only. Nested loop/switch bodies are separate blocks
@@ -526,26 +523,15 @@ pub(crate) fn main_stmt_count(stmts: &[Stmt]) -> u32 {
         .sum()
 }
 
+/// Escape a name for inclusion in a Java identifier *without* the
+/// `u_`/`f_`/`g_` prefix [`mangle`] adds — the synthesized spellings
+/// here (`p_<param>`, `<class>_<method>_<arity>`) supply their own
+/// prefix and need the bare stem. Character escaping itself is
+/// [`mangle::safe_chars`], so the two can't drift apart.
 pub(crate) fn sanitize_ident(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            out.push(c);
-        } else {
-            for unit in c.to_string().encode_utf16() {
-                write!(out, "_u{unit:04X}").unwrap();
-            }
-        }
-    }
-    out
+    mangle::safe_chars(name)
 }
 
-/// Static op cost of an expression for the `ops(value, n)` overload.
-/// Mirrors the Java reference's `LeekExpression.computeOperations` and
-/// the cost table in `LeekValueType.java`: literals / var reads / casts
-/// / calls / `&&` / `||` are free; most binary operators cost 1;
-/// `*` costs `MUL_COST=2`, `/`, `%`, `\` cost `DIV_COST=MOD_COST=5`,
-/// `**` costs `POW_COST=40`.
 /// For a call's expression callee, the extra op cost of indexing into an array
 /// literal and calling the result: 2 ops per index level (`executeArrayAccess`),
 /// but only when the index chain is rooted in an array literal. `0` otherwise.
@@ -571,6 +557,12 @@ fn array_literal_index_call_cost(callee: &Expr) -> u32 {
     }
 }
 
+/// Static op cost of an expression for the `ops(value, n)` overload.
+/// Mirrors the Java reference's `LeekExpression.computeOperations` and
+/// the cost table in `LeekValueType.java`: literals / var reads / casts
+/// / calls / `&&` / `||` are free; most binary operators cost 1;
+/// `*` costs `MUL_COST=2`, `/`, `%`, `\` cost `DIV_COST=MOD_COST=5`,
+/// `**` costs `POW_COST=40`.
 pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
     match &e.kind {
         ExprKind::Literal(_) | ExprKind::Name(_) => 0,
@@ -775,11 +767,6 @@ pub(crate) fn java_type_for(ty: Option<&Type>) -> &'static str {
     }
 }
 
-/// True when this receiver builtin's second positional argument is a
-/// `FunctionLeekValue` (a higher-order callback). The cast at the
-/// call site lets javac pick the right overload on the value class
-/// instead of failing with "Object cannot be converted to
-/// FunctionLeekValue".
 /// A receiver builtin whose first non-receiver argument is a concrete
 /// collection value class (`setUnion(set, OTHER_SET)`, `mapMerge(map, OTHER_MAP)`),
 /// so the `Object`-typed argument needs a cast to that class.
@@ -796,6 +783,11 @@ pub(crate) fn receiver_collection_arg_cast(name: &str) -> Option<&'static str> {
     }
 }
 
+/// True when this receiver builtin's second positional argument is a
+/// `FunctionLeekValue` (a higher-order callback). The cast at the
+/// call site lets javac pick the right overload on the value class
+/// instead of failing with "Object cannot be converted to
+/// FunctionLeekValue".
 pub(crate) fn takes_function_arg(name: &str) -> bool {
     matches!(
         name,
@@ -1060,9 +1052,6 @@ pub(crate) fn java_class_name(ty: &Type) -> &'static str {
     }
 }
 
-/// Count statements the way the reference parser does: an `if`
-/// with an `else` arm is split into two sibling instructions in
-/// `mInstructions`, so it counts as 2.
 /// Walk the entire HIR (main + every function/method body) and
 /// collect builtin names that appear on the left-hand side of an
 /// `=` assignment. Those names get routed through `__shadows` at

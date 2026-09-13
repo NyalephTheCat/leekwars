@@ -76,6 +76,11 @@ fn new_creates_skeleton() {
     assert!(base.join("demo/Miku.toml").is_file());
     assert!(base.join("demo/src/main.leek").is_file());
     assert!(base.join("demo/.gitignore").is_file());
+    // One output root, one ignore line.
+    assert_eq!(
+        std::fs::read_to_string(base.join("demo/.gitignore")).unwrap(),
+        "/build/\n"
+    );
 
     // The skeleton should pass `miku check`.
     let check = miku(&["check"], &base.join("demo"));
@@ -406,6 +411,156 @@ default = true
     let out = miku(&["clean"], &dir);
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(!dir.join("build").exists(), "build/ should be gone");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `miku doc` writes under the build root, so a plain `miku clean`
+/// takes the generated pages with it — they used to survive in
+/// `target/doc/`.
+#[test]
+fn clean_removes_generated_docs() {
+    let dir = scratch_dir("clean-doc");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "cleandoc"
+version = "0.1.0"
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4
+return 0;
+",
+    );
+
+    let out = miku(&["doc"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        dir.join("build/doc/index.html").is_file(),
+        "docs should land under the build root"
+    );
+
+    let out = miku(&["clean"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(!dir.join("build").exists(), "build/ should be gone");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `miku clean --doc` sweeps only the documentation.
+#[test]
+fn clean_doc_keeps_other_build_output() {
+    let dir = scratch_dir("clean-doc-only");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "cleandoconly"
+version = "0.1.0"
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4
+return 0;
+",
+    );
+
+    let out = miku(&["doc"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    write(
+        &dir,
+        "build/keep.txt",
+        "artifact
+",
+    );
+
+    let out = miku(&["clean", "--doc"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(!dir.join("build/doc").exists(), "build/doc should be gone");
+    assert!(
+        dir.join("build/keep.txt").is_file(),
+        "other build output should survive --doc"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `[paths].build` moves the whole output root, docs included, and
+/// `miku clean` follows it.
+#[test]
+fn build_dir_is_configurable() {
+    let dir = scratch_dir("build-dir");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "outdir"
+version = "0.1.0"
+
+[paths]
+build = "out"
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4
+return 0;
+",
+    );
+
+    let out = miku(&["doc"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        dir.join("out/doc/index.html").is_file(),
+        "docs should follow [paths].build"
+    );
+    assert!(!dir.join("build").exists(), "nothing should use build/");
+
+    let out = miku(&["clean"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(!dir.join("out").exists(), "out/ should be gone");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `miku clean` deletes the build root wholesale, so a `paths.build`
+/// that escapes the project is a manifest error, not a surprise `rm`.
+#[test]
+fn escaping_build_dir_is_rejected() {
+    let dir = scratch_dir("build-dir-escape");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "escape"
+version = "0.1.0"
+
+[paths]
+build = "../elsewhere"
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4
+return 0;
+",
+    );
+
+    let out = miku(&["clean"], &dir);
+    assert_ne!(out.status, 0, "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("paths.build"),
+        "stderr should name the key: {}",
+        out.stderr
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -843,8 +998,12 @@ version = "0.1.0"
 
     let out = miku(&["doc"], &dir);
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert!(dir.join("target/doc/index.html").is_file(), "missing index");
-    let pages: Vec<_> = std::fs::read_dir(dir.join("target/doc"))
+    assert!(dir.join("build/doc/index.html").is_file(), "missing index");
+    assert!(
+        !dir.join("target").exists(),
+        "doc must not write outside the build root"
+    );
+    let pages: Vec<_> = std::fs::read_dir(dir.join("build/doc"))
         .unwrap()
         .filter_map(std::result::Result::ok)
         .map(|e| e.path())
@@ -894,6 +1053,143 @@ version = "0.1.0"
     );
     let after = std::fs::read_to_string(dir.join("src/main.leek")).unwrap();
     assert_eq!(after, original, "no-op migration should be byte-identical");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A scenario with two idle leeks: no AI files, ends in a draw at the turn
+/// limit. Enough to exercise the `miku fight` plumbing without compiling.
+const IDLE_DUEL: &str = r"seed = 1
+max_turns = 2
+
+[map]
+width = 10
+height = 10
+
+[[entities]]
+id = 1
+team = 0
+cell = 0
+
+[[entities]]
+id = 2
+team = 1
+cell = 99
+";
+
+#[test]
+fn fight_uses_manifest_fight_table() {
+    let dir = scratch_dir("fight_manifest");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name = "fights"
+version = "0.1.0"
+
+[fight]
+default_scenario = "duel.toml"
+scenarios_dir = "scenarios"
+reports_dir = "out/reports"
+jobs = 2
+"#,
+    );
+    write(&dir, "scenarios/duel.toml", IDLE_DUEL);
+
+    // No scenario argument: `[fight].default_scenario` resolved under
+    // `[fight].scenarios_dir`. Bare `--report`: `[fight].reports_dir`.
+    let out = miku(&["fight", "--report"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("draw"), "stdout: {}", out.stdout);
+
+    let report = dir.join("out/reports/single.json");
+    assert!(
+        report.is_file(),
+        "expected a report at {}; stderr: {}",
+        report.display(),
+        out.stderr
+    );
+    let json = std::fs::read_to_string(&report).unwrap();
+    assert!(json.contains("\"turns\""), "report body: {json}");
+
+    // An explicit path wins over `[fight].reports_dir`.
+    let out = miku(&["fight", "--report=elsewhere/run.json"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(dir.join("elsewhere/run.json").is_file());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Regression (#66): a tournament has no hero, so the run no longer claims
+/// one — the summary drops the win rate, the JSON leaves the hero totals null,
+/// and the exit status gates on the games having run rather than always
+/// passing.
+#[test]
+fn fight_tournament_reports_a_leaderboard_not_a_hero_verdict() {
+    let dir = scratch_dir("fight_tournament");
+    write(&dir, "duel.toml", IDLE_DUEL);
+    write(&dir, "a.leek", "return 0;\n");
+    write(&dir, "b.leek", "return 1;\n");
+
+    let args = |x: &'static str| {
+        vec![
+            "fight",
+            "duel.toml",
+            "--mode",
+            "tournament",
+            "--entrant",
+            x,
+            "--entrant",
+            "b.leek",
+            "--report=out.json",
+        ]
+    };
+    let out = miku(&args("a.leek"), &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        !out.stdout.contains("win rate") && !out.stdout.contains("losses"),
+        "no hero, no win/loss summary: {}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("leaderboard"), "stdout: {}", out.stdout);
+
+    let json = std::fs::read_to_string(dir.join("out.json")).unwrap();
+    for key in [
+        "\"scoring\": \"leaderboard\"",
+        "\"wins\": null",
+        "\"losses\": null",
+        "\"win_rate\": null",
+    ] {
+        assert!(json.contains(key), "expected {key} in {json}");
+    }
+
+    // A tournament whose games can't be run is a failed run, not a silent
+    // success.
+    let out = miku(&args("missing.leek"), &dir);
+    assert_eq!(out.status, 1, "stdout: {}", out.stdout);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fight_without_default_scenario_explains_itself() {
+    let dir = scratch_dir("fight_no_scenario");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name = "fights"
+version = "0.1.0"
+"#,
+    );
+
+    let out = miku(&["fight"], &dir);
+    assert_ne!(out.status, 0, "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("default_scenario"),
+        "stderr: {}",
+        out.stderr
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

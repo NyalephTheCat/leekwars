@@ -3,7 +3,7 @@
 //! Two modes — `Exact` mirrors the Java reference's emit shape
 //! (`u_x` mangling, per-statement `ai.ops(1)`, runtime-comparison
 //! switch lowering, etc.); `Clean` opts into the liberalizations
-//! documented in `doc/java-backend.md` §2.2.
+//! documented in `docs/java-backend.md` §2.2.
 
 use std::sync::Arc;
 

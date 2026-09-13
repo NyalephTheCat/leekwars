@@ -35,7 +35,7 @@ use leek_syntax::language::NodeOrToken;
 use leek_syntax::{SyntaxKind, SyntaxNode, Version};
 
 use super::boundary12;
-use super::util::behavior_change;
+use super::util::{behavior_change, record_edit, token_span};
 use crate::MigrationPass;
 
 pub struct V1ToV2;
@@ -64,7 +64,12 @@ impl MigrationPass for V1ToV2 {
             if tok.kind == SyntaxKind::BlockComment && &source[tok.span.range()] == "/*/" {
                 // v1's three-char comment; at v2 it would swallow
                 // the rest of the file.
-                let _ = edits.replace_span(tok.span, "/**/".to_string());
+                record_edit(
+                    edits.replace_span(tok.span, "/**/".to_string()),
+                    tok.span,
+                    "v1 `/*/` comment fix-up",
+                    diagnostics,
+                );
             }
         }
         boundary12::for_each_delim_escape(source, source_id, Version::V1, |span| {
@@ -72,7 +77,12 @@ impl MigrationPass for V1ToV2 {
             // content (the escape is not consumed). Spell that content
             // explicitly for v2: `\\` (escaped backslash) + `\"`
             // (escaped delimiter) — i.e. the lone `\` becomes `\\\`.
-            let _ = edits.replace_span(span, "\\\\\\".to_string());
+            record_edit(
+                edits.replace_span(span, "\\\\\\".to_string()),
+                span,
+                "v1 delimiter-escape rewrite",
+                diagnostics,
+            );
         });
 
         // ---- CST-level rewrites --------------------------------
@@ -87,7 +97,12 @@ impl MigrationPass for V1ToV2 {
                 continue;
             };
             if tok.kind() == SyntaxKind::CaretEq {
-                let _ = edits.replace_token(&tok, "**=".to_string());
+                record_edit(
+                    edits.replace_token(&tok, "**=".to_string()),
+                    token_span(&tok, source_id),
+                    "`^=` → `**=` rewrite",
+                    diagnostics,
+                );
             }
         }
 
@@ -98,7 +113,12 @@ impl MigrationPass for V1ToV2 {
         // Constant division by zero: fold to v1's result.
         boundary12::for_each_div_by_zero(&file, |bin, lhs_is_literal| {
             if lhs_is_literal {
-                let _ = edits.replace_node(bin.syntax(), "null".to_string());
+                record_edit(
+                    edits.replace_node(bin.syntax(), "null".to_string()),
+                    leek_syntax::node_span(bin.syntax(), source_id),
+                    "constant division-by-zero fold to `null`",
+                    diagnostics,
+                );
             } else {
                 diagnostics.push(behavior_change(
                     leek_syntax::node_span(bin.syntax(), source_id),

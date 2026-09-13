@@ -13,7 +13,8 @@
 //! users migrate before the function disappears.
 
 use leek_diagnostics::{Diagnostic, codes, diag};
-use leek_hir::{Callee, Expr, ExprKind, NameRef};
+use leek_hir::{Call, Callee, Expr, ExprKind, NameRef};
+use leek_span::Span;
 
 use crate::LintGroup;
 use crate::pass::{LintCx, LintMeta, LintPass};
@@ -37,7 +38,7 @@ impl LintPass for DeprecatedFeature {
             && let Callee::Function(NameRef::Builtin(name)) = &c.callee
             && let Some(replacement) = deprecated_replacement(name)
         {
-            cx.emit(diagnostic(name, replacement, e.span));
+            cx.emit(diagnostic(name, replacement, e.span, c));
         }
     }
 }
@@ -60,44 +61,105 @@ fn deprecated_replacement(name: &str) -> Option<&'static str> {
     }
 }
 
-fn diagnostic(name: &str, replacement: &str, span: leek_span::Span) -> Diagnostic {
-    use leek_diagnostics::{Applicability, Suggestion, TextEdit};
-    // We don't have the exact name-token span here — `span` is the
-    // whole call expression. That's still useful as an attachment
-    // point; the suggestion below targets the call's text range
-    // and replaces the name prefix.
-    diag!(
+fn diagnostic(name: &str, replacement: &str, span: Span, call: &Call) -> Diagnostic {
+    let d = diag!(
         codes::DEPRECATED_FEATURE,
         span,
         "`{name}` is deprecated; use `{replacement}` instead"
     )
     .with_note(format!(
         "`{name}` still works at this version but will be removed in a future release"
-    ))
-    .with_suggestion(Suggestion {
+    ));
+    match rename_fix(name, replacement, call) {
+        Some(fix) => d.with_suggestion(fix),
+        // A `subArray` call whose arity we don't recognise: renaming
+        // alone would silently drop the last element, and we can't
+        // tell which argument is the end index. Same call
+        // `leek-migrate`'s v3→v4 pass makes — flag it, fix nothing.
+        None if name == "subArray" => d.with_note(format!(
+            "no automatic fix here — `{replacement}`'s end index is exclusive, \
+             so this call needs rewriting by hand"
+        )),
+        // Only reachable when the callee span isn't the name token,
+        // i.e. the file has a parse error. Nothing safe to offer.
+        None => d,
+    }
+}
+
+/// The quick fix for one deprecated call, or `None` when no faithful
+/// edit exists.
+///
+/// The rename edit targets [`Call::callee_span`] — the name token
+/// alone. Using the call expression's span would replace the argument
+/// list too, turning `randFloat(0, 1)` into a bare `randReal`.
+fn rename_fix(name: &str, replacement: &str, call: &Call) -> Option<leek_diagnostics::Suggestion> {
+    use leek_diagnostics::{Applicability, Suggestion, TextEdit};
+
+    let callee = call.callee_span;
+    // Guard against a callee span that isn't the name token — a
+    // parse error makes `lower_call` fall back to the whole call.
+    // Replacing that range would delete the arguments.
+    if callee.start < call.span.start
+        || callee.end > call.span.end
+        || (callee.end - callee.start) as usize != name.len()
+    {
+        return None;
+    }
+    let mut edits = vec![TextEdit {
+        span: callee,
+        replacement: replacement.to_string(),
+    }];
+
+    // `subArray(a, i, j)`'s end index is inclusive; `arraySlice`'s is
+    // exclusive. Bump the third argument so the rename keeps the same
+    // elements — the rewrite `leek-migrate`'s v3→v4 pass performs.
+    let applicability = if name == "subArray" {
+        let [_, _, end] = call.args.as_slice() else {
+            return None;
+        };
+        let src = end.span.source;
+        edits.push(TextEdit {
+            span: Span::new(src, end.span.start, end.span.start),
+            replacement: "(".to_string(),
+        });
+        edits.push(TextEdit {
+            span: Span::new(src, end.span.end, end.span.end),
+            replacement: ") + 1".to_string(),
+        });
+        // Faithful, but it reshapes an argument the author wrote —
+        // worth a glance, and kept out of `source.fixAll`.
+        Applicability::MaybeIncorrect
+    } else {
+        Applicability::MachineApplicable
+    };
+
+    Some(Suggestion {
         message: format!("rename to `{replacement}`"),
-        edits: vec![TextEdit {
-            // Approximate: replace the leading `name(...)` text with
-            // `replacement(...)`. The text-edit layer scopes to the
-            // file the span belongs to, so this lands on the call's
-            // own line.
-            span,
-            replacement: replacement.to_string(),
-        }],
-        // The suggestion only swaps the function name; leaving the
-        // edit imprecise (we'd need a name-only sub-span) so mark
-        // as MaybeIncorrect rather than MachineApplicable.
-        applicability: Applicability::MaybeIncorrect,
+        edits,
+        applicability,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use leek_diagnostics::Applicability;
+    use leek_rewrite::EditSet;
+
     use super::*;
-    use crate::testing::lint_one;
+    use crate::testing::{assert_suggestions_fix, lint_one};
 
     fn run(src: &str) -> Vec<Diagnostic> {
         lint_one(DeprecatedFeature, src)
+    }
+
+    /// Apply the single suggestion on the single finding.
+    fn fix(src: &str) -> String {
+        let d = run(src);
+        assert_eq!(d.len(), 1, "expected one finding, got {d:?}");
+        let sug = d[0].suggestions.first().expect("a suggestion");
+        let mut edits = EditSet::new(src.len());
+        edits.push_suggestion(sug).expect("valid edits");
+        edits.apply(src).expect("edits apply to their own source")
     }
 
     #[test]
@@ -118,5 +180,77 @@ mod tests {
     fn ignores_modern_names() {
         let d = run("var x = randReal(0, 1)\nvar y = arraySlice([1, 2, 3], 0, 2)\n");
         assert!(d.is_empty(), "got {d:?}");
+    }
+
+    /// Regression: the rename used to target the whole call
+    /// expression, so applying it turned `randFloat(0, 1)` into a
+    /// bare `randReal` and the argument list was lost.
+    #[test]
+    fn rename_keeps_the_argument_list() {
+        assert_eq!(fix("var x = randFloat(0, 1)\n"), "var x = randReal(0, 1)\n");
+        assert_eq!(
+            fix("var m = [:]\nremoveKey(m, \"k\")\n"),
+            "var m = [:]\nmapRemove(m, \"k\")\n"
+        );
+    }
+
+    /// A method named like a deprecated builtin keeps its receiver:
+    /// the edit is the name token, never the call.
+    #[test]
+    fn rename_inside_a_bigger_expression() {
+        assert_eq!(
+            fix("var x = 1 + randFloat(0, 1) * 2\n"),
+            "var x = 1 + randReal(0, 1) * 2\n"
+        );
+    }
+
+    /// `subArray`'s end index is inclusive, `arraySlice`'s exclusive —
+    /// the fix compensates, like `leek-migrate`'s v3→v4 pass.
+    #[test]
+    fn subarray_fix_bumps_the_end_index() {
+        assert_eq!(
+            fix("var x = subArray([1, 2, 3], 0, 2)\n"),
+            "var x = arraySlice([1, 2, 3], 0, (2) + 1)\n"
+        );
+        assert_eq!(
+            fix("var a = [1]\nvar x = subArray(a, 0, count(a) - 1)\n"),
+            "var a = [1]\nvar x = arraySlice(a, 0, (count(a) - 1) + 1)\n"
+        );
+    }
+
+    /// The end-index bump reshapes an argument, so it stays out of
+    /// `source.fixAll`; a pure rename does not.
+    #[test]
+    fn applicability_matches_the_edit() {
+        let d = run("var x = randFloat(0, 1)\n");
+        assert_eq!(
+            d[0].suggestions[0].applicability,
+            Applicability::MachineApplicable
+        );
+        let d = run("var x = subArray([1, 2, 3], 0, 2)\n");
+        assert_eq!(
+            d[0].suggestions[0].applicability,
+            Applicability::MaybeIncorrect
+        );
+    }
+
+    /// A `subArray` call we can't rewrite faithfully gets no fix at
+    /// all rather than a rename that drops the last element.
+    #[test]
+    fn no_fix_for_unexpected_subarray_arity() {
+        let d = run("var x = subArray([1, 2, 3], 0)\n");
+        assert_eq!(d.len(), 1);
+        assert!(d[0].suggestions.is_empty(), "got {:?}", d[0].suggestions);
+        assert!(d[0].notes.iter().any(|n| n.contains("by hand")));
+    }
+
+    #[test]
+    fn suggestions_are_applicable() {
+        for src in [
+            "var x = randFloat(0, 1)\n",
+            "var x = subArray([1, 2, 3], 0, 2)\n",
+        ] {
+            assert_suggestions_fix(|| DeprecatedFeature, src);
+        }
     }
 }

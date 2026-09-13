@@ -205,6 +205,9 @@ fn build_entity(spec: &EntitySpec) -> Result<Entity> {
             e.inventory.push(w);
         }
     }
+    // Chips need no equip step, but the leek only gets to cast the ones its
+    // build lists: `useChip` refuses anything outside this set.
+    e = e.with_chips(spec.chips.iter().copied());
     // Stats without a builder — set the public fields directly.
     if let Some(agility) = spec.agility {
         e.agility = agility;

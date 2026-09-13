@@ -13,6 +13,18 @@
 //! adapter compiles it with [`leek_backend_native::NativeOptions::debug`]
 //! (no optimization, frame pointers kept, DWARF emitted) and runs it.
 //!
+//! Compilation goes through the same project front-end as `miku run`:
+//! `include("…")` is resolved off disk with matching `SourceId`s, and the
+//! language version / strict mode are settled from the launch config, then
+//! the file's `@version` / `@strict` pragmas, then `Miku.toml`'s
+//! `[project]` defaults. Breakpoints and stack frames therefore point at
+//! included files by their own paths and lines.
+//!
+//! The debuggee always runs on a worker thread — including a `noDebug`
+//! launch, which is the same run with the instrumentation off — so the
+//! request loop keeps answering `terminate`/`disconnect` while a long
+//! program (or a whole fight) is running.
+//!
 //! # Status: skeleton
 //!
 //! Working: the full DAP handshake, native execution, line breakpoints,

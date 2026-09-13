@@ -1,6 +1,7 @@
 package test;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -21,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import leekscript.compiler.JavaCompiler;
 import leekscript.compiler.LeekScript;
 import leekscript.compiler.Options;
 import leekscript.compiler.AnalyzeError.AnalyzeErrorLevel;
@@ -514,7 +516,11 @@ public class TestCommon {
 				}
 			} else {
 				var err = C_RED + "[FAIL] " + END_COLOR + "[v" + version + "]" + (strict ? "[strict]" : "") + " " + code + " =/= " + checker.getExpected() + " got " + checker.getResult(result) + "\n" +
-				"/home/pierre/dev/leek-wars/generator/leekscript/ai/AI_" + aiID + ".java";
+				// Upstream hard-codes a developer's own checkout here. Point at
+				// the file that was actually generated instead: the compiler
+				// writes it under `JavaCompiler.IA_PATH` relative to the JVM's
+				// working directory, which the scripts set to a scratch dir.
+				new File(JavaCompiler.IA_PATH, "AI_" + aiID + ".java").getAbsolutePath();
 				System.out.println(err);
 				failedTests.add(err);
 			}

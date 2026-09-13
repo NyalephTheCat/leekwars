@@ -75,4 +75,14 @@ mod tests {
         let d = run("function f() {\n  var x = 1\n  x += x\n}\n");
         assert!(d.is_empty(), "got {d:?}");
     }
+
+    /// The suggestion this rule emits must apply cleanly: the
+    /// rewritten source still parses and the finding is gone.
+    #[test]
+    fn suggestions_are_applicable() {
+        crate::testing::assert_suggestions_fix(
+            || SelfAssignment,
+            "function f() {\n  var x = 1\n  x = x\n}\n",
+        );
+    }
 }

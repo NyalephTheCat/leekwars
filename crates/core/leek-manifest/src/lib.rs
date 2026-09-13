@@ -27,6 +27,6 @@ pub use format::{
 };
 pub use parse::{ManifestError, ManifestWarning};
 pub use types::{
-    BackendKind, BackendSettings, BackendTable, JavaMode, LintTable, Manifest, PathsTable,
-    ProjectTable, TestTable,
+    BackendKind, BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest,
+    PathsTable, ProjectTable, TestTable,
 };

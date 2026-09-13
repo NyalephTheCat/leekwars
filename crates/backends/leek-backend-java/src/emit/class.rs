@@ -555,8 +555,8 @@ impl<'a> super::Emitter<'a> {
         let static_fields: Vec<&Field> = c.fields.iter().filter(|f| f.is_static).collect();
         // `createStaticClass_<C>`: declare each static field on the ClassLeekValue.
         self.writer.add_line(&format!(
-            "private void createStaticClass_{}() throws LeekRunException {{",
-            c.name
+            "private void {}() throws LeekRunException {{",
+            mangle::create_static_class(&c.name)
         ));
         self.writer.push_indent();
         for f in &static_fields {
@@ -570,8 +570,8 @@ impl<'a> super::Emitter<'a> {
         self.writer.add_line("}");
         // `initClass_<C>`: set each static field's value.
         self.writer.add_line(&format!(
-            "private void initClass_{}() throws LeekRunException {{",
-            c.name
+            "private void {}() throws LeekRunException {{",
+            mangle::init_class(&c.name)
         ));
         self.writer.push_indent();
         for f in &static_fields {

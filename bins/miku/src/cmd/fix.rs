@@ -107,9 +107,18 @@ fn collect_edits(diagnostics: &[Diagnostic], text: &str) -> FixedFile {
             }
         }
     }
-    FixedFile {
-        text: set.apply(text),
-        edits: count,
+    // Every edit came from a suggestion validated against `text`, so
+    // a failure here means a rule handed us offsets from other bytes:
+    // leave the file untouched rather than write mangled source.
+    match set.apply(text) {
+        Ok(fixed) => FixedFile {
+            text: fixed,
+            edits: count,
+        },
+        Err(_) => FixedFile {
+            text: text.to_string(),
+            edits: 0,
+        },
     }
 }
 

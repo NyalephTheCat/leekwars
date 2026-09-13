@@ -1,7 +1,7 @@
-//! The `debug_hooks` build emits a `leek_dbg_safepoint(offset, desc, values)`
-//! call before every statement; verify the installed hook fires with offsets
-//! that map to the right source lines, and that the frame's locals render to
-//! the expected values.
+//! The `debug_hooks` build emits a `leek_dbg_safepoint(pos, desc, values)`
+//! call before every statement; verify the installed hook fires with the
+//! statement's source id and an offset that maps to the right source line,
+//! and that the frame's locals render to the expected values.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,15 +19,21 @@ static SERIAL: Mutex<()> = Mutex::new(());
 struct Recorder {
     lt: LineTable,
     hits: Mutex<Vec<(u32, Vec<(String, String)>)>>,
+    /// Every distinct source id the safepoints reported.
+    sources: Mutex<Vec<u32>>,
 }
 
 impl DebugHook for Recorder {
-    fn safepoint(&self, offset: u32, desc: usize, values: usize) {
+    fn safepoint(&self, source: u32, offset: u32, desc: usize, values: usize) {
         let line = self.lt.line_col(offset).line;
         // Rendered on the debuggee thread while the frame is live — exactly
         // how the adapter captures locals at a stop.
         let vars = render_frame_vars(desc, values);
         self.hits.lock().unwrap().push((line, vars));
+        let mut sources = self.sources.lock().unwrap();
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
     }
 }
 
@@ -45,6 +51,7 @@ fn safepoints_fire_and_render_locals() {
     let rec = Arc::new(Recorder {
         lt: LineTable::new(src),
         hits: Mutex::new(Vec::new()),
+        sources: Mutex::new(Vec::new()),
     });
     leek_backend_native::set_debug_hook(Some(rec.clone()));
     let opts = NativeOptions::debug()
@@ -55,6 +62,10 @@ fn safepoints_fire_and_render_locals() {
 
     assert!(result.is_ok(), "native run failed: {result:?}");
     assert_eq!(result.unwrap().to_string(), "42");
+
+    // Every safepoint reports the source its statement came from, so a
+    // debugger can pick the right file's line table.
+    assert_eq!(*rec.sources.lock().unwrap(), vec![source.get()]);
 
     let hits = rec.hits.lock().unwrap();
     let lines: Vec<u32> = hits.iter().map(|(l, _)| *l).collect();
@@ -98,6 +109,7 @@ fn renders_reference_locals() {
     let rec = Arc::new(Recorder {
         lt: LineTable::new(src),
         hits: Mutex::new(Vec::new()),
+        sources: Mutex::new(Vec::new()),
     });
     leek_backend_native::set_debug_hook(Some(rec.clone()));
     let opts = NativeOptions::debug()
@@ -141,6 +153,7 @@ fn safepoint_on_bare_return_line() {
     let rec = Arc::new(Recorder {
         lt: LineTable::new(src),
         hits: Mutex::new(Vec::new()),
+        sources: Mutex::new(Vec::new()),
     });
     leek_backend_native::set_debug_hook(Some(rec.clone()));
     let opts = NativeOptions::debug()
@@ -167,7 +180,7 @@ struct StackRec {
 }
 
 impl DebugHook for StackRec {
-    fn safepoint(&self, offset: u32, _desc: usize, _values: usize) {
+    fn safepoint(&self, _source: u32, offset: u32, _desc: usize, _values: usize) {
         let line = self.lt.line_col(offset).line;
         let depth = self.depth.load(Ordering::SeqCst);
         self.samples.lock().unwrap().push((line, depth));

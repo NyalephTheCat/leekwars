@@ -82,6 +82,38 @@ fn strict_mode_rejects_unsupported_items() {
 }
 
 #[test]
+fn build_world_gives_each_leek_its_chips() {
+    // The build's `chips` are what the leek may cast: the loader must hand
+    // them to the entity, and only those (`useChip` refuses the rest).
+    use leek_game_runtime::GameHost;
+
+    let scn = Scenario::from_toml_str(
+        r"
+        [map]
+        width = 10
+        height = 10
+
+        [[entities]]
+        id = 1
+        cell = 0
+        chips = [18, 4]
+
+        [[entities]]
+        id = 2
+        cell = 99
+        ",
+    )
+    .expect("parse toml");
+    let world = leek_scenario::build_world(&scn).expect("build world");
+
+    assert_eq!(world.fight.chips(1), vec![18, 4]);
+    assert!(
+        world.fight.chips(2).is_empty(),
+        "a build without chips casts nothing"
+    );
+}
+
+#[test]
 fn json_nested_entities_flatten_with_team_from_index() {
     // The official generator's shape: `entities` is a list-of-teams and the
     // seed key is `random_seed`.

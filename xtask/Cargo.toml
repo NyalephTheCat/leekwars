@@ -10,6 +10,7 @@ description = "Repository automation (`cargo xtask <task>`), e.g. the crate laye
 [dependencies]
 serde      = { workspace = true }
 serde_json = { workspace = true }
+toml       = { workspace = true }
 
 [lints]
 workspace = true

@@ -61,7 +61,7 @@ use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, Version};
 
 use super::boundary12;
-use super::util::behavior_change;
+use super::util::{behavior_change, record_edit, token_span};
 use crate::MigrationPass;
 
 pub struct V2ToV1;
@@ -93,7 +93,12 @@ impl MigrationPass for V2ToV1 {
                     // v1 would read `/*/` as a complete comment and
                     // expose the rest of this comment as code.
                     let span = Span::new(source_id, tok.span.start, tok.span.start + 3);
-                    let _ = edits.replace_span(span, "/* /".to_string());
+                    record_edit(
+                        edits.replace_span(span, "/* /".to_string()),
+                        span,
+                        "v1 `/*/` comment fix-up",
+                        diagnostics,
+                    );
                 }
             }
         }
@@ -174,7 +179,12 @@ impl MigrationPass for V2ToV1 {
                 SyntaxKind::StarStarEq => {
                     // `**=` is 3 chars at byte offset op.start(),
                     // we replace with `^=`.
-                    let _ = edits.replace_token(&op, "^=".to_string());
+                    record_edit(
+                        edits.replace_token(&op, "^=".to_string()),
+                        token_span(&op, source_id),
+                        "`**=` → `^=` downgrade",
+                        diagnostics,
+                    );
                 }
                 SyntaxKind::CaretEq => {
                     // `^=` is xor-assign in v2; in v1 the SAME
@@ -195,7 +205,12 @@ impl MigrationPass for V2ToV1 {
 
                     // Replace the entire BinaryExpr text.
                     let new = format!("{lhs_text} = {lhs_text} ^ ({rhs_text})");
-                    let _ = edits.replace_node(bin.syntax(), new);
+                    record_edit(
+                        edits.replace_node(bin.syntax(), new),
+                        leek_syntax::node_span(bin.syntax(), source_id),
+                        "`^=` expansion to `x = x ^ (y)`",
+                        diagnostics,
+                    );
                 }
                 _ => {}
             }

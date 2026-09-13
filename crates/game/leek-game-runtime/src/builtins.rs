@@ -80,6 +80,7 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         "getWeapon" => opt_int(host.weapon(entity_arg(0))),
         "getWeapons" => int_array(host.weapons(entity_arg(0))),
         "setWeapon" => Value::Bool(host.set_weapon(current, int_arg(0))),
+        "getChips" => int_array(host.chips(entity_arg(0))),
         // getCooldown(item, [entity]).
         "getCooldown" => Value::Int(host.cooldown(entity_arg(1), int_arg(0))),
         "isAlive" => Value::Bool(host.life(entity_arg(0)).is_some_and(|l| l > 0)),
@@ -194,6 +195,7 @@ pub fn is_game_builtin(name: &str) -> bool {
             | "getWeapon"
             | "getWeapons"
             | "setWeapon"
+            | "getChips"
             | "getCooldown"
             | "isAlive"
             | "isDead"
@@ -339,8 +341,14 @@ fn use_weapon(host: &mut dyn GameHost, attacker: i64, target: i64) -> Value {
     use_effects(host, attacker, target, weapon, weapon.effects)
 }
 
-/// `useChip(chip, target)`: cast a chip from the catalog onto the target.
+/// `useChip(chip, target)`: cast one of the caster's own chips onto the
+/// target. A chip the caster doesn't own is refused before anything is spent,
+/// like upstream `ChipClass.useChip` (which returns `-1` for a chip the leek
+/// hasn't equipped).
 fn use_chip(host: &mut dyn GameHost, caster: i64, chip_item: i64, target: i64) -> Value {
+    if !host.chips(caster).contains(&chip_item) {
+        return Value::Int(USE_INVALID_TARGET); // chip not owned
+    }
     let Some(chip) = chips::lookup(chip_item) else {
         return Value::Int(USE_FAILED); // chip not modeled
     };

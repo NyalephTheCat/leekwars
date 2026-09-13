@@ -88,8 +88,8 @@ pub enum Command {
     Fix(Fix),
     /// Start the language server on stdio.
     Lsp,
-    /// Remove the build/ directory.
-    Clean,
+    /// Remove the project's build output directory.
+    Clean(Clean),
     /// Print shell completion script to stdout.
     Completions(Completions),
     /// Migrate .leek sources between language versions.
@@ -157,8 +157,17 @@ pub enum ProfileFormat {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct Clean {
+    /// Only remove the generated documentation (`<build>/doc/`),
+    /// keeping the rest of the build output.
+    #[arg(long)]
+    pub doc: bool,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct Doc {
-    /// Output directory. Defaults to `target/doc/`.
+    /// Output directory. Defaults to `<build>/doc/`, i.e. `build/doc/`
+    /// unless `[paths].build` says otherwise.
     #[arg(long, value_name = "PATH")]
     pub out_dir: Option<PathBuf>,
     /// Open the generated index page in the system browser
@@ -360,6 +369,18 @@ pub struct Fight {
     #[arg(long, value_enum, default_value_t = FightFormat::Human)]
     pub format: FightFormat,
 
+    /// Also write the run's JSON report to a file (`--report=<PATH>`). Bare
+    /// `--report` writes `<mode>.json` under the manifest's
+    /// `[fight].reports_dir` (default `build/fight-reports/`).
+    //
+    // The outer `Option` is "was `--report` passed", the inner one "was a path
+    // given" — clap's shape for an optional value, so `Option<Option<_>>` is
+    // the only way to spell it. `require_equals` keeps `--report` from eating
+    // the `<SCENARIO>` positional (and overwriting a scenario file with JSON).
+    #[allow(clippy::option_option)]
+    #[arg(long, value_name = "PATH", num_args = 0..=1, require_equals = true)]
+    pub report: Option<Option<PathBuf>>,
+
     /// Instead of running, generate a self-contained native executable that
     /// runs this fight and writes it to the given path. Requires `cargo` on
     /// PATH. Applies `--seed`/`--profile`/`--max-turns` to the baked-in fight.
@@ -384,7 +405,11 @@ pub struct Fight {
     /// Tournament format.
     #[arg(long, value_enum, default_value_t = BracketArg::RoundRobin)]
     pub bracket: BracketArg,
-    /// Seeds (games) played per pairing. Tournament mode.
+    /// Whether an entrant takes over its team's lead entity only (default) or
+    /// every member of the team. Tournament mode.
+    #[arg(long, value_enum)]
+    pub entrant_scope: Option<EntrantScopeArg>,
+    /// Seeds played per pairing; each is played from both sides. Tournament mode.
     #[arg(long, value_delimiter = ',')]
     pub games: Vec<u64>,
 
@@ -421,6 +446,12 @@ pub enum FightFormat {
 pub enum BracketArg {
     RoundRobin,
     SingleElim,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EntrantScopeArg {
+    Lead,
+    Team,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

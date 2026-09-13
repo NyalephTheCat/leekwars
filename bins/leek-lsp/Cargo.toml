@@ -13,5 +13,8 @@ path = "src/main.rs"
 [dependencies]
 leek-lsp = { workspace = true }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

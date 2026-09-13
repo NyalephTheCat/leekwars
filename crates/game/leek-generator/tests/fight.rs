@@ -32,9 +32,40 @@ fn run(fight: &FightRef, src: &str) -> String {
     run_ai(fight, &hir, 4, false).map_or_else(|e| format!("ERR: {e}"), |v| v.to_string())
 }
 
+/// Every chip cast below. `useChip` refuses a chip its caster doesn't own, so
+/// the bot is handed the whole set: these tests are about the effect formulas,
+/// not about ownership (`unowned_chip_is_refused` covers that rule).
+const CHIPS_UNDER_TEST: [i64; 20] = [
+    CHIP_SPARK,
+    CHIP_CURE,
+    CHIP_ARMOR,
+    CHIP_PROTEIN,
+    CHIP_VENOM,
+    CHIP_VACCINE,
+    CHIP_FRACTURE,
+    CHIP_SHURIKEN,
+    CHIP_ANTIDOTE,
+    CHIP_RESURRECTION,
+    CHIP_LEATHER_BOOTS,
+    CHIP_MOTIVATION,
+    CHIP_TRANQUILIZER,
+    CHIP_LIBERATION,
+    CHIP_PUNISHMENT,
+    CHIP_MUTATION,
+    CHIP_BRAMBLE,
+    CHIP_MANUMISSION,
+    CHIP_KILL,
+    CHIP_BOXING_GLOVE,
+];
+
 /// Bot (id 1) at cell 0 = (0,0); Foe (id 2) at cell 33 = (3,3) → distance 6.
+/// The bot owns [`CHIPS_UNDER_TEST`].
 fn arena(bot: Entity, foe: Entity) -> FightRef {
-    shared(Fight::new(10, 10, 1).with_entity(bot).with_entity(foe))
+    shared(
+        Fight::new(10, 10, 1)
+            .with_entity(bot.with_chips(CHIPS_UNDER_TEST))
+            .with_entity(foe),
+    )
 }
 
 #[test]
@@ -428,7 +459,11 @@ fn resurrect_a_dead_entity() {
     // Foe at cell 11 (distance 2 from Bot) — within resurrection's 1–2 range.
     let f = shared(
         Fight::new(10, 10, 1)
-            .with_entity(Entity::new(1, "Bot", 0, 0).with_points(5, 20)) // resurrection costs 15 TP
+            .with_entity(
+                Entity::new(1, "Bot", 0, 0)
+                    .with_points(5, 20) // resurrection costs 15 TP
+                    .with_chips(CHIPS_UNDER_TEST),
+            )
             .with_entity(Entity::new(2, "Foe", 11, 1)),
     );
     f.borrow_mut().deal_damage(2, 999); // kill the foe
@@ -468,7 +503,7 @@ fn life_damage_via_punishment() {
     // 75% to the caster itself (ON_CASTER). No jet, no stats → deterministic.
     let f = shared(
         Fight::new(10, 10, 1)
-            .with_entity(Entity::new(1, "Bot", 0, 0))
+            .with_entity(Entity::new(1, "Bot", 0, 0).with_chips(CHIPS_UNDER_TEST))
             .with_entity(Entity::new(2, "Foe", 1, 1)), // distance 1
     );
     assert_eq!(
@@ -558,6 +593,40 @@ fn steal_shield_via_j_laser() {
     assert_eq!(f.borrow().absolute_shield(1), 20, "caster stole the shield");
 }
 
+#[test]
+fn unowned_chip_is_refused() {
+    // A leek may only cast the chips its build gives it: `useChip` returns
+    // USE_INVALID_TARGET (-1) for anything else, before spending TP or
+    // touching the target — otherwise any AI could cast all 108 catalog chips.
+    let f = shared(
+        Fight::new(10, 10, 1)
+            .with_entity(Entity::new(1, "Bot", 0, 0).with_chips([CHIP_SPARK]))
+            .with_entity(Entity::new(2, "Foe", 33, 1)),
+    );
+    // kill (range 1–50, 1 TP) would set the foe's life to 0 if it were owned.
+    assert_eq!(run(&f, &format!("return useChip({CHIP_KILL}, 2)")), "-1");
+    assert_eq!(f.borrow().life(2), Some(100), "the foe is untouched");
+    assert_eq!(f.borrow().tp(1), Some(10), "no TP is spent");
+    assert_eq!(
+        f.borrow().cooldown(1, CHIP_KILL),
+        0,
+        "no cooldown is registered"
+    );
+    // The owned chip still works.
+    assert_eq!(run(&f, &format!("return useChip({CHIP_SPARK}, 2)")), "1");
+}
+
+#[test]
+fn get_chips_lists_the_owned_chips() {
+    let f = shared(
+        Fight::new(10, 10, 1)
+            .with_entity(Entity::new(1, "Bot", 0, 0).with_chips([CHIP_SPARK, CHIP_CURE]))
+            .with_entity(Entity::new(2, "Foe", 33, 1).with_chips([CHIP_ARMOR])),
+    );
+    assert_eq!(run(&f, "return getChips()"), "[18, 4]");
+    assert_eq!(run(&f, "return getChips(2)"), "[22]");
+}
+
 const CHIP_BOXING_GLOVE: i64 = 163; // sole effect: push (51), unmodeled
 
 #[test]
@@ -589,7 +658,7 @@ fn target_mask_blocks_buffing_enemies() {
     // casting it on an enemy in range spends the TP but buffs nobody.
     let f = shared(
         Fight::new(10, 10, 1)
-            .with_entity(Entity::new(1, "Bot", 0, 0))
+            .with_entity(Entity::new(1, "Bot", 0, 0).with_chips(CHIPS_UNDER_TEST))
             .with_entity(Entity::new(2, "Foe", 11, 1)), // distance 2 ≤ range 4
     );
     assert_eq!(run(&f, &format!("return useChip({CHIP_PROTEIN}, 2)")), "1");
@@ -741,8 +810,39 @@ fn looping_ai_loses_its_turn_not_the_fight() {
         errors,
         [1, 2, 3].map(|t| (t, 1, "TOO_MUCH_OPERATIONS")).to_vec()
     );
-    let log: Vec<String> = f.borrow().log().iter().map(|(_, m)| m.clone()).collect();
-    assert_eq!(log, ["bot1", "foe1", "bot2", "foe2", "bot3", "foe3"]);
+    // Who opens comes from the seed-drawn start order (#39); what this
+    // regression is about is that both entities act on every turn.
+    let mut log: Vec<String> = f.borrow().log().iter().map(|(_, m)| m.clone()).collect();
+    log.sort();
+    assert_eq!(log, ["bot1", "bot2", "bot3", "foe1", "foe2", "foe3"]);
+}
+
+/// Regression (#39): the turn loop played entities in ascending id order, so
+/// the lowest id — team 0's lead in the usual scenario layout — opened every
+/// fight on every seed. The order of play is drawn from the fight's seed now
+/// (`StartOrder.compute`), so both sides get to open.
+#[test]
+fn turn_order_is_drawn_from_the_seed_not_from_the_ids() {
+    let mut ais: HashMap<i64, HirFile> = HashMap::new();
+    ais.insert(1, compile("say(\"bot\")"));
+    ais.insert(2, compile("say(\"foe\")"));
+
+    let openers: Vec<String> = (1..=8u64)
+        .map(|seed| {
+            let f = shared(
+                Fight::new(10, 10, 1)
+                    .with_seed(seed)
+                    .with_entity(Entity::new(1, "Bot", 0, 0))
+                    .with_entity(Entity::new(2, "Foe", 33, 1)),
+            );
+            run_fight(&f, &ais, 1, 4, false, DEFAULT_MAX_OPS_PER_TURN);
+            let opener = f.borrow().log().first().map(|(_, m)| m.clone());
+            opener.unwrap_or_default()
+        })
+        .collect();
+
+    assert!(openers.iter().any(|o| o == "bot"), "{openers:?}");
+    assert!(openers.iter().any(|o| o == "foe"), "{openers:?}");
 }
 
 /// Regression (#67): an AI runtime error propagated out of the turn loop and

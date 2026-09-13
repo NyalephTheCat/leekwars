@@ -43,11 +43,11 @@ miku explain <CODE>  extended help for a diagnostic code
 miku migrate         rewrite sources between language versions (v1–v4)
 miku analyze         per-function complexity / big-O
 miku profile         run under the ops profiler
-miku doc             generate HTML API docs
+miku doc             generate HTML API docs into build/doc/
 miku lsp             start the language server on stdio
 miku fight           run / test / debug leek-wars fights
 miku completions     generate shell completions (bash, zsh, fish, …)
-miku clean           remove build artifacts
+miku clean           remove the build output root (--doc: docs only)
 ```
 
 Global flags include `--manifest-path` (point at a `Miku.toml` elsewhere;
@@ -55,6 +55,29 @@ otherwise `miku` walks up from the current directory), `--library leekwars`
 (load host function libraries), `--message-format {human|json|junit}`,
 `--color`, `--quiet`, and `--verbose` (e.g. `miku build --verbose` prints
 per-stage pipeline timings).
+
+## Output layout
+
+Everything `miku` generates goes under **one output root**: `build/` by
+default, overridable per project.
+
+```toml
+[paths]
+src   = "src"          # sources (default)
+tests = "tests"        # tests (default)
+build = "build"        # output root (default)
+```
+
+```text
+build/java/            backend artifacts (java, leekscript, native, …)
+build/doc/             miku doc pages (`--out-dir` overrides)
+build/fight-reports/   bare `miku fight --report` (see [fight].reports_dir)
+```
+
+`miku clean` removes that whole root, generated docs included;
+`miku clean --doc` removes only `<build>/doc/`. Since `miku clean` deletes
+the root wholesale, `paths.build` must be a relative path inside the project
+— `..`, `.` and absolute paths are manifest errors.
 
 ## Fights
 
@@ -69,7 +92,49 @@ miku fight duel.toml --mode tournament \
 miku fight duel.toml --mode random \
     --runs 50 --capital 800                # fuzz the AI against random builds
 miku fight duel.toml --emit ./duel-fight   # standalone native executable
+miku fight duel.toml --report              # also write the JSON report to a file
+miku fight duel.toml --report=run.json     # ... at a path of your choosing
 ```
+
+### The `[fight]` manifest table
+
+```toml
+[fight]
+default_scenario = "duel.toml"        # what a bare `miku fight` plays
+scenarios_dir    = "scenarios"        # where scenario arguments are looked up
+reports_dir      = "build/fight-reports"  # where a bare `--report` writes (default)
+jobs             = 4                  # sweep workers
+```
+
+All four keys are optional. A scenario argument is resolved as given first,
+then under `scenarios_dir`, then against the project root. A bare `--report`
+writes `<mode>.json` (`single.json`, `matrix.json`, …) under `reports_dir`;
+`--report=<PATH>` overrides it. `jobs` is parsed, validated (`>= 1`) and
+exposed on the manifest, but the matrix / tournament / random drivers still
+run sequentially — it takes effect when they learn to run in parallel.
+
+Turn order is drawn from the fight's seed, like the official generator's
+`StartOrder` — not from the entity ids — so no side opens by construction. In
+a tournament every `--games` seed is played twice, the entrants swapping team
+slots between the legs, so neither entrant keeps whatever edge a slot carries;
+a single-elimination match that ends level is scored as a draw for both
+entrants, and which of them advances is a coin drawn from the pairing rather
+than the bracket position.
+
+An entrant takes over the **lead (first-listed) entity** of a team; the rest of
+the team keeps the AI the scenario gave it. `--entrant-scope team` (or
+`entrant_scope = "team"` in the scenario's `[testing]` table) hands the whole
+team to the entrant instead.
+
+A tournament has no hero team, so it reports no win/loss totals: each game says
+which entrant won it (`"scoring": "leaderboard"` and a per-cell
+`winner_entrant` in the JSON, `wins`/`losses`/`draws`/`win_rate` null), and the
+leaderboard is the result. The run's exit status is still a gate: non-zero when
+a game couldn't be run at all — a matrix or random run also fails when the hero
+lost a fight.
+
+Fights work outside a project too: with no `Miku.toml` in scope the defaults
+apply, so `--report` writes under `build/fight-reports/`.
 
 A complete, runnable example — AIs, reusable leek builds, composable
 scenarios, and debugger launch configs — lives in

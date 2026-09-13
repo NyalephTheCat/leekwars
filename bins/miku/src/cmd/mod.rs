@@ -59,7 +59,7 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
             environment.as_ref(),
         ),
         Command::Run(args) => run::run(&args, manifest_path.as_deref(), color, format, quiet),
-        Command::Fight(args) => fight::run(&args, quiet),
+        Command::Fight(args) => fight::run(&args, manifest_path.as_deref(), quiet),
         Command::Check => check::run(manifest_path.as_deref(), color, format, quiet),
         Command::Test(args) => test::run(&args, manifest_path.as_deref(), color, format, quiet),
         Command::Fmt(args) => fmt::run(&args, manifest_path.as_deref(), quiet),
@@ -67,7 +67,7 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Explain(args) => Ok(explain::run(&args)),
         Command::Fix(args) => fix::run(&args, manifest_path.as_deref(), quiet),
         Command::Lsp => Ok(lsp::run()),
-        Command::Clean => clean::run(manifest_path.as_deref(), quiet).map(to_exit),
+        Command::Clean(args) => clean::run(&args, manifest_path.as_deref(), quiet).map(to_exit),
         Command::Completions(args) => {
             completions::run(&args);
             Ok(ExitCode::SUCCESS)

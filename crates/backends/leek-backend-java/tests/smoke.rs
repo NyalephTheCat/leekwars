@@ -474,3 +474,37 @@ fn clean_switch_with_out_of_range_or_duplicate_labels_uses_eq_chain() {
         assert!(java.contains("if (eq(__sw_0, "), "{src}: {java}");
     }
 }
+
+#[test]
+fn synthesized_identifiers_escape_non_ascii_names() {
+    // #94: `g_init_<x>`, `createStaticClass_<C>` and `initClass_<C>` were built
+    // from the raw source name instead of the mangled one, so a non-ASCII
+    // global or class name emitted an identifier javac rejects.
+    let java = java_for(
+        "class Ét\u{00e9} { static integer j\u{00f4}ur = 1 }\nglobal caf\u{00e9} = 2\nreturn caf\u{00e9}\n",
+        &Options::exact(Version::V4, 1),
+    );
+    // The only non-ASCII left is inside string literals — the runtime keeps
+    // the source spelling there (`addStaticField(this, "j\u{00f4}ur", …)`).
+    for line in java.lines().filter(|l| !l.contains('"')) {
+        assert!(line.is_ascii(), "non-ASCII identifier: {line}");
+    }
+    assert!(
+        java.contains("private boolean g_init_caf_u00E9 = false;"),
+        "{java}"
+    );
+    assert!(java.contains("g_init_caf_u00E9 = true;"), "{java}");
+    assert!(
+        java.contains("createStaticClass__u00C9t_u00E9();"),
+        "{java}"
+    );
+    assert!(
+        java.contains("private void createStaticClass__u00C9t_u00E9()"),
+        "{java}"
+    );
+    assert!(java.contains("initClass__u00C9t_u00E9();"), "{java}");
+    assert!(
+        java.contains("private void initClass__u00C9t_u00E9()"),
+        "{java}"
+    );
+}

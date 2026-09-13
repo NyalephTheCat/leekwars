@@ -6,6 +6,7 @@ Project documentation for the Rust LeekScript toolchain.
 |----------|----------------|
 | [`architecture.md`](architecture.md) | Crate layers, the compilation pipeline, the fight simulator, and how the pieces fit together. Start here to find your way around the codebase. |
 | [`grammar.md`](grammar.md) | The formal LeekScript grammar (ECMA-262-inspired notation). |
+| [`java-backend.md`](java-backend.md) | The Java backend spec: emission modes, output shape, identifier mangling, the op-cost model, v1 boxing, the parity harness, and the known byte-parity gaps. |
 
 See also:
 

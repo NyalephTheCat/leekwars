@@ -1092,13 +1092,15 @@ type DbgFrame = Option<(
     Vec<(usize, u8)>,
 )>;
 
-/// Emit a `leek_dbg_safepoint(offset, desc, values)` call, spilling the
-/// frame's named locals into the value slot first. Used before each
-/// statement and before each `return` terminator.
+/// Emit a `leek_dbg_safepoint(pos, desc, values)` call, spilling the frame's
+/// named locals into the value slot first. Used before each statement and
+/// before each `return` terminator. `span` carries the source the statement
+/// came from, so a debugger can map the offset in the right file's line table
+/// even when the program was spliced from includes.
 fn emit_dbg_safepoint(
     tx: &mut Tx<'_, '_>,
     frame: &DbgFrame,
-    offset: u32,
+    span: leek_span::Span,
 ) -> Result<(), NativeError> {
     let (desc_v, values_v) = if let Some((table_ptr, slot, slots)) = frame {
         let dv = tx.b.ins().iconst(types::I64, *table_ptr);
@@ -1127,8 +1129,11 @@ fn emit_dbg_safepoint(
         (zero, zero)
     };
     let sp = tx.imports.rt("leek_dbg_safepoint")?;
-    let off = tx.b.ins().iconst(types::I64, i64::from(offset));
-    tx.b.ins().call(sp, &[off, desc_v, values_v]);
+    let pos = tx.b.ins().iconst(
+        types::I64,
+        crate::debug::pack_position(span.source, span.start),
+    );
+    tx.b.ins().call(sp, &[pos, desc_v, values_v]);
     Ok(())
 }
 
@@ -1529,7 +1534,7 @@ pub fn translate_function(
             // frame slot, then call out with (offset, descriptor, values) so
             // a debugger can pause and inspect them.
             if debug_hooks && let Some(span) = b.statement_spans.get(i) {
-                emit_dbg_safepoint(&mut tx, &dbg_frame, span.start)?;
+                emit_dbg_safepoint(&mut tx, &dbg_frame, *span)?;
             }
             tx.stmt(stmt)?;
         }
@@ -1544,7 +1549,7 @@ pub fn translate_function(
             && !default_fill.contains_key(&b.id)
         {
             if b.terminator_span.source != leek_span::Span::SYNTHETIC_SOURCE {
-                emit_dbg_safepoint(&mut tx, &dbg_frame, b.terminator_span.start)?;
+                emit_dbg_safepoint(&mut tx, &dbg_frame, b.terminator_span)?;
             }
             let leave = tx.imports.rt("leek_dbg_leave")?;
             tx.b.ins().call(leave, &[]);

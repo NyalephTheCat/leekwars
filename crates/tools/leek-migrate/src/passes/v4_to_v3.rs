@@ -29,14 +29,14 @@ use std::collections::HashSet;
 use leek_diagnostics::{Diagnostic, codes};
 use leek_parser::ast::{AstNode, CallExpr, Expr, SourceFile};
 use leek_parser::parse;
-use leek_rewrite::EditSet;
+use leek_rewrite::{Edit, EditSet};
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, Version};
 
 use super::boundary34;
 use super::util::{
-    ident_of_name_ref_expr, is_field_name_position, is_null_literal, name_ref_ident,
-    token_range as range,
+    ident_of_name_ref_expr, is_field_name_position, is_null_literal, name_ref_ident, record_edit,
+    token_range as range, token_span,
 };
 use crate::MigrationPass;
 
@@ -110,13 +110,23 @@ impl MigrationPass for V4ToV3 {
                     3 => {
                         // The canonical case — rename and bump the
                         // end index DOWN by one to land back on
-                        // inclusive semantics.
-                        if edits.replace_token(&ident, "subArray".to_string()).is_ok() {
-                            consumed.insert(range(&ident));
-                        }
+                        // inclusive semantics. One without the other
+                        // is an off-by-one that still compiles, so
+                        // the pair goes in atomically.
                         let end = &args[2];
                         let end_text = end.syntax().text().to_string();
-                        let _ = edits.replace_node(end.syntax(), format!("({end_text}) - 1"));
+                        let applied = record_edit(
+                            edits.try_push_all([
+                                Edit::for_token(&ident, "subArray".to_string()),
+                                Edit::for_node(end.syntax(), format!("({end_text}) - 1")),
+                            ]),
+                            leek_syntax::node_span(call.syntax(), source_id),
+                            "`arraySlice` → `subArray` downgrade",
+                            diagnostics,
+                        );
+                        if applied {
+                            consumed.insert(range(&ident));
+                        }
                     }
                     1 | 2 | 4 => {
                         diagnostics.push(deprecated_diag(
@@ -133,7 +143,12 @@ impl MigrationPass for V4ToV3 {
                     }
                 }
             } else if let Some((_, new_name)) = RENAMES.iter().find(|(old, _)| *old == name)
-                && edits.replace_token(&ident, (*new_name).to_string()).is_ok()
+                && record_edit(
+                    edits.replace_token(&ident, (*new_name).to_string()),
+                    token_span(&ident, source_id),
+                    &format!("`{name}` → `{new_name}` rename"),
+                    diagnostics,
+                )
             {
                 consumed.insert(range(&ident));
             }
@@ -169,7 +184,12 @@ impl MigrationPass for V4ToV3 {
                 continue;
             }
             if let Some((_, new)) = RENAMES.iter().find(|(old, _)| *old == name) {
-                let _ = edits.replace_token(&ident, (*new).to_string());
+                record_edit(
+                    edits.replace_token(&ident, (*new).to_string()),
+                    Span::new(source_id, r.0, r.1),
+                    &format!("`{name}` → `{new}` rename"),
+                    diagnostics,
+                );
             }
         }
 
@@ -178,7 +198,7 @@ impl MigrationPass for V4ToV3 {
         // non-bool `==` is plain false, exactly like v3's `===`, so
         // bool-literal comparisons strictify faithfully; the
         // callback-parameter swap is its own inverse.
-        boundary34::strictify_juggling_equality(&file, edits);
+        boundary34::strictify_juggling_equality(&file, source_id, edits, diagnostics);
         boundary34::swap_callback_params(&file, source_id, edits, diagnostics);
         boundary34::flag_container_drift(&file, source_id, diagnostics);
     }

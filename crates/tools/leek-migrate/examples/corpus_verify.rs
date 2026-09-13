@@ -17,6 +17,10 @@
 //! Mismatches WITH a diagnostic are at least flagged for manual
 //! review; they're tallied separately.
 //!
+//! A `MigrationSkipped` (W0513) warning fails the run on its own: a
+//! rewrite the migration knew how to make but could not apply is a
+//! bug in the passes, whatever value the migrated case produced.
+//!
 //! Usage (always build with --release; the corpus is 10k+ cases):
 //!   cargo run --release -p leek-migrate --example corpus_verify
 //!     [--adjacent]        only migrate to v±1, not all other versions
@@ -28,7 +32,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use leek_diagnostics::Severity;
+use leek_diagnostics::{Severity, codes};
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_migrate::migrate_text;
@@ -148,6 +152,11 @@ struct DirStats {
     /// Migrated program trapped or panicked at runtime.
     silent_crash: u64,
     flagged_crash: u64,
+    /// A rewrite the migration wanted to make was rejected by the
+    /// edit set (`MigrationSkipped`, W0513). The result may still run
+    /// correctly, but a pass that couldn't finish its rewrite is a
+    /// migration bug regardless of the value it happened to produce.
+    rejected_edit: u64,
     /// Baseline unavailable (native unsupported / compile error /
     /// runtime error on the ORIGINAL) — outside migration's control.
     baseline_skip: u64,
@@ -266,6 +275,23 @@ fn verify_case(case: &TestCase, opts: &Options, stats: &mut BTreeMap<String, Dir
             continue;
         };
         let flagged = !migrated.diagnostics.is_empty();
+        let rejected: Vec<&str> = migrated
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == codes::MIGRATION_SKIPPED)
+            .map(|d| d.message.as_str())
+            .collect();
+        if !rejected.is_empty() {
+            entry.rejected_edit += 1;
+            if entry.failures.len() < opts.max_failures {
+                entry.failures.push(format!(
+                    "{}: rewrite rejected by the edit set: {}\n  code: {}",
+                    case.id,
+                    rejected.join("; "),
+                    snippet(&case.code),
+                ));
+            }
+        }
 
         match run_at(&migrated.text, to, case.strict) {
             Run::Value(after) => {
@@ -381,9 +407,12 @@ fn main() {
                 + s.silent_crash
                 + s.flagged_crash;
             let silent_bad = s.silent_mismatch + s.silent_break + s.silent_crash;
-            bad_total += silent_bad;
+            // A rejected edit is a bug even when the case still runs:
+            // the pass gave up half-way through a rewrite it knew how
+            // to make.
+            bad_total += silent_bad + s.rejected_edit;
             println!(
-                "{dir}: compared={compared} equal={} | SILENT bad: mismatch={} break={} crash={} | flagged: mismatch={} break={} crash={} | baseline-skip={}",
+                "{dir}: compared={compared} equal={} | SILENT bad: mismatch={} break={} crash={} | flagged: mismatch={} break={} crash={} | rejected-edit={} | baseline-skip={}",
                 s.equal,
                 s.silent_mismatch,
                 s.silent_break,
@@ -391,6 +420,7 @@ fn main() {
                 s.flagged_mismatch,
                 s.flagged_break,
                 s.flagged_crash,
+                s.rejected_edit,
                 s.baseline_skip,
             );
         }
@@ -403,7 +433,7 @@ fn main() {
                 println!("{f}");
             }
         }
-        println!("\ntotal silent semantic breaks: {bad_total}");
+        println!("\ntotal silent semantic breaks and rejected edits: {bad_total}");
         if bad_total > 0 {
             std::process::exit(1);
         }

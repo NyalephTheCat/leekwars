@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use leek_manifest::PathsTable;
 
 use crate::cli::{Init, New};
 
@@ -68,7 +69,8 @@ fn write_skeleton(dir: &Path, project_name: &str, _quiet: bool) -> Result<()> {
 
     let gitignore_path = dir.join(".gitignore");
     if !gitignore_path.exists() {
-        std::fs::write(&gitignore_path, "/build/\n/target/\n")
+        let ignore = format!("/{}/\n", PathsTable::default().build.display());
+        std::fs::write(&gitignore_path, ignore)
             .with_context(|| format!("writing {}", gitignore_path.display()))?;
     }
     Ok(())

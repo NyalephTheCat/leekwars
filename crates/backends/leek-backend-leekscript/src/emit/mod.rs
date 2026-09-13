@@ -86,9 +86,6 @@ impl Emitter<'_> {
         }
 
         for stmt in &self.hir.main {
-            if !first {
-                first = false;
-            }
             self.emit_stmt(stmt);
         }
         self.comments.flush_rest(&mut self.w);

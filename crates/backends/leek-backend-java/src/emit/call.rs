@@ -1,7 +1,6 @@
 use leek_hir::{Call, Callee, Def, Expr, ExprKind, Literal, NameRef};
 use leek_types::Type;
 
-use super::EmitExpr;
 use super::{
     builtin_arity, builtin_arity_strict, is_primitive_number_expr, is_string_expr,
     needs_v1_3_suffix, receiver_collection_arg_cast, sanitize_ident, takes_function_arg,
@@ -465,6 +464,7 @@ impl super::Emitter<'_> {
                         let builtin_call = Call {
                             callee: Callee::Function(NameRef::Builtin(name.clone())),
                             args: c.args.clone(),
+                            callee_span: c.callee_span,
                             span: c.span,
                         };
                         self.write_call(buf, &builtin_call);

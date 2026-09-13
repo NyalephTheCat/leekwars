@@ -120,4 +120,16 @@ mod tests {
         let d = run("var x = rand() && rand()\n");
         assert!(d.is_empty(), "got {d:?}");
     }
+
+    /// Every suggestion this rule emits must apply cleanly: the
+    /// rewritten source still parses and the finding is gone.
+    #[test]
+    fn suggestions_are_applicable() {
+        for src in [
+            "function f(x) {\n  return x | x\n}\n",
+            "function f(x) {\n  return x & x\n}\n",
+        ] {
+            crate::testing::assert_suggestions_fix(|| IdenticalOperands, src);
+        }
+    }
 }

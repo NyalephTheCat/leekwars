@@ -63,8 +63,11 @@ mkdir -p "$RUNNER_OUT"
 JUNIT_CP="$JUNIT_API:$JUNIT_ENGINE:$JUNIT_PLAT_COMM:$JUNIT_PLAT_ENG:$JUNIT_LAUNCHER:$OPENTEST:$APIGUARDIAN"
 javac -d "$RUNNER_OUT" -cp "$JUNIT_CP" --release 25 "$TOOL/RunOpsCostTest.java"
 
-# Run from the repo root so the TSV-resolution in `TestOpsCostCorpus`
-# finds `crates/backends/leek-backend-java/tests/fixtures/ops/cases.tsv`.
-cd "$ROOT"
+# Run from a scratch directory (see `jvm_workdir`) so the upstream
+# compiler's `ai/` output tree does not land in the repo root. That puts
+# the corpus TSV out of reach of `TestOpsCostCorpus`'s relative probing,
+# so hand it the absolute path.
+export LEEK_OPS_CORPUS="$ROOT/crates/backends/leek-backend-java/tests/fixtures/ops/cases.tsv"
+cd "$(jvm_workdir "$TOOL")"
 RUN_CP="$RUNNER_OUT:$TEST_CLASSES:$MAIN_CLASSES:$JACKSON_DB:$JACKSON_CORE:$JACKSON_ANN:$JUNIT_CP"
 exec java -cp "$RUN_CP" RunOpsCostTest

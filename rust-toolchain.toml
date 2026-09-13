@@ -1,3 +1,10 @@
+# Pinned to an exact release on purpose: clippy runs at `pedantic` with
+# `-D warnings`, so a floating `stable` lets a new Rust release turn CI red
+# with no commit in this repo. Bump it in its own PR, keep
+# `[workspace.package] rust-version` in Cargo.toml on the same MAJOR.MINOR
+# (that pairing makes the ordinary build the MSRV check), and see
+# CONTRIBUTING.md § "Bumping the Rust toolchain". `cargo xtask
+# check-toolchain` enforces both.
 [toolchain]
-channel    = "stable"
+channel    = "1.94.1"
 components = ["rustfmt", "clippy"]

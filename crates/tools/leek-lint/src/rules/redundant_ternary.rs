@@ -124,4 +124,14 @@ mod tests {
         assert_eq!(d.len(), 1, "got {d:?}");
         assert!(d[0].suggestions.is_empty(), "side-effecting cond: {d:?}");
     }
+
+    /// The suggestion this rule emits must apply cleanly: the
+    /// rewritten source still parses and the finding is gone.
+    #[test]
+    fn suggestions_are_applicable() {
+        crate::testing::assert_suggestions_fix(
+            || RedundantTernary,
+            "function f(c) {\n  return c ? 1 : 1\n}\n",
+        );
+    }
 }

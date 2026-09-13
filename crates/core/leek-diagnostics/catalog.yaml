@@ -73,11 +73,13 @@ rewrite:
   - { id: E0500, name: EditOverlap, severity: error }
   - { id: E0501, name: EditOutOfBounds, severity: error }
   - { id: E0502, name: EditInvalidRange, severity: error }
+  - { id: E0503, name: EditNotCharBoundary, severity: error }
   # Migration (leek-migrate): warnings about version-to-version
   # rewrites that need manual review.
   - { id: W0510, name: MigrationCompileBreak, severity: warning }
   - { id: W0511, name: MigrationBehaviorChange, severity: warning }
   - { id: W0512, name: MigrationUnsupported, severity: warning }
+  - { id: W0513, name: MigrationSkipped, severity: warning }
 
 lint:
   - { id: L0001, name: UnusedVariable, severity: warning }

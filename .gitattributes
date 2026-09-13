@@ -1,0 +1,5 @@
+# Machine-written corpus data: refreshed wholesale by
+# `cargo run -p leek-test-corpus -- extract-reference` / `run --save-baseline`,
+# never hand-edited. Marking it generated keeps a refresh from burying a review
+# under megabytes of diff.
+crates/testing/leek-test-corpus/data/reference.tsv linguist-generated=true

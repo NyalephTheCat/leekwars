@@ -7,11 +7,17 @@ adapter logic lives there.
 It speaks the Debug Adapter Protocol over **stdin/stdout**. The debuggee is
 the **native (Cranelift) backend**: on launch the adapter compiles the
 program in debug mode (no optimization, per-statement safepoints, DWARF) and
-runs it in-process. Supported today: line breakpoints, `stopOnEntry`,
-step in/over/out, multi-frame stack traces, and per-frame local-variable
-inspection. Known gap: a breakpoint on a line that lowers to only a
-terminator (a bare `return x`) won't fire, since safepoints are
-per-statement.
+runs it in-process, on a worker thread — so the adapter keeps answering
+requests (including `terminate` / `disconnect`) for the whole run. Supported
+today: line breakpoints, `stopOnEntry`, step in/over/out, multi-frame stack
+traces, and per-frame local-variable inspection. Known gap: a breakpoint on a
+line that lowers to only a terminator (a bare `return x`) won't fire, since
+safepoints are per-statement.
+
+The program is compiled through the same project front-end as `miku run`:
+`include("…")` resolves off disk, so a program split across files debugs the
+way it runs, and breakpoints and stack frames in an included file point at
+that file's own path and lines.
 
 ## Build & install
 
@@ -40,8 +46,14 @@ An editor launches it as a stdio subprocess. With the
 }
 ```
 
-Launch options: `version` (language version 1–4, defaults to the file's
-pragma), `strict`, and `noDebug` (run natively without breakpoints).
+Launch options: `version` (language version 1–4), `strict`, and `noDebug`
+(the same run with breakpoints and stepping off — still off the request
+loop, so it can be terminated from the editor).
+
+With no `version` set, the language version and strict mode are settled the
+way `miku` settles them: the file's `// @version:N` / `// @strict` pragmas
+first, then the nearest `Miku.toml`'s `[project].language` / `strict`, then
+the latest version.
 
 ## Debugging an AI inside a fight
 

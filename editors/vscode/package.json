@@ -47,7 +47,7 @@
               },
               "version": {
                 "type": "number",
-                "description": "Leekscript language version (1-4). Defaults to the file's pragma / latest.",
+                "description": "Leekscript language version (1-4). Defaults to the file's @version pragma, then Miku.toml's [project].language, then the latest version.",
                 "enum": [
                   1,
                   2,
@@ -57,12 +57,12 @@
               },
               "strict": {
                 "type": "boolean",
-                "description": "Compile in strict mode.",
+                "description": "Compile in strict mode. Also enabled by the file's @strict pragma or Miku.toml's [project].strict.",
                 "default": false
               },
               "noDebug": {
                 "type": "boolean",
-                "description": "Run without debugging (native, no breakpoints).",
+                "description": "Run without debugging (native, no breakpoints). The run still happens off the request loop, so it can be terminated from the editor.",
                 "default": false
               },
               "scenario": {

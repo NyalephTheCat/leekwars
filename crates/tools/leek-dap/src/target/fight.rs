@@ -17,7 +17,14 @@ use super::{LaunchConfig, RunOutcome};
 /// Build the fight from `config.scenario`, swap `program` in for the debugged
 /// entity, and run to a conclusion. Returns the fight outcome (or the first
 /// failure) as a [`RunOutcome`].
-pub(crate) fn run_fight_debug(config: &LaunchConfig, program: &Compiled) -> RunOutcome {
+///
+/// `debug_hooks` is off for a `noDebug` launch: the same fight runs, without
+/// the per-statement safepoints that let breakpoints fire.
+pub(crate) fn run_fight_debug(
+    config: &LaunchConfig,
+    program: &Compiled,
+    debug_hooks: bool,
+) -> RunOutcome {
     let Some(scenario_path) = config.scenario.as_ref() else {
         return RunOutcome::failed("fight debug target requires a `scenario`");
     };
@@ -66,7 +73,7 @@ pub(crate) fn run_fight_debug(config: &LaunchConfig, program: &Compiled) -> RunO
     let debug_opts = NativeOptions::debug()
         .with_lang(program.version, program.strict)
         .with_link_game(true)
-        .with_debug_hooks(true)
+        .with_debug_hooks(debug_hooks)
         .with_op_limit(leek_generator::fight_op_limit(lf.max_ops_per_turn));
     let other_opts = leek_generator::fight_options(lf.version, lf.strict, lf.max_ops_per_turn);
 

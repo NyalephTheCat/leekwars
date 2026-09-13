@@ -10,7 +10,8 @@ Run everything from this directory.
 ## Layout
 
 ```
-Miku.toml            project manifest (makes `miku check`/`fmt` work on ais/)
+Miku.toml            project manifest (makes `miku check`/`fmt` work on ais/,
+                     and holds the [fight] defaults)
 base-arena.toml      a bare arena (map + seed) meant to be inherited
 duel.toml            the main scenario: extends base-arena, pulls leek builds
                      from files, has a profile + a [testing] block
@@ -50,6 +51,10 @@ A leek starts a fight **unequipped**: the `weapons` in its build are owned
 `useWeapon(...)`. The example AIs equip their primary weapon with
 `setWeapon(getWeapons()[0])`, then fire while `useWeapon` returns `> 0` (a hit).
 
+Chips need no equip step, but a leek can only cast the `chips` its build lists
+(`getChips()` returns them). `useChip` on any other chip returns
+`USE_INVALID_TARGET` (`-1`) without spending TP.
+
 
 ## Running
 
@@ -60,6 +65,7 @@ flag is needed for fights. (For `miku check`/`fmt` on the AIs you do need it:
 ### One fight
 
 ```sh
+miku fight                       # the manifest's [fight].default_scenario
 miku fight duel.toml
 miku fight duel.toml --seed 5 --profile aggressive
 miku fight skirmish.toml --format json
@@ -85,6 +91,15 @@ miku fight duel.toml --mode tournament \
     --bracket round-robin --games 1,2
 ```
 
+Each entrant takes over the lead entity of a team; `--entrant-scope team` gives
+it every member of the team instead. A single-elimination match that ends level
+counts as a draw for both entrants — one still advances, on a coin drawn from
+the pairing.
+
+There is no hero in a tournament: every game names the entrant that won it and
+the leaderboard is the result, so the report carries no win/loss totals and no
+win rate. The run fails (non-zero exit) only when a game couldn't be run.
+
 ### Randomized point-buy builds
 
 ```sh
@@ -94,6 +109,16 @@ miku fight duel.toml --mode random --runs 50 --capital 800 \
 ```
 
 The report flags any build that beat your hero.
+
+### Keeping the report
+
+```sh
+miku fight duel.toml --mode matrix --report        # -> build/fight-reports/matrix.json
+miku fight duel.toml --mode matrix --report=m.json # ... or wherever you want it
+```
+
+`--report` writes the same JSON `--format json` prints. With no path it lands
+in this project's `[fight].reports_dir` (`build/fight-reports/`).
 
 ### Generate a standalone executable
 

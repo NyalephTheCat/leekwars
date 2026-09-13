@@ -114,7 +114,9 @@ The `game/` crates implement the LeekWars game offline:
   upstream generator's JSON by [`tools/game-item-extract.sh`](../tools/game-item-extract.sh);
   CI runs it with `--check` to guard against drift, so regenerate with
   `--write` when the upstream data changes.
-- `leek-generator` mirrors the official generator's fight setup.
+- `leek-generator` mirrors the official generator's fight setup, down to the
+  order of play: it is drawn from the fight's seed before turn 1
+  (`StartOrder.compute`), not taken from the entity ids.
 - `leek-scenario` parses composable scenario files (TOML or the official JSON)
   that describe arenas, leek builds, seeds, and override profiles — the input
   to `miku fight`. A runnable example lives in
@@ -143,6 +145,13 @@ drift. The scripts live in [`tools/`](../tools/):
 - `game-item-extract.sh` — weapon/chip catalogs (see above).
 - `builtin-extract.sh` / `game-builtin-extract.sh` — builtin function tables.
 - `cargo xtask check-layers` ([`xtask/`](../xtask/)) — the layering rule.
+- `cargo xtask check-toolchain` ([`xtask/`](../xtask/)) — the Rust pin is an
+  exact release and matches the advertised MSRV.
+- `cargo xtask check-artifacts` ([`xtask/`](../xtask/)) — generated output
+  stays untracked and git-ignored. The upstream LeekScript compiler writes
+  `AI_<id>.java/.class/.lines/.sig` into `./ai` relative to its working
+  directory, so the java-emitter scripts run the JVM from a scratch dir under
+  `tools/java-emitter/build/` and this check catches anything that slips.
 - `check.sh` — the full quality gate (and the contract CI honors).
 
 When you change one of these inputs, regenerate the output in the same commit so

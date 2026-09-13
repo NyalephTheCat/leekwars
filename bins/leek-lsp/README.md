@@ -38,8 +38,34 @@ You don't normally run it by hand — an editor does, as a stdio subprocess:
 ## Logging
 
 All server-side logs go to **stderr** (VS Code shows them in the
-"Leekscript" output channel). Set `LEEK_LSP_LOG=trace` for per-handler entry
-logs.
+"Leekscript" output channel). By default only lifecycle events are logged
+(startup, library loading, initialize/initialized, shutdown). Set
+`LEEK_LSP_LOG=trace` for per-handler entry logs — including the per-edit
+`didOpen` / `didClose` / `publishDiagnostics` lines, which stay off by
+default so the output channel isn't one line per keystroke.
+
+## Robustness
+
+Request handlers are panic-guarded: analysis runs over buffers that are
+half-typed by definition, so a panic anywhere in parse/resolve/types/HIR/lint
+fails that one request (the client sees an empty result) instead of unwinding
+out of the server and killing the process. That includes the diagnostic paths
+— the push on every keystroke, `textDocument/diagnostic`, and
+`workspace/diagnostic`, where each file is guarded on its own so one bad
+buffer doesn't blank the report for the whole workspace. Set `LEEK_LSP_LOG=trace`
+to see which handler tripped the guard.
+
+## Diagnostics and quick fixes
+
+Diagnostics are computed once per file over the whole `include` closure and
+filtered to that file's own spans; a problem inside an include belongs to the
+include's document. Push (`publishDiagnostics`), pull
+(`textDocument/diagnostic`, `workspace/diagnostic`) and `textDocument/codeAction`
+all read that one set, so a quick fix is only ever offered for a diagnostic the
+editor is displaying — and `source.fixAll`, which editors run on save, applies
+only those fixes. Quick fixes are additionally matched against the
+`context.diagnostics` the client sends with the request, so a stale server-side
+set cannot produce a fix for a squiggle that is already gone.
 
 ## Host libraries
 

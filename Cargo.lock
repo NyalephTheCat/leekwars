@@ -1102,10 +1102,13 @@ dependencies = [
  "dap",
  "leek-backend-native",
  "leek-diagnostics",
+ "leek-driver",
  "leek-generator",
  "leek-hir",
+ "leek-manifest",
  "leek-pipeline",
  "leek-recipes",
+ "leek-resolver",
  "leek-scenario",
  "leek-span",
  "serde",
@@ -1237,6 +1240,7 @@ dependencies = [
  "leek-pipeline",
  "leek-recipes",
  "leek-resolver",
+ "leek-rewrite",
  "leek-span",
  "leek-syntax",
 ]
@@ -1272,6 +1276,7 @@ name = "leek-lsp-bin"
 version = "0.0.1"
 dependencies = [
  "leek-lsp",
+ "serde_json",
 ]
 
 [[package]]
@@ -1424,6 +1429,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "leek-diagnostics",
+ "leek-game-runtime",
  "leek-generator",
  "leek-hir",
  "leek-pipeline",
@@ -2825,6 +2831,7 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

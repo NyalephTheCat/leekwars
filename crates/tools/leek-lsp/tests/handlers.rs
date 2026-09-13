@@ -1346,6 +1346,175 @@ fn code_action_source_only_filter_excludes_quickfix() {
     );
 }
 
+#[test]
+fn code_action_uses_the_published_diagnostic_set() {
+    // Regression: code actions ran a per-file pipeline with no include
+    // resolution, so a global defined in an include looked undefined and
+    // its machine-applicable "did you mean" fix was offered — and applied
+    // by `source.fixAll` — for a problem the editor never displayed.
+    let mut ws = Workspace::default();
+    let main = test_file("code-action-include-project/src/entry.leek");
+    let included = test_file("code-action-include-project/lib/constants.leek");
+    ws.open(included, "var INCLUDED_VALUE = 1\n".to_string());
+    ws.open(
+        main.clone(),
+        concat!(
+            "include(\"../lib/constants.leek\")\n",
+            "class Consumer {\n",
+            "    read(boolean flag) {\n",
+            "        var INCLUDED_VALUES = 2\n",
+            "        if (flag == true) { return INCLUDED_VALUE + INCLUDED_VALUES }\n",
+            "        return 0\n",
+            "    }\n",
+            "}\n",
+        )
+        .to_string(),
+    );
+
+    let report = pull_diagnostics::handle_textdoc(&ws, &main);
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        report
+    else {
+        panic!("expected full report");
+    };
+    let published = &full.full_document_diagnostic_report.items;
+    assert!(
+        published
+            .iter()
+            .all(|d| !d.message.contains("INCLUDED_VALUE")),
+        "the include resolves, so nothing is published about it: {published:#?}"
+    );
+    assert!(
+        published
+            .iter()
+            .any(|d| d.code == Some(lsp::NumberOrString::String("L0012".into()))),
+        "the redundant-boolean lint should be published: {published:#?}"
+    );
+
+    let whole = lsp::Range {
+        start: lsp::Position {
+            line: 0,
+            character: 0,
+        },
+        end: lsp::Position {
+            line: 8,
+            character: 0,
+        },
+    };
+    let ctx = lsp::CodeActionContext::default();
+    let actions = code_action::handle(&ws, &main, whole, &ctx).expect("actions");
+
+    // Every quick fix must be attached to a diagnostic the editor shows.
+    for action in &actions {
+        let lsp::CodeActionOrCommand::CodeAction(ca) = action else {
+            continue;
+        };
+        if ca.kind != Some(lsp::CodeActionKind::QUICKFIX) {
+            continue;
+        }
+        for diag in ca.diagnostics.iter().flatten() {
+            assert!(
+                published
+                    .iter()
+                    .any(|p| p.range == diag.range && p.code == diag.code),
+                "quick fix for an unpublished diagnostic {diag:#?}, published: {published:#?}"
+            );
+        }
+    }
+
+    // …and fix-all, which editors run on save, must carry only the
+    // published lint's edit — never the phantom rename of the included
+    // global to the similarly-named local.
+    let fix_all = actions
+        .iter()
+        .find_map(|a| match a {
+            lsp::CodeActionOrCommand::CodeAction(ca)
+                if ca.kind == Some(lsp::CodeActionKind::SOURCE_FIX_ALL) =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("expected a source.fixAll action");
+    let edits = fix_all
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.values().next())
+        .expect("fix-all should carry edits");
+    assert_eq!(
+        edits.len(),
+        1,
+        "only the published lint is auto-fixable here: {edits:#?}"
+    );
+    assert!(
+        edits.iter().all(|e| e.new_text != "INCLUDED_VALUES"),
+        "fix-all must not rewrite the included global: {edits:#?}"
+    );
+}
+
+#[test]
+fn code_action_skips_quickfix_the_client_no_longer_shows() {
+    // The client sends the diagnostics it is displaying at the range. If
+    // ours is not among them our set has gone stale, and a fix for a
+    // squiggle the user cannot see must not be offered.
+    let ws = open("function f(boolean b) {\n  return b == true\n}\n");
+    let whole_line2 = lsp::Range {
+        start: lsp::Position {
+            line: 1,
+            character: 0,
+        },
+        end: lsp::Position {
+            line: 1,
+            character: 40,
+        },
+    };
+    let stale = lsp::Diagnostic {
+        range: lsp::Range {
+            start: lsp::Position {
+                line: 1,
+                character: 0,
+            },
+            end: lsp::Position {
+                line: 1,
+                character: 1,
+            },
+        },
+        code: Some(lsp::NumberOrString::String("L0012".into())),
+        source: Some("leek".into()),
+        message: "comparison against a boolean literal is redundant".into(),
+        ..Default::default()
+    };
+    let ctx = lsp::CodeActionContext {
+        diagnostics: vec![stale],
+        only: Some(vec![lsp::CodeActionKind::QUICKFIX]),
+        ..Default::default()
+    };
+    let actions = code_action::handle(&ws, &url(), whole_line2, &ctx).expect("actions");
+    assert!(
+        actions.is_empty(),
+        "no quick fix should match the client's diagnostics: {actions:#?}"
+    );
+
+    // With the diagnostic the client actually holds, the fix is offered.
+    let published = pull_diagnostics::handle_textdoc(&ws, &url());
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        published
+    else {
+        panic!("expected full report");
+    };
+    let ctx = lsp::CodeActionContext {
+        diagnostics: full.full_document_diagnostic_report.items,
+        only: Some(vec![lsp::CodeActionKind::QUICKFIX]),
+        ..Default::default()
+    };
+    let actions = code_action::handle(&ws, &url(), whole_line2, &ctx).expect("actions");
+    assert!(
+        !actions.is_empty(),
+        "the published diagnostic should still get its quick fix"
+    );
+}
+
 // ─── slice 15: inline values (debug) ───────────────────────────────
 
 #[test]

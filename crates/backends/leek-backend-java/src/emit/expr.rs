@@ -5,7 +5,6 @@ use leek_hir::{
 use leek_types::Type;
 use std::fmt::Write as _;
 
-use super::traits::EmitExpr;
 use super::{
     Emitter, builtin_fn_wrapper, escape_string, is_div_expr, is_primitive_number,
     is_primitive_number_expr, is_string_expr, java_class_name, user_fn_wrapper,
@@ -172,8 +171,8 @@ impl Emitter<'_> {
     }
 }
 
-impl EmitExpr for Emitter<'_> {
-    fn write_expr(&self, buf: &mut String, e: &Expr, parens_if_negative: bool) {
+impl Emitter<'_> {
+    pub(crate) fn write_expr(&self, buf: &mut String, e: &Expr, parens_if_negative: bool) {
         match &e.kind {
             ExprKind::Literal(lit) => self.write_literal(buf, lit, parens_if_negative),
             ExprKind::Name(n) => self.write_name(buf, n),

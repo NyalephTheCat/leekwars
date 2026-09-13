@@ -14,9 +14,10 @@
 //!   `miku analyze` prints.
 //! - Source location.
 //!
-//! Output: `target/doc/index.html` plus `target/doc/<file>.html`
-//! for each source. A small inline stylesheet keeps the bundle
-//! standalone.
+//! Output: `<build>/doc/index.html` plus `<build>/doc/<file>.html`
+//! for each source, where `<build>` is `[paths].build` (default
+//! `build/`) — the same root `miku clean` removes. A small inline
+//! stylesheet keeps the bundle standalone.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -41,10 +42,7 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         eprintln!("warning: {w}");
     }
 
-    let out_root = args
-        .out_dir
-        .clone()
-        .unwrap_or_else(|| project.root.join("target").join("doc"));
+    let out_root = args.out_dir.clone().unwrap_or_else(|| project.doc_dir());
     std::fs::create_dir_all(&out_root)
         .with_context(|| format!("creating {}", out_root.display()))?;
 

@@ -1,16 +1,17 @@
 //! Debug hook seam for the native backend.
 //!
 //! When a program is compiled with [`crate::NativeOptions::debug_hooks`],
-//! the generated code calls `leek_dbg_safepoint(offset, desc, values)`
-//! before every statement (see `translate`). That shim forwards to the
+//! the generated code calls `leek_dbg_safepoint(pos, desc, values)` before
+//! every statement (see `translate`). That shim forwards to the
 //! process-global [`DebugHook`] installed via [`set_debug_hook`], if any.
 //!
 //! The hook is the boundary the debug adapter plugs into. It receives the
-//! source byte offset of the statement about to run plus a pointer pair
-//! describing the current frame's local variables, and decides whether to
-//! pause (block the calling thread). Variable rendering is done here, in the
-//! native crate, so the adapter never touches raw pointers — see
-//! [`render_frame_vars`].
+//! statement's source *and* byte offset plus a pointer pair describing the
+//! current frame's local variables, and decides whether to pause (block the
+//! calling thread). Carrying the source matters once a program is spliced
+//! from several files: an offset alone would be looked up in the wrong
+//! file's line table. Variable rendering is done here, in the native crate,
+//! so the adapter never touches raw pointers — see [`render_frame_vars`].
 //!
 //! Single debuggee at a time: the hook is global, matching one debug
 //! session per process (a debug adapter drives exactly one).
@@ -18,11 +19,29 @@
 use std::sync::{Arc, RwLock};
 
 use leek_runtime::Value;
+use leek_span::SourceId;
+
+/// Pack a statement's `(source, byte offset)` into the single `i64` the
+/// generated `leek_dbg_safepoint` call carries: source id in the high 32
+/// bits, offset in the low 32. Keeping it one argument leaves the shim's
+/// signature (and every existing call site) untouched.
+pub(crate) fn pack_position(source: SourceId, offset: u32) -> i64 {
+    ((u64::from(source.get()) << 32) | u64::from(offset)) as i64
+}
+
+/// Inverse of [`pack_position`]: `(source id, byte offset)`.
+fn unpack_position(packed: i64) -> (u32, u32) {
+    let bits = packed as u64;
+    ((bits >> 32) as u32, bits as u32)
+}
 
 /// Receives a callback before each statement executes.
 pub trait DebugHook: Send + Sync {
     /// Called on the executing (debuggee) thread before the statement at
-    /// `offset` (a byte offset into the source) runs.
+    /// `offset` (a byte offset into the file `source` identifies) runs.
+    /// `source` is the raw [`SourceId`] value the statement's span carries,
+    /// so a program spliced from included files reports which file each
+    /// safepoint belongs to.
     ///
     /// `frame_desc` / `frame_values` describe the current function's locals:
     /// `frame_desc` is a `*const VarTable` and `frame_values` points at one
@@ -31,7 +50,7 @@ pub trait DebugHook: Send + Sync {
     ///
     /// Implementations may block this thread to pause execution; they must
     /// eventually return for the program to make progress.
-    fn safepoint(&self, offset: u32, frame_desc: usize, frame_values: usize);
+    fn safepoint(&self, source: u32, offset: u32, frame_desc: usize, frame_values: usize);
 
     /// Called on function entry (debuggee thread), pushing a call frame.
     /// `frame_desc` is the entered function's `*const VarTable`.
@@ -126,13 +145,15 @@ fn render_slot(kind: u8, raw: i64) -> String {
 }
 
 /// Forward a safepoint to the installed hook. Called from the
-/// `leek_dbg_safepoint` runtime shim. The `Arc` is cloned out and the lock
-/// released *before* calling `safepoint`, so a hook that blocks (to pause)
-/// doesn't hold the lock.
-pub(crate) fn fire_safepoint(offset: u32, desc: usize, values: usize) {
+/// `leek_dbg_safepoint` runtime shim with the packed position built by
+/// [`pack_position`]. The `Arc` is cloned out and the lock released *before*
+/// calling `safepoint`, so a hook that blocks (to pause) doesn't hold the
+/// lock.
+pub(crate) fn fire_safepoint(packed: i64, desc: usize, values: usize) {
     let hook = HOOK.read().expect("debug-hook lock poisoned").clone();
     if let Some(hook) = hook {
-        hook.safepoint(offset, desc, values);
+        let (source, offset) = unpack_position(packed);
+        hook.safepoint(source, offset, desc, values);
     }
 }
 
