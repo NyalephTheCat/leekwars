@@ -14,6 +14,9 @@ impl<'a> super::Emitter<'a> {
     /// - clean mode has no rebind, so the signature must use the same
     ///   [`mangle::local`] name the body uses (which drops the `u_` prefix for
     ///   ordinary identifiers).
+    ///
+    /// A param bound to a runtime `Box` (see [`param_needs_box`]) always takes
+    /// the `p_` slot in both modes, so the rebind can own the body's name.
     fn sig_param_name(&self, name: &str) -> String {
         if self.opts.is_clean() {
             mangle::local(self.opts, name)
@@ -29,14 +32,27 @@ impl<'a> super::Emitter<'a> {
         // rebind layer — the signature declares the body's own name directly.
         let exact = !self.opts.is_clean();
         let v1 = matches!(self.opts.version, leek_syntax::Version::V1);
+        // A param a nested closure captures must be *shared*, not copied: Leek
+        // closures capture by reference, so a write on either side has to be
+        // visible on the other. Upstream binds such a param to a runtime `Box`
+        // at entry; we mirror that in every mode. Clean mode used to skip the
+        // rebind entirely, which silently dropped a write made inside the
+        // lambda (the closure got a by-value copy, or the emit fell back to a
+        // `return null` stub).
+        let boxed: Vec<bool> = f
+            .params
+            .iter()
+            .map(|p| param_needs_box(f.body.as_ref(), p))
+            .collect();
         // At v1 args are passed by value, so a `p_x` slot + a copy/box rebind is
         // needed for every param (a `@x` aliases instead of copying). At v2+
-        // only exact mode rebinds (`var u_x = p_x`).
+        // only exact mode and a boxed param rebind (`var u_x = p_x`).
         let params = f
             .params
             .iter()
-            .map(|p| {
-                let n = if exact || v1 {
+            .enumerate()
+            .map(|(i, p)| {
+                let n = if exact || v1 || boxed[i] {
                     format!("p_{}", sanitize_ident(&p.name))
                 } else {
                     self.sig_param_name(&p.name)
@@ -45,7 +61,7 @@ impl<'a> super::Emitter<'a> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let rebinds = f.params.iter().fold(String::new(), |mut acc, p| {
+        let rebinds = f.params.iter().enumerate().fold(String::new(), |mut acc, (i, p)| {
             let safe = sanitize_ident(&p.name);
             let body = mangle::local(self.opts, &p.name);
             let ai = self.ai_this();
@@ -59,13 +75,17 @@ impl<'a> super::Emitter<'a> {
                 );
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else if v1 {
-                if self.ref_boxes.borrow().contains(&p.def) {
-                    // Plain v1 param passed onward at a `@` position → bind
-                    // through a runtime `Box` so the inner callee can alias
-                    // it (upstream boxes every v1 param: `var u_a = new
+                let already_boxed = self.ref_boxes.borrow().contains(&p.def);
+                if already_boxed || boxed[i] {
+                    // Plain v1 param passed onward at a `@` position, or
+                    // captured by a nested closure → bind through a runtime
+                    // `Box` so the inner callee (or the closure) can alias it
+                    // (upstream boxes every v1 param: `var u_a = new
                     // Box(AI.this, copy(p_a))`; the ctor's 1 op replaces this
-                    // param's share of `v1_param_box_ops`).
+                    // param's share of `v1_param_box_ops`). v1 keeps value
+                    // semantics, so the box still holds a copy of the arg.
                     let _ = write!(acc, "Box {body} = new Box({ai}, copy(p_{safe}));");
+                    self.ref_boxes.borrow_mut().insert(p.def);
                 } else {
                     // v1 plain param: passed by value → deep-copy the arg so a
                     // mutation inside doesn't touch the caller's array/map.
@@ -87,11 +107,7 @@ impl<'a> super::Emitter<'a> {
                         "Box {body} = p_{safe} instanceof Box ? (Box) p_{safe} : new Box({ai}, copy(p_{safe}));"
                     );
                     self.ref_boxes.borrow_mut().insert(p.def);
-                } else if f
-                    .body
-                    .as_ref()
-                    .is_some_and(|b| captured_by_nested_lambda_stmts(&b.stmts, p.def))
-                {
+                } else if boxed[i] {
                     // Param captured by a nested closure → bind through a
                     // runtime `Box` so writes propagate into the closure;
                     // the 2-arg ctor charges the same 1 op as upstream's
@@ -101,6 +117,13 @@ impl<'a> super::Emitter<'a> {
                 } else {
                     let _ = write!(acc, "var u_{safe} = p_{safe};");
                 }
+            } else if boxed[i] {
+                // Clean mode at v2+ has no rebind layer, but a captured param
+                // still needs the shared `Box` — same shape as exact mode. The
+                // signature slot became `p_x` above so this rebind can own the
+                // name the body uses.
+                let _ = write!(acc, "final Box {body} = new Box({ai}, p_{safe});");
+                self.ref_boxes.borrow_mut().insert(p.def);
             }
             acc
         });
@@ -291,10 +314,19 @@ impl<'a> super::Emitter<'a> {
     /// `this.field` as a direct field access (see `write_expr`'s `Field` arm).
     fn emit_class_method(&mut self, m: &MethodDef) {
         let jname = format!("u_{}", sanitize_ident(&m.name));
+        // Params a nested closure captures bind to a runtime `Box` on entry,
+        // exactly like a top-level function's (see `emit_function`); their
+        // signature slot moves to `p_x` so the rebind owns the body's name.
+        let boxed: Vec<bool> = m
+            .params
+            .iter()
+            .map(|p| param_needs_box(m.body.as_ref(), p))
+            .collect();
         let params = m
             .params
             .iter()
-            .map(|p| format!("Object {}", mangle::local(self.opts, &p.name)))
+            .enumerate()
+            .map(|(i, p)| self.method_sig_param(p, boxed[i]))
             .collect::<Vec<_>>()
             .join(", ");
         // A `@Private`/`@Protected` annotation on the Java method — the runtime
@@ -307,6 +339,7 @@ impl<'a> super::Emitter<'a> {
             visibility_annotation(m.visibility)
         ));
         self.writer.push_indent();
+        self.emit_param_box_rebinds(&m.params, &boxed);
         if let Some(body) = &m.body {
             self.emit_stmts(&body.stmts);
             if !ends_with_return(&body.stmts, self.opts.emit_ops) {
@@ -327,6 +360,34 @@ impl<'a> super::Emitter<'a> {
             for arity in min_arity..m.params.len() {
                 self.emit_method_default_overload(m, &jname, arity);
             }
+        }
+    }
+
+    /// The Java signature slot for one method/constructor param: its body name,
+    /// or the `p_` staging slot when the param is rebound to a runtime `Box`.
+    fn method_sig_param(&self, p: &leek_hir::Param, boxed: bool) -> String {
+        if boxed {
+            format!("Object p_{}", sanitize_ident(&p.name))
+        } else {
+            format!("Object {}", mangle::local(self.opts, &p.name))
+        }
+    }
+
+    /// Emit the `final Box u_x = new Box(AI.this, p_x);` entry rebind for each
+    /// method/constructor param a nested closure captures, and register it so
+    /// reads emit `.get()` and writes route through the `Box` mutators.
+    fn emit_param_box_rebinds(&mut self, params: &[leek_hir::Param], boxed: &[bool]) {
+        for (i, p) in params.iter().enumerate() {
+            if !boxed[i] {
+                continue;
+            }
+            let ai = self.ai_this();
+            self.writer.add_line(&format!(
+                "final Box {} = new Box({ai}, p_{});",
+                mangle::local(self.opts, &p.name),
+                sanitize_ident(&p.name)
+            ));
+            self.ref_boxes.borrow_mut().insert(p.def);
         }
     }
 
@@ -372,16 +433,23 @@ impl<'a> super::Emitter<'a> {
     /// A user constructor body, emitted as `init(params)` (the runtime
     /// `execute(...)` calls it after the field-default constructor).
     fn emit_class_init(&mut self, m: &MethodDef) {
+        let boxed: Vec<bool> = m
+            .params
+            .iter()
+            .map(|p| param_needs_box(m.body.as_ref(), p))
+            .collect();
         let params = m
             .params
             .iter()
-            .map(|p| format!("Object {}", mangle::local(self.opts, &p.name)))
+            .enumerate()
+            .map(|(i, p)| self.method_sig_param(p, boxed[i]))
             .collect::<Vec<_>>()
             .join(", ");
         self.writer.add_line(&format!(
             "public Object init({params}) throws LeekRunException {{"
         ));
         self.writer.push_indent();
+        self.emit_param_box_rebinds(&m.params, &boxed);
         if let Some(body) = &m.body {
             self.emit_stmts(&body.stmts);
         }
@@ -591,6 +659,14 @@ impl<'a> super::Emitter<'a> {
 
 /// Java annotation prefix (`@Private `/`@Protected `/empty) for a member's
 /// visibility — read reflectively by the runtime visibility check.
+/// True when `p` must bind to a runtime `Box` at the callee's entry because a
+/// lambda nested anywhere in `body` captures it — read *or* write. Leek
+/// closures capture by reference, so both directions of the mutation have to
+/// be shared; upstream boxes every such parameter.
+fn param_needs_box(body: Option<&leek_hir::Block>, p: &leek_hir::Param) -> bool {
+    body.is_some_and(|b| captured_by_nested_lambda_stmts(&b.stmts, p.def))
+}
+
 fn visibility_annotation(v: leek_hir::Visibility) -> &'static str {
     match v {
         leek_hir::Visibility::Public => "",

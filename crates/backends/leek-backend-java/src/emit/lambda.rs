@@ -36,30 +36,32 @@ impl super::Emitter<'_> {
             }
 
             if !captures.is_empty() {
-                // Writes to a *boxed* captured local are now correct (the local
-                // is a shared `Object[]`, passed to the factory as a `final
-                // Object[]` param). Only a write to an *unboxed* captured local
-                // — a parameter, foreach binding, or nested-lambda capture we
-                // don't box — still can't be expressed, so that residual case
-                // keeps the null-returning stub.
-                let unboxed_captures: std::collections::HashSet<_> = {
-                    let boxed = self.boxed_locals.borrow();
-                    let ref_boxes = self.ref_boxes.borrow();
-                    captures
-                        .iter()
-                        .copied()
-                        // A captured `@`-ref param is a runtime `Box` (passed to
-                        // the factory as `final Box`), so a write through it
-                        // *is* expressible — `a += 2` routes to the Box mutator
-                        // and propagates. Only genuinely unboxed captures force
-                        // the null stub.
-                        .filter(|d| !boxed.contains(d) && !ref_boxes.contains(d))
-                        .collect()
-                };
-                if lambda_writes_to_outer(b, &unboxed_captures) {
-                    self.write_lambda_inline_fallback(buf, l);
-                    return;
-                }
+                // Every capture a lambda *writes* is shared through a box, so
+                // outlining always expresses the write: a `var` declaration
+                // becomes an `Object[]` (`boxed_locals`, threaded as a `final
+                // Object[]` factory param), while a parameter or foreach
+                // binding becomes a runtime `Box` (`ref_boxes`, threaded as a
+                // `final Box`). Both survive Java's effectively-final rule.
+                // This used to fall back to a lambda body that just returned
+                // `null` — a silent wrong answer; the assertion below keeps a
+                // future unhandled binding form from regressing to that (in
+                // release the outlined emit is a javac "cannot assign to final
+                // variable", i.e. loud, not silent).
+                debug_assert!(
+                    {
+                        let unboxed: std::collections::HashSet<_> = {
+                            let boxed = self.boxed_locals.borrow();
+                            let ref_boxes = self.ref_boxes.borrow();
+                            captures
+                                .iter()
+                                .copied()
+                                .filter(|d| !boxed.contains(d) && !ref_boxes.contains(d))
+                                .collect()
+                        };
+                        !lambda_writes_to_outer(b, &unboxed)
+                    },
+                    "lambda writes to a captured binding that was never boxed"
+                );
                 // Outlined factory. If the lambda is self-
                 // recursive, route through the Supplier-box wrap
                 // around the factory call and pass `_self_box` as
@@ -96,20 +98,6 @@ impl super::Emitter<'_> {
             }
         }
         self.write_lambda_inline(buf, l);
-    }
-
-    /// Block-body lambda emit that always returns null. Used when
-    /// outlining isn't viable (the body writes to a captured local).
-    /// The surrounding code at least compiles; the call's return
-    /// value is a value mismatch instead of a javac error.
-    // Takes `&self` for symmetry with `write_lambda_inline`, though the
-    // null-fallback shape it emits doesn't depend on emitter state.
-    #[allow(clippy::unused_self)]
-    pub(crate) fn write_lambda_inline_fallback(&self, buf: &mut String, l: &LambdaExpr) {
-        let arity = l.params.len();
-        buf.push_str("new FunctionLeekValue(");
-        buf.push_str(&arity.to_string());
-        buf.push_str(") {public Object run(AI ai, Object thiz, Object... values) throws LeekRunException {return null;}}");
     }
 
     pub(crate) fn write_lambda_inline(&self, buf: &mut String, l: &LambdaExpr) {
@@ -224,6 +212,15 @@ impl super::Emitter<'_> {
         for (i, def_id) in captures.iter().enumerate() {
             if i > 0 {
                 buf.push_str(", ");
+            }
+            // A *nested* lambda may capture the var the enclosing lambda is
+            // being assigned to (`var fact = function(n) { var h = function()
+            // { return fact(n - 1) } … }`). The Java local is still
+            // mid-initialization here, so read it out of the Supplier wrap's
+            // `_self_box` like `write_name` does inside the body.
+            if Some(*def_id) == self.self_rec_def.get() {
+                buf.push_str("_self_box[0]");
+                continue;
             }
             let name = self.def_name(*def_id).to_string();
             buf.push_str(&mangle::local(self.opts, &name));
@@ -435,11 +432,25 @@ pub(crate) fn lambda_outer_captures(
                     expr(a, params, out, seen);
                 }
             }
-            // Nested lambdas: don't descend — they have their own
-            // scope and would produce false positives for nested
-            // param shadowing. Their captures are recorded via the
-            // outer expression flow above.
-            ExprKind::Lambda(_) => {}
+            // Nested lambdas: descend with their own scope excluded. A
+            // nested lambda's params and locals shadow the enclosing
+            // scope, but anything *else* it references is still an outer
+            // capture of **this** lambda — the outlined factory has to
+            // receive it so the inner factory's call site (emitted inside
+            // the outer factory body) can pass it on. Skipping the descent
+            // used to emit `__anon_1(a)` inside an `__anon_0` that never
+            // declared `a`, a javac "cannot find symbol".
+            ExprKind::Lambda(l) => {
+                let mut nested: std::collections::HashSet<leek_hir::DefId> = params.clone();
+                nested.extend(l.params.iter().map(|p| p.def));
+                match &l.body {
+                    LambdaBody::Expr(b) => expr(b, &nested, out, seen),
+                    LambdaBody::Block(b) => {
+                        collect_inner_decls(b, &mut nested);
+                        block_walk(b, &nested, out, seen);
+                    }
+                }
+            }
         }
     }
     fn stmt(
@@ -692,9 +703,15 @@ pub(crate) fn lambda_writes_to_outer(
             ExprKind::Object(fields) => fields.iter().any(|(_, v)| expr(v, captures)),
             ExprKind::Cast(b, _) => expr(b, captures),
             ExprKind::New(n) => n.args.iter().any(|a| expr(a, captures)),
-            // Nested lambdas have their own scope; conservatively
-            // ignore (matches the read-walker's policy).
-            ExprKind::Lambda(_) => false,
+            // A write performed by a *nested* lambda still mutates the
+            // enclosing binding, so it counts as a write to this lambda's
+            // capture — the box has to be threaded through both factory
+            // levels. `DefId`s are unique per binding, so a nested param or
+            // local can never alias `captures`; no scope bookkeeping needed.
+            ExprKind::Lambda(l) => match &l.body {
+                LambdaBody::Expr(b) => expr(b, captures),
+                LambdaBody::Block(b) => block_walk(b, captures),
+            },
             _ => false,
         }
     }
@@ -813,18 +830,24 @@ pub(crate) fn captured_by_nested_lambda_body(body: &LambdaBody, def: leek_hir::D
 }
 
 /// Compute the file-wide set of VarDecl-declared locals that must be heap-boxed
-/// because a *directly-nested* lambda captures **and writes** them. LeekScript
-/// closures capture by reference, so a write inside the lambda must be visible
-/// in the enclosing scope; Java's effectively-final rule forbids that for a
-/// plain captured local, so we share a one-element `Object[]` instead.
+/// because a lambda captures **and writes** them. LeekScript closures capture
+/// by reference, so a write inside the lambda must be visible in the enclosing
+/// scope; Java's effectively-final rule forbids that for a plain captured
+/// local, so we share a one-element `Object[]` instead.
 ///
-/// Deliberately scoped to keep this safe:
-/// - only **first-level** lambdas are inspected (we don't descend into nested
-///   lambda bodies — threading a box through two factory levels is a separate
-///   problem, so nested captured-writes stay on the null-stub fallback), and
-/// - only **VarDecl** locals are boxable (a captured-written *parameter* or
-///   foreach binding isn't a `var` declaration we can rewrite, so it also stays
-///   on the fallback).
+/// Lambdas are inspected at **every** nesting depth, on both sides:
+/// - a `var` declared *inside* a lambda body is collected too, so a lambda
+///   nested in that body can box it, and
+/// - a write performed by a deeper lambda is attributed to the capture of
+///   every lambda between it and the declaration, so each factory level
+///   threads the same `Object[]` through.
+///
+/// The other binding forms carry their own box: a captured-written
+/// function/method/constructor/lambda **parameter** binds to a runtime `Box`
+/// at entry (see `emit_function` / `emit_class_method` / `write_lambda_inline`)
+/// and so does a captured foreach binding (see `emit_foreach`). Between them
+/// every binding form a lambda can write is shared, which is what lets
+/// `write_lambda` outline unconditionally.
 ///
 /// `DefId`s are unique across the whole HIR file, so one set serves every
 /// function/method/main body.
@@ -880,39 +903,55 @@ fn scan_stmt(
     if let Stmt::VarDecl(v) = s {
         var_decls.insert(v.def);
     }
-    // First-level lambdas in this statement's immediate expressions.
+    // Lambdas in this statement's immediate expressions (at any depth).
     leek_hir::walk_stmt_child_exprs(s, &mut |e| {
-        find_first_level_lambda_writes(e, captured_written);
+        find_lambda_captured_writes(e, var_decls, captured_written);
     });
     // Recurse into child statements (control-flow bodies). Lambdas are
-    // expressions, not statements, so this never descends into a lambda body.
+    // expressions, not statements, so the walk above is what enters a body.
     leek_hir::walk_stmt_child_stmts(s, &mut |child| {
         scan_stmt(child, var_decls, captured_written);
     });
 }
 
-/// Find lambdas in `e` without descending into a lambda's own body, recording
-/// each first-level lambda's captured-and-written outer locals.
-fn find_first_level_lambda_writes(
+/// Find every lambda in `e`, at any nesting depth, and record the outer locals
+/// each one captures **and** writes. A lambda body is also re-scanned as a
+/// statement list so the `var`s it declares reach `var_decls` — a local
+/// declared inside a lambda is boxable exactly like a top-level one when a
+/// deeper lambda writes it.
+fn find_lambda_captured_writes(
     e: &Expr,
+    var_decls: &mut std::collections::HashSet<leek_hir::DefId>,
     captured_written: &mut std::collections::HashSet<leek_hir::DefId>,
 ) {
     if let ExprKind::Lambda(l) = &e.kind {
-        if let LambdaBody::Block(b) = &l.body {
-            let mut inner: std::collections::HashSet<_> = l.params.iter().map(|p| p.def).collect();
-            collect_inner_decls(b, &mut inner);
-            for c in lambda_outer_captures(b, &inner) {
-                let one = std::iter::once(c).collect();
-                if lambda_writes_to_outer(b, &one) {
-                    captured_written.insert(c);
+        match &l.body {
+            LambdaBody::Block(b) => {
+                let mut inner: std::collections::HashSet<_> =
+                    l.params.iter().map(|p| p.def).collect();
+                collect_inner_decls(b, &mut inner);
+                // `lambda_outer_captures` / `lambda_writes_to_outer` both see
+                // through nested lambdas, so a write a deeper lambda performs
+                // is attributed to this lambda's capture as well — every
+                // factory level then declares the box as a parameter.
+                for c in lambda_outer_captures(b, &inner) {
+                    let one = std::iter::once(c).collect();
+                    if lambda_writes_to_outer(b, &one) {
+                        captured_written.insert(c);
+                    }
                 }
+                scan_stmts(&b.stmts, var_decls, captured_written);
+            }
+            // An expression-bodied lambda is always emitted inline, so it
+            // needs no box of its own; still descend, since it may contain a
+            // block-bodied lambda that does.
+            LambdaBody::Expr(inner_e) => {
+                find_lambda_captured_writes(inner_e, var_decls, captured_written);
             }
         }
-        // Do not descend into the lambda body — nested captured-writes are
-        // intentionally left on the null-stub path.
         return;
     }
     leek_hir::walk_expr_children(e, &mut |child| {
-        find_first_level_lambda_writes(child, captured_written);
+        find_lambda_captured_writes(child, var_decls, captured_written);
     });
 }

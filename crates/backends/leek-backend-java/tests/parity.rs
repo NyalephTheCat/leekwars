@@ -1131,19 +1131,23 @@ fn rust_emit_matches_snapshot_on_jvm() {
     // up after every batch of fixes so regressions can't sneak in.
     // The emit gaps behind the current numbers are catalogued in
     // `docs/java-backend.md` §9; `JVM_PARITY.txt` tracks them per case.
+    // Measured on the 3443-case snapshot after the lambda captured-write
+    // boxing fix (JAVA-03): value 3443/3443 and ops 3371/3371, both 100.0%.
+    // The ratchets sit one point below that so a single environment-specific
+    // case can't fail the suite outright — a real regression drops far more.
     let value_ratio = f64::from(value_ok) / f64::from(total.max(1));
     let ops_ratio = f64::from(ops_ok) / f64::from(ops_total.max(1));
     let breakdown = snapshot_out_dir().join("JVM_PARITY.txt");
     let breakdown = breakdown.display();
     assert!(
-        value_ratio >= 0.96,
-        "rust-emit JVM value parity below 96%: {value_ok}/{total} = {:.1}%\n\
+        value_ratio >= 0.99,
+        "rust-emit JVM value parity below 99%: {value_ok}/{total} = {:.1}%\n\
          See {breakdown} for the per-case breakdown",
         value_ratio * 100.0
     );
     assert!(
-        ops_ratio >= 0.89,
-        "rust-emit JVM ops parity below 89%: {ops_ok}/{ops_total} = {:.1}%\n\
+        ops_ratio >= 0.99,
+        "rust-emit JVM ops parity below 99%: {ops_ok}/{ops_total} = {:.1}%\n\
          See {breakdown} for the per-case breakdown",
         ops_ratio * 100.0
     );

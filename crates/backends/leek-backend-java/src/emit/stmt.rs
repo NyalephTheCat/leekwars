@@ -723,6 +723,17 @@ impl Emitter<'_> {
                 self.own_instance_field_ref(field),
                 Self::coerce_decl(self.own_field_ty(field).as_ref(), value)
             ),
+            // A reused outer local (`for (x in …)` with `x` declared above)
+            // that a lambda captures-and-writes is a shared `Object[]`, so the
+            // per-iteration store goes through `[0]` like every other write to
+            // it (`write_name`). Without this the store would assign an
+            // `Object` to an `Object[]` slot — a javac type error.
+            _ if bind
+                .local_def()
+                .is_some_and(|d| self.boxed_locals.borrow().contains(&d)) =>
+            {
+                format!("{local}[0] = {value}")
+            }
             _ => format!("{local} = {value}"),
         }
     }
