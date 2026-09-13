@@ -8,10 +8,12 @@
 //!
 //! All return a [`TestReport`]. [`run_matrix`] and [`run_random`] classify each
 //! fight relative to a *hero team* (the AI under test); a tournament has no
-//! hero and reports a leaderboard instead. One bad cell never sinks the run:
-//! an AI error inside a fight is contained by the generator and listed on the
-//! cell ([`CellResult::ai_errors`]), and a fight that can't even be set up (an
-//! AI that doesn't compile, say) becomes a [`FightResult::Error`] cell.
+//! hero, so each of its cells names the entrant that won that game and the
+//! leaderboard — not the hero totals, which stay unset — is the result (see
+//! [`Scoring`]). One bad cell never sinks the run: an AI error inside a fight
+//! is contained by the generator and listed on the cell
+//! ([`CellResult::ai_errors`]), and a fight that can't even be set up (an AI
+//! that doesn't compile, say) becomes a [`CellOutcome::Error`] cell.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,8 +33,36 @@ pub enum FightResult {
     Win,
     Loss,
     Draw,
+}
+
+/// What one cell of a report says happened.
+///
+/// A hero mode ([`run_matrix`], [`run_random`]) classifies every fight against
+/// the AI under test. A tournament has no hero: a game is named by its winner
+/// instead, because a win or a loss there could only be read against the side
+/// one of the entrants happened to be assigned (#66).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellOutcome {
+    /// A hero-mode fight, classified against the hero team.
+    Hero(FightResult),
+    /// A tournament game won by the named entrant.
+    Won(String),
+    /// A tournament game that ended level.
+    Level,
     /// The fight couldn't be run; [`CellResult::failure`] says why.
     Error,
+}
+
+/// How a report's cells are scored, and so what its totals mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scoring {
+    /// Every fight is classified against the hero team: the report's
+    /// `wins`/`losses`/`draws` and [`TestReport::win_rate`] are the result.
+    Hero,
+    /// There is no hero: every cell names the entrant that won its game and
+    /// [`TestReport::standings`] is the result. The hero totals stay zero and
+    /// [`TestReport::win_rate`] is `None`.
+    Leaderboard,
 }
 
 /// One fight in a report.
@@ -42,11 +72,11 @@ pub struct CellResult {
     pub seed: u64,
     pub winner: Option<i64>,
     pub turns: u32,
-    pub result: FightResult,
+    pub result: CellOutcome,
     /// AI turns that ended in an error during the fight (each rendered as
     /// `turn N: entity E: ERROR`); the fight still played out.
     pub ai_errors: Vec<String>,
-    /// Why the fight couldn't be run, for a [`FightResult::Error`] cell.
+    /// Why the fight couldn't be run, for a [`CellOutcome::Error`] cell.
     pub failure: Option<String>,
 }
 
@@ -64,19 +94,26 @@ pub struct Standing {
 #[derive(Debug, Clone)]
 pub struct TestReport {
     pub mode: &'static str,
+    /// What the cells and the totals below mean.
+    pub scoring: Scoring,
     pub cells: Vec<CellResult>,
     pub standings: Vec<Standing>,
+    /// Hero totals: the fights the hero team won, lost and drew. All three
+    /// stay zero under [`Scoring::Leaderboard`], which has no hero to count
+    /// them for — read `standings` instead.
     pub wins: u32,
     pub losses: u32,
     pub draws: u32,
-    /// Cells whose fight couldn't be run ([`FightResult::Error`]).
+    /// Cells whose fight couldn't be run ([`CellOutcome::Error`]), in every
+    /// mode.
     pub errors: u32,
 }
 
 impl TestReport {
-    fn new(mode: &'static str) -> Self {
+    fn new(mode: &'static str, scoring: Scoring) -> Self {
         Self {
             mode,
+            scoring,
             cells: Vec::new(),
             standings: Vec::new(),
             wins: 0,
@@ -86,20 +123,25 @@ impl TestReport {
         }
     }
 
-    fn record(
-        &mut self,
-        label: String,
-        seed: u64,
-        outcome: &Outcome,
-        hero_team: i64,
-    ) -> FightResult {
+    /// Record a hero-mode fight, classified against `hero_team`.
+    fn record_hero(&mut self, label: String, seed: u64, outcome: &Outcome, hero_team: i64) {
         let result = classify(outcome.winner_team, hero_team);
         match result {
             FightResult::Win => self.wins += 1,
             FightResult::Loss => self.losses += 1,
             FightResult::Draw => self.draws += 1,
-            FightResult::Error => self.errors += 1,
         }
+        self.push_cell(label, seed, outcome, CellOutcome::Hero(result));
+    }
+
+    /// Record a tournament game won by `winner` (`None` when it ended level).
+    /// The hero totals are left alone: the standings are the result.
+    fn record_game(&mut self, label: String, seed: u64, outcome: &Outcome, winner: Option<String>) {
+        let result = winner.map_or(CellOutcome::Level, CellOutcome::Won);
+        self.push_cell(label, seed, outcome, result);
+    }
+
+    fn push_cell(&mut self, label: String, seed: u64, outcome: &Outcome, result: CellOutcome) {
         self.cells.push(CellResult {
             label,
             seed,
@@ -109,7 +151,6 @@ impl TestReport {
             ai_errors: outcome.errors.iter().map(ToString::to_string).collect(),
             failure: None,
         });
-        result
     }
 
     /// Record a cell whose fight couldn't be run.
@@ -120,22 +161,23 @@ impl TestReport {
             seed,
             winner: None,
             turns: 0,
-            result: FightResult::Error,
+            result: CellOutcome::Error,
             ai_errors: Vec::new(),
             failure: Some(format!("{err:#}")),
         });
     }
 
     /// Win rate over the fights that ran (wins, losses and draws; error cells
-    /// don't count), as a percentage.
+    /// don't count), as a percentage. `None` when there is nothing to compute
+    /// it from: a [`Scoring::Leaderboard`] report has no hero, and a report in
+    /// which no fight ran has no fights.
     #[must_use]
-    pub fn win_rate(&self) -> f64 {
-        let total = self.wins + self.losses + self.draws;
-        if total == 0 {
-            0.0
-        } else {
-            f64::from(self.wins) * 100.0 / f64::from(total)
+    pub fn win_rate(&self) -> Option<f64> {
+        if self.scoring != Scoring::Hero {
+            return None;
         }
+        let total = self.wins + self.losses + self.draws;
+        (total > 0).then(|| f64::from(self.wins) * 100.0 / f64::from(total))
     }
 }
 
@@ -175,7 +217,7 @@ fn play_one(
 ///
 /// An AI that fails to compile is left out rather than failing the run: the
 /// cells that use it retry the compile and report the error as their own
-/// [`FightResult::Error`], while the other cells still play.
+/// [`CellOutcome::Error`], while the other cells still play.
 fn precompile(
     base: &Scenario,
     base_dir: &Path,
@@ -252,7 +294,7 @@ pub struct MatrixAxes {
 
 /// Run a cartesian sweep of seeds × opponents × profiles, classifying each
 /// fight relative to `hero_team`. A cell whose fight can't be run is reported
-/// as [`FightResult::Error`] and the sweep continues.
+/// as [`CellOutcome::Error`] and the sweep continues.
 ///
 /// # Errors
 /// A profile name not found in the scenario (checked before any fight runs).
@@ -284,7 +326,7 @@ pub fn run_matrix(
         axes.profiles.iter().map(Some).collect()
     };
 
-    let mut report = TestReport::new("matrix");
+    let mut report = TestReport::new("matrix", Scoring::Hero);
     for &seed in &seeds {
         for opp in &opponents {
             for prof in &profiles {
@@ -302,9 +344,7 @@ pub fn run_matrix(
                     prof.map_or("-", String::as_str),
                 );
                 match play_one(&scn, base_dir, &cache) {
-                    Ok(outcome) => {
-                        report.record(label, seed, &outcome, hero_team);
-                    }
+                    Ok(outcome) => report.record_hero(label, seed, &outcome, hero_team),
                     Err(e) => report.record_failure(label, seed, &e),
                 }
             }
@@ -334,12 +374,14 @@ pub struct TournamentSpec {
 }
 
 /// Run a tournament among `entrants`, returning a leaderboard in `standings`.
-/// A game that can't be run is reported as a [`FightResult::Error`] cell and
+/// A game that can't be run is reported as a [`CellOutcome::Error`] cell and
 /// counts for neither side.
 ///
-/// There is no hero here: each cell is classified relative to the side the
-/// first-named entrant of that game played, and the standings — not the
-/// report's win/loss totals — are the result.
+/// There is no hero here, so the report is scored as a [`Scoring::Leaderboard`]
+/// one: each cell names the entrant that won that game ([`CellOutcome::Won`],
+/// or [`CellOutcome::Level`] for a draw), the hero win/loss/draw totals stay
+/// unset — they could only count "whoever this pairing listed first" (#66) —
+/// and the standings are the result.
 ///
 /// Every seed of a pairing is played twice, with the entrants swapping team
 /// slots between the two legs, so no entrant collects whatever edge a slot
@@ -369,7 +411,7 @@ pub fn run_tournament(
         spec.seeds.clone()
     };
 
-    let mut report = TestReport::new("tournament");
+    let mut report = TestReport::new("tournament", Scoring::Leaderboard);
     let mut standings: HashMap<String, Standing> = HashMap::new();
     for e in &spec.entrants {
         standings.insert(
@@ -415,12 +457,21 @@ pub fn run_tournament(
                         continue;
                     }
                 };
-                match outcome.winner_team {
-                    Some(t) if t == a_team => aw += 1,
-                    Some(_) => bw += 1,
-                    None => dw += 1,
-                }
-                report.record(label, seed, &outcome, a_team);
+                let winner = match outcome.winner_team {
+                    Some(t) if t == a_team => {
+                        aw += 1;
+                        Some(label_of(a))
+                    }
+                    Some(_) => {
+                        bw += 1;
+                        Some(label_of(b))
+                    }
+                    None => {
+                        dw += 1;
+                        None
+                    }
+                };
+                report.record_game(label, seed, &outcome, winner);
             }
         }
         (aw, bw, dw)
@@ -558,7 +609,7 @@ pub fn run_random(
 ) -> Result<TestReport> {
     // AIs are fixed across runs — only stats change — so the cache is built once.
     let cache = precompile(base, base_dir, &[]);
-    let mut report = TestReport::new("random");
+    let mut report = TestReport::new("random", Scoring::Hero);
 
     for run in 0..spec.runs {
         let run_seed = build_gen::mix(spec.seed, u64::from(run));
@@ -581,9 +632,7 @@ pub fn run_random(
 
         let label = format!("build#{run} {}", fmt_build(&build));
         match play_one(&scn, base_dir, &cache) {
-            Ok(outcome) => {
-                report.record(label, fight_seed, &outcome, hero_team);
-            }
+            Ok(outcome) => report.record_hero(label, fight_seed, &outcome, hero_team),
             Err(e) => report.record_failure(label, fight_seed, &e),
         }
     }
@@ -640,10 +689,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(report.cells.len(), 2);
-        assert_eq!(report.cells[0].result, FightResult::Error);
+        assert_eq!(report.cells[0].result, CellOutcome::Error);
         let failure = report.cells[0].failure.as_deref().unwrap_or_default();
         assert!(failure.contains("missing.leek"), "failure: {failure}");
-        assert_eq!(report.cells[1].result, FightResult::Draw);
+        assert_eq!(report.cells[1].result, CellOutcome::Hero(FightResult::Draw));
         assert_eq!((report.errors, report.draws), (1, 1));
     }
 
@@ -683,6 +732,92 @@ mod tests {
         }
     }
 
+    /// Regression (#66): every tournament cell used to be classified against
+    /// whichever entrant the pairing happened to list first, so the report's
+    /// win/loss totals counted "the side called `a`" and each cell's WIN/LOSS
+    /// said nothing. A cell now names the entrant that won the game, and the
+    /// hero totals — which need a hero — stay unset.
+    #[test]
+    fn tournament_cells_name_the_winner_and_leave_the_hero_totals_unset() {
+        let dir =
+            std::env::temp_dir().join(format!("leek-tournament-cells-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // A leek starts unequipped, so the shooter equips before firing; the
+        // other entrant idles and is shot down from either side of the map.
+        std::fs::write(
+            dir.join("shooter.leek"),
+            "// @version: 4\n\
+             var target = getNearestEnemy();\n\
+             setWeapon(getWeapons()[0]);\n\
+             while (getTP() >= 3) { if (useWeapon(target) <= 0) { break; } }\n",
+        )
+        .expect("write AI");
+        std::fs::write(dir.join("idle.leek"), "return 0;\n").expect("write AI");
+
+        let base = Scenario::from_toml_str(
+            r"
+            max_turns = 12
+            [map]
+            width = 5
+            height = 5
+            [[entities]]
+            id = 1
+            team = 0
+            cell = 0
+            life = 100
+            tp = 10
+            weapons = [37]
+            [[entities]]
+            id = 2
+            team = 1
+            cell = 4
+            life = 100
+            tp = 10
+            weapons = [37]
+            ",
+        )
+        .expect("parse arena");
+
+        let spec = TournamentSpec {
+            entrants: vec![PathBuf::from("shooter.leek"), PathBuf::from("idle.leek")],
+            bracket: crate::schema::Bracket::RoundRobin,
+            seeds: vec![1],
+            scope: EntrantScope::Lead,
+        };
+        let report = run_tournament(&base, &dir, &spec).expect("the tournament runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Both legs of the seed: the shooter wins each, whichever slot it sat
+        // in, and the cell says so by name.
+        assert_eq!(report.cells.len(), 2);
+        for c in &report.cells {
+            assert_eq!(
+                c.result,
+                CellOutcome::Won("shooter".to_string()),
+                "{}: {:?}",
+                c.label,
+                c.result
+            );
+        }
+
+        // No hero: the totals stay unset and there is no win rate to read.
+        assert_eq!(report.scoring, Scoring::Leaderboard);
+        assert_eq!((report.wins, report.losses, report.draws), (0, 0, 0));
+        assert_eq!(report.win_rate(), None);
+
+        // The standings carry the real record.
+        let record = |label: &str| {
+            let s = report
+                .standings
+                .iter()
+                .find(|s| s.label == label)
+                .expect("entrant in the standings");
+            (s.wins, s.losses, s.draws)
+        };
+        assert_eq!(record("shooter"), (1, 0, 0));
+        assert_eq!(record("idle"), (0, 1, 0));
+    }
+
     /// Regression (#65): a level single-elimination match used to be recorded
     /// as a win for whoever advanced. It advances someone — the bracket needs
     /// it — but the leaderboard says draw.
@@ -703,7 +838,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         // Every game of the arena is an idle draw, so the match is level.
-        assert!(report.cells.iter().all(|c| c.result == FightResult::Draw));
+        assert!(report.cells.iter().all(|c| c.result == CellOutcome::Level));
         assert_eq!(report.standings.len(), 2);
         for s in &report.standings {
             assert_eq!(
@@ -762,12 +897,23 @@ mod tests {
         let team = run_tournament(&base, &dir, &spec).expect("the tournament runs");
         let _ = std::fs::remove_dir_all(&dir);
 
+        // A tournament has no hero totals, so count the games that ran.
+        let level = |r: &TestReport| {
+            r.cells
+                .iter()
+                .filter(|c| c.result == CellOutcome::Level)
+                .count()
+        };
         assert_eq!(
-            (lead.errors, lead.draws),
+            (lead.errors, level(&lead)),
             (2, 0),
             "lead leaves the support AI in place"
         );
-        assert_eq!((team.errors, team.draws), (0, 2), "team scope replaces it");
+        assert_eq!(
+            (team.errors, level(&team)),
+            (0, 2),
+            "team scope replaces it"
+        );
     }
 
     /// A level single-elimination match is decided by the pairing, not by the

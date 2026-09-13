@@ -124,9 +124,14 @@ than the bracket position.
 An entrant takes over the **lead (first-listed) entity** of a team; the rest of
 the team keeps the AI the scenario gave it. `--entrant-scope team` (or
 `entrant_scope = "team"` in the scenario's `[testing]` table) hands the whole
-team to the entrant instead. A tournament has no hero team: the leaderboard is
-the result, not the report's win/loss totals, which are counted relative to
-whichever entrant was listed first in each game.
+team to the entrant instead.
+
+A tournament has no hero team, so it reports no win/loss totals: each game says
+which entrant won it (`"scoring": "leaderboard"` and a per-cell
+`winner_entrant` in the JSON, `wins`/`losses`/`draws`/`win_rate` null), and the
+leaderboard is the result. The run's exit status is still a gate: non-zero when
+a game couldn't be run at all — a matrix or random run also fails when the hero
+lost a fight.
 
 Fights work outside a project too: with no `Miku.toml` in scope the defaults
 apply, so `--report` writes under `build/fight-reports/`.

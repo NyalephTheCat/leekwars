@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use leek_manifest::FightTable;
 use leek_project::Project;
 use leek_scenario::{
-    Bracket, EntrantScope, MatrixAxes, RandomSpec, RandomTarget, Scenario, StatKind, TestReport,
-    TournamentSpec,
+    Bracket, CellOutcome, EntrantScope, FightResult, MatrixAxes, RandomSpec, RandomTarget,
+    Scenario, StatKind, TestReport, TournamentSpec,
 };
 
 use crate::cli::{BracketArg, EntrantScopeArg, Fight, FightFormat, FightMode, RandomTargetArg};
@@ -83,7 +83,7 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
             let report = run_tournament_mode(args, &scn, &base_dir)?;
             render_report(&report, args.format);
             write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
-            Ok(ExitCode::SUCCESS)
+            Ok(verdict(&report))
         }
         FightMode::Random => {
             let report = run_random_mode(args, &scn, &base_dir, hero_team)?;
@@ -229,8 +229,9 @@ fn run_matrix_mode(
     leek_scenario::run_matrix(scn, base_dir, &axes, hero_team)
 }
 
-/// A tournament has no hero: every entrant is under test, and the leaderboard
-/// — not the report's win/loss totals — is the result.
+/// A tournament has no hero: every entrant is under test, each cell names the
+/// entrant that won that game, and the leaderboard — not the report's win/loss
+/// totals, which stay unset — is the result.
 fn run_tournament_mode(args: &Fight, scn: &Scenario, base_dir: &Path) -> Result<TestReport> {
     let testing = scn.testing.clone().unwrap_or_default();
     let entrants = pick_vec(&args.entrant, &testing.entrants);
@@ -318,9 +319,12 @@ fn parse_stats(names: &[String]) -> Result<Vec<StatKind>> {
         .collect()
 }
 
+/// The exit status of a testing run, so it can be a regression gate.
+///
+/// Non-zero if the hero lost a fight, or a fight couldn't be run. A tournament
+/// has no hero and so no losses to count: only a game that couldn't be run
+/// fails it.
 fn verdict(report: &TestReport) -> ExitCode {
-    // Non-zero if the hero lost any fight, or a fight couldn't be run —
-    // useful as a regression gate.
     if report.losses > 0 || report.errors > 0 {
         ExitCode::from(1)
     } else {
@@ -336,38 +340,40 @@ fn render_report(report: &TestReport, format: FightFormat) {
 }
 
 fn render_human(report: &TestReport) {
-    use leek_scenario::FightResult;
+    use leek_scenario::Scoring;
 
     println!("mode: {}", report.mode);
     println!(
-        "{:<48} {:>10} {:>8} {:>6} {:>6}",
+        "{:<48} {:>10} {:>8} {:>6} {:>16}",
         "label", "seed", "winner", "turns", "result"
     );
     for c in &report.cells {
         let winner = c.winner.map_or_else(|| "-".to_string(), |t| t.to_string());
-        let result = match c.result {
-            FightResult::Win => "WIN",
-            FightResult::Loss => "LOSS",
-            FightResult::Draw => "DRAW",
-            FightResult::Error => "ERROR",
-        };
         println!(
-            "{:<48} {:>10} {:>8} {:>6} {:>6}",
+            "{:<48} {:>10} {:>8} {:>6} {:>16}",
             truncate(&c.label, 48),
             c.seed,
             winner,
             c.turns,
-            result
+            cell_result(&c.result)
         );
     }
-    println!(
-        "\nwins {}  losses {}  draws {}  errors {}   (win rate {:.1}%)",
-        report.wins,
-        report.losses,
-        report.draws,
-        report.errors,
-        report.win_rate()
-    );
+    match report.scoring {
+        Scoring::Hero => {
+            let rate = report
+                .win_rate()
+                .map_or_else(|| "-".to_string(), |rate| format!("{rate:.1}%"));
+            println!(
+                "\nwins {}  losses {}  draws {}  errors {}   (win rate {rate})",
+                report.wins, report.losses, report.draws, report.errors,
+            );
+        }
+        // No hero, so no win rate to print and nothing for a win/loss total to
+        // count: the leaderboard below is the result.
+        Scoring::Leaderboard => {
+            println!("\ngames {}  errors {}", report.cells.len(), report.errors);
+        }
+    }
 
     if !report.standings.is_empty() {
         println!("\nleaderboard:");
@@ -388,11 +394,12 @@ fn render_human(report: &TestReport) {
         }
     }
 
-    // Surface the settings that beat the hero.
+    // Surface the settings that beat the hero. A leaderboard report has no
+    // hero and so no losses: this is empty for a tournament.
     let beaten: Vec<&str> = report
         .cells
         .iter()
-        .filter(|c| c.result == FightResult::Loss)
+        .filter(|c| c.result == CellOutcome::Hero(FightResult::Loss))
         .map(|c| c.label.as_str())
         .collect();
     if !beaten.is_empty() {
@@ -419,6 +426,18 @@ fn render_human(report: &TestReport) {
                 println!("    AI error: {e}");
             }
         }
+    }
+}
+
+/// A cell's result column. A tournament game names the entrant that won it:
+/// there is no hero to call it a win or a loss for.
+fn cell_result(result: &CellOutcome) -> String {
+    match result {
+        CellOutcome::Hero(FightResult::Win) => "WIN".to_string(),
+        CellOutcome::Hero(FightResult::Loss) => "LOSS".to_string(),
+        CellOutcome::Hero(FightResult::Draw) | CellOutcome::Level => "DRAW".to_string(),
+        CellOutcome::Won(label) => format!("{} won", truncate(label, 12)),
+        CellOutcome::Error => "ERROR".to_string(),
     }
 }
 
@@ -451,23 +470,28 @@ fn render_json(report: &TestReport) {
 
 /// The JSON body of a sweep/tournament/random report.
 fn report_json(report: &TestReport) -> serde_json::Value {
-    use leek_scenario::FightResult;
+    use leek_scenario::Scoring;
 
     let cells: Vec<_> = report
         .cells
         .iter()
         .map(|c| {
+            // `winner_entrant` names who won a tournament game; a hero-mode
+            // cell leaves it null and says win/loss instead.
+            let (result, winner_entrant) = match &c.result {
+                CellOutcome::Hero(FightResult::Win) => ("win", None),
+                CellOutcome::Hero(FightResult::Loss) => ("loss", None),
+                CellOutcome::Hero(FightResult::Draw) | CellOutcome::Level => ("draw", None),
+                CellOutcome::Won(label) => ("win", Some(label.clone())),
+                CellOutcome::Error => ("error", None),
+            };
             serde_json::json!({
                 "label": c.label,
                 "seed": c.seed,
                 "winner": c.winner,
+                "winner_entrant": winner_entrant,
                 "turns": c.turns,
-                "result": match c.result {
-                    FightResult::Win => "win",
-                    FightResult::Loss => "loss",
-                    FightResult::Draw => "draw",
-                    FightResult::Error => "error",
-                },
+                "result": result,
                 "failure": c.failure,
                 "ai_errors": c.ai_errors,
             })
@@ -486,11 +510,18 @@ fn report_json(report: &TestReport) -> serde_json::Value {
             })
         })
         .collect();
+    // The win/loss/draw totals only mean something against a hero team, so a
+    // leaderboard report reports them as null rather than as zeroes.
+    let hero = report.scoring == Scoring::Hero;
     serde_json::json!({
         "mode": report.mode,
-        "wins": report.wins,
-        "losses": report.losses,
-        "draws": report.draws,
+        "scoring": match report.scoring {
+            Scoring::Hero => "hero",
+            Scoring::Leaderboard => "leaderboard",
+        },
+        "wins": hero.then_some(report.wins),
+        "losses": hero.then_some(report.losses),
+        "draws": hero.then_some(report.draws),
         "errors": report.errors,
         "win_rate": report.win_rate(),
         "cells": cells,

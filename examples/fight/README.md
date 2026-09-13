@@ -96,6 +96,10 @@ it every member of the team instead. A single-elimination match that ends level
 counts as a draw for both entrants — one still advances, on a coin drawn from
 the pairing.
 
+There is no hero in a tournament: every game names the entrant that won it and
+the leaderboard is the result, so the report carries no win/loss totals and no
+win rate. The run fails (non-zero exit) only when a game couldn't be run.
+
 ### Randomized point-buy builds
 
 ```sh

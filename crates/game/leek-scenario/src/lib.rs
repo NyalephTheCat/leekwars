@@ -33,8 +33,8 @@ pub use schema::{
     ScenarioPatch, StatKind, TeamSpec, TestMode, TestingSpec,
 };
 pub use testing::{
-    CellResult, FightResult, MatrixAxes, Standing, TestReport, TournamentSpec, run_matrix,
-    run_random, run_tournament,
+    CellOutcome, CellResult, FightResult, MatrixAxes, Scoring, Standing, TestReport,
+    TournamentSpec, run_matrix, run_random, run_tournament,
 };
 
 use std::path::Path;

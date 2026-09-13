@@ -1120,6 +1120,57 @@ jobs = 2
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Regression (#66): a tournament has no hero, so the run no longer claims
+/// one — the summary drops the win rate, the JSON leaves the hero totals null,
+/// and the exit status gates on the games having run rather than always
+/// passing.
+#[test]
+fn fight_tournament_reports_a_leaderboard_not_a_hero_verdict() {
+    let dir = scratch_dir("fight_tournament");
+    write(&dir, "duel.toml", IDLE_DUEL);
+    write(&dir, "a.leek", "return 0;\n");
+    write(&dir, "b.leek", "return 1;\n");
+
+    let args = |x: &'static str| {
+        vec![
+            "fight",
+            "duel.toml",
+            "--mode",
+            "tournament",
+            "--entrant",
+            x,
+            "--entrant",
+            "b.leek",
+            "--report=out.json",
+        ]
+    };
+    let out = miku(&args("a.leek"), &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        !out.stdout.contains("win rate") && !out.stdout.contains("losses"),
+        "no hero, no win/loss summary: {}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("leaderboard"), "stdout: {}", out.stdout);
+
+    let json = std::fs::read_to_string(dir.join("out.json")).unwrap();
+    for key in [
+        "\"scoring\": \"leaderboard\"",
+        "\"wins\": null",
+        "\"losses\": null",
+        "\"win_rate\": null",
+    ] {
+        assert!(json.contains(key), "expected {key} in {json}");
+    }
+
+    // A tournament whose games can't be run is a failed run, not a silent
+    // success.
+    let out = miku(&args("missing.leek"), &dir);
+    assert_eq!(out.status, 1, "stdout: {}", out.stdout);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn fight_without_default_scenario_explains_itself() {
     let dir = scratch_dir("fight_no_scenario");

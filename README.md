@@ -103,7 +103,8 @@ Turn order follows the fight's seed (the official `StartOrder` draw), not the
 entity ids, and a tournament plays every seed from both sides — so neither the
 lowest id nor the first entrant opens by construction. A tournament entrant
 takes over its team's lead entity, or the whole team with
-`--entrant-scope team`.
+`--entrant-scope team`; with no hero to win or lose, each game names the
+entrant that won it and the leaderboard is the result.
 
 Scenarios are **composable**: a file can `extends` a base arena, pull reusable
 leek builds from separate files (`leek = "leeks/hero.toml"`), and carry named
