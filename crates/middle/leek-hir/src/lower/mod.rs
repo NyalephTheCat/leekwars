@@ -246,13 +246,31 @@ pub fn lower_files(
     // happens at the include-graph layer; here we just dedupe by
     // path so a diamond import doesn't double the body.
     lo.out.main = match resolved_includes {
-        Some(resolved) => splice_includes(
-            entry_main,
-            entry.path,
-            &per_file_main,
-            resolved,
-            &mut BTreeSet::new(),
-        ),
+        Some(resolved) => {
+            let mut already = BTreeSet::new();
+            let spliced = splice_includes(
+                entry_main,
+                entry.path,
+                &per_file_main,
+                resolved,
+                &mut already,
+            );
+            // Definition bodies were lowered in pass 2, before the
+            // per-file main blocks existed, so their include sites are
+            // spliced here rather than in the walk above.
+            let unit_paths: BTreeMap<SourceId, PathBuf> = units
+                .iter()
+                .map(|u| (u.source, u.path.to_path_buf()))
+                .collect();
+            splice_includes_in_defs(
+                &mut lo.out.defs,
+                &unit_paths,
+                &per_file_main,
+                resolved,
+                &mut already,
+            );
+            spliced
+        }
         None => entry_main,
     };
 
@@ -290,10 +308,106 @@ fn splice_includes(
                 let spliced = splice_includes(body, &p, per_file_main, resolved, already);
                 out.extend(spliced);
             }
-            other => out.push(other),
+            mut other => {
+                splice_nested_includes(&mut other, current_path, per_file_main, resolved, already);
+                out.push(other);
+            }
         }
     }
     out
+}
+
+/// Splice the `include(...)` sites nested *inside* `s`.
+///
+/// `include` is an ordinary statement in the grammar, so it parses inside a
+/// block, a branch, a loop body, or a switch arm. Walking only the entry's
+/// flat top-level list left those sites as `Stmt::Include` while the
+/// include graph merged the file's definitions anyway — the backend then
+/// emitted both the definitions and an `include("…")` referring to a file
+/// that was supposed to have been inlined, and the included file's own
+/// main-block statements were dropped on the floor.
+///
+/// Statement lists are spliced in place. A body that holds a *single*
+/// boxed statement (`if (c) include("x");`, an unbraced loop body) has no
+/// list to splice into, so the include expands to a `Stmt::Block`: an
+/// include's main block is usually more than one statement, and leaving it
+/// unbraced would put only the first under the branch. Nothing leaks out of
+/// that block that did not already stay in: every unit's main block is
+/// lowered in its own scope, so an included file's `var` is a local of that
+/// file either way.
+fn splice_nested_includes(
+    s: &mut Stmt,
+    current_path: &Path,
+    per_file_main: &BTreeMap<PathBuf, Vec<Stmt>>,
+    resolved: &BTreeMap<(PathBuf, String), PathBuf>,
+    already: &mut BTreeSet<PathBuf>,
+) {
+    match s {
+        Stmt::Block(b) => {
+            let stmts = std::mem::take(&mut b.stmts);
+            b.stmts = splice_includes(stmts, current_path, per_file_main, resolved, already);
+        }
+        Stmt::Switch(sw) => {
+            for arm in &mut sw.arms {
+                let body = std::mem::take(&mut arm.body);
+                arm.body = splice_includes(body, current_path, per_file_main, resolved, already);
+            }
+        }
+        // Everything else that carries statements carries them boxed, one
+        // apiece; `Stmt::Block` and `Stmt::Switch` are already handled, so
+        // this walk never revisits a list.
+        other => crate::visit::walk_stmt_child_stmts_mut(other, &mut |child| {
+            if matches!(child, Stmt::Include(_)) {
+                let span = child.span();
+                let taken = std::mem::replace(
+                    child,
+                    Stmt::Block(Block {
+                        stmts: Vec::new(),
+                        span,
+                    }),
+                );
+                let stmts =
+                    splice_includes(vec![taken], current_path, per_file_main, resolved, already);
+                *child = Stmt::Block(Block { stmts, span });
+            } else {
+                splice_nested_includes(child, current_path, per_file_main, resolved, already);
+            }
+        }),
+    }
+}
+
+/// Splice the `include(...)` sites inside emitted function, method, and
+/// constructor bodies, which pass 2 lowered before `per_file_main` existed.
+///
+/// `already` is the set the main-block splice filled: a file whose body has
+/// already run at top level merges to nothing here, the same rule a diamond
+/// import follows.
+fn splice_includes_in_defs(
+    defs: &mut [Def],
+    unit_paths: &BTreeMap<SourceId, PathBuf>,
+    per_file_main: &BTreeMap<PathBuf, Vec<Stmt>>,
+    resolved: &BTreeMap<(PathBuf, String), PathBuf>,
+    already: &mut BTreeSet<PathBuf>,
+) {
+    for def in defs {
+        let Some(path) = unit_paths.get(&def.span().source).cloned() else {
+            continue;
+        };
+        let bodies: Vec<&mut Block> = match def {
+            Def::Function(f) => f.body.iter_mut().collect(),
+            Def::Class(c) => c
+                .methods
+                .iter_mut()
+                .chain(&mut c.constructors)
+                .filter_map(|m| m.body.as_mut())
+                .collect(),
+            Def::Global(_) | Def::Local(_) => Vec::new(),
+        };
+        for body in bodies {
+            let stmts = std::mem::take(&mut body.stmts);
+            body.stmts = splice_includes(stmts, &path, per_file_main, resolved, already);
+        }
+    }
 }
 
 pub(crate) struct Lowerer {

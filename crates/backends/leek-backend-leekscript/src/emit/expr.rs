@@ -1,6 +1,7 @@
 //! Expression emission with precedence-driven re-parenthesization.
 
 use leek_hir::{Call, Callee, Expr, ExprKind, LambdaBody, Literal, NameRef, UnaryOp};
+use leek_syntax::Version;
 use leek_types::Type;
 
 use crate::prec::{
@@ -32,7 +33,7 @@ impl Emitter<'_> {
     fn emit_kind(&mut self, kind: &ExprKind) {
         match kind {
             ExprKind::Literal(l) => {
-                let s = literal_str(l);
+                let s = literal_str(l, self.opts.version);
                 self.w.token(&s);
             }
             ExprKind::Name(n) => {
@@ -249,12 +250,12 @@ impl Emitter<'_> {
     }
 }
 
-fn literal_str(l: &Literal) -> String {
+fn literal_str(l: &Literal, version: Version) -> String {
     match l {
         Literal::Int(i) => i.to_string(),
         Literal::Real(r) => real_lit(*r),
         Literal::BigInt(digits) => format!("{digits}L"),
-        Literal::String(s) => string_lit(s),
+        Literal::String(s) => string_lit(s, version),
         Literal::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Literal::Null => "null".to_string(),
     }
@@ -312,13 +313,35 @@ fn real_lit(r: f64) -> String {
     format!("{r:?}")
 }
 
-/// Render a string literal with the necessary escapes.
-pub(crate) fn string_lit(s: &str) -> String {
+/// Render a string literal with the escapes `version` will decode back to
+/// the same value.
+///
+/// v1 keeps the backslash before a quote matching the delimiter
+/// (`leek_text::EscapeMode::V1`): `"\""` reads back as the two characters
+/// `\"`, so at v1 a `"` inside the value cannot be written with a
+/// backslash at all — the literal switches to `'` delimiters instead. A v1
+/// value holding *both* quote characters has no single-literal form; it
+/// keeps the v2+ shape, which is the closest approximation available.
+pub(crate) fn string_lit(s: &str, version: Version) -> String {
+    // At v1 the delimiter is the only lever for embedding a quote, so pick
+    // the one the value does not contain.
+    let quote = if version == Version::V1 && s.contains('"') && !s.contains('\'') {
+        '\''
+    } else {
+        '"'
+    };
     let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
+    out.push(quote);
     for c in s.chars() {
         match c {
-            '"' => out.push_str("\\\""),
+            '"' | '\'' if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            // The other quote needs no escape, and at v1 escaping it would
+            // be wrong in the opposite direction (`\'` inside `"…"` decodes
+            // to a bare `'`, but so does a plain `'`).
+            '"' | '\'' => out.push(c),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
@@ -326,7 +349,7 @@ pub(crate) fn string_lit(s: &str) -> String {
             c => out.push(c),
         }
     }
-    out.push('"');
+    out.push(quote);
     out
 }
 
