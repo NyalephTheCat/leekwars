@@ -50,12 +50,22 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     let dry_run = args.check || args.diff;
     let mut any_changes = false;
     let mut changed_files = 0usize;
+    let mut unsafe_files = 0usize;
     for (i, path) in sources.iter().enumerate() {
         let original =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let version = detect_version(&original, project.as_ref());
-        let formatted = leek_fmt::format_source(&original, source, version, &opts);
+        // Never write output that lost a comment or token: leave the
+        // file untouched and report it instead.
+        let formatted = match leek_fmt::format_source_checked(&original, source, version, &opts) {
+            Ok(formatted) => formatted,
+            Err(err) => {
+                eprintln!("error: refusing to format {}: {err}", path.display());
+                unsafe_files += 1;
+                continue;
+            }
+        };
         if formatted == original {
             continue;
         }
@@ -77,6 +87,13 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         }
     }
 
+    if unsafe_files > 0 {
+        eprintln!(
+            "miku: {unsafe_files} file{} left unformatted: the formatter failed its safety check (please report this)",
+            if unsafe_files == 1 { "" } else { "s" }
+        );
+        return Ok(ExitCode::from(1));
+    }
     if dry_run && any_changes {
         if !quiet {
             eprintln!(
@@ -101,7 +118,8 @@ fn run_stdin(args: &Fmt, opts: &FormatOptions, project: Option<&Project>) -> Res
     let original = std::io::read_to_string(std::io::stdin()).context("reading stdin")?;
     let source = SourceId::new(1).unwrap();
     let version = detect_version(&original, project);
-    let formatted = leek_fmt::format_source(&original, source, version, opts);
+    let formatted = leek_fmt::format_source_checked(&original, source, version, opts)
+        .map_err(|err| anyhow::anyhow!("refusing to format <stdin>: {err}"))?;
     if args.diff {
         print!(
             "{}",
