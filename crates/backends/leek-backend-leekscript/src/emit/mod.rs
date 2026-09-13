@@ -47,6 +47,7 @@ pub fn emit(hir: &HirFile, opts: &Options) -> EmittedLeekScript {
         w: LsWriter::new(opts.indent.clone(), opts.is_compact()),
         names,
         comments,
+        declared_globals: BTreeSet::new(),
     };
     em.emit_file();
     EmittedLeekScript {
@@ -60,6 +61,11 @@ pub(crate) struct Emitter<'a> {
     pub(crate) w: LsWriter,
     pub(crate) names: RenameMap,
     pub(crate) comments: Comments,
+    /// Globals this file has already declared. HIR keeps one
+    /// `Stmt::VarDecl { is_global: true }` per declaration site but folds
+    /// them all onto a single `DefId`, so only the first site writes the
+    /// `global` keyword — see [`Emitter::emit_vardecl`].
+    declared_globals: BTreeSet<DefId>,
 }
 
 impl Emitter<'_> {
@@ -89,7 +95,12 @@ impl Emitter<'_> {
             match def {
                 Def::Function(f) => self.emit_function(item, f),
                 Def::Class(c) => self.emit_class(c),
-                Def::Global(g) => self.emit_global(g),
+                Def::Global(g) => {
+                    // The item form is the declaration; a later statement
+                    // site must degrade to a plain assignment.
+                    self.declared_globals.insert(item);
+                    self.emit_global(g);
+                }
                 Def::Local(_) => {}
             }
         }
@@ -291,6 +302,16 @@ impl Emitter<'_> {
         if matches!(s, Stmt::Charge(_)) {
             return;
         }
+        // A repeat `global x;` with no initializer has nothing left to say
+        // once an earlier site declared it — writing the bare name would be
+        // a pointless expression statement.
+        if let Stmt::VarDecl(v) = s
+            && v.is_global
+            && v.init.is_none()
+            && self.declared_globals.contains(&v.def)
+        {
+            return;
+        }
         self.flush_leading(s.span());
         match s {
             Stmt::Charge(_) => {}
@@ -423,7 +444,8 @@ impl Emitter<'_> {
             Stmt::Include(i) => {
                 self.w.token("include");
                 self.w.token("(");
-                self.w.token(&crate::emit::expr::string_lit(&i.path));
+                self.w
+                    .token(&crate::emit::expr::string_lit(&i.path, self.opts.version));
                 self.w.token(")");
                 self.semi();
             }
@@ -481,11 +503,18 @@ impl Emitter<'_> {
 
     fn emit_vardecl(&mut self, v: &VarDecl) {
         if v.is_global {
-            self.w.token("global");
+            // One `global` keyword per global. HIR folds every declaration
+            // site of a name onto one `DefId` and keeps them all as
+            // statements; upstream hoists the declaration regardless of
+            // position, so the sites after the first are assignments.
+            if self.declared_globals.insert(v.def) {
+                self.w.token("global");
+                self.w.space();
+            }
         } else {
             self.w.token("var");
+            self.w.space();
         }
-        self.w.space();
         self.w.token(&v.name);
         if let Some(init) = &v.init {
             self.w.space();
@@ -550,6 +579,13 @@ pub(crate) fn is_prelude_span(span: Span, opts: &Options) -> bool {
 /// skipped for every global a surviving statement covers. A `Def::Global`
 /// with no such statement left (the shape `propagate_const_globals` leaves
 /// behind) still emits `global x;`, so no declaration is ever lost.
+///
+/// This answers the *item vs. statement* question only. When a global has
+/// several declaration sites — `global g = 1; global g = 2;`, or two
+/// included files that both declare `CFG` — every site is a separate
+/// statement sharing one `DefId`, and [`Emitter::declared_globals`] keeps
+/// the `global` keyword on the first of them. The two mechanisms are one
+/// policy: exactly one declaration per global.
 ///
 /// Lambda bodies are leaves in [`leek_hir::visit::walk_stmt_child_stmts`],
 /// so a global declared only inside a lambda is not counted and keeps its
