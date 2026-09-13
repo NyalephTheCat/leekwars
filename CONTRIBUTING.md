@@ -169,7 +169,9 @@ than one sprawling change.
   `target/`. Accept new output on purpose with `UPDATE_SNAPSHOTS=1 cargo test
   -p leek-backend-java`, and commit it only when that is the point of the
   change. `tools/check.sh` fails if a run touches the directory without the
-  flag.
+  flag. Programs that call `rand`/`randInt`/`randFloat`/`randReal` are left out
+  of the exact op-count comparison, because their reference counts come from a
+  single unseeded JVM run.
 - **JVM parity gates:** the Java-backend cross-check against the upstream
   harness skips (with a `SKIPPED` line) when `leekscript-emitter.jar` or the
   captured `snapshot.tsv` is missing, so the suite runs without a JDK. Set
