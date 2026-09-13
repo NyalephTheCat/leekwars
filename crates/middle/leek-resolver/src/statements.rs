@@ -398,6 +398,17 @@ impl Resolver {
     /// Resolve a var/global declaration: walk initializers, record
     /// lambda arities and class types, then declare the names.
     fn resolve_var_decl(&mut self, v: &VarDeclStmt) {
+        let declaration_kind = if v
+            .syntax()
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|t| t.kind() == SyntaxKind::KwGlobal)
+        {
+            SymbolKind::Global
+        } else {
+            SymbolKind::Local
+        };
+
         // Recursive-var-lambda support: when the init is a lambda
         // and there's exactly one declared name, pre-declare it
         // so the lambda body's references to that name resolve to
@@ -415,7 +426,7 @@ impl Resolver {
             if self.name_in_outer_scope(&nm) {
                 false
             } else {
-                let (_, _) = self.declare(name_tok, SymbolKind::Local);
+                let (_, _) = self.declare(name_tok, declaration_kind);
                 true
             }
         } else {
@@ -466,7 +477,7 @@ impl Resolver {
             _ => None,
         });
         if !skip_declare {
-            self.declare_var_names(v, SymbolKind::Local);
+            self.declare_var_names(v, declaration_kind);
         }
         if let Some(name) = idents_after_keyword(v.syntax()).first() {
             if let Some((min_args, max_args)) = lambda_arity {

@@ -444,6 +444,20 @@ mod index_tests {
     }
 
     #[test]
+    fn table_records_global_decl_as_global() {
+        let r = run("global cache = 5;\nvar value = cache;\n");
+        let cache = r.table.symbols.iter().find(|s| s.name == "cache").unwrap();
+        assert_eq!(cache.kind, SymbolKind::Global);
+        assert!(
+            r.table
+                .references
+                .iter()
+                .any(|reference| reference.target == cache.id),
+            "the global use should resolve to its declaration"
+        );
+    }
+
+    #[test]
     fn reference_at_finds_cursor_inside_use() {
         let r = run("var apple = 5;\nvar n = apple;\n");
         // Find the byte offset of the use of `apple` on line 2.
