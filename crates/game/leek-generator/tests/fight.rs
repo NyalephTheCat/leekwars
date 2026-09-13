@@ -741,8 +741,39 @@ fn looping_ai_loses_its_turn_not_the_fight() {
         errors,
         [1, 2, 3].map(|t| (t, 1, "TOO_MUCH_OPERATIONS")).to_vec()
     );
-    let log: Vec<String> = f.borrow().log().iter().map(|(_, m)| m.clone()).collect();
-    assert_eq!(log, ["bot1", "foe1", "bot2", "foe2", "bot3", "foe3"]);
+    // Who opens comes from the seed-drawn start order (#39); what this
+    // regression is about is that both entities act on every turn.
+    let mut log: Vec<String> = f.borrow().log().iter().map(|(_, m)| m.clone()).collect();
+    log.sort();
+    assert_eq!(log, ["bot1", "bot2", "bot3", "foe1", "foe2", "foe3"]);
+}
+
+/// Regression (#39): the turn loop played entities in ascending id order, so
+/// the lowest id — team 0's lead in the usual scenario layout — opened every
+/// fight on every seed. The order of play is drawn from the fight's seed now
+/// (`StartOrder.compute`), so both sides get to open.
+#[test]
+fn turn_order_is_drawn_from_the_seed_not_from_the_ids() {
+    let mut ais: HashMap<i64, HirFile> = HashMap::new();
+    ais.insert(1, compile("say(\"bot\")"));
+    ais.insert(2, compile("say(\"foe\")"));
+
+    let openers: Vec<String> = (1..=8u64)
+        .map(|seed| {
+            let f = shared(
+                Fight::new(10, 10, 1)
+                    .with_seed(seed)
+                    .with_entity(Entity::new(1, "Bot", 0, 0))
+                    .with_entity(Entity::new(2, "Foe", 33, 1)),
+            );
+            run_fight(&f, &ais, 1, 4, false, DEFAULT_MAX_OPS_PER_TURN);
+            let opener = f.borrow().log().first().map(|(_, m)| m.clone());
+            opener.unwrap_or_default()
+        })
+        .collect();
+
+    assert!(openers.iter().any(|o| o == "bot"), "{openers:?}");
+    assert!(openers.iter().any(|o| o == "foe"), "{openers:?}");
 }
 
 /// Regression (#67): an AI runtime error propagated out of the turn loop and

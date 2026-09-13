@@ -309,14 +309,20 @@ pub fn run_matrix(
 pub struct TournamentSpec {
     pub entrants: Vec<PathBuf>,
     pub bracket: crate::schema::Bracket,
-    /// Seeds played per pairing (each is one game); the side winning the most
-    /// games takes the match.
+    /// Seeds played per pairing. Each seed is played twice, once with the
+    /// entrants on either side, so a pairing is `2 × seeds` games; the side
+    /// winning the most of them takes the match.
     pub seeds: Vec<u64>,
 }
 
 /// Run a tournament among `entrants`, returning a leaderboard in `standings`.
 /// A game that can't be run is reported as a [`FightResult::Error`] cell and
 /// counts for neither side.
+///
+/// Every seed of a pairing is played twice, with the entrants swapping team
+/// slots between the two legs, so no entrant collects whatever edge a slot
+/// carries (#39). A single-elimination match that ends level is decided by
+/// [`tie_break_favors_a`].
 ///
 /// # Errors
 /// Needs at least two entrants and two teams in the base scenario.
@@ -356,28 +362,44 @@ pub fn run_tournament(
         );
     }
 
-    // Play A (team_a) vs B (team_b) over the seeds; returns (a_wins, b_wins, draws).
+    // Play A vs B over the seeds; returns (a_wins, b_wins, draws). Each seed
+    // is played twice, with the entrants swapped between the two team slots:
+    // the slots aren't interchangeable (starting cells, and the start order is
+    // drawn per team), so playing one leg would hand whoever sits in `team_a`
+    // the same edge in every pairing (#39).
     let mut play_match = |a: &Path, b: &Path| -> (u32, u32, u32) {
         let (mut aw, mut bw, mut dw) = (0, 0, 0);
         for &seed in &seeds {
-            let mut scn = base.clone();
-            scn.seed = Some(seed);
-            set_team_lead_ai(&mut scn, team_a, a);
-            set_team_lead_ai(&mut scn, team_b, b);
-            let label = format!("{} vs {} @seed={seed}", label_of(a), label_of(b));
-            let outcome = match play_one(&scn, base_dir, &cache) {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    report.record_failure(label, seed, &e);
-                    continue;
+            for swapped in [false, true] {
+                let (a_team, b_team) = if swapped {
+                    (team_b, team_a)
+                } else {
+                    (team_a, team_b)
+                };
+                let mut scn = base.clone();
+                scn.seed = Some(seed);
+                set_team_lead_ai(&mut scn, a_team, a);
+                set_team_lead_ai(&mut scn, b_team, b);
+                let sides = if swapped { "swapped" } else { "as-listed" };
+                let label = format!(
+                    "{} vs {} @seed={seed} sides={sides}",
+                    label_of(a),
+                    label_of(b)
+                );
+                let outcome = match play_one(&scn, base_dir, &cache) {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        report.record_failure(label, seed, &e);
+                        continue;
+                    }
+                };
+                match outcome.winner_team {
+                    Some(t) if t == a_team => aw += 1,
+                    Some(_) => bw += 1,
+                    None => dw += 1,
                 }
-            };
-            match outcome.winner_team {
-                Some(t) if t == team_a => aw += 1,
-                Some(_) => bw += 1,
-                None => dw += 1,
+                report.record(label, seed, &outcome, a_team);
             }
-            report.record(label, seed, &outcome, team_a);
         }
         (aw, bw, dw)
     };
@@ -409,14 +431,18 @@ pub fn run_tournament(
                     }
                     let (a, b) = (&pair[0], &pair[1]);
                     let (aw, bw, _dw) = play_match(a, b);
-                    let (la, lb) = (label_of(a), label_of(b));
-                    if bw > aw {
-                        award(&mut standings, &lb, &la);
-                        next.push(b.clone());
-                    } else {
-                        award(&mut standings, &la, &lb);
-                        next.push(a.clone());
-                    }
+                    // Someone has to advance; a level match is decided by a
+                    // coin that depends on the pair, not on who is listed
+                    // first (both legs of every seed were played, so ties are
+                    // common).
+                    let a_advances = match aw.cmp(&bw) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Less => false,
+                        std::cmp::Ordering::Equal => tie_break_favors_a(a, b, &seeds),
+                    };
+                    let (winner, loser) = if a_advances { (a, b) } else { (b, a) };
+                    award(&mut standings, &label_of(winner), &label_of(loser));
+                    next.push(winner.clone());
                 }
                 round = next;
             }
@@ -432,6 +458,28 @@ pub fn run_tournament(
     });
     report.standings = rows;
     Ok(report)
+}
+
+/// Does a dead-level single-elimination match go to `a`? The coin is a hash
+/// of the pairing — the two labels *sorted*, plus the seeds — so it is
+/// reproducible, and, unlike advancing `pair[0]`, it doesn't reward being
+/// listed first in the bracket.
+fn tie_break_favors_a(a: &Path, b: &Path, seeds: &[u64]) -> bool {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let (la, lb) = (label_of(a), label_of(b));
+    let a_first = la <= lb;
+    let (lo, hi) = if a_first { (&la, &lb) } else { (&lb, &la) };
+
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64; // FNV-1a offset basis
+    for byte in lo.bytes().chain([0]).chain(hi.bytes()) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+    }
+    for &seed in seeds {
+        hash = (hash ^ seed).wrapping_mul(FNV_PRIME);
+    }
+
+    // The coin picks one of the two *labels*; map it back to the entrants.
+    (hash & 1 == 0) == a_first
 }
 
 fn award(standings: &mut HashMap<String, Standing>, winner: &str, loser: &str) {
@@ -565,5 +613,55 @@ mod tests {
         assert!(failure.contains("missing.leek"), "failure: {failure}");
         assert_eq!(report.cells[1].result, FightResult::Draw);
         assert_eq!((report.errors, report.draws), (1, 1));
+    }
+
+    /// Regression (#39): a tournament pairing used to put the first entrant in
+    /// `team_a` for every game, so whatever edge that slot carries went to the
+    /// entrant listed first. Each seed is now played from both sides.
+    #[test]
+    fn tournament_plays_each_seed_from_both_sides() {
+        let dir =
+            std::env::temp_dir().join(format!("leek-tournament-sides-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("a.leek"), "return 0;\n").expect("write AI");
+        std::fs::write(dir.join("b.leek"), "return 1;\n").expect("write AI");
+
+        let spec = TournamentSpec {
+            entrants: vec![PathBuf::from("a.leek"), PathBuf::from("b.leek")],
+            bracket: crate::schema::Bracket::RoundRobin,
+            seeds: vec![1, 2],
+        };
+        let report = run_tournament(&arena(), &dir, &spec, 0).expect("the tournament runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Two seeds × two legs, and each seed shows up on both sides.
+        assert_eq!(report.cells.len(), 4);
+        for seed in [1, 2] {
+            for sides in ["as-listed", "swapped"] {
+                assert!(
+                    report
+                        .cells
+                        .iter()
+                        .any(|c| c.seed == seed && c.label.contains(sides)),
+                    "missing seed {seed} {sides} in {:?}",
+                    report.cells.iter().map(|c| &c.label).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// A level single-elimination match is decided by the pairing, not by the
+    /// bracket position: swapping the two entrants advances the same one.
+    #[test]
+    fn tie_break_does_not_favor_the_entrant_listed_first() {
+        let seeds = [1, 2, 3];
+        for (x, y) in [("alpha", "beta"), ("beta", "gamma"), ("zz", "aa")] {
+            let (a, b) = (PathBuf::from(x), PathBuf::from(y));
+            assert_ne!(
+                tie_break_favors_a(&a, &b, &seeds),
+                tie_break_favors_a(&b, &a, &seeds),
+                "{x} vs {y} must resolve to the same entrant either way round"
+            );
+        }
     }
 }

@@ -99,6 +99,10 @@ a bare `miku fight` plays), `scenarios_dir` (where scenario names are looked
 up), `reports_dir` (where a bare `--report` writes, default
 `build/fight-reports`), and `jobs` (sweep workers).
 
+Turn order follows the fight's seed (the official `StartOrder` draw), not the
+entity ids, and a tournament plays every seed from both sides — so neither the
+lowest id nor the first entrant opens by construction.
+
 Scenarios are **composable**: a file can `extends` a base arena, pull reusable
 leek builds from separate files (`leek = "leeks/hero.toml"`), and carry named
 override `[profiles]`. You can also **debug an AI inside a running fight** —

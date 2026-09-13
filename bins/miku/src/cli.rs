@@ -405,7 +405,7 @@ pub struct Fight {
     /// Tournament format.
     #[arg(long, value_enum, default_value_t = BracketArg::RoundRobin)]
     pub bracket: BracketArg,
-    /// Seeds (games) played per pairing. Tournament mode.
+    /// Seeds played per pairing; each is played from both sides. Tournament mode.
     #[arg(long, value_delimiter = ',')]
     pub games: Vec<u64>,
 

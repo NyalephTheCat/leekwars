@@ -114,7 +114,9 @@ The `game/` crates implement the LeekWars game offline:
   upstream generator's JSON by [`tools/game-item-extract.sh`](../tools/game-item-extract.sh);
   CI runs it with `--check` to guard against drift, so regenerate with
   `--write` when the upstream data changes.
-- `leek-generator` mirrors the official generator's fight setup.
+- `leek-generator` mirrors the official generator's fight setup, down to the
+  order of play: it is drawn from the fight's seed before turn 1
+  (`StartOrder.compute`), not taken from the entity ids.
 - `leek-scenario` parses composable scenario files (TOML or the official JSON)
   that describe arenas, leek builds, seeds, and override profiles — the input
   to `miku fight`. A runnable example lives in

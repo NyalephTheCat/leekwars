@@ -12,7 +12,11 @@
 //!
 //! The **turn loop** ([`run_fight`] and friends) runs each living entity's AI
 //! once per turn, regenerating MP/TP and ticking effects, until one team
-//! remains or `max_turns` elapses.
+//! remains or `max_turns` elapses. The order of play is drawn from the
+//! fight's seed once, before turn 1
+//! ([`fight_start_order`](leek_game_runtime::order::fight_start_order)), the
+//! way the official `StartOrder.compute` does — it is not the entity ids in
+//! ascending order, so no side opens by construction.
 //!
 //! **Budget and errors**: every AI turn runs under a per-turn operation budget
 //! ([`DEFAULT_MAX_OPS_PER_TURN`] unless the caller configures one). Like the
@@ -25,6 +29,7 @@ pub mod official;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use leek_game_runtime::order::fight_start_order;
 use leek_game_runtime::{GameHost, call_game_builtin};
 use leek_hir::HirFile;
 use leek_runtime::Value;
@@ -170,12 +175,16 @@ pub struct Outcome {
 }
 
 /// The turn loop, generic over how an entity's AI **and its run options** are
-/// looked up. Each turn, every living entity (in id order) regenerates MP/TP,
+/// looked up. Each turn, every living entity (in start order) regenerates MP/TP,
 /// ticks effects, and runs its AI once under the options `get_ai` returns for
 /// it. Stops when at most one team remains or after `max_turns`. Entities for
 /// which `get_ai` returns `None` act only as targets. Returning per-entity
 /// options lets the debugger run one entity with debug hooks and the rest
 /// without (see [`run_fight_debug`]).
+///
+/// The start order is drawn once from the fight's seed and reused every turn
+/// (see [`fight_start_order`](leek_game_runtime::order::fight_start_order));
+/// entities that die along the way are skipped where they stand.
 ///
 /// An AI that errors (a runtime fault, an exhausted op budget, or code outside
 /// the native subset) ends its own turn, keeping the actions it already took;
@@ -188,14 +197,12 @@ fn fight_loop<'a>(
     get_ai: impl Fn(i64) -> Option<(&'a HirFile, &'a NativeOptions)>,
 ) -> Outcome {
     let mut errors = Vec::new();
+    // `StartOrder.compute`, drawn once before the fight and kept for every
+    // turn, like the reference's `Order`.
+    let order = fight_start_order(&fight.borrow());
     for turn in 1..=max_turns {
         fight.borrow_mut().set_turn(i64::from(turn));
-        let order: Vec<i64> = {
-            let mut ids = fight.borrow().entities(true);
-            ids.sort_unstable();
-            ids
-        };
-        for id in order {
+        for &id in &order {
             // Skip entities killed earlier this turn.
             if fight.borrow().life(id).is_none_or(|l| l <= 0) {
                 continue;

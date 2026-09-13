@@ -16,6 +16,9 @@ use std::rc::Rc;
 use crate::effect::{MODIFIER_IRREDUCTIBLE, MODIFIER_STACKABLE};
 use crate::{ActiveEffect, EffectKind, Entity, GameHost, Stat};
 
+/// The default combat RNG seed, used when the scenario names none.
+const DEFAULT_SEED: u64 = 0x2545_f491_4f6c_dd1d;
+
 /// The fight world model — entities on a `width × height` grid.
 #[derive(Debug, Clone)]
 pub struct Fight {
@@ -35,6 +38,9 @@ pub struct Fight {
     warned: HashSet<(i64, u8)>,
     /// Combat RNG state (xorshift64) — seeded so fights are reproducible.
     rng: u64,
+    /// The seed the fight was set up with, kept alongside the (mutating) RNG
+    /// state so order-of-play draws can start from their own stream.
+    seed: u64,
 }
 
 impl Fight {
@@ -50,7 +56,8 @@ impl Fight {
             obstacles: HashSet::new(),
             log: Vec::new(),
             warned: HashSet::new(),
-            rng: 0x2545_f491_4f6c_dd1d, // default non-zero seed
+            rng: DEFAULT_SEED,
+            seed: DEFAULT_SEED,
         }
     }
 
@@ -64,8 +71,17 @@ impl Fight {
     /// Seed the combat RNG (damage rolls) for a reproducible fight.
     #[must_use]
     pub fn with_seed(mut self, seed: u64) -> Self {
-        self.rng = if seed == 0 { 1 } else { seed };
+        self.seed = if seed == 0 { 1 } else { seed };
+        self.rng = self.seed;
         self
+    }
+
+    /// The seed this fight was set up with (see [`Fight::with_seed`]). Unlike
+    /// the combat RNG state it never moves, so setup-time draws — the start
+    /// order, say — replay identically whatever the fight does.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
     #[must_use]

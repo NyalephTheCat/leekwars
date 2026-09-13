@@ -113,6 +113,13 @@ writes `<mode>.json` (`single.json`, `matrix.json`, …) under `reports_dir`;
 exposed on the manifest, but the matrix / tournament / random drivers still
 run sequentially — it takes effect when they learn to run in parallel.
 
+Turn order is drawn from the fight's seed, like the official generator's
+`StartOrder` — not from the entity ids — so no side opens by construction. In
+a tournament every `--games` seed is played twice, the entrants swapping team
+slots between the legs, so neither entrant keeps whatever edge a slot carries;
+a single-elimination match that ends level is decided by a coin drawn from the
+pairing rather than by bracket position.
+
 Fights work outside a project too: with no `Miku.toml` in scope the defaults
 apply, so `--report` writes under `build/fight-reports/`.
 

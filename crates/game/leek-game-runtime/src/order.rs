@@ -11,7 +11,16 @@
 //! team order, skipping exhausted teams. Golden orderings in the tests were
 //! produced by running the Java algorithm verbatim with the official LCG.
 
+use crate::fight::Fight;
+use crate::host::GameHost;
 use crate::rng::OfficialRng;
+
+/// The frequency every fighter is given when computing the engine-native
+/// fight's start order. The reference draws each team's probability from its
+/// lead's `frequency` stat, which the scenario schema doesn't carry yet
+/// (GAME-09); until then every team weighs the same and the draw alone
+/// decides who opens.
+pub const DEFAULT_FREQUENCY: i64 = 100;
 
 /// Compute the global turn order for a fight (`StartOrder.compute`).
 ///
@@ -84,10 +93,57 @@ pub fn compute_start_order(teams: &[Vec<(i64, i64)>], rng: &mut OfficialRng) -> 
     order
 }
 
+/// Stir a fight seed into the LCG state the start-order draw starts from
+/// (splitmix64, then the bits as a Java `long`).
+///
+/// The reference reaches `StartOrder.compute` with a well-mixed state: map
+/// generation has already drawn from the same stream. Here the start order is
+/// the first draw, and scenario seeds are small counters (1, 2, 3, …), whose
+/// LCG state stays positive for the first steps — `getDouble()` would then
+/// land in `[0.5, 1)` for *every* seed and the same team would open every
+/// fight. Mixing first gives the draw its full range.
+fn start_order_seed(seed: u64) -> i64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // The state is a Java `long`: keep the bits, wrapping into the sign.
+    i64::from_ne_bytes(z.to_ne_bytes())
+}
+
+/// The start order of an engine-native [`Fight`]: group its living entities
+/// into teams (teams and their members in setup order) and run
+/// [`compute_start_order`] over a fresh [`OfficialRng`] seeded from
+/// [`Fight::seed`] (through [`start_order_seed`]).
+///
+/// This is the fight's order of play for every turn, drawn once like the
+/// reference's `StartOrder.compute` — so who opens follows the seed rather
+/// than the entity ids. The draws come from their own stream, so the combat
+/// RNG (damage rolls) is untouched.
+#[must_use]
+pub fn fight_start_order(fight: &Fight) -> Vec<i64> {
+    let mut teams: Vec<(i64, Vec<(i64, i64)>)> = Vec::new();
+    for id in fight.entities(true) {
+        let team = fight.team(id).unwrap_or_default();
+        if let Some((_, members)) = teams.iter_mut().find(|(t, _)| *t == team) {
+            members.push((id, DEFAULT_FREQUENCY));
+        } else {
+            teams.push((team, vec![(id, DEFAULT_FREQUENCY)]));
+        }
+    }
+    if teams.is_empty() {
+        return Vec::new();
+    }
+    let queues: Vec<Vec<(i64, i64)>> = teams.into_iter().map(|(_, members)| members).collect();
+    let mut rng = OfficialRng::new(start_order_seed(fight.seed()));
+    compute_start_order(&queues, &mut rng)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::compute_start_order;
+    use super::{DEFAULT_FREQUENCY, compute_start_order, fight_start_order, start_order_seed};
     use crate::rng::OfficialRng;
+    use crate::{Entity, Fight};
 
     // Golden orderings from running the Java `StartOrder` algorithm verbatim
     // with the official LCG.
@@ -126,5 +182,69 @@ mod tests {
             compute_start_order(&teams, &mut rng),
             vec![20, 10, 21, 11, 12]
         );
+    }
+
+    /// A 1v1 arena laid out the usual way: the lower id leads team 0.
+    fn duel(seed: u64) -> Fight {
+        Fight::new(10, 10, 1)
+            .with_seed(seed)
+            .with_entity(Entity::new(1, "Bot", 0, 0))
+            .with_entity(Entity::new(2, "Foe", 33, 1))
+    }
+
+    /// Regression (#39): the engine-native order used to be the entity ids
+    /// sorted, so id 1 opened every fight on every seed. It is drawn from the
+    /// seed now, so both sides get to open.
+    #[test]
+    fn fight_start_order_follows_the_seed() {
+        let seeds = 1..=64;
+        let opened_by_1 = seeds
+            .clone()
+            .filter(|&seed| fight_start_order(&duel(seed)).first() == Some(&1))
+            .count();
+        // Equal frequencies: the draw is a coin flip, so neither side runs
+        // away with the openings (it was 64/64 for id 1 before #39).
+        assert!(
+            (16..=48).contains(&opened_by_1),
+            "id 1 opened {opened_by_1} of 64 seeds"
+        );
+        // Every fighter still gets exactly one slot.
+        let mut order = fight_start_order(&duel(7));
+        order.sort_unstable();
+        assert_eq!(order, vec![1, 2]);
+    }
+
+    /// The fight-level helper is `compute_start_order` over uniform
+    /// frequencies, drawn from the fight's own seed.
+    #[test]
+    fn fight_start_order_matches_the_reference_draw() {
+        let teams = vec![vec![(1, DEFAULT_FREQUENCY)], vec![(2, DEFAULT_FREQUENCY)]];
+        for seed in [1_u64, 42, 1_000_003] {
+            let mut rng = OfficialRng::new(start_order_seed(seed));
+            assert_eq!(
+                fight_start_order(&duel(seed)),
+                compute_start_order(&teams, &mut rng),
+                "seed {seed}"
+            );
+        }
+    }
+
+    /// Teams and their members keep setup order, and the dead take no slot.
+    #[test]
+    fn fight_start_order_groups_by_team_and_skips_the_dead() {
+        let fight = Fight::new(10, 10, 1)
+            .with_seed(3)
+            .with_entity(Entity::new(7, "Lead", 0, 0))
+            .with_entity(Entity::new(3, "Ally", 1, 0))
+            .with_entity(Entity::new(5, "Foe", 33, 1))
+            .with_entity(Entity::new(4, "Corpse", 34, 1).with_life(0));
+        let order = fight_start_order(&fight);
+        assert_eq!(order.len(), 3);
+        assert!(
+            !order.contains(&4),
+            "a dead fighter takes no slot: {order:?}"
+        );
+        let team0: Vec<i64> = order.iter().copied().filter(|id| *id != 5).collect();
+        assert_eq!(team0, vec![7, 3], "team members keep setup order");
     }
 }
