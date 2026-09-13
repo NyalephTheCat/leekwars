@@ -400,7 +400,9 @@ impl LanguageServer for LeekLanguageServer {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         let version = params.text_document.version;
-        eprintln!("leek-lsp: didOpen {} ({} bytes)", uri, text.len());
+        if crate::trace_enabled() {
+            eprintln!("leek-lsp: didOpen {} ({} bytes)", uri, text.len());
+        }
         {
             let mut ws = self.state.lock().await;
             ws.open(uri.clone(), text);
@@ -441,7 +443,9 @@ impl LanguageServer for LeekLanguageServer {
 
     async fn did_close(&self, params: lsp::DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
-        eprintln!("leek-lsp: didClose {uri}");
+        if crate::trace_enabled() {
+            eprintln!("leek-lsp: didClose {uri}");
+        }
         {
             let mut ws = self.state.lock().await;
             ws.close(&uri);
@@ -1012,12 +1016,14 @@ impl LeekLanguageServer {
             drop(ws);
             (lsp_diags, Some(doc_version))
         };
-        eprintln!(
-            "leek-lsp: publishDiagnostics {} ({} items, v{})",
-            uri,
-            diags.len(),
-            version.unwrap_or(-1),
-        );
+        if crate::trace_enabled() {
+            eprintln!(
+                "leek-lsp: publishDiagnostics {} ({} items, v{})",
+                uri,
+                diags.len(),
+                version.unwrap_or(-1),
+            );
+        }
         self.client.publish_diagnostics(uri, diags, version).await;
     }
 }

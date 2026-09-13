@@ -38,8 +38,11 @@ You don't normally run it by hand — an editor does, as a stdio subprocess:
 ## Logging
 
 All server-side logs go to **stderr** (VS Code shows them in the
-"Leekscript" output channel). Set `LEEK_LSP_LOG=trace` for per-handler entry
-logs.
+"Leekscript" output channel). By default only lifecycle events are logged
+(startup, library loading, initialize/initialized, shutdown). Set
+`LEEK_LSP_LOG=trace` for per-handler entry logs — including the per-edit
+`didOpen` / `didClose` / `publishDiagnostics` lines, which stay off by
+default so the output channel isn't one line per keystroke.
 
 ## Host libraries
 

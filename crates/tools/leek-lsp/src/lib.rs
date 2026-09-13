@@ -30,7 +30,8 @@ pub use server::LeekLanguageServer;
 ///
 /// All server-side logs go to **stderr**, which `vscode-languageclient`
 /// captures and forwards to the editor's "Leekscript" output channel.
-/// Set `LEEK_LSP_LOG=trace` to enable per-handler entry logs.
+/// Only lifecycle events are logged by default; set `LEEK_LSP_LOG=trace`
+/// to enable the per-handler entry logs (see [`trace_enabled`]).
 pub fn run_stdio() {
     eprintln!(
         "leek-lsp v{} starting (pid {})",
@@ -75,7 +76,9 @@ pub fn run_stdio() {
 }
 
 /// Returns true when `LEEK_LSP_LOG` is set to `trace` (or any
-/// truthy value). Used to gate the noisier per-handler entry logs.
+/// truthy value). Used to gate the noisier per-handler entry logs —
+/// notably `didOpen` / `didClose` / `publishDiagnostics`, which would
+/// otherwise emit a line per keystroke.
 pub fn trace_enabled() -> bool {
     matches!(
         std::env::var("LEEK_LSP_LOG").as_deref(),
