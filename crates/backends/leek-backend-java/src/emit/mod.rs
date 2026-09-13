@@ -67,6 +67,11 @@ pub(crate) struct Emitter<'a> {
     in_function: bool,
     /// Monotonic counter for foreach iterator temp names.
     iter_counter: u32,
+    /// Monotonic counter for switch temp names (`__sw_<n>` / `__si_<n>`),
+    /// mirroring upstream `SwitchBlock`'s `mId`. Unique per emitted file so
+    /// sequential and nested switches never redeclare a Java local. `Cell`
+    /// so scratch emitters (`render_block_to_string`) can hand it back.
+    switch_counter: std::cell::Cell<u32>,
     /// Lambda nesting depth. When > 0, the bare Java `this` would
     /// resolve to the anonymous `FunctionLeekValue` inner class
     /// instead of the surrounding AI — so we emit `ai` (the lambda's
@@ -203,6 +208,7 @@ impl<'a> Emitter<'a> {
             writer: JavaWriter::new(),
             in_function: false,
             iter_counter: 0,
+            switch_counter: std::cell::Cell::new(0),
             lambda_depth: std::cell::Cell::new(0),
             outlined: std::cell::RefCell::new(Vec::new()),
             fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -1632,13 +1638,18 @@ pub(crate) fn stmt_definitely_returns(s: &Stmt, emit_ops: bool) -> bool {
         // completes normally — code after it is unreachable, so suppress
         // the trailing `return null;`.
         Stmt::While(w) => is_infinite_loop(&w.cond, &w.body, emit_ops),
-        // A `switch` always returns when it has a `default` arm and every arm
-        // (default included) definitely returns and none `break`s out.
+        // A `switch` never completes normally when it has a `default` arm, no
+        // arm `break`s out, and the last arm definitely returns: every other
+        // arm either returns or falls through into the next one (an empty
+        // `case 1: case 2:` label arm always falls through). This is javac's
+        // rule for the lowered `switch (__si_N)`, so the emitted code agrees
+        // with javac on whether a trailing statement is reachable.
         Stmt::Switch(s) => {
             s.arms.iter().any(|a| a.case.is_none())
-                && s.arms.iter().all(|a| {
-                    ends_with_return(&a.body, emit_ops) && !a.body.iter().any(stmt_has_own_break)
-                })
+                && s.arms
+                    .last()
+                    .is_some_and(|a| ends_with_return(&a.body, emit_ops))
+                && !s.arms.iter().any(|a| a.body.iter().any(stmt_has_own_break))
         }
         _ => false,
     }

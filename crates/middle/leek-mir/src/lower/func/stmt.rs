@@ -564,9 +564,17 @@ impl FnLowerer<'_> {
             let body_bb = case_iter.next().unwrap();
             let case = self.lower_expr_to_operand(case_expr);
             let cmp = self.fresh_temp(Type::Boolean, sw.span);
+            // The comparison is `Synthetic`: upstream charges one op per
+            // case test (reference.tsv: `var x = 2 switch (x) { case 1: ...
+            // case 2: ... }` = 4 ops), which is the flow-control charge
+            // below — the equality itself must not add another (#78).
             self.push_stmt(Statement::Assign(
                 Place::Local(cmp),
-                Rvalue::Binary(BinOp::Eq, Operand::Local(disc_local), case),
+                Rvalue::Synthetic(Box::new(Rvalue::Binary(
+                    BinOp::Eq,
+                    Operand::Local(disc_local),
+                    case,
+                ))),
             ));
             let next_bb = self.new_block();
             // Each case test costs 1 op (flow-control charge; the
@@ -592,17 +600,27 @@ impl FnLowerer<'_> {
                 }
                 default.unwrap_or(exit)
             };
+        //
+        // Every body entered — by a match or by falling through from
+        // the previous body — costs 1 op: upstream opens each Java
+        // `case N: {` block with `ops(1)` (reference.tsv row
+        // `var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 2) {
+        // return 99 } case 2: ... }` = 7 ops, #78). Upstream merges
+        // stacked labels (`case 1: case 2:`) into one test charged per
+        // label; charging each empty body here yields the same total.
         let mut case_index = 0usize;
         for arm in &sw.arms {
             if arm.case.is_some() {
                 let body_bb = case_bodies[case_index];
                 self.resume(body_bb);
+                self.push_stmt(Statement::Charge(1));
                 self.lower_block_stmts(&arm.body);
                 let next = body_after(case_index, &case_bodies, default_body, exit);
                 self.goto(next);
                 case_index += 1;
             } else if let Some(default_bb) = default_body {
                 self.resume(default_bb);
+                self.push_stmt(Statement::Charge(1));
                 self.lower_block_stmts(&arm.body);
                 self.goto(exit);
             }

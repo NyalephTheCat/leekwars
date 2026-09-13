@@ -1739,6 +1739,44 @@ fn formatting_uses_configured_indent_style() {
 }
 
 #[test]
+fn formatting_keeps_comments_inside_expressions() {
+    let text = "var x = 1 + // why\n    2\nf(a, /* b */ c)\nvar arr = [1, // one\n    2]\n";
+    let ws = open(text);
+    let edits = formatting::handle(&ws, &url()).expect("format");
+    let out: String = edits.iter().map(|e| e.new_text.clone()).collect();
+    for comment in ["// why", "/* b */", "// one"] {
+        assert!(
+            edits.is_empty() || out.contains(comment),
+            "formatting dropped {comment:?}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn range_formatting_keeps_comments_inside_statements() {
+    let text = "function f() {\nvar x = g(a, /* keep */ b)\n}\n";
+    let ws = open(text);
+    let range = lsp::Range {
+        start: lsp::Position {
+            line: 1,
+            character: 0,
+        },
+        end: lsp::Position {
+            line: 1,
+            character: 26,
+        },
+    };
+    let edits = leek_lsp::handlers::range_formatting::handle(&ws, &url(), range).expect("format");
+    for edit in &edits {
+        assert!(
+            edit.new_text.contains("/* keep */"),
+            "range formatting dropped the comment: {:?}",
+            edit.new_text
+        );
+    }
+}
+
+#[test]
 fn inlay_hints_can_be_disabled_via_settings() {
     let mut ws = open("var n = 1 + 2\n");
     let whole = lsp::Range {
