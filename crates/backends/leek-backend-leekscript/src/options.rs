@@ -25,8 +25,10 @@ pub struct Options {
     pub optimize: bool,
     /// Language version the output targets (drives a few literal quirks).
     pub version: Version,
-    /// The `SourceId` of the *user* file. Defs whose span comes from a
-    /// different (non-synthetic) source are treated as prelude-origin.
+    /// The `SourceId` of the *user* (entry) file. Only used for comment
+    /// attribution: `source_text` holds the entry's text, so comments are
+    /// flushed for spans coming from it. It does **not** decide what is
+    /// emitted — see [`Options::prelude_sources`].
     pub user_source: SourceId,
     /// Original source text, used to recover comments for pretty mode.
     /// `None` disables comment preservation.
@@ -34,6 +36,12 @@ pub struct Options {
     /// Skip prelude-origin definitions (stdlib signatures merged into the
     /// HIR). On by default; their calls emit the bare builtin name.
     pub drop_prelude_defs: bool,
+    /// `SourceId`s that hold merged library/prelude headers. Origin is
+    /// recorded here rather than inferred from `user_source`, so defs from
+    /// *included* files — which carry their own ids — are emitted like the
+    /// entry's own. Defaults to [`leek_prelude::source_id()`], the id every
+    /// in-tree pipeline gives the merged header.
+    pub prelude_sources: Vec<SourceId>,
     /// Indentation unit for pretty mode (ignored in compact mode).
     pub indent: String,
 }
@@ -47,6 +55,7 @@ impl Options {
             user_source: SourceId::new(1).expect("source id 1 is valid"),
             source_text: None,
             drop_prelude_defs: true,
+            prelude_sources: vec![leek_prelude::source_id()],
             indent: "\t".to_string(),
         }
     }
@@ -84,6 +93,14 @@ impl Options {
     #[must_use]
     pub fn with_indent(mut self, indent: impl Into<String>) -> Self {
         self.indent = indent.into();
+        self
+    }
+
+    /// Override the set of library/prelude source ids (for embedders that
+    /// merge a header under an id of their own).
+    #[must_use]
+    pub fn with_prelude_sources(mut self, ids: impl IntoIterator<Item = SourceId>) -> Self {
+        self.prelude_sources = ids.into_iter().collect();
         self
     }
 

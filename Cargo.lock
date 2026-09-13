@@ -985,6 +985,7 @@ dependencies = [
  "leek-hir",
  "leek-lexer",
  "leek-parser",
+ "leek-prelude",
  "leek-runtime",
  "leek-span",
  "leek-syntax",

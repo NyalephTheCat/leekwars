@@ -15,6 +15,7 @@ leek-syntax      = { workspace = true }
 leek-lexer       = { workspace = true }
 leek-hir         = { workspace = true }
 leek-types       = { workspace = true }
+leek-prelude     = { workspace = true }
 
 [dev-dependencies]
 leek-parser         = { workspace = true }
