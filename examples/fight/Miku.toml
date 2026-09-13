@@ -1,6 +1,6 @@
 # Makes this example folder a miku project, so `miku --library leekwars check`
-# / `miku fmt` work on the AIs in `ais/`. The fight commands read the scenario
-# files directly; the `[fight]` table below only supplies their defaults.
+# / `miku fmt` work on the AIs in `ais/`, and so a bare `miku fight` runs the
+# duel (see `[fight]`). An explicit scenario argument always wins.
 [project]
 name     = "fight-example"
 version  = "0.1.0"
@@ -10,15 +10,17 @@ entry    = "ais/hero.leek"
 [paths]
 src = "ais"
 
-[backend.interp]
+[backend.native]
 enable  = true
 default = true
 
 # Defaults for `miku fight` in this folder: a bare `miku fight` plays the duel,
-# and a bare `--report` writes JSON under `build/fight-reports/`. `jobs` is the
-# sweep worker count — parsed and exposed today, honoured once the matrix /
+# scenarios named without a directory part are looked up here, and a bare
+# `--report` writes JSON under `build/fight-reports/`. `jobs` is the sweep
+# worker count — parsed and exposed today, honoured once the matrix /
 # tournament / random drivers run in parallel.
 [fight]
 default_scenario = "duel.toml"
+scenarios_dir    = "."
 reports_dir      = "build/fight-reports"
 jobs             = 4

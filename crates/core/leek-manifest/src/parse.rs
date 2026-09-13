@@ -789,6 +789,19 @@ mod tests {
     }
 
     #[test]
+    fn fight_default_scenario_must_be_a_string() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            default_scenario = 3
+        "#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("fight.default_scenario"), "{err}");
+    }
+
+    #[test]
     fn fight_reports_dir_must_be_a_string() {
         let src = r#"
             [project]
