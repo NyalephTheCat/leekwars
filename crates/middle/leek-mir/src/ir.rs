@@ -635,6 +635,11 @@ pub enum Rvalue {
     /// inner rvalue but charges no ops. Wraps the foreach loop
     /// machinery (the `pos < len` test, the `pos + 1` step, the
     /// snapshot pair reads) whose upstream equivalents are free.
+    ///
+    /// As the source of an `Assign(Place::Index(..), ..)` it marks the
+    /// nested-index promotion write-back (`a[i][j] = v` re-storing
+    /// `a[i]`): an uncharged store that only matters for v1-v3
+    /// LegacyArray promotion, so backends skip it for v4.
     Synthetic(Box<Rvalue>),
     /// Construct a closure value. `function_idx` indexes into
     /// `MirProgram.functions` — the lambda's body lives there with

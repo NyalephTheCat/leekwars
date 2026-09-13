@@ -8,13 +8,47 @@ use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn ops(src: &str) -> u64 {
+    ops_v(src, 4)
+}
+
+fn ops_v(src: &str, version: u8) -> u64 {
     let s = SourceId::new(1).unwrap();
-    let p = parse(src, s, Version::V4);
+    let v = match version {
+        1 => Version::V1,
+        2 => Version::V2,
+        3 => Version::V3,
+        _ => Version::V4,
+    };
+    let p = parse(src, s, v);
     let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).expect("parse");
-    let (h, _) = leek_hir::lower_file_versioned(&sf, s, 4);
-    leek_runtime::DISPLAY_VERSION.with(|c| c.set(4));
-    run(&h, &NativeOptions::release().with_lang(4, false)).expect("run");
+    let (h, _) = leek_hir::lower_file_versioned(&sf, s, version);
+    leek_runtime::DISPLAY_VERSION.with(|c| c.set(version));
+    run(&h, &NativeOptions::release().with_lang(version, false)).expect("run");
     ops_used()
+}
+
+#[test]
+fn nested_index_write_charges_no_writeback() {
+    // A nested write costs exactly what the same write through an explicit
+    // alias does (minus the alias's `var` op): the promotion write-back is
+    // uncharged, and skipped entirely in v4 (#79).
+    for v in [1, 4] {
+        let nested = ops_v("var t = [[1, 2]] t[0][1] = 3", v);
+        let aliased = ops_v("var t = [[1, 2]] var m = t[0] m[1] = 3", v);
+        assert_eq!(nested + 1, aliased, "v{v}");
+    }
+}
+
+#[test]
+fn nested_index_write_on_a_field_charges_the_field_once() {
+    // `this.m[i][j] = v` charges the field access once; re-lowering the
+    // chain used to charge it again (#49).
+    let nested =
+        ops("class A { m = [[0, 0]] f() { this.m[0][1] = 5 } } var a = new A() a.f() return a.m");
+    let aliased = ops(
+        "class A { m = [[0, 0]] f() { var t = this.m t[0][1] = 5 } } var a = new A() a.f() return a.m",
+    );
+    assert_eq!(nested + 1, aliased);
 }
 
 #[test]

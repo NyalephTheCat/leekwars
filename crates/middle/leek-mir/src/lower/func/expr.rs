@@ -575,16 +575,18 @@ impl FnLowerer<'_> {
     ) -> Operand {
         // For compound assigns we first read the old value, apply
         // the base op, then write back. Plain `=` skips the read.
-        let place = self.lower_place(lhs);
-        // For nested index assignments (`a[i][j] = v`), collect
-        // the chain of (outer_base, outer_idx, intermediate_local)
-        // so we can emit a write-back after the inner mutation.
-        // This propagates v1-v3 LegacyArray array→map promotion
-        // up through every level of indirection (set_index in
-        // the interp returns the morphed value when promotion
+        //
+        // For nested index assignments (`a[i][j] = v`), the place
+        // lowering also records the chain of (outer_base, outer_idx,
+        // intermediate_local) so we can emit a write-back after the
+        // inner mutation. This propagates v1-v3 LegacyArray
+        // array→map promotion up through every level of indirection
+        // (set_index returns the morphed value when promotion
         // happens, and the explicit write-back makes sure each
-        // outer slot ends up holding the new container).
-        let writeback_chain = self.collect_index_writeback_chain(lhs, &place);
+        // outer slot ends up holding the new container). Every
+        // sub-expression is lowered exactly once (#49).
+        let mut writeback_chain = Vec::new();
+        let place = self.lower_place_collecting(lhs, Some(&mut writeback_chain));
         let new_value = if let Some(base_op) = op.compound_base() {
             if base_op == HBinOp::NullCoalesce {
                 // `a ??= b` desugars into `a = a ?? b`. The short-
@@ -632,44 +634,59 @@ impl FnLowerer<'_> {
         // without explicit write-back the outer slot keeps a stale
         // empty array. For non-promotion writes the chain is a
         // no-op (every intermediate `Rc` is unchanged).
-        for (outer_base, outer_idx, intermediate) in writeback_chain {
+        //
+        // The chain is innermost level first. Each store is
+        // `Synthetic`: it is compiler machinery with no upstream
+        // counterpart (Java's legacy arrays promote in place), so it
+        // never charges, and backends skip it entirely for v4, where
+        // no promotion can happen (#79).
+        for (outer_base, outer_idx, intermediate) in writeback_chain.into_iter().rev() {
             self.push_stmt(Statement::Assign(
                 Place::Index(outer_base, outer_idx),
-                Rvalue::Use(Operand::Local(intermediate)),
+                Rvalue::Synthetic(Box::new(Rvalue::Use(Operand::Local(intermediate)))),
             ));
         }
         self.read_place(&place, ty, span)
     }
 
-    /// Walk the LHS expression's index chain — from innermost to
-    /// outermost — returning `(outer_base, outer_idx,
-    /// intermediate_local)` triples for every nested level. The
-    /// `intermediate_local` is the same LocalId that `lower_place`
-    /// already allocated when reading each inner value; we just
-    /// re-discover the chain shape so we can emit the explicit
-    /// write-back statements.
-    pub(crate) fn collect_index_writeback_chain(
+    /// Lower the base of an index l-value. When the base is itself an
+    /// index expression (`a[i]` in `a[i][j] = v`), each level is
+    /// lowered exactly once into a temp holding the intermediate
+    /// container, and — when `chain` is given — the level is recorded
+    /// as an `(outer_base, outer_idx, intermediate_local)` triple,
+    /// outermost level first, for the promotion write-back.
+    fn lower_index_place_base(
         &mut self,
-        lhs: &Expr,
-        place: &Place,
-    ) -> Vec<(LocalId, Operand, LocalId)> {
-        let mut chain: Vec<(LocalId, Operand, LocalId)> = Vec::new();
-        let Place::Index(inner_local, _) = place else {
-            return chain;
+        base: &Expr,
+        chain: &mut Option<&mut Vec<(LocalId, Operand, LocalId)>>,
+    ) -> LocalId {
+        let (ExprKind::Index(outer_base, outer_idx), Some(_)) = (&base.kind, chain.as_ref()) else {
+            return self.lower_expr_to_local(base);
         };
-        let ExprKind::Index(inner_lhs, _) = &lhs.kind else {
-            return chain;
-        };
-        let mut cur_lhs: &Expr = inner_lhs;
-        let mut cur_local: LocalId = *inner_local;
-        while let ExprKind::Index(outer_base, outer_idx) = &cur_lhs.kind {
-            let outer_local = self.lower_expr_to_local(outer_base);
-            let outer_idx_op = self.lower_expr_to_operand(outer_idx);
-            chain.push((outer_local, outer_idx_op, cur_local));
-            cur_lhs = outer_base;
-            cur_local = outer_local;
+        let outer_local = self.lower_index_place_base(outer_base, chain);
+        let mut outer_idx_op = self.lower_expr_to_operand(outer_idx);
+        // The write-back reuses the index after the RHS ran; a user
+        // local (`a[i][j] = i++`) is snapshotted so the write-back
+        // targets the slot that was actually read.
+        if let Operand::Local(id) = outer_idx_op
+            && self.locals[id.0 as usize].kind != LocalKind::Temp
+        {
+            let t = self.fresh_temp(outer_idx.ty.clone(), outer_idx.span);
+            self.push_stmt(Statement::Assign(
+                Place::Local(t),
+                Rvalue::Use(Operand::Local(id)),
+            ));
+            outer_idx_op = Operand::Local(t);
         }
-        chain
+        let t = self.fresh_temp(base.ty.clone(), base.span);
+        self.push_stmt(Statement::Assign(
+            Place::Local(t),
+            Rvalue::Index(outer_local, outer_idx_op.clone()),
+        ));
+        if let Some(chain) = chain.as_mut() {
+            chain.push((outer_local, outer_idx_op, t));
+        }
+        t
     }
 
     /// `a ??= b` reuses the same shape as `a ?? b` but with the
@@ -733,6 +750,17 @@ impl FnLowerer<'_> {
     /// index access) get pushed into the current block as temp
     /// assignments first.
     pub(crate) fn lower_place(&mut self, e: &Expr) -> Place {
+        self.lower_place_collecting(e, None)
+    }
+
+    /// [`Self::lower_place`], additionally recording the nested index
+    /// write-back chain (see [`Self::lower_index_place_base`]) into
+    /// `chain` when one is given.
+    pub(crate) fn lower_place_collecting(
+        &mut self,
+        e: &Expr,
+        mut chain: Option<&mut Vec<(LocalId, Operand, LocalId)>>,
+    ) -> Place {
         match &e.kind {
             ExprKind::Name(NameRef::Local(def)) => {
                 if let Some(id) = self.local_map.get(def).copied() {
@@ -788,7 +816,7 @@ impl FnLowerer<'_> {
                 Place::Field(base_local, name.clone())
             }
             ExprKind::Index(base, idx) => {
-                let base_local = self.lower_expr_to_local(base);
+                let base_local = self.lower_index_place_base(base, &mut chain);
                 let idx_op = self.lower_expr_to_operand(idx);
                 Place::Index(base_local, idx_op)
             }

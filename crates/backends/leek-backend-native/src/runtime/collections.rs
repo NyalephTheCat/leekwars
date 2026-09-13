@@ -314,6 +314,35 @@ shim! {
 }
 
 shim! {
+    /// [`leek_value_set_index`] without the op charge — the compiler-synthesized
+    /// nested-index promotion write-back (`a[i][j] = v` re-storing `a[i]` in
+    /// v1–v3), which has no upstream counterpart (legacy arrays promote in place).
+    pub extern "C" fn leek_value_set_index_raw(
+        base: *mut Value,
+        idx: *mut Value,
+        value: *mut Value,
+        version: i64,
+    ) {
+        let v = unsafe { val(value) }.clone();
+        unsafe { set_member(base, val(idx), v, version as u8) };
+    }
+}
+
+shim! {
+    /// [`leek_set_index_int`] without the op charge; see
+    /// [`leek_value_set_index_raw`].
+    pub extern "C" fn leek_set_index_int_raw(
+        base: *mut Value,
+        idx: i64,
+        value: *mut Value,
+        version: i64,
+    ) {
+        let v = unsafe { val(value) }.clone();
+        unsafe { set_member(base, &Value::Int(idx), v, version as u8) };
+    }
+}
+
+shim! {
     pub extern "C" fn leek_map_new() -> *mut Value {
         handle(Value::Map(Rc::new(RefCell::new(MapData::new()))))
     }
