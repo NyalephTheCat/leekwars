@@ -147,4 +147,62 @@ pub(crate) mod testing {
         out.sort_by_key(|d| (d.span.start, d.span.end));
         out
     }
+
+    /// Apply every suggestion the pass attaches to `src`, one
+    /// suggestion at a time, and assert each one is a *real* fix: the
+    /// rewritten source still parses, and the finding it was attached
+    /// to is gone.
+    ///
+    /// This is the guard against span-level plausible but textually
+    /// destructive edits — a suggestion that replaces a whole call
+    /// expression with a bare function name passes a "the message
+    /// mentions the new name" test and fails this one.
+    ///
+    /// `make` builds a fresh pass per run, since [`LintPass`] hooks
+    /// take `&mut self` and a pass may carry state. `src` should
+    /// contain exactly one finding so "the finding is gone" is
+    /// unambiguous.
+    pub(crate) fn assert_suggestions_fix<P, F>(make: F, src: &str)
+    where
+        P: LintPass + 'static,
+        F: Fn() -> P,
+    {
+        use leek_rewrite::EditSet;
+
+        let before = lint_one(make(), src);
+        assert_eq!(
+            before.len(),
+            1,
+            "expected exactly one finding to fix in:\n{src}\ngot {before:?}"
+        );
+        let diag = &before[0];
+        assert!(
+            !diag.suggestions.is_empty(),
+            "no suggestion attached to {:?} in:\n{src}",
+            diag.code
+        );
+        for sug in &diag.suggestions {
+            let mut edits = EditSet::new(src.len());
+            edits
+                .push_suggestion(sug)
+                .unwrap_or_else(|e| panic!("suggestion {:?} has invalid edits: {e}", sug.message));
+            let fixed = edits.apply(src);
+
+            let source = SourceId::new(1).unwrap();
+            let parsed = leek_parser::parse(&fixed, source, Version::V4);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "applying {:?} produced unparseable source:\n{fixed}\n{:?}",
+                sug.message,
+                parsed.diagnostics
+            );
+
+            let after = lint_one(make(), &fixed);
+            assert!(
+                after.iter().all(|d| d.code != diag.code),
+                "applying {:?} left the finding in place:\n{fixed}\n{after:?}",
+                sug.message
+            );
+        }
+    }
 }

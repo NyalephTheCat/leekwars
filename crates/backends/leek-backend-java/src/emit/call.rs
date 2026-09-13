@@ -464,6 +464,7 @@ impl super::Emitter<'_> {
                         let builtin_call = Call {
                             callee: Callee::Function(NameRef::Builtin(name.clone())),
                             args: c.args.clone(),
+                            callee_span: c.callee_span,
                             span: c.span,
                         };
                         self.write_call(buf, &builtin_call);

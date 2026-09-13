@@ -160,4 +160,14 @@ mod tests {
         assert_eq!(d.len(), 1, "got {d:?}");
         assert!(d[0].message.contains("dead"), "{d:?}");
     }
+
+    /// The suggestion this rule emits must apply cleanly: the
+    /// rewritten source still parses and the finding is gone.
+    #[test]
+    fn suggestions_are_applicable() {
+        crate::testing::assert_suggestions_fix(
+            || UnusedVariable,
+            "function f() {\n  var dead = 1\n  return 0\n}\n",
+        );
+    }
 }

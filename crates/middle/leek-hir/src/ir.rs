@@ -434,6 +434,13 @@ pub struct SetItem {
 pub struct Call {
     pub callee: Callee,
     pub args: Vec<Expr>,
+    /// The callee's *name* token span — the `f` in `f(args)`, the `m`
+    /// in `obj.m(args)`. For a computed callee (`(expr)(args)`) it is
+    /// the callee expression's span. Tooling that rewrites the called
+    /// name (lint quick fixes, migrations) must edit this, never
+    /// [`Self::span`], which covers the arguments too.
+    pub callee_span: Span,
+    /// The whole call expression, arguments included.
     pub span: Span,
 }
 

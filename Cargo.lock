@@ -1240,6 +1240,7 @@ dependencies = [
  "leek-pipeline",
  "leek-recipes",
  "leek-resolver",
+ "leek-rewrite",
  "leek-span",
  "leek-syntax",
 ]

@@ -18,6 +18,7 @@ leek-parser      = { workspace = true }
 [dev-dependencies]
 leek-recipes     = { workspace = true }
 leek-pipeline    = { workspace = true }
+leek-rewrite     = { workspace = true }
 
 [features]
 default = []

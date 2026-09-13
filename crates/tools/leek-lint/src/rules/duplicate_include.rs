@@ -83,4 +83,14 @@ mod tests {
         let d = run("include(\"a\")\ninclude(\"a\")\ninclude(\"a\")\nreturn 0\n");
         assert_eq!(d.len(), 2, "two duplicates of `a`: {d:?}");
     }
+
+    /// The suggestion this rule emits must apply cleanly: the
+    /// rewritten source still parses and the finding is gone.
+    #[test]
+    fn suggestions_are_applicable() {
+        crate::testing::assert_suggestions_fix(
+            || DuplicateInclude,
+            "include(\"util\")\ninclude(\"util\")\nreturn 0\n",
+        );
+    }
 }

@@ -1407,6 +1407,7 @@ mod tests {
                 kind: ExprKind::Call(Box::new(crate::ir::Call {
                     callee: Callee::Function(NameRef::Builtin("setWeapon".into())),
                     args: vec![name("WEAPON_PISTOL")],
+                    callee_span: span(),
                     span: span(),
                 })),
                 ty: leek_types::Type::Any,
