@@ -15,7 +15,9 @@ pub mod transform;
 pub mod visit;
 
 pub use ir::*;
-pub use lower::{lower_file, lower_file_versioned, lower_file_with_prelude, lower_files};
+pub use lower::{
+    LowerUnit, lower_file, lower_file_versioned, lower_file_with_prelude, lower_files,
+};
 pub use transform::fold_constants;
 pub use visit::{
     Flow, HirVisitor, HirVisitorMut, OnExpr, OnStmt, Visit, VisitMut, Visitable, VisitableMut,
