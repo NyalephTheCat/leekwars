@@ -1162,6 +1162,165 @@ fn rust_emit_matches_snapshot_on_jvm() {
     assert_snapshots(&failures);
 }
 
+/// Every shape of "a lambda writes a binding it captured", run on the JVM.
+///
+/// The snapshot corpus doesn't cover these, and the emitter used to answer
+/// most of them with a lambda body of `return null;` — code that compiles and
+/// then silently computes the wrong value. On the pre-fix emitter 16 of these
+/// 22 runs were wrong: 12 silent wrong values and 4 javac errors. Each case
+/// pins the *runtime* answer, which is the only thing that can prove the box
+/// is really shared across the closure boundary. Regression guard for #43
+/// (JAVA-03).
+///
+/// Skipped like the other JVM tests when the harness isn't built;
+/// `LEEK_REQUIRE_JVM=1` turns the skip into a failure.
+#[test]
+fn lambda_captured_writes_run_correctly_on_jvm() {
+    const TEST: &str = "lambda_captured_writes_run_correctly_on_jvm";
+    // (case name, source, the value the JVM must print)
+    const CASES: &[(&str, &str, &str)] = &[
+        // A lambda writing a captured *parameter*, then read after it ran.
+        (
+            "param_write",
+            "function f(p) { var g = function() { p = p + 1 } g() return p }\nreturn f(5)\n",
+            "6",
+        ),
+        // A write to the param made *after* the closure was built must be
+        // visible to the closure — capture is by reference, not by value.
+        (
+            "param_write_outside_lambda",
+            "function f(p) { var g = function() { return p } p = 10 return g() }\nreturn f(5)\n",
+            "10",
+        ),
+        // A lambda writing a captured local (the plain counter case).
+        (
+            "local_int",
+            "var n = 0\nvar inc = function() { n = n + 1 }\ninc()\ninc()\nreturn n\n",
+            "2",
+        ),
+        // The write happens one lambda level below the declaration.
+        (
+            "nested_lambda_writes_outer_local",
+            "var c = 0\nvar f = function() { var g = function() { c = c + 1 } g() }\nf()\nreturn c\n",
+            "1",
+        ),
+        // …and two levels below.
+        (
+            "triple_nested_lambda_writes_outer_local",
+            "var c = 0\nvar f = function() { var g = function() { var h = function() { c = c + 5 } h() } g() }\nf()\nreturn c\n",
+            "5",
+        ),
+        // The local is declared *inside* a lambda body.
+        (
+            "local_declared_in_lambda",
+            "var f = function() { var c = 0 var g = function() { c = c + 1 } g() return c }\nreturn f()\n",
+            "1",
+        ),
+        // `a` is referenced only from the inner lambda: the outer factory has
+        // to receive it or the inner call names an out-of-scope symbol.
+        (
+            "inner_only_capture_is_threaded",
+            "var a = 7\nvar b = 0\nvar f = function() { b = b + 1 var g = function() { return a } return g() }\nreturn f()\n",
+            "7",
+        ),
+        // A nested lambda referencing the var the outer one is assigned to.
+        (
+            "self_recursive_through_nested_lambda",
+            "var fact = function(n) { var h = function() { if (n <= 1) { return 1 } return n * fact(n - 1) } return h() }\nreturn fact(5)\n",
+            "120",
+        ),
+        // Class method parameter.
+        (
+            "class_method_param",
+            "class A { method m(p) { var g = function() { p = p + 1 } g() return p } }\nvar o = new A()\nreturn o.m(5)\n",
+            "6",
+        ),
+        // Class constructor parameter.
+        (
+            "class_constructor_param",
+            "class A { integer v method get() { return v } constructor(p) { var g = function() { p = p + 1 } g() v = p } }\nvar o = new A(5)\nreturn o.get()\n",
+            "6",
+        ),
+        // Foreach binding (already boxed before this change — kept so the
+        // binding forms are covered end to end).
+        (
+            "foreach_binding",
+            "var t = 0\nfor (var x in [1, 2, 3]) { var g = function() { x = x * 10 } g() t = t + x }\nreturn t\n",
+            "60",
+        ),
+    ];
+
+    let jar_path = workspace_root().join("tools/java-emitter/build/leekscript-emitter.jar");
+    if !jar_path.exists() {
+        skip_jvm_test(
+            TEST,
+            &format!(
+                "{} missing — run tools/java-emitter/build.sh first",
+                jar_path.display()
+            ),
+        );
+        return;
+    }
+    let java_bin = match std::env::var_os("JAVA") {
+        Some(v) => std::path::PathBuf::from(v),
+        None => std::path::PathBuf::from("java"),
+    };
+
+    // Both modes: clean is what production compiles with, exact is what the
+    // ops/byte-parity work targets. The bug hit them differently.
+    let mut cases: Vec<JvmCase> = Vec::new();
+    for (i, (name, code, expected)) in CASES.iter().enumerate() {
+        let src = format!("// @version:4\n{code}");
+        for (mode, opts) in [
+            ("clean", Options::clean(Version::V4, 2 * i as u64 + 1)),
+            ("exact", Options::exact(Version::V4, 2 * i as u64 + 2)),
+        ] {
+            let source = SourceId::new(1).unwrap();
+            let parsed = parse(&src, source, Version::V4);
+            let root = SyntaxNode::new_root(parsed.green);
+            let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
+            let (hir, _diags) = leek_hir::lower_file(&sf, source);
+            let java = emit(&hir, &opts).java;
+            // The stub is gone for good — assert on the text too, so a
+            // regression is reported here even without a JVM.
+            assert!(
+                !java.contains("Object... values) throws LeekRunException {return null;}"),
+                "{name}/{mode}: emitted the null-returning lambda stub:\n{java}"
+            );
+            cases.push(JvmCase {
+                id: format!("{name}/{mode}"),
+                version: 4,
+                code: src.clone(),
+                java,
+                expected_value: (*expected).to_string(),
+                expected_ops: 0,
+            });
+        }
+    }
+
+    let results = run_harness(&java_bin, &jar_path, &cases).expect("run RunEmittedJava");
+    let mut failures = String::new();
+    for c in &cases {
+        match results.get(&c.id) {
+            None => {
+                let _ = writeln!(failures, "{}: no reply from the harness", c.id);
+            }
+            Some(r) if !r.error.is_empty() => {
+                let _ = writeln!(failures, "{}: JVM error: {}", c.id, r.error);
+            }
+            Some(r) if r.value != c.expected_value => {
+                let _ = writeln!(
+                    failures,
+                    "{}: value {:?}, expected {:?}\ncode:\n{}",
+                    c.id, r.value, c.expected_value, c.code
+                );
+            }
+            Some(_) => {}
+        }
+    }
+    assert!(failures.is_empty(), "{failures}");
+}
+
 struct JvmCase {
     id: String,
     version: u8,
