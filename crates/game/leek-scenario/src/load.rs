@@ -237,12 +237,16 @@ pub fn compile_ai_source(
     version: u8,
     strict: bool,
 ) -> Result<Arc<HirFile>> {
+    // Settle the AI's language settings here at the `Input` boundary: its own
+    // `@version` pragma wins over the scenario/world version, and `@strict`
+    // turns strict mode on. HIR lowering no longer re-reads pragmas.
+    let lang = leek_span::pragma::LanguageSettings::resolve(source, None, version, strict);
     let src_id = SourceId::new(1).expect("source id 1 is non-zero");
     let input = Input {
         source: src_id,
         text: source.into(),
-        version_byte: version,
-        strict,
+        version_byte: lang.version,
+        strict: lang.strict,
         flags: FeatureFlags::from_env(),
     };
 
@@ -264,4 +268,17 @@ pub fn compile_ai_source(
         .get::<HirArtifact>()
         .ok_or_else(|| anyhow!("compiling {label}: produced no HIR"))?;
     Ok(hir.0.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compile_ai_source;
+
+    /// `class` is only a keyword from v2 on, so this AI compiles only when its
+    /// own `@version:1` pragma wins over the world's default version.
+    #[test]
+    fn ai_version_pragma_wins_over_world_version() {
+        let src = "// @version:1\nvar class = 1\nreturn class\n";
+        compile_ai_source(src, "v1-ai", 4, false).expect("v1 AI should compile");
+    }
 }

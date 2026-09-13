@@ -8,6 +8,7 @@ use std::sync::Arc;
 use leek_pipeline::ProjectIndex;
 use leek_pipeline::salsa::{LeekDb, ProjectFile, SourceFile};
 use leek_span::LineTable;
+use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
 use salsa::Setter;
 use tower_lsp::lsp_types::{SemanticToken, Url};
 
@@ -124,9 +125,10 @@ impl Workspace {
         if let Some(path) = uri_to_path(&uri)
             && let Some(indexed) = self.indexed.remove(&path)
         {
-            let version_byte = indexed.source_file.version_byte(&self.db);
+            let lang = self.settle(&text);
+            self.apply_language(indexed.source_file, Some(indexed.project_file), lang);
             let source = indexed.source_file.source(&self.db);
-            let classes = Self::scan_classes(&text, source, version_byte);
+            let classes = Self::scan_classes(&text, source, lang.version);
             let line_table = LineTable::new(&text);
             let arc_text: Arc<str> = Arc::from(text.as_str());
             indexed.source_file.set_text(&mut self.db).to(text.clone());
@@ -147,17 +149,18 @@ impl Workspace {
         let source_id = self.alloc_source_id();
         let line_table = LineTable::new(&text);
         let arc_text: Arc<str> = Arc::from(text.as_str());
+        let lang = self.settle(&text);
         let classes = Self::scan_classes(
             &text,
             leek_span::SourceId::new(source_id).expect("non-zero SourceId"),
-            4,
+            lang.version,
         );
         let source_file = SourceFile::new(
             &self.db,
             source_id,
             text,
-            4,
-            false,
+            lang.version,
+            lang.strict,
             leek_pipeline::FeatureFlags::from_env().to_bits(),
             self.class_union.clone(),
         );
@@ -191,9 +194,15 @@ impl Workspace {
         let source_file = doc.source_file;
         doc.line_table = LineTable::new(&new_text);
         doc.text = Arc::from(new_text.as_str());
-        let version_byte = source_file.version_byte(&self.db);
+        // The edit may have added, removed or changed `@version`/`@strict`:
+        // re-settle so every tracked pass sees the buffer's current settings.
+        let lang = self.settle(&new_text);
+        let project_file = uri_to_path(uri)
+            .and_then(|path| self.indexed.get(&path))
+            .map(|indexed| indexed.project_file);
+        self.apply_language(source_file, project_file, lang);
         let source = source_file.source(&self.db);
-        let classes = Self::scan_classes(&new_text, source, version_byte);
+        let classes = Self::scan_classes(&new_text, source, lang.version);
         source_file.set_text(&mut self.db).to(new_text.clone());
         if let Some(path) = uri_to_path(uri)
             && let Some(indexed) = self.indexed.get_mut(&path)
@@ -324,6 +333,42 @@ impl Workspace {
             });
         }
         out
+    }
+
+    /// Settle one buffer's language settings from its text: the file's
+    /// `@version` pragma, else the project's `[project].language` default
+    /// (latest outside a project); strict on `@strict` or the project
+    /// default.
+    fn settle(&self, text: &str) -> LanguageSettings {
+        self.project.as_ref().map_or_else(
+            || LanguageSettings::resolve(text, None, LATEST_VERSION, false),
+            |index| index.language_settings(text),
+        )
+    }
+
+    /// Push settled language settings into a file's salsa inputs, writing
+    /// only the fields that changed so an ordinary edit doesn't needlessly
+    /// invalidate on them.
+    fn apply_language(
+        &mut self,
+        source_file: SourceFile,
+        project_file: Option<ProjectFile>,
+        lang: LanguageSettings,
+    ) {
+        if source_file.version_byte(&self.db) != lang.version {
+            source_file.set_version_byte(&mut self.db).to(lang.version);
+        }
+        if source_file.strict(&self.db) != lang.strict {
+            source_file.set_strict(&mut self.db).to(lang.strict);
+        }
+        if let Some(project_file) = project_file {
+            if project_file.version_byte(&self.db) != lang.version {
+                project_file.set_version_byte(&mut self.db).to(lang.version);
+            }
+            if project_file.strict(&self.db) != lang.strict {
+                project_file.set_strict(&mut self.db).to(lang.strict);
+            }
+        }
     }
 
     fn alloc_source_id(&mut self) -> u32 {
@@ -458,9 +503,10 @@ impl Workspace {
         indexed.text = Arc::from(text.as_str());
         let source_file = indexed.source_file;
         let project_file = indexed.project_file;
-        let version_byte = source_file.version_byte(&self.db);
+        let lang = self.settle(&text);
+        self.apply_language(source_file, Some(project_file), lang);
         let source = source_file.source(&self.db);
-        let classes = Self::scan_classes(&text, source, version_byte);
+        let classes = Self::scan_classes(&text, source, lang.version);
         source_file.set_text(&mut self.db).to(text.clone());
         project_file.set_text(&mut self.db).to(text);
         self.refresh_classes(uri, Some(classes));
@@ -555,5 +601,60 @@ mod tests {
 
         assert_eq!(indexed, expected);
         assert_eq!(ws.analysis_targets().len(), 2);
+    }
+
+    fn lang_of(ws: &Workspace, uri: &Url) -> (u8, bool) {
+        let file = ws.doc(uri).expect("open doc").source_file;
+        (file.version_byte(&ws.db), file.strict(&ws.db))
+    }
+
+    #[test]
+    fn open_buffer_outside_project_honours_pragmas() {
+        let mut ws = Workspace::default();
+        let uri = Url::parse("untitled:scratch.leek").expect("uri");
+        ws.open(uri.clone(), "// @version:1\n// @strict\nreturn 1\n".into());
+        assert_eq!(lang_of(&ws, &uri), (1, true));
+    }
+
+    #[test]
+    fn editing_pragmas_resettles_buffer_language() {
+        let mut ws = Workspace::default();
+        let uri = Url::parse("untitled:scratch.leek").expect("uri");
+        ws.open(uri.clone(), "// @version:4\nreturn 1\n".into());
+        assert_eq!(lang_of(&ws, &uri), (4, false));
+
+        ws.update(&uri, "// @version:1\n// @strict\nreturn 1\n".into());
+        assert_eq!(lang_of(&ws, &uri), (1, true));
+
+        ws.update(&uri, "return 1\n".into());
+        assert_eq!(lang_of(&ws, &uri), (LATEST_VERSION, false));
+    }
+
+    #[test]
+    fn editing_pragma_in_indexed_file_updates_project_input() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        let main = root.join("main.leek");
+        fs::write(&main, "return 1\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = main.canonicalize().expect("canonical entry");
+        let uri = path_to_uri(&path);
+
+        // Not open yet: an on-disk change is picked up by reload.
+        fs::write(&main, "// @version:2\nreturn 1\n").expect("rewrite entry");
+        ws.reload_from_disk(&uri);
+        let project_file = ws.indexed[&path].project_file;
+        assert_eq!(project_file.version_byte(&ws.db), 2);
+
+        // Opening with a different pragma re-settles both inputs, and later
+        // edits re-settle the open buffer.
+        ws.open(uri.clone(), "// @version:1\nreturn 1\n".into());
+        assert_eq!(project_file.version_byte(&ws.db), 1);
+        ws.update(&uri, "// @version:3\n// @strict\nreturn 1\n".into());
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert_eq!(lang_of(&ws, &uri), (3, true));
     }
 }

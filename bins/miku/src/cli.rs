@@ -127,9 +127,10 @@ pub enum DevCommand {
 pub struct DevPipeline {
     /// Source file to compile. Defaults to `tests/fixtures/hello.leek`.
     pub path: Option<PathBuf>,
-    /// Language version (1..=4).
-    #[arg(long = "lang-version", default_value_t = 4)]
-    pub lang_version: u8,
+    /// Language version (1..=4). Overrides the file's `@version` pragma when
+    /// given; otherwise the pragma applies, else the latest version.
+    #[arg(long = "lang-version")]
+    pub lang_version: Option<u8>,
 }
 
 #[derive(Debug, clap::Args)]

@@ -18,6 +18,7 @@ use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::Input;
 use leek_recipes::Target;
 use leek_span::SourceId;
+use leek_span::pragma::LanguageSettings;
 
 use super::{LaunchConfig, RunOutcome};
 
@@ -53,13 +54,13 @@ impl NativeTarget {
             }
         };
 
-        let version = self.config.version.unwrap_or(DEFAULT_VERSION);
+        let lang = settle_language(&source, &self.config);
         let src_id = SourceId::new(1).expect("source id 1 is non-zero");
         let input = Input {
             source: src_id,
             text: source.clone().into(),
-            version_byte: version,
-            strict: self.config.strict,
+            version_byte: lang.version,
+            strict: lang.strict,
             flags: leek_pipeline::FeatureFlags::from_env(),
         };
 
@@ -88,10 +89,18 @@ impl NativeTarget {
         Ok(Compiled {
             hir: hir.0.clone(),
             source,
-            version,
-            strict: self.config.strict,
+            version: lang.version,
+            strict: lang.strict,
         })
     }
+}
+
+/// Settle the debugged program's language settings once, at the `Input`
+/// boundary: the launch config's `version` > the file's `@version` pragma >
+/// [`DEFAULT_VERSION`]; strict when the file has `@strict` or the launch
+/// config asks for it. The same values drive lowering and the backend.
+fn settle_language(source: &str, config: &LaunchConfig) -> LanguageSettings {
+    LanguageSettings::resolve(source, config.version, DEFAULT_VERSION, config.strict)
 }
 
 impl NativeTarget {
@@ -114,5 +123,37 @@ pub(crate) fn run_compiled(program: &Compiled, debug_hooks: bool) -> RunOutcome 
             exit_code: 0,
         },
         Err(e) => RunOutcome::failed(format!("native execution error: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(version: Option<u8>, strict: bool) -> LaunchConfig {
+        serde_json::from_value(serde_json::json!({
+            "program": "main.leek",
+            "version": version,
+            "strict": strict,
+        }))
+        .expect("launch config")
+    }
+
+    #[test]
+    fn pragma_selects_version_when_launch_config_does_not() {
+        let lang = settle_language("// @version:1\n// @strict\n", &config(None, false));
+        assert_eq!((lang.version, lang.strict), (1, true));
+    }
+
+    #[test]
+    fn launch_config_version_overrides_pragma() {
+        let lang = settle_language("// @version:1\n", &config(Some(3), true));
+        assert_eq!((lang.version, lang.strict), (3, true));
+    }
+
+    #[test]
+    fn pragma_less_file_defaults_to_latest() {
+        let lang = settle_language("return 1\n", &config(None, false));
+        assert_eq!((lang.version, lang.strict), (DEFAULT_VERSION, false));
     }
 }
