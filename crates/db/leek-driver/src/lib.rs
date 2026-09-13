@@ -225,3 +225,272 @@ pub fn run_entry_timed(
 pub fn input_from(src: SourceInput) -> Input {
     Input::from(src)
 }
+
+#[cfg(test)]
+mod tests {
+    use leek_diagnostics::{Diagnostic, Severity, codes};
+    use leek_manifest::ManifestLoad;
+    use leek_pipeline::LintGroups;
+    use leek_span::{SourceId, Span};
+
+    use super::*;
+
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "leek-driver-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// The minimum `Miku.toml` the parser accepts; tests append the table
+    /// they actually care about.
+    const BASE_MANIFEST: &str = "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+
+    /// A project rooted at `root` whose manifest is `BASE_MANIFEST` + `extra`.
+    fn project_at(root: std::path::PathBuf, extra: &str) -> Project {
+        let toml = format!("{BASE_MANIFEST}{extra}");
+        let (manifest, warnings) = leek_manifest::load_str(&toml).expect("parse manifest");
+        Project::from_load(ManifestLoad {
+            manifest,
+            root,
+            warnings,
+        })
+    }
+
+    fn project(extra: &str) -> Project {
+        project_at(std::path::PathBuf::from("."), extra)
+    }
+
+    fn config(lints: LintGroups) -> DriverConfig {
+        DriverConfig {
+            params: RecipeParams::default().with_lints(lints),
+            ..DriverConfig::default()
+        }
+    }
+
+    fn diag(code: leek_diagnostics::Code, severity: Severity) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            severity,
+            Span::new(SourceId::new(1).unwrap(), 0, 0),
+            "synthetic",
+        )
+    }
+
+    #[test]
+    fn manifest_lint_groups_or_into_the_cli_flags() {
+        // Either source can switch a group on and neither can switch one off:
+        // `miku check --pedantic` must not be undone by an absent manifest
+        // key, and `lint.pedantic = true` must not need the flag.
+        for manifest_pedantic in [false, true] {
+            for manifest_nursery in [false, true] {
+                for cli_pedantic in [false, true] {
+                    for cli_nursery in [false, true] {
+                        let toml = format!(
+                            "[lint]\npedantic = {manifest_pedantic}\nnursery = {manifest_nursery}\n"
+                        );
+                        let project = project(&toml);
+                        let cli = config(LintGroups {
+                            pedantic: cli_pedantic,
+                            nursery: cli_nursery,
+                        });
+                        let merged = merge_manifest_lints(&project, &cli);
+                        assert_eq!(
+                            merged.params.lints,
+                            LintGroups {
+                                pedantic: manifest_pedantic || cli_pedantic,
+                                nursery: manifest_nursery || cli_nursery,
+                            },
+                            "manifest ({manifest_pedantic}, {manifest_nursery}) \
+                             + cli ({cli_pedantic}, {cli_nursery})"
+                        );
+                        // The caller's config is left untouched.
+                        assert_eq!(cli.params.lints.pedantic, cli_pedantic);
+                        assert_eq!(cli.params.lints.nursery, cli_nursery);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merging_preserves_the_rest_of_the_config() {
+        let project = project("[lint]\npedantic = true\n");
+        let cli = DriverConfig {
+            target: Target::Mir,
+            params: RecipeParams::default().with_opt(leek_recipes::OptLevel::O1),
+            color: ColorWhen::Never,
+            format: MessageFormat::Json,
+        };
+        let merged = merge_manifest_lints(&project, &cli);
+        assert_eq!(merged.target, Target::Mir);
+        assert_eq!(merged.params.opt, leek_recipes::OptLevel::O1);
+        assert!(matches!(merged.format, MessageFormat::Json));
+        assert!(merged.params.lints.pedantic);
+    }
+
+    #[test]
+    fn reporter_applies_the_manifest_allow_list() {
+        let project = project("[lint]\nallow = [\"E0240\"]\n");
+        let reporter =
+            reporter_for(&project, ColorWhen::Never, MessageFormat::Human).expect("reporter");
+        let kept = reporter.apply_levels(&[
+            diag(codes::PRIVATE_FIELD, Severity::Error),
+            diag(codes::UNEXPECTED_TOKEN, Severity::Error),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].code, codes::UNEXPECTED_TOKEN);
+    }
+
+    #[test]
+    fn reporter_applies_the_manifest_deny_and_warn_lists() {
+        let project = project("[lint]\ndeny = [\"W0010\"]\nwarn = [\"E0240\"]\n");
+        let reporter =
+            reporter_for(&project, ColorWhen::Never, MessageFormat::Human).expect("reporter");
+        let out = reporter.apply_levels(&[
+            diag(codes::PRAGMA_UNKNOWN, Severity::Warning),
+            diag(codes::PRIVATE_FIELD, Severity::Error),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].severity, Severity::Error, "deny promotes");
+        assert_eq!(out[1].severity, Severity::Warning, "warn demotes");
+    }
+
+    #[test]
+    fn reporter_accepts_canonical_names_as_well_as_ids() {
+        let project = project("[lint]\nallow = [\"PrivateField\"]\n");
+        let reporter =
+            reporter_for(&project, ColorWhen::Never, MessageFormat::Human).expect("reporter");
+        assert!(
+            reporter
+                .apply_levels(&[diag(codes::PRIVATE_FIELD, Severity::Error)])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unknown_lint_code_in_the_manifest_is_an_error_not_a_silent_no_op() {
+        let project = project("[lint]\ndeny = [\"NOPE9999\"]\n");
+        let Err(err) = reporter_for(&project, ColorWhen::Never, MessageFormat::Human) else {
+            panic!("an unknown lint code must fail the reporter build");
+        };
+        assert!(err.to_string().contains("NOPE9999"), "{err}");
+    }
+
+    #[test]
+    fn includes_step_survives_a_path_that_cannot_be_canonicalized() {
+        // `canonicalize` fails for a file that does not exist; the step must
+        // fall back to the path as given rather than panic.
+        let step = includes_step(
+            std::path::Path::new("/no/such/entry.leek"),
+            SourceId::new(7).unwrap(),
+        );
+        assert_eq!(step.name(), "resolve_includes");
+    }
+
+    #[test]
+    fn file_pipeline_resolves_includes_before_parsing() {
+        let dir = scratch("file-pipeline");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let pipeline = file_pipeline(
+            &project,
+            &dir.join("src/main.leek"),
+            SourceId::new(1).unwrap(),
+            &DriverConfig::default(),
+        )
+        .expect("pipeline");
+        let names = pipeline.step_names();
+        let at = |n: &str| {
+            names
+                .iter()
+                .position(|s| *s == n)
+                .unwrap_or_else(|| panic!("no `{n}` step in {names:?}"))
+        };
+        assert!(at("lex") < at("resolve_includes"), "{names:?}");
+        assert!(at("resolve_includes") < at("parse"), "{names:?}");
+        assert!(names.contains(&"lint"), "the default target is Linted");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_pipeline_follows_the_configured_target() {
+        let dir = scratch("target");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let config = DriverConfig {
+            target: Target::Mir,
+            ..DriverConfig::default()
+        };
+        let names = file_pipeline(
+            &project,
+            &dir.join("src/main.leek"),
+            SourceId::new(1).unwrap(),
+            &config,
+        )
+        .expect("pipeline")
+        .step_names();
+        assert!(names.contains(&"lower-mir"), "{names:?}");
+        assert!(!names.contains(&"lint"), "{names:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_entry_reports_a_resolver_error_from_the_project_entry() {
+        let dir = scratch("run-entry");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        // A redeclared symbol (E0202) — a resolver error, so it also proves
+        // the pipeline got past lexing and parsing.
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nreturn a;\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let config = DriverConfig {
+            color: ColorWhen::Never,
+            ..DriverConfig::default()
+        };
+        let run = run_entry(&project, &config).expect("run");
+        assert!(run.had_error, "diagnostics: {:?}", run.run.diagnostics());
+        assert!(
+            run.run
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == codes::REDECLARED_SYMBOL),
+            "diagnostics: {:?}",
+            run.run.diagnostics()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_entry_is_clean_for_a_well_formed_entry() {
+        let dir = scratch("run-entry-ok");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(dir.join("src/main.leek"), "return 1 + 1;\n").expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let config = DriverConfig {
+            color: ColorWhen::Never,
+            ..DriverConfig::default()
+        };
+        let run = run_entry(&project, &config).expect("run");
+        assert!(!run.had_error, "diagnostics: {:?}", run.run.diagnostics());
+        assert!(run.run.errors().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

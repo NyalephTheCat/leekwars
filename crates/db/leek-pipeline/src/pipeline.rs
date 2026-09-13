@@ -57,6 +57,30 @@ impl Pipeline {
         self
     }
 
+    /// The planned steps' names, in execution order.
+    ///
+    /// Adapters (`StopOnError`, `StopOnDiagnostics`, `TimedBox`) delegate
+    /// [`Step::name`] to the step they wrap, so this reports the *pass*
+    /// sequence regardless of how the recipe wrapped it. Use it to assert
+    /// pipeline shape (e.g. that include resolution precedes parsing);
+    /// assert wrapping through behavior, not through these names.
+    #[must_use]
+    pub fn step_names(&self) -> Vec<&'static str> {
+        self.steps.iter().map(|s| s.name()).collect()
+    }
+
+    /// How many steps the pipeline will run.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Whether the pipeline has no steps at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
     /// Drive the pipeline over `input` without memoization. Each
     /// call recomputes every step's output from scratch.
     pub fn run(&self, input: Input) -> Run<'static> {

@@ -15,5 +15,10 @@ leek-resolver    = { workspace = true }
 leek-span        = { workspace = true }
 anyhow           = { workspace = true }
 
+[dev-dependencies]
+# Tests build a `Project` from a manifest string; the driver itself only
+# ever sees one that `leek-project` already loaded.
+leek-manifest    = { workspace = true }
+
 [lints]
 workspace = true

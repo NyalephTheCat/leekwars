@@ -259,4 +259,180 @@ mod tests {
         assert_eq!(lang.version, 4);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn source_ids_are_stable_and_path_shape_independent() {
+        let dir = scratch("ids");
+        let a = dir.join("a.leek");
+        let b = dir.join("b.leek");
+        std::fs::write(&a, "return 1;\n").expect("write a");
+        std::fs::write(&b, "return 2;\n").expect("write b");
+
+        let mut index = v4_index(&dir);
+        let id_a = index.source_for_path(&a);
+        assert_eq!(
+            index.source_for_path(&a),
+            id_a,
+            "the same path re-uses its id"
+        );
+
+        // A path that canonicalizes to the same file must not mint a second
+        // id — included files reach the index through both shapes.
+        let indirect = dir.join(".").join("a.leek");
+        assert_eq!(index.source_for_path(&indirect), id_a);
+
+        let id_b = index.source_for_path(&b);
+        assert_ne!(id_a, id_b);
+        assert_eq!(
+            id_b.get(),
+            id_a.get() + 1,
+            "ids are handed out in call order"
+        );
+
+        assert_eq!(
+            index.path_for_source(id_a),
+            Some(ProjectIndex::canonicalize(&a).as_path())
+        );
+        assert_eq!(index.source_for_existing(&b), Some(id_b));
+        assert_eq!(index.source_for_existing(&dir.join("never.leek")), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enumerating_a_tree_lists_each_file_once_in_sorted_order() {
+        // Regression: `enumerate_dir` pushed every discovered file itself on
+        // top of the push inside `source_for_path`, so `files()` held each
+        // path twice.
+        let dir = scratch("enumerate");
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("nested/deeper")).expect("dirs");
+        for rel in ["main.leek", "nested/one.leek", "nested/deeper/two.leek"] {
+            std::fs::write(src.join(rel), "return 1;\n").expect("write");
+        }
+        // Not Leekscript: must not be indexed.
+        std::fs::write(src.join("notes.txt"), "hello").expect("write");
+
+        let index = ProjectIndex::from_src_root(&src);
+        let files = index.files();
+        assert_eq!(files.len(), 3, "{files:?}");
+        let mut sorted = files.to_vec();
+        sorted.sort();
+        assert_eq!(files, sorted.as_slice(), "files() stays sorted");
+        assert!(
+            files
+                .iter()
+                .all(|p| p.extension().is_some_and(|e| e == "leek"))
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn walking_skips_build_and_target_trees() {
+        let dir = scratch("walk-outputs");
+        std::fs::create_dir_all(dir.join("build/leekscript")).expect("dirs");
+        std::fs::create_dir_all(dir.join("target/debug")).expect("dirs");
+        std::fs::write(dir.join("kept.leek"), "return 1;\n").expect("write");
+        // Emitted output that would otherwise be re-compiled as source.
+        std::fs::write(dir.join("build/leekscript/main.leek"), "return 1;\n").expect("write");
+        std::fs::write(dir.join("target/debug/main.leek"), "return 1;\n").expect("write");
+
+        let found = walk_leek_files(&dir);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].ends_with("kept.leek"), "{found:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn walking_honors_a_gitignore_and_skips_hidden_files() {
+        let dir = scratch("walk-ignore");
+        std::fs::write(dir.join(".gitignore"), "ignored.leek\nvendor/\n").expect("write");
+        std::fs::write(dir.join("kept.leek"), "return 1;\n").expect("write");
+        std::fs::write(dir.join("ignored.leek"), "return 1;\n").expect("write");
+        std::fs::write(dir.join(".hidden.leek"), "return 1;\n").expect("write");
+        std::fs::create_dir_all(dir.join("vendor")).expect("dirs");
+        std::fs::write(dir.join("vendor/dep.leek"), "return 1;\n").expect("write");
+
+        let found = walk_leek_files(&dir);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, ["kept.leek"], "{found:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn walking_a_missing_directory_yields_nothing() {
+        let dir = scratch("walk-missing");
+        assert!(walk_leek_files(&dir.join("no-such-dir")).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_paths_resolve_against_the_project_root() {
+        let dir = scratch("manifest-paths");
+        std::fs::create_dir_all(dir.join("sources")).expect("dirs");
+        std::fs::write(dir.join("sources/main.leek"), "return 1;\n").expect("write");
+
+        let (manifest, _) = leek_manifest::load_str(
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\nlanguage = 3\nstrict = true\n\
+             [paths]\nsrc = \"sources\"\ntests = \"spec\"\n",
+        )
+        .expect("parse manifest");
+        let index = ProjectIndex::from_manifest(dir.clone(), &manifest);
+
+        assert_eq!(index.src_root, dir.join("sources"));
+        // `spec/` does not exist, so there is no tests root to walk.
+        assert_eq!(index.tests_root, None);
+        assert_eq!(index.default_version_byte, 3);
+        assert!(index.default_strict);
+        assert_eq!(index.files().len(), 1, "{:?}", index.files());
+
+        // Create the tests dir and it is picked up on the next load.
+        std::fs::create_dir_all(dir.join("spec")).expect("dirs");
+        let index = ProjectIndex::from_manifest(dir.clone(), &manifest);
+        assert_eq!(index.tests_root, Some(dir.join("spec")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_file_names_the_path_it_could_not_read() {
+        let dir = scratch("load-missing");
+        let mut index = v4_index(&dir);
+        let missing = dir.join("nope.leek");
+        let err = index.load_file(&missing).expect_err("missing file");
+        assert!(
+            err.message.contains("nope.leek"),
+            "the message must name the file: {}",
+            err.message
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_file_registers_the_file_and_builds_a_line_table() {
+        let dir = scratch("load-registers");
+        let path = dir.join("main.leek");
+        std::fs::write(&path, "var a = 1;\nreturn a;\n").expect("write");
+        let mut index = v4_index(&dir);
+
+        let loaded = index.load_file(&path).expect("load");
+        assert_eq!(loaded.path, ProjectIndex::canonicalize(&path));
+        assert_eq!(index.source_for_existing(&path), Some(loaded.source));
+        assert_eq!(index.files(), [ProjectIndex::canonicalize(&path)]);
+        // Offset 11 is the `r` of `return` — the first byte of line 2.
+        assert_eq!(loaded.line_table.line_col(11).line, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

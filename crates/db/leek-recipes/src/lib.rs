@@ -211,7 +211,7 @@ where
     let mut composite = leek_environment::CompositeCatalog::new();
     for spec in specs {
         let spec = spec.as_ref();
-        if matches!(spec, "leekwars" | "fight" | "fight.generator") {
+        if is_builtin_leekwars_spec(spec) {
             register_leekwars();
         } else {
             let lib = leek_environment::load(spec)?;
@@ -235,18 +235,33 @@ pub fn activate_leekwars_constant_folding() {
     );
 }
 
+/// Whether `spec` names the built-in leek-wars library rather than a
+/// library-definition file. These specs go through the typed signature
+/// header (see [`register_leekwars`]); [`leek_environment::load`] answers
+/// them with a constants-only catalog that exposes no functions at all, so
+/// every loader path has to branch on this *before* falling back to it.
+fn is_builtin_leekwars_spec(spec: &str) -> bool {
+    matches!(spec, "leekwars" | "fight" | "fight.generator")
+}
+
 /// Register the leek-wars game library from its typed signature header:
 /// function names + arities (parsed from the header), the fight constants,
 /// and activation of the header so HIR lowering merges its signatures +
 /// `@java-dispatch:` directives.
-fn register_leekwars() {
-    for (name, lo, hi) in leekwars_header_arities() {
-        leek_resolver::builtins::register_builtin_function(&name, lo, hi, 1);
+///
+/// Returns the `(name, min_arity, max_arity)` rows it registered so the
+/// reporting loader can describe the contribution without re-parsing the
+/// header.
+fn register_leekwars() -> Vec<(String, u8, u8)> {
+    let arities = leekwars_header_arities();
+    for (name, lo, hi) in &arities {
+        leek_resolver::builtins::register_builtin_function(name, *lo, *hi, 1);
     }
     for (name, _ty) in leek_environment::leekwars_constants() {
         leek_resolver::builtins::register_builtin_constant(name);
     }
     leek_prelude::activate_library(leek_prelude::LEEKWARS_SRC);
+    arities
 }
 
 /// Parse the leek-wars signature header into `(name, min_arity, max_arity)`
@@ -326,6 +341,32 @@ pub struct LibraryStats {
 /// Outcome of loading one library spec.
 pub type LibraryLoadResult = Result<LibraryStats, String>;
 
+/// Describe what the built-in leek-wars library contributed, given the
+/// arity rows [`register_leekwars`] registered.
+fn leekwars_stats(spec: &str, arities: &[(String, u8, u8)]) -> LibraryStats {
+    let mut fn_names: Vec<String> = arities.iter().map(|(n, _, _)| n.clone()).collect();
+    let mut const_names: Vec<String> = leek_environment::leekwars_constants()
+        .iter()
+        .map(|(n, _)| (*n).to_string())
+        .collect();
+    fn_names.sort();
+    const_names.sort();
+    let functions = fn_names.len();
+    let constants = const_names.len();
+    fn_names.truncate(5);
+    const_names.truncate(5);
+    LibraryStats {
+        spec: spec.to_string(),
+        // The header dispatches through `@java-dispatch:` directives, so
+        // there is no import namespace to report.
+        imports: Vec::new(),
+        functions,
+        constants,
+        sample_functions: fn_names,
+        sample_constants: const_names,
+    }
+}
+
 /// Load each spec individually, register it with the resolver, and return a
 /// per-spec report (counts + a sorted sample of names, or a load error).
 ///
@@ -341,6 +382,16 @@ where
     let mut out = Vec::new();
     for spec in specs {
         let spec = spec.as_ref();
+        if is_builtin_leekwars_spec(spec) {
+            // The header path, same as `load_and_register_libraries`. Going
+            // through `leek_environment::load` here registered nothing (its
+            // leekwars catalog has no functions) and left the prelude header
+            // inactive, so the LSP — the only caller — logged "leekwars — 0
+            // functions" and offered no signature, hover or completion for
+            // `getCell` & co. while the CLIs had them all along.
+            out.push(Ok(leekwars_stats(spec, &register_leekwars())));
+            continue;
+        }
         match leek_environment::load(spec) {
             Ok(cat) => {
                 register_environment(cat.as_ref());
@@ -367,4 +418,195 @@ where
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Registration writes a process-global table shared by every test in
+    /// this binary, so each assertion below is *monotone*: it checks that a
+    /// name is registered with a particular arity, never that something is
+    /// absent. Anything order-dependent would be flaky under `cargo test`'s
+    /// thread-per-test model.
+    fn arity_of(rows: &[(String, u8, u8)], name: &str) -> (u8, u8) {
+        let (_, lo, hi) = rows
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("`{name}` missing from the leekwars header rows"));
+        (*lo, *hi)
+    }
+
+    #[test]
+    fn leekwars_header_yields_the_documented_arity_ranges() {
+        // Guards both the silent `Vec::new()` on a parse failure and the
+        // per-name min/max fold across overloads. A header/parser regression
+        // that disables all 305 functions shows up here rather than as
+        // "undefined function" in an editor.
+        // 305 signatures in the header fold into 195 distinct names.
+        let rows = leekwars_header_arities();
+        assert!(
+            rows.len() >= 190,
+            "only {} functions parsed from the header",
+            rows.len()
+        );
+        // `getLife(entity)` / `getLife()`; `getCell(entity)` / `getCell()`.
+        assert_eq!(arity_of(&rows, "getLife"), (0, 1));
+        assert_eq!(arity_of(&rows, "getCell"), (0, 1));
+        // Single-signature functions collapse to a point range.
+        assert_eq!(arity_of(&rows, "say"), (1, 1));
+        assert_eq!(arity_of(&rows, "useWeapon"), (1, 1));
+        // `moveToward(entity, mp)` / `moveToward(entity)`.
+        assert_eq!(arity_of(&rows, "moveToward"), (1, 2));
+        // `markText` ranges over 0..=3 parameters across its overloads.
+        assert_eq!(arity_of(&rows, "markText"), (0, 3));
+        // Every row is a real range.
+        for (name, lo, hi) in &rows {
+            assert!(lo <= hi, "{name}: {lo} > {hi}");
+        }
+    }
+
+    #[test]
+    fn header_names_are_unique_per_function() {
+        let rows = leekwars_header_arities();
+        let mut names: Vec<&str> = rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "overloads must fold into one row");
+    }
+
+    #[test]
+    fn reporting_loader_registers_the_leekwars_header() {
+        // Regression: `load_register_and_report` (the LSP's loader) went
+        // straight to `leek_environment::load`, whose leekwars catalog
+        // exposes no functions — so the editor reported "0 functions" and
+        // flagged every `getCell()` as undefined while `leekc --library
+        // leekwars` accepted it.
+        let reports = load_register_and_report(["leekwars"]);
+        assert_eq!(reports.len(), 1);
+        let stats = reports[0].as_ref().expect("leekwars loads");
+        assert_eq!(stats.spec, "leekwars");
+        assert!(
+            stats.functions >= 190,
+            "reported {} functions",
+            stats.functions
+        );
+        assert!(stats.constants > 0);
+        assert_eq!(stats.sample_functions.len(), 5);
+        assert!(stats.sample_functions.windows(2).all(|w| w[0] <= w[1]));
+
+        // …and the registration actually reached the resolver.
+        assert_eq!(
+            leek_resolver::builtins::builtin_fn_meta("getCell"),
+            Some((0, 1, 1))
+        );
+        assert_eq!(
+            leek_resolver::builtins::builtin_fn_meta("moveToward"),
+            Some((1, 2, 1))
+        );
+        assert!(leek_resolver::builtins::is_builtin_constant(
+            "WEAPON_PISTOL"
+        ));
+    }
+
+    #[test]
+    fn the_leekwars_aliases_take_the_same_header_path() {
+        for spec in ["fight", "fight.generator"] {
+            assert!(is_builtin_leekwars_spec(spec), "{spec}");
+            let reports = load_register_and_report([spec]);
+            let stats = reports[0]
+                .as_ref()
+                .unwrap_or_else(|e| panic!("{spec}: {e}"));
+            assert!(stats.functions >= 190, "{spec}: {}", stats.functions);
+        }
+        assert!(!is_builtin_leekwars_spec("leekwars.lib"));
+        assert!(!is_builtin_leekwars_spec("/tmp/leekwars"));
+    }
+
+    #[test]
+    fn leekwars_contributes_no_catalog_entries_but_still_registers() {
+        // The documented contract: the header is not a TSV catalog, so the
+        // composed catalog stays empty while the resolver learns the names.
+        let catalog = load_and_register_libraries(["leekwars"]).expect("load");
+        assert!(leek_environment::EnvironmentCatalog::entries(&catalog).is_empty());
+        assert_eq!(
+            leek_resolver::builtins::builtin_fn_meta("useWeapon"),
+            Some((1, 1, 1))
+        );
+    }
+
+    #[test]
+    fn a_missing_library_file_is_an_error_in_both_loaders() {
+        let missing = "/definitely/not/a/library/file.lib";
+        let err = load_and_register_libraries([missing]).expect_err("missing file");
+        assert!(err.contains(missing), "{err}");
+
+        // The reporting loader keeps going past a failure and records it in
+        // that spec's slot — the documented difference between the two.
+        let reports = load_register_and_report(["leekwars", missing]);
+        assert_eq!(reports.len(), 2);
+        assert!(reports[0].is_ok());
+        let err = reports[1].as_ref().expect_err("missing file");
+        assert!(err.starts_with(missing), "{err}");
+    }
+
+    #[test]
+    fn file_catalogs_register_their_declared_arities_verbatim() {
+        let dir = std::env::temp_dir().join(format!(
+            "leek-recipes-lib-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("demo.lib");
+        std::fs::write(
+            &path,
+            "namespace = com.example.demo.*\n\
+             # name\tclass\tkind\tmin\tmax\tops\n\
+             demoZeroArg\tDemoClass\tstatic\t0\t0\t1\n\
+             demoRange\tDemoClass\tstatic\t1\t3\t2\n\
+             const DEMO_CONSTANT\tinteger\n",
+        )
+        .expect("write library");
+
+        let catalog = load_and_register_libraries([path.to_str().expect("utf-8 path")])
+            .expect("load file catalog");
+        assert_eq!(
+            leek_environment::EnvironmentCatalog::imports(&catalog),
+            ["com.example.demo.*"]
+        );
+        assert_eq!(
+            leek_resolver::builtins::builtin_fn_meta("demoZeroArg"),
+            Some((0, 0, 1))
+        );
+        assert_eq!(
+            leek_resolver::builtins::builtin_fn_meta("demoRange"),
+            Some((1, 3, 1))
+        );
+        assert!(leek_resolver::builtins::is_builtin_constant(
+            "DEMO_CONSTANT"
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_malformed_library_file_reports_the_offending_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "leek-recipes-bad-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("bad.lib");
+        // A non-numeric arity field must fail loudly rather than register a
+        // 0-arity entry that rejects every call.
+        std::fs::write(&path, "brokenFn\tDemoClass\tstatic\tnope\n").expect("write");
+        let err = load_and_register_libraries([path.to_str().expect("utf-8 path")])
+            .expect_err("malformed");
+        assert!(err.contains("line 1"), "{err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
