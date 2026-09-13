@@ -30,10 +30,13 @@ fn source_len() -> u32 {
 
 const SOURCE: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP";
 
-/// A naive reference apply: splice non-overlapping edits (sorted by start)
-/// into the source. Panics if edits overlap (caller guarantees they don't).
+/// A naive reference apply: splice non-overlapping edits into the source in
+/// `EditSet`'s documented order — by start offset, insertions before the
+/// replacement that starts at the same offset, push order among the rest
+/// (the sort is stable). Panics if edits overlap (caller guarantees they
+/// don't).
 fn reference_apply(source: &str, mut edits: Vec<(u32, u32, String)>) -> String {
-    edits.sort_by_key(|e| e.0);
+    edits.sort_by_key(|e| (e.0, e.0 != e.1));
     let mut out = String::new();
     let mut cursor = 0usize;
     for (s, e, repl) in edits {
@@ -71,6 +74,40 @@ fn gen_disjoint(rng: &mut Rng) -> Vec<(u32, u32, String)> {
     edits
 }
 
+/// Like [`gen_disjoint`], but sprinkles zero-length insertions at the
+/// boundaries of the generated edits — the tie cases `gen_disjoint`
+/// steps over. Insertions own no bytes, so the set stays conflict-free
+/// whatever order it is pushed in.
+fn gen_with_boundary_inserts(rng: &mut Rng) -> Vec<(u32, u32, String)> {
+    let mut edits = gen_disjoint(rng);
+    // Offsets that already hold an insertion. Two insertions at one offset
+    // apply in *push* order by design, so a shuffled set would legitimately
+    // differ; keep at most one per offset here and let
+    // `push_order_is_fifo_for_inserts_at_one_offset` cover that case.
+    let mut taken: Vec<u32> = edits.iter().filter(|e| e.0 == e.1).map(|e| e.0).collect();
+    let mut extra = Vec::new();
+    for (i, (s, e, _)) in edits.iter().enumerate() {
+        // Deterministic tag so a misordered insertion shows up as a diff,
+        // not just a length mismatch.
+        for (off, text) in [(*s, format!("<{i}")), (*e, format!("{i}>"))] {
+            if rng.below(2) == 0 && !taken.contains(&off) {
+                taken.push(off);
+                extra.push((off, off, text));
+            }
+        }
+    }
+    edits.extend(extra);
+    edits
+}
+
+/// Push two edits into a fresh set in the given order, then apply.
+fn push_two(first: (u32, u32, &str), second: (u32, u32, &str)) -> Result<String, EditError> {
+    let mut set = EditSet::new(SOURCE.len());
+    set.push(first.0, first.1, first.2.to_string())?;
+    set.push(second.0, second.1, second.2.to_string())?;
+    set.apply(SOURCE)
+}
+
 #[test]
 fn disjoint_edits_are_order_independent_and_match_reference() {
     let mut rng = Rng(0xDEAD_BEEF_CAFE_F00D);
@@ -92,7 +129,11 @@ fn disjoint_edits_are_order_independent_and_match_reference() {
                 set.push(*s, *e, repl.clone())
                     .expect("disjoint edits must never conflict");
             }
-            assert_eq!(set.apply(SOURCE), expected, "push order changed the result");
+            assert_eq!(
+                set.apply(SOURCE).unwrap(),
+                expected,
+                "push order changed the result"
+            );
         }
     }
 }
@@ -143,7 +184,7 @@ fn overlapping_edits_are_always_rejected_never_silently_wrong() {
                     .collect(),
             );
             assert_eq!(
-                set.apply(SOURCE),
+                set.apply(SOURCE).unwrap(),
                 expected,
                 "applied result diverged from reference"
             );
@@ -170,5 +211,104 @@ fn touching_edits_at_a_boundary_are_accepted() {
         SOURCE,
         vec![(2, 5, "X".into()), (5, 5, "|".into()), (5, 8, "Y".into())],
     );
-    assert_eq!(set.apply(SOURCE), expected);
+    assert_eq!(set.apply(SOURCE).unwrap(), expected);
+}
+
+#[test]
+fn boundary_inserts_are_order_independent_and_match_reference() {
+    let mut rng = Rng(0x5EED_0F1E_2D3C_4B5A);
+    for _ in 0..2000 {
+        let edits = gen_with_boundary_inserts(&mut rng);
+        let expected = reference_apply(SOURCE, edits.clone());
+
+        for _ in 0..3 {
+            let mut shuffled = edits.clone();
+            for i in (1..shuffled.len()).rev() {
+                let j = usize::try_from(rng.below((i + 1) as u64)).unwrap();
+                shuffled.swap(i, j);
+            }
+            let mut set = EditSet::new(SOURCE.len());
+            for (s, e, repl) in &shuffled {
+                set.push(*s, *e, repl.clone())
+                    .expect("insertions at an edit's boundary must never conflict");
+            }
+            assert_eq!(
+                set.apply(SOURCE).unwrap(),
+                expected,
+                "push order changed the result for {shuffled:?}"
+            );
+        }
+    }
+}
+
+/// Exhaustive over a small grid: for *every* pair of spans — replacement
+/// vs replacement, replacement vs zero-length insertion, insertion vs
+/// insertion — the two push orders must agree on whether the pair is legal
+/// and, when it is, on the text it produces.
+#[test]
+fn push_order_changes_neither_the_verdict_nor_the_text() {
+    const GRID: u32 = 8;
+    for a0 in 0..GRID {
+        for a1 in a0..=GRID {
+            for b0 in 0..GRID {
+                for b1 in b0..=GRID {
+                    let a = (a0, a1, "A");
+                    let b = (b0, b1, "B");
+                    let fwd = push_two(a, b);
+                    let rev = push_two(b, a);
+                    assert_eq!(
+                        fwd.is_ok(),
+                        rev.is_ok(),
+                        "({a0}..{a1}) & ({b0}..{b1}) accepted in one order only: \
+                         {fwd:?} vs {rev:?}",
+                    );
+                    let (Ok(fwd), Ok(rev)) = (fwd, rev) else {
+                        continue;
+                    };
+                    if a0 == a1 && b0 == b1 && a0 == b0 {
+                        // Two insertions at one offset: FIFO by design, so the
+                        // orders differ — and each must be exactly its push order.
+                        assert!(fwd.contains("AB"), "insert FIFO broken at {a0}: {fwd}");
+                        assert!(rev.contains("BA"), "insert FIFO broken at {a0}: {rev}");
+                    } else {
+                        assert_eq!(
+                            fwd, rev,
+                            "({a0}..{a1}) & ({b0}..{b1}) applied differently per push order",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn push_order_is_fifo_for_inserts_at_one_offset() {
+    // Insertions at a single offset keep the order they were pushed in,
+    // however many there are and whatever else shares the offset.
+    for &(start, end) in &[(5u32, 5u32), (5, 9), (2, 5)] {
+        for replace_first in [true, false] {
+            let mut set = EditSet::new(SOURCE.len());
+            let push_replacement = |set: &mut EditSet| {
+                if (start, end) != (5, 5) {
+                    set.push(start, end, "R".into()).unwrap();
+                }
+            };
+            if replace_first {
+                push_replacement(&mut set);
+            }
+            for tag in ["a", "b", "c", "d"] {
+                set.push(5, 5, tag.into()).unwrap();
+            }
+            if !replace_first {
+                push_replacement(&mut set);
+            }
+            let out = set.apply(SOURCE).unwrap();
+            assert!(
+                out.contains("abcd"),
+                "inserts at 5 lost push order next to {start}..{end} \
+                 (replace_first = {replace_first}): {out}",
+            );
+        }
+    }
 }

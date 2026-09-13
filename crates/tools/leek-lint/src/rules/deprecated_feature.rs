@@ -159,7 +159,7 @@ mod tests {
         let sug = d[0].suggestions.first().expect("a suggestion");
         let mut edits = EditSet::new(src.len());
         edits.push_suggestion(sug).expect("valid edits");
-        edits.apply(src)
+        edits.apply(src).expect("edits apply to their own source")
     }
 
     #[test]

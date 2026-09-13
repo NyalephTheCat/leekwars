@@ -186,7 +186,7 @@ pub(crate) mod testing {
             edits
                 .push_suggestion(sug)
                 .unwrap_or_else(|e| panic!("suggestion {:?} has invalid edits: {e}", sug.message));
-            let fixed = edits.apply(src);
+            let fixed = edits.apply(src).expect("edits apply to their own source");
 
             let source = SourceId::new(1).unwrap();
             let parsed = leek_parser::parse(&fixed, source, Version::V4);

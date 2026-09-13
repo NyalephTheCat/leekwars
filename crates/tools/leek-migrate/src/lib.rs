@@ -24,7 +24,7 @@ mod verify;
 
 use leek_diagnostics::Diagnostic;
 use leek_rewrite::EditSet;
-use leek_span::SourceId;
+use leek_span::{SourceId, Span};
 use leek_syntax::Version;
 
 pub use passes::{V1ToV2, V2ToV1, V2ToV3, V3ToV2, V3ToV4, V4ToV3};
@@ -74,7 +74,17 @@ pub fn run_pass(pass: &dyn MigrationPass, source: &str, source_id: SourceId) -> 
     let mut edits = EditSet::new(source.len());
     let mut diagnostics = Vec::new();
     pass.collect_edits(source, source_id, &mut edits, &mut diagnostics);
-    let after_pass = edits.apply(source);
+    // The edits were built against `source`, so applying them back to
+    // it can only fail if a pass invented offsets. Report that instead
+    // of rewriting the file from broken spans.
+    let after_pass = match edits.apply(source) {
+        Ok(text) => text,
+        Err(e) => {
+            let span = Span::new(source_id, 0, leek_span::offset(source.len()));
+            diagnostics.push(e.to_diagnostic(span));
+            source.to_string()
+        }
+    };
 
     // Tack on the pragma update as a separate edit round, so the
     // pass body doesn't need to know where the `@version` line

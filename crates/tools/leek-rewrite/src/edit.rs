@@ -15,6 +15,34 @@ pub struct Edit {
     pub replacement: String,
 }
 
+impl Edit {
+    /// True when the edit adds text without removing any
+    /// (`start == end`), i.e. it names a position, not a range.
+    #[must_use]
+    pub fn is_insert(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// True when `[start, end)` cannot coexist with this edit.
+    ///
+    /// Two replacements conflict as soon as they share a byte. An
+    /// insertion owns no bytes, so it conflicts only when it lands
+    /// *strictly inside* a replaced range: an insertion sitting at
+    /// another edit's start or end is touching, not overlapping, and
+    /// two insertions at the same offset never conflict. The relation
+    /// is symmetric, so the verdict does not depend on which edit was
+    /// pushed first.
+    #[must_use]
+    pub fn conflicts_with(&self, start: u32, end: u32) -> bool {
+        match (self.is_insert(), start == end) {
+            (true, true) => false,
+            (true, false) => start < self.start && self.start < end,
+            (false, true) => self.start < start && start < self.end,
+            (false, false) => self.start.max(start) < self.end.min(end),
+        }
+    }
+}
+
 /// Why an attempted edit was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
@@ -28,6 +56,9 @@ pub enum EditError {
         existing: (u32, u32),
         incoming: (u32, u32),
     },
+    /// An offset falls inside a multi-byte UTF-8 character, so the
+    /// text around it cannot be sliced.
+    NotCharBoundary { offset: u32 },
 }
 
 impl std::fmt::Display for EditError {
@@ -44,6 +75,9 @@ impl std::fmt::Display for EditError {
                 "edit {}..{} overlaps existing edit {}..{}",
                 incoming.0, incoming.1, existing.0, existing.1
             ),
+            EditError::NotCharBoundary { offset } => {
+                write!(f, "edit offset {offset} is not a character boundary")
+            }
         }
     }
 }
@@ -73,6 +107,11 @@ impl EditError {
                     "edit {}..{} overlaps existing edit {}..{}",
                     incoming.0, incoming.1, existing.0, existing.1
                 ),
+            ),
+            EditError::NotCharBoundary { offset } => Diagnostic::error(
+                codes::EDIT_NOT_CHAR_BOUNDARY,
+                span,
+                format!("edit offset {offset} is not a character boundary"),
             ),
         }
     }
