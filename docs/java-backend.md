@@ -228,38 +228,53 @@ name falls back to a bare `name(...)` call.
    golden (`tests/snapshots/<name>.exact.diff`), plus the clean-vs-exact
    diffs and `SUMMARY.txt`, are goldens: the text is a pure function of the
    fixtures and the emitter. A run writes the fresh diff under
-   `target/tmp/leek-backend-java/reports/` and compares it with the tracked
+   `target/tmp/leek-backend-java-snapshots/` and compares it with the tracked
    copy, so unreviewed emit drift fails the test instead of quietly rewriting
-   a tracked file.
+   a tracked file. A fixture input with no golden fails the test by name,
+   rather than being skipped past its stale `*.exact.diff`.
 3. **JVM cross-check** — the corpus is emitted, compiled with `javac` and run,
    comparing both returned value and op count against the reference. Ratchets
-   guard the pass rates (value parity, op parity, a zero-tolerance ceiling on
-   compile/run errors, and a zero-tolerance ceiling on cases the harness never
-   answered for); the per-case breakdown is written to `JVM_PARITY.txt`. Bump
-   the ratchets up as fixes land so regressions cannot sneak back in.
+   guard the pass rates (value parity, op parity, and a zero-tolerance
+   ceiling on compile/run errors — a case the harness never answered for
+   counts as an error, so a harness that dies mid-run still fails); the
+   per-case breakdown is written to `JVM_PARITY.txt`. Bump the ratchets up as
+   fixes land so regressions cannot sneak back in.
 
 Op comparisons are skipped for snippets that draw from the RNG (`rand`,
 `randInt`, `randFloat`, `randReal`). The recorded `jvm_ops` column came from a
 single JVM run and the harness RNG is unseeded, so those rows drift by a few
 dozen ops out of 13.6M between runs — comparing them made `OPS_DRIFT.txt` churn
 and turned the op ratchet into a coin flip. Their *values* are still compared,
-and both reports print how many comparisons were skipped.
+and both reports print how many comparisons were skipped. Excluding them is
+what makes the run reports reproducible enough to be goldens in their own
+right.
 
-The per-run reports — `JVM_PARITY.txt`, `OPS_DRIFT.txt`, `CORPUS_SUMMARY.txt`
-and `NATIVE_OPS_DRIFT.txt` — are statistics about the run, not goldens. A test
-run writes them under `target/tmp/leek-backend-java/reports/` and the failure
-messages point at the file it actually wrote. The tracked copies in
-`tests/snapshots/` are refreshed only by `UPDATE_SNAPSHOTS=1 cargo test -p
-leek-backend-java`, which is also how you accept a new diff snapshot — so a
-plain run never leaves churn in the working tree.
+So the per-run reports — `JVM_PARITY.txt`, `OPS_DRIFT.txt`,
+`CORPUS_SUMMARY.txt` and `NATIVE_OPS_DRIFT.txt` — are compared like every
+other snapshot. A test run writes them under
+`target/tmp/leek-backend-java-snapshots/` and the failure messages point at
+the file it actually wrote. The tracked copies in `tests/snapshots/` are
+refreshed only by `UPDATE_SNAPSHOTS=1 cargo test -p leek-backend-java`, which
+is also how you accept a new diff snapshot — so a plain run never leaves churn
+in the working tree.
+
+The reports are **pinned on Linux**. They embed values from native math
+builtins, which go through the platform libm, and other libms round
+differently (RT-N1): macOS disagrees on `cos`/`sin`/`tan` of `5`. Off Linux
+each comparison prints a `SKIPPED <report>` line and passes, while the
+value/ops ratio gates still run; `LEEK_REQUIRE_SNAPSHOTS=1` compares anyway,
+and `UPDATE_SNAPSHOTS=1` is refused with a notice so a non-Linux run can never
+overwrite the pinned copies. The rule is the pure function `snapshot_policy`
+in `tests/parity.rs`.
 
 ### Running without a JDK
 
 The JVM cross-check needs `tools/java-emitter/build/leekscript-emitter.jar`
-(built by `tools/java-emitter/build.sh`) and `tests/fixtures/ops/snapshot.tsv`.
-Without either, or when `java` fails to spawn, it prints a `SKIPPED` line
-naming what is missing and passes — that keeps the suite runnable on machines
-without a JDK, but it also means the ratchets above are not running.
+(built by `tools/java-emitter/build.sh`). Without it, or when `java` fails to
+spawn, it prints a `SKIPPED` line naming what is missing and passes — that
+keeps the suite runnable on machines without a JDK, but it also means the
+ratchets above are not running. `tests/fixtures/ops/snapshot.tsv` is tracked,
+so a missing one is a broken checkout and fails rather than skips.
 
 Set `LEEK_REQUIRE_JVM=1` wherever the harness is supposed to be there and every
 such skip becomes a failure. `tools/check.sh` exports it automatically when the
