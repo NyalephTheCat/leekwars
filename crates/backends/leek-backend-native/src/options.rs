@@ -88,7 +88,35 @@ pub struct NativeOptions {
     /// the `beforeFight()` / `afterFight()` lifecycle hooks: they're never
     /// called from the AI body, so reachability would otherwise prune them.
     pub hook_roots: Vec<String>,
+    /// Maximum number of nested user-function calls. Entering a frame beyond
+    /// it records `STACKOVERFLOW` (upstream's `Error.STACKOVERFLOW`) and the
+    /// program winds down, instead of recursing until the native stack
+    /// overflows and the OS kills the host process. Defaults to
+    /// [`DEFAULT_MAX_CALL_DEPTH`]; lower it to exercise the error in tests.
+    pub max_call_depth: u32,
+    /// Native stack the program's user frames may use, in bytes, measured
+    /// from where the run starts. Entering a frame below that also records
+    /// `STACKOVERFLOW`. A backstop for [`max_call_depth`](Self::max_call_depth):
+    /// recursion through a function value crosses the Rust dispatch shims and
+    /// costs ~100x the stack of a direct call, so no single depth fits every
+    /// call path. `usize::MAX` disables it. Defaults to
+    /// [`DEFAULT_MAX_STACK_BYTES`]; the calling thread must have at least this
+    /// much stack free (plus slack for the runtime) when the run starts.
+    pub max_stack_bytes: usize,
 }
+
+/// Default [`NativeOptions::max_call_depth`].
+///
+/// Upstream has no explicit counter: the JVM throws `StackOverflowError`
+/// when the thread stack runs out, so its depth depends on the stack size.
+/// This default admits every recursion the upstream corpus runs to completion
+/// (the deepest is `rec(1000)`; `rec(10000)` is only run under an op budget it
+/// exhausts first).
+pub const DEFAULT_MAX_CALL_DEPTH: u32 = 5_000;
+
+/// Default [`NativeOptions::max_stack_bytes`]: 1 MiB, half the 2 MiB stack a
+/// spawned Rust thread (test, DAP or fight worker) gets by default.
+pub const DEFAULT_MAX_STACK_BYTES: usize = 1 << 20;
 
 impl Default for NativeOptions {
     fn default() -> Self {
@@ -112,6 +140,8 @@ impl NativeOptions {
             link_game: false,
             op_limit: u64::MAX,
             hook_roots: Vec::new(),
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            max_stack_bytes: DEFAULT_MAX_STACK_BYTES,
         }
     }
 
@@ -129,7 +159,21 @@ impl NativeOptions {
             link_game: false,
             op_limit: u64::MAX,
             hook_roots: Vec::new(),
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            max_stack_bytes: DEFAULT_MAX_STACK_BYTES,
         }
+    }
+
+    /// Set the call-depth limit (see [`max_call_depth`](Self::max_call_depth)).
+    pub fn with_max_call_depth(mut self, depth: u32) -> Self {
+        self.max_call_depth = depth;
+        self
+    }
+
+    /// Set the native stack budget (see [`max_stack_bytes`](Self::max_stack_bytes)).
+    pub fn with_max_stack_bytes(mut self, bytes: usize) -> Self {
+        self.max_stack_bytes = bytes;
+        self
     }
 
     /// Enable per-statement debug safepoints (see [`NativeOptions::debug_hooks`]).

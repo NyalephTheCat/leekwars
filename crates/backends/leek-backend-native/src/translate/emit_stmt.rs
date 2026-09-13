@@ -50,6 +50,15 @@ impl Tx<'_, '_> {
         Ok(())
     }
 
+    /// Pop this function's call-depth frame before a real return — the match
+    /// for the entry prologue's `leek_enter_frame`. Emits nothing where the
+    /// guard isn't declared (`main`, text-dump mode).
+    pub(super) fn emit_leave_frame(&mut self) {
+        if let Ok(leave) = self.imports.rt("leek_leave_frame") {
+            self.b.ins().call(leave, &[]);
+        }
+    }
+
     /// Whether the edge `from → to` may close a loop: `to` is emitted at or
     /// before `from`. Every CFG cycle has at least one such edge, so a budget
     /// check on each of them bounds every loop — `Goto`-only ones included.
@@ -565,6 +574,7 @@ impl Tx<'_, '_> {
                 };
                 let v = self.coerce(v, ty, self.ret_ty)?;
                 self.flush_charge()?;
+                self.emit_leave_frame();
                 self.b.ins().return_(&[v]);
             }
             // A void function returns null. With a `Ref` result that's a
@@ -572,6 +582,7 @@ impl Tx<'_, '_> {
             // dead dummy zero.
             Terminator::Return(None) => {
                 self.flush_charge()?;
+                self.emit_leave_frame();
                 let z = match self.ret_ty {
                     ValTy::Ref => {
                         let null = self.imports.rt("leek_box_null")?;

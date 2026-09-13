@@ -1281,6 +1281,32 @@ pub fn translate_function(
         link_game,
     )?;
 
+    // Call-depth guard prologue, in the dedicated entry block (never a loop
+    // target, so it runs exactly once per call): count this frame, or — when
+    // the depth limit is hit (`STACKOVERFLOW` recorded) or the run has already
+    // errored — return the default value straight away. Declared for every
+    // function but `main` (see `declare_imports`); each real `Return` pops the
+    // frame again.
+    if let Ok(enter) = imports.rt("leek_enter_frame") {
+        let inst = builder.ins().call(enter, &[]);
+        let refuse = builder.inst_results(inst)[0];
+        let bail = builder.create_block();
+        let body = builder.create_block();
+        builder.ins().brif(refuse, bail, &[], body, &[]);
+        builder.switch_to_block(bail);
+        let default = match ret_ty {
+            ValTy::Ref => {
+                let null = imports.rt("leek_box_null")?;
+                let inst = builder.ins().call(null, &[]);
+                builder.inst_results(inst)[0]
+            }
+            ValTy::Real => builder.ins().f64const(0.0),
+            _ => builder.ins().iconst(types::I64, 0),
+        };
+        builder.ins().return_(&[default]);
+        builder.switch_to_block(body);
+    }
+
     let mut vars: Vec<Variable> = Vec::with_capacity(mir_fn.locals.len());
     let mut var_tys: Vec<ValTy> = Vec::with_capacity(mir_fn.locals.len());
     for i in 0..mir_fn.locals.len() {

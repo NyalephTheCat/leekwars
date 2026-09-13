@@ -406,6 +406,9 @@ fn compile_entry(
             // ops at the same MIR sites the interpreter does (so counts match);
             // `ops_used()` reads the total after `main` returns.
             runtime::reset_ops(opts.op_limit);
+            // Arm the recursion guard: frames start at zero for this run, and
+            // the stack budget is measured from here (just above the entry).
+            runtime::arm_call_guard(opts.max_call_depth, opts.max_stack_bytes);
             // Everything above is codegen + runtime wiring; the program itself
             // hasn't run yet. Split the timing here so the benchmark can report
             // JIT compilation separately from execution.

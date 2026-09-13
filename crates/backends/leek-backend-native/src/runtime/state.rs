@@ -59,6 +59,62 @@ shim! {
     }
 }
 
+/// Arm the recursion guard for a new run: reset the frame counter, install the
+/// call-depth limit, and set the stack floor `max_stack_bytes` below the
+/// caller's current stack position (`usize::MAX` disables the stack check).
+///
+/// Call it from the frame that then invokes the JIT'd entry, so the budget
+/// covers only the program's own frames.
+#[inline(never)]
+pub fn arm_call_guard(max_call_depth: u32, max_stack_bytes: usize) {
+    super::MAX_CALL_DEPTH.with(|c| c.set(max_call_depth));
+    super::CALL_DEPTH.with(|c| c.set(0));
+    let marker = 0u8;
+    let sp = std::ptr::addr_of!(marker) as usize;
+    super::STACK_FLOOR.with(|c| c.set(sp.saturating_sub(max_stack_bytes)));
+}
+
+/// The upstream error for runaway recursion (`Error.STACKOVERFLOW`, which the
+/// generator records when the JVM throws `StackOverflowError`).
+pub const STACK_OVERFLOW: &str = "STACKOVERFLOW";
+
+shim! {
+    /// Function-entry prologue of every compiled user function (not `main`).
+    /// Returns non-zero when the function must return its default value at
+    /// once: the run has already errored, or entering this frame would exceed
+    /// the call-depth limit or the native stack budget (the frame starts below
+    /// the floor [`arm_call_guard`] set) — which records [`STACK_OVERFLOW`]. Only a frame
+    /// that returns 0 is counted, and must be matched by [`leek_leave_frame`].
+    ///
+    /// Without it, unbounded recursion (`function f(x) { return f(x) }`) runs
+    /// the native thread out of stack and the OS kills the whole host process.
+    pub extern "C" fn leek_enter_frame() -> i64 {
+        if aborting() {
+            return 1;
+        }
+        let depth = super::CALL_DEPTH.with(std::cell::Cell::get).saturating_add(1);
+        let marker = 0u8;
+        let sp = std::ptr::addr_of!(marker) as usize;
+        if depth > super::MAX_CALL_DEPTH.with(std::cell::Cell::get)
+            || sp < super::STACK_FLOOR.with(std::cell::Cell::get)
+        {
+            raise_runtime_error(STACK_OVERFLOW);
+            return 1;
+        }
+        super::CALL_DEPTH.with(|c| c.set(depth));
+        0
+    }
+}
+
+shim! {
+    /// Function-return epilogue: pops the frame [`leek_enter_frame`] counted.
+    /// (Early returns taken after an error skip it; the counter only matters
+    /// until the run stops and is reset for the next one.)
+    pub extern "C" fn leek_leave_frame() {
+        super::CALL_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
 /// Whether a runtime error has been recorded this run, i.e. execution must
 /// stop. Side-effecting shims check it and do nothing once it is set, matching
 /// upstream, where the error is an exception that ends the AI immediately.

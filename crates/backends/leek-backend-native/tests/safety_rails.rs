@@ -110,3 +110,78 @@ fn game_actions_before_an_error_still_happen() {
     assert!(matches!(out, Err(NativeError::Runtime(_))), "got {out:?}");
     assert_eq!(calls, vec!["useWeapon".to_string()]);
 }
+
+fn outcome(src: &str, opts: &NativeOptions) -> String {
+    match run(&hir(src), opts) {
+        Ok(v) => v.to_string(),
+        Err(NativeError::Runtime(code)) => format!("runtime error {code}"),
+        Err(e) => format!("other error: {e}"),
+    }
+}
+
+const STACK_OVERFLOW: &str = "runtime error STACKOVERFLOW";
+
+#[test]
+fn unbounded_recursion_raises_stack_overflow_instead_of_crashing() {
+    // Runs on a default (2 MiB) test thread with the default depth limit: the
+    // guard must trip before the native stack is exhausted, on every call path.
+    let opts = NativeOptions::release().with_lang(4, false);
+    for src in [
+        // Direct user-function recursion (JIT-to-JIT calls).
+        "function f(x) { return f(x) } return f(1)",
+        // Mutual recursion.
+        "function a(x) { return b(x) } function b(x) { return a(x) } return a(1)",
+        // Recursion through a function value (crosses the Rust dispatch shims).
+        "var g = function(x) { return g(x) } return g(1)",
+        // Method recursion.
+        "class A { m(x) { return this.m(x) } } return new A().m(1)",
+    ] {
+        assert_eq!(outcome(src, &opts), STACK_OVERFLOW, "{src}");
+    }
+}
+
+#[test]
+fn call_depth_limit_is_configurable() {
+    let rec = |n: u32| {
+        format!("function rec(n) {{ if (n == 0) return 0 return 1 + rec(n - 1) }} return rec({n})")
+    };
+    let opts = NativeOptions::release()
+        .with_lang(4, false)
+        .with_max_call_depth(50);
+    // `rec(n)` nests n + 1 frames.
+    assert_eq!(outcome(&rec(49), &opts), "49");
+    assert_eq!(outcome(&rec(50), &opts), STACK_OVERFLOW);
+}
+
+#[test]
+fn stack_budget_stops_recursion_the_depth_limit_allows() {
+    let src = "var g = function(x) { return g(x) } return g(1)";
+    let opts = NativeOptions::release()
+        .with_lang(4, false)
+        .with_max_call_depth(u32::MAX)
+        .with_max_stack_bytes(64 * 1024);
+    assert_eq!(outcome(src, &opts), STACK_OVERFLOW);
+}
+
+#[test]
+fn default_limit_admits_the_corpus_recursion_depth() {
+    // Upstream `rec(1000)` completes (`max_ops(50000).equals("1000")`).
+    let src = "function rec(n) { if (n == 0) return 0 return 1 + rec(n - 1) } return rec(1000)";
+    assert_eq!(
+        outcome(src, &NativeOptions::release().with_lang(4, false)),
+        "1000"
+    );
+}
+
+#[test]
+fn returns_pop_their_frames() {
+    // Many sequential calls, each returning through a different path, never
+    // accumulate depth: a limit of 3 frames is plenty.
+    let src = "function f(x) { if (x > 0) return 1 } \
+               function g() { f(1) f(0) } \
+               var s = 0 for (var i = 0; i < 10000; i++) { g() s++ } return s";
+    let opts = NativeOptions::release()
+        .with_lang(4, false)
+        .with_max_call_depth(3);
+    assert_eq!(outcome(src, &opts), "10000");
+}

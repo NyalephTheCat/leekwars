@@ -250,6 +250,9 @@ pub fn run() -> Result<ExitCode> {
                 opts.version = v_byte;
                 opts.strict = pragmas.strict;
                 opts.op_limit = 20_000_000;
+                if let Some(depth) = cli.max_call_depth {
+                    opts.max_call_depth = depth;
+                }
                 opts.emit = NativeEmit::Jit;
                 match leek_backend_native::compile(hir.0.as_ref(), &opts) {
                     Ok(NativeArtifact::Value(v)) => println!("{v}"),
@@ -287,6 +290,9 @@ pub fn run() -> Result<ExitCode> {
                 opts.version = version_byte;
                 opts.strict = pragmas.strict;
                 opts.link_game = cli.link_game;
+                if let Some(depth) = cli.max_call_depth {
+                    opts.max_call_depth = depth;
+                }
                 let obj_path = cli
                     .native_out
                     .clone()

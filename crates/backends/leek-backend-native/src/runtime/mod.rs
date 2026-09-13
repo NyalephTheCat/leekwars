@@ -150,6 +150,23 @@ thread_local! {
     /// `Cell<bool>` so the hot polls skip the `RefCell` borrow.
     static ABORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
+    /// User-function frames currently active in this run: bumped by every
+    /// compiled function's entry prologue ([`leek_enter_frame`]) and dropped on
+    /// each return ([`leek_leave_frame`]). `main` is not counted.
+    static CALL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+
+    /// Call-depth limit for the current run; entering a frame beyond it raises
+    /// `STACKOVERFLOW` instead of recursing until the native stack overflows.
+    static MAX_CALL_DEPTH: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(crate::options::DEFAULT_MAX_CALL_DEPTH) };
+
+    /// Lowest stack address a user frame may start at this run (0 = no
+    /// check). A backstop for the depth counter: frames reached through the
+    /// Rust dispatch shims (function values, callbacks) cost far more stack
+    /// than direct JIT calls, so the counter alone can't keep every call path
+    /// inside a small thread stack.
+    static STACK_FLOOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
     /// Whether the current run uses strict typing. Mirrors the interpreter's
     /// `strict` flag, which some runtime-fault rules depend on (e.g. an
     /// out-of-bounds array write only errors under v4 *strict*).
@@ -354,5 +371,7 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
             "leek_op_budget_exceeded",
             leek_op_budget_exceeded as *const u8,
         ),
+        ("leek_enter_frame", leek_enter_frame as *const u8),
+        ("leek_leave_frame", leek_leave_frame as *const u8),
     ]
 }

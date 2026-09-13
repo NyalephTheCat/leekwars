@@ -169,6 +169,15 @@ fn run_one(
     let mut opts = leek_backend_native::NativeOptions::debug();
     opts.version = version_byte;
     opts.op_limit = budget;
+    if let Some(depth) = project
+        .manifest
+        .backend
+        .native
+        .as_ref()
+        .and_then(|s| s.max_call_depth)
+    {
+        opts.max_call_depth = depth;
+    }
     opts.emit = leek_backend_native::NativeEmit::Jit;
     let err = leek_backend_native::compile(hir.0.as_ref(), &opts).err();
 

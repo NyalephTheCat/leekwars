@@ -52,6 +52,15 @@ pub fn run(
     let mut opts = NativeOptions::debug();
     opts.version = version_byte;
     opts.op_limit = OP_BUDGET;
+    if let Some(depth) = project
+        .manifest
+        .backend
+        .native
+        .as_ref()
+        .and_then(|s| s.max_call_depth)
+    {
+        opts.max_call_depth = depth;
+    }
     opts.emit = NativeEmit::Jit;
     match leek_backend_native::compile(hir.0.as_ref(), &opts) {
         Ok(NativeArtifact::Value(v)) => {
