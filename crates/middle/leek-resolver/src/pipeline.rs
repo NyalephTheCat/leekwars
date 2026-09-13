@@ -205,7 +205,13 @@ impl Step for ResolveIncludes {
                 step: "resolve_includes",
                 message: format!("source allocator poisoned: {e}"),
             })?;
-            build_include_graph(&entry_path, cx.text(), &*self.folder, |p| (alloc)(p))
+            build_include_graph(
+                &entry_path,
+                cx.text(),
+                version_from_byte(cx.version_byte()),
+                &*self.folder,
+                |p| (alloc)(p),
+            )
         };
 
         cx.emit_all(graph.diagnostics.iter().cloned());
@@ -300,7 +306,10 @@ pub fn resolve_query(
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return ResolveArtifact::default();
     };
-    let (pragmas, _) = leek_syntax::parse_pragmas(file.text(db), file.source(db));
+    // Pragmas only contribute experimental opt-ins here; the version and
+    // strict mode come from the salsa input (the settled `Input`). Reuse the
+    // memoized pragma query instead of re-scanning the text.
+    let pragmas = leek_syntax::pipeline::pragma_query(db, file).pragmas;
     let opts = Options {
         strict: file.strict(db),
         experimental_imports: pragmas.experimental.iter().any(|f| f == "imports"),

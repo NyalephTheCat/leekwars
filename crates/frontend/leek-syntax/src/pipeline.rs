@@ -11,13 +11,7 @@ use crate::version::Version;
 /// Decode a `Context::version_byte()` into the typed [`Version`]
 /// enum. Values out of range collapse to [`Version::LATEST`].
 pub fn version_from_byte(b: u8) -> Version {
-    match b {
-        1 => Version::V1,
-        2 => Version::V2,
-        3 => Version::V3,
-        4 => Version::V4,
-        _ => Version::LATEST,
-    }
+    Version::from_byte(b)
 }
 
 /// Output of [`Pragma`].
@@ -27,10 +21,12 @@ impl Artifact for PragmasArtifact {}
 
 // Pragma preprocessing — extracts `// @version`, `// @strict`, …
 //
-// The context's `Input::version_byte` is the authoritative active
-// version; callers resolve it themselves (often from this artifact).
-// This step only contributes the parsed pragmas plus any pragma
-// diagnostics.
+// The context's `Input::version_byte` / `Input::strict` are the
+// authoritative language settings. Drivers settle them once, before the
+// pipeline runs, with `leek_span::pragma::LanguageSettings::resolve`
+// (override > pragma > default); no pass re-derives the version from
+// pragmas. This step only contributes the parsed pragmas (experimental
+// features) plus any pragma diagnostics.
 leek_pipeline::define_step!(Pragma, "pragma", PragmasArtifact, run_pragma);
 
 impl RecipeStep for Pragma {

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use leek_manifest::discover;
+use leek_span::pragma::LanguageSettings;
 use leek_span::{LineTable, SourceId};
 
 /// Error discovering or indexing a project.
@@ -114,17 +115,24 @@ impl ProjectIndex {
             message: format!("reading {}: {e}", canonical.display()),
         })?;
         let source = self.source_for_path(&canonical);
-        let version_byte = peek_version_byte(&text, self.default_version_byte);
-        let strict = peek_strict_flag(&text) || self.default_strict;
+        let lang = self.language_settings(&text);
         let line_table = LineTable::new(&text);
         Ok(LoadedProjectFile {
             path: canonical,
             source,
             text,
-            version_byte,
-            strict,
+            version_byte: lang.version,
+            strict: lang.strict,
             line_table,
         })
+    }
+
+    /// Settle a file's language version and strict mode: its own
+    /// `// @version:N` / `// @strict` pragmas, falling back to the manifest's
+    /// `[project].language` / `strict` defaults. This is the one place project
+    /// inputs get their version; every pass then reads `Input::version_byte`.
+    pub fn language_settings(&self, text: &str) -> LanguageSettings {
+        LanguageSettings::resolve(text, None, self.default_version_byte, self.default_strict)
     }
 
     pub fn canonicalize(path: &Path) -> PathBuf {
@@ -157,32 +165,6 @@ pub struct LoadedProjectFile {
     pub line_table: LineTable,
 }
 
-pub(crate) fn peek_version_byte(text: &str, default: u8) -> u8 {
-    for line in text.lines().take(32) {
-        let trimmed = line.trim();
-        let rest = trimmed
-            .strip_prefix("// @version")
-            .or_else(|| trimmed.strip_prefix("@version"))
-            .or_else(|| trimmed.strip_prefix("//@version"));
-        let Some(rest) = rest else {
-            continue;
-        };
-        if let Ok(n) = rest.trim().parse::<u8>()
-            && (1..=4).contains(&n)
-        {
-            return n;
-        }
-    }
-    default
-}
-
-pub(crate) fn peek_strict_flag(text: &str) -> bool {
-    text.lines().take(32).any(|line| {
-        let t = line.trim();
-        t == "// @strict" || t == "@strict" || t == "//@strict"
-    })
-}
-
 /// Recursively collect `*.leek` under `dir`, honoring ignore rules.
 pub fn walk_leek_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -212,4 +194,69 @@ pub fn walk_leek_files(dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "leek-project-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// An index whose manifest defaults are `language = 4`, `strict = false`.
+    fn v4_index(src: &Path) -> ProjectIndex {
+        let mut index = ProjectIndex::from_src_root(src);
+        index.default_version_byte = 4;
+        index.default_strict = false;
+        index
+    }
+
+    #[test]
+    fn file_pragma_overrides_manifest_language() {
+        // Regression: the old pre-scan stripped `// @version` and tried to
+        // parse `:N` as a number, so it never matched the real syntax and
+        // every file got the manifest default.
+        let dir = scratch("pragma");
+        let index = v4_index(&dir);
+        for (text, want) in [
+            ("// @version:1\nreturn 1;\n", 1),
+            ("//@version:2\nreturn 1;\n", 2),
+            (" // @version:3\nreturn 1;\n", 3),
+            ("return 1;\n", 4),
+        ] {
+            assert_eq!(index.language_settings(text).version, want, "{text:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_file_uses_pragma_version_and_strict() {
+        let dir = scratch("load");
+        let path = dir.join("main.leek");
+        std::fs::write(&path, "// @version:1\n// @strict\nreturn 1;\n").expect("write");
+        let mut index = v4_index(&dir);
+        let loaded = index.load_file(&path).expect("load");
+        assert_eq!(loaded.version_byte, 1);
+        assert!(loaded.strict);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_strict_default_applies_without_pragma() {
+        let dir = scratch("strict");
+        let mut index = v4_index(&dir);
+        index.default_strict = true;
+        let lang = index.language_settings("return 1;\n");
+        assert!(lang.strict);
+        assert_eq!(lang.version, 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

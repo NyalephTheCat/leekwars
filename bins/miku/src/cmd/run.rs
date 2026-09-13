@@ -12,8 +12,6 @@ use leek_recipes::{OptLevel, RecipeParams, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Run};
 
-const OP_BUDGET: u64 = 20_000_000;
-
 pub fn run(
     args: &Run,
     manifest_path: Option<&Path>,
@@ -45,14 +43,10 @@ pub fn run(
         return Ok(ExitCode::from(1));
     };
 
-    let version_byte = driver_run.run.input().version_byte;
-    // Execute via the native JIT (the interpreter backend was removed). The 20M
-    // op budget matches the prior interpreter run.
-    use leek_backend_native::{NativeArtifact, NativeEmit, NativeOptions};
-    let mut opts = NativeOptions::debug();
-    opts.version = version_byte;
-    opts.op_limit = OP_BUDGET;
-    opts.emit = NativeEmit::Jit;
+    // Execute via the native JIT (the interpreter backend was removed), at the
+    // input's settled version *and* strict mode.
+    use leek_backend_native::{DEFAULT_OP_BUDGET, NativeArtifact, NativeOptions};
+    let opts = NativeOptions::jit_for_input(driver_run.run.input(), DEFAULT_OP_BUDGET);
     match leek_backend_native::compile(hir.0.as_ref(), &opts) {
         Ok(NativeArtifact::Value(v)) => {
             println!("{v}");

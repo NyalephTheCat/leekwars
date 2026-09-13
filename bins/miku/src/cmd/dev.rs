@@ -79,15 +79,21 @@ fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
     });
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let version = cmd.lang_version;
+    // `--lang-version` > the file's `@version` pragma > latest; `@strict`.
+    let lang = leek_span::pragma::LanguageSettings::resolve(
+        &text,
+        cmd.lang_version,
+        leek_span::pragma::LATEST_VERSION,
+        false,
+    );
     let sink = TimingSink::new();
     let pipeline = leek_recipes::pipeline_timed(Target::Hir, &RecipeParams::permissive(), &sink)
         .expect("recipe");
     let _run = pipeline.run(Input {
         source: SourceId::new(1).unwrap(),
         text: text.into(),
-        version_byte: version,
-        strict: false,
+        version_byte: lang.version,
+        strict: lang.strict,
         flags: leek_pipeline::FeatureFlags::from_env(),
     });
     if !quiet {

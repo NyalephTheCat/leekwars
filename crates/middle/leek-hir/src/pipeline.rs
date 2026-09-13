@@ -9,53 +9,57 @@ use leek_pipeline::{Artifact, Context, OptLevel, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 use leek_resolver::pipeline::IncludeGraphArtifact;
 use leek_span::SourceId;
+use leek_syntax::Version;
 
 use crate::HirFile;
 use crate::lower::{
-    lower_file_versioned_with_flags, lower_file_with_prelude_with_flags, lower_files,
+    LowerUnit, PRELUDE_UNIT_PATH, lower_file_versioned_with_flags,
+    lower_file_with_prelude_with_flags, lower_files,
 };
 
 /// Parse the active library/prelude headers (the implicit prelude when
 /// enabled, plus any `--library` headers like leekwars) into a single
 /// signature AST to merge ahead of the user file. `None` when nothing
-/// is active. Parsed with bodiless signatures + generics enabled so the
-/// headers' typed signatures and `@<backend>-dispatch:` directives load.
-fn parse_prelude(prelude_enabled: bool) -> Option<(leek_parser::ast::SourceFile, SourceId)> {
-    use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
+/// is active.
+///
+/// Parsed at the **program's** language version through the shared,
+/// version-keyed [`leek_parser::parse_signature_header`] cache — the same
+/// one the type checker seeds signatures from — so lowering and checking
+/// see the same header tree and nothing is re-parsed per compile.
+fn parse_prelude(
+    prelude_enabled: bool,
+    version: Version,
+) -> Option<(leek_parser::ast::SourceFile, SourceId)> {
+    use leek_parser::ast::SourceFile as AstSourceFile;
     use leek_syntax::SyntaxNode;
     let combined = leek_prelude::merged_header_src(prelude_enabled)?;
-    let src = leek_prelude::source_id();
-    let parsed = leek_parser::parse_with_features(
-        &combined,
-        src,
-        leek_syntax::Version::V4,
-        leek_parser::ParseFeatures {
-            function_signatures: true,
-            generics: true,
-            ..Default::default()
-        },
-    );
-    let ast = AstSourceFile::cast(SyntaxNode::new_root(parsed.green))?;
-    Some((ast, src))
+    let green = leek_parser::parse_signature_header(&combined, version);
+    let ast = AstSourceFile::cast(SyntaxNode::new_root(green))?;
+    Some((ast, leek_prelude::source_id()))
 }
 
-/// Pick the language version for lowering: an explicit `// @version:N`
-/// pragma always wins; otherwise fall back to the out-of-band
-/// `Input::version_byte` (which the corpus runner and editors set).
-/// Previously `lower_file` defaulted pragma-less sources to v4,
-/// silently dropping the caller's version (e.g. v1 string-escape rules).
-fn effective_version(src_text: &str, source: SourceId, fallback_byte: u8) -> u8 {
-    let (pragmas, _) = leek_syntax::parse_pragmas(src_text, source);
-    if pragmas.version_explicit {
-        match pragmas.version {
-            leek_syntax::Version::V1 => 1,
-            leek_syntax::Version::V2 => 2,
-            leek_syntax::Version::V3 => 3,
-            leek_syntax::Version::V4 => 4,
-        }
-    } else {
-        fallback_byte
+/// Lower one file at the pipeline's settled language settings: `version`
+/// is `Input::version_byte` (already resolved from override > pragma >
+/// default by the driver), never re-derived from the file's pragmas.
+fn lower_single(
+    ast: &leek_parser::ast::SourceFile,
+    source: SourceId,
+    version_byte: u8,
+    flags: leek_pipeline::FeatureFlags,
+) -> (HirFile, Vec<Diagnostic>) {
+    if let Some((prelude, prelude_src)) =
+        parse_prelude(flags.prelude, Version::from_byte(version_byte))
+    {
+        return lower_file_with_prelude_with_flags(
+            ast,
+            source,
+            version_byte,
+            &prelude,
+            prelude_src,
+            flags,
+        );
     }
+    lower_file_versioned_with_flags(ast, source, version_byte, flags)
 }
 
 /// Lowered HIR.
@@ -148,27 +152,38 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         && !graph.includes.is_empty()
         && let Some(ast) = cx.get::<AstArtifact>().and_then(|a| a.0.clone())
     {
-        let mut includes: Vec<_> = graph
-            .includes
-            .iter()
-            .map(|inc| (inc.ast.clone(), inc.source, inc.path.clone()))
-            .collect();
+        let version = Version::from_byte(cx.version_byte());
+        let flags = cx.flags();
         // Active library headers (e.g. leekwars) merge in as a
-        // synthetic front include: their bodiless signatures are
+        // synthetic front unit: their bodiless signatures are
         // pre-declared before every user file's, mirroring the
         // single-file prelude path. No `include` statement resolves
         // to the synthetic path, so it contributes no main block.
-        if let Some((prelude, prelude_src)) = parse_prelude(cx.flags().prelude) {
-            includes.insert(
-                0,
-                (prelude, prelude_src, std::path::PathBuf::from("<prelude>")),
-            );
+        let prelude = parse_prelude(flags.prelude, version);
+        let mut units: Vec<LowerUnit<'_>> = Vec::with_capacity(graph.includes.len() + 1);
+        if let Some((prelude_ast, prelude_src)) = &prelude {
+            units.push(LowerUnit {
+                ast: prelude_ast,
+                source: *prelude_src,
+                path: std::path::Path::new(PRELUDE_UNIT_PATH),
+                version,
+            });
         }
-        let (hir, diagnostics) = lower_files(
-            (&ast, cx.source(), &graph.entry_path),
-            &includes,
-            &graph.resolved,
-        );
+        // Each included file keeps the version the include walker lexed and
+        // parsed it at (its own pragma, else the entry's version).
+        units.extend(graph.includes.iter().map(|inc| LowerUnit {
+            ast: &inc.ast,
+            source: inc.source,
+            path: &inc.path,
+            version: inc.version,
+        }));
+        let entry = LowerUnit {
+            ast: &ast,
+            source: cx.source(),
+            path: &graph.entry_path,
+            version,
+        };
+        let (hir, diagnostics) = lower_files(entry, &units, Some(&graph.resolved), flags);
         return (finish_hir(hir, opt), diagnostics);
     }
 
@@ -190,21 +205,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         .get::<AstArtifact>()
         .and_then(|a| a.0.clone())
         .expect("LowerHir::run guards on AstArtifact presence outside the salsa path");
-    let src_text = ast.syntax().text().to_string();
-    let version = effective_version(&src_text, cx.source(), cx.version_byte());
-    let flags = cx.flags();
-    if let Some((prelude, prelude_src)) = parse_prelude(flags.prelude) {
-        let (hir, diagnostics) = lower_file_with_prelude_with_flags(
-            &ast,
-            cx.source(),
-            version,
-            &prelude,
-            prelude_src,
-            flags,
-        );
-        return (finish_hir(hir, opt), diagnostics);
-    }
-    let (hir, diagnostics) = lower_file_versioned_with_flags(&ast, cx.source(), version, flags);
+    let (hir, diagnostics) = lower_single(&ast, cx.source(), cx.version_byte(), cx.flags());
     (finish_hir(hir, opt), diagnostics)
 }
 
@@ -268,24 +269,8 @@ pub fn lower_hir_query(
             diagnostics: Vec::new(),
         };
     };
-    let src_text = ast.syntax().text().to_string();
-    let version = effective_version(&src_text, file.source(db), file.version_byte(db));
     let flags = leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db));
-    if let Some((prelude, prelude_src)) = parse_prelude(flags.prelude) {
-        let (hir, diagnostics) = lower_file_with_prelude_with_flags(
-            &ast,
-            file.source(db),
-            version,
-            &prelude,
-            prelude_src,
-            flags,
-        );
-        return LowerHirResult {
-            hir: finish_hir(hir, OptLevel::O0),
-            diagnostics,
-        };
-    }
-    let (hir, diagnostics) = lower_file_versioned_with_flags(&ast, file.source(db), version, flags);
+    let (hir, diagnostics) = lower_single(&ast, file.source(db), file.version_byte(db), flags);
     LowerHirResult {
         hir: finish_hir(hir, OptLevel::O0),
         diagnostics,

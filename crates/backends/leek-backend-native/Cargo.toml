@@ -11,6 +11,9 @@ leek-mir      = { workspace = true }
 leek-hir      = { workspace = true }
 leek-types    = { workspace = true }
 leek-span     = { workspace = true }
+# `NativeOptions::jit_for_input` reads the settled language settings from
+# the pipeline `Input`.
+leek-pipeline = { workspace = true }
 # The shared value semantics (binary ops, indexing, iteration, deep-clone)
 # live in `leek-runtime`; the native backend links them as C-ABI shims.
 # No dependency on any backend — `leek-runtime` is the shared library.
