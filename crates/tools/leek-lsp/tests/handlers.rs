@@ -1943,6 +1943,37 @@ fn definition_jumps_across_include_to_home_file() {
 }
 
 #[test]
+fn definition_jumps_across_include_to_global_variable() {
+    let ws = open_files(&[
+        ("constants.leek", "global shared_value = 42\n"),
+        (
+            "main.leek",
+            "include(\"constants\")\nvar copy = shared_value\n",
+        ),
+    ]);
+    // Cursor on `shared_value` in main.leek (line 1, col 12).
+    let resp = definition::handle(
+        &ws,
+        &proj("main.leek"),
+        lsp::Position {
+            line: 1,
+            character: 12,
+        },
+    )
+    .expect("definition");
+    let lsp::GotoDefinitionResponse::Scalar(loc) = resp else {
+        panic!("expected scalar");
+    };
+    assert_eq!(
+        loc.uri,
+        proj("constants.leek"),
+        "should cross into constants.leek"
+    );
+    assert_eq!(loc.range.start.line, 0);
+    assert_eq!(loc.range.start.character, 7, "after the `global ` keyword");
+}
+
+#[test]
 fn definition_prefers_local_symbol_over_cross_file() {
     // A local shadow in main must win over a same-named include symbol.
     let ws = open_files(&[
