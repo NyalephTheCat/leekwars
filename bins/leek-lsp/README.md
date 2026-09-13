@@ -55,6 +55,18 @@ out of the server and killing the process. That includes the diagnostic paths
 buffer doesn't blank the report for the whole workspace. Set `LEEK_LSP_LOG=trace`
 to see which handler tripped the guard.
 
+## Diagnostics and quick fixes
+
+Diagnostics are computed once per file over the whole `include` closure and
+filtered to that file's own spans; a problem inside an include belongs to the
+include's document. Push (`publishDiagnostics`), pull
+(`textDocument/diagnostic`, `workspace/diagnostic`) and `textDocument/codeAction`
+all read that one set, so a quick fix is only ever offered for a diagnostic the
+editor is displaying — and `source.fixAll`, which editors run on save, applies
+only those fixes. Quick fixes are additionally matched against the
+`context.diagnostics` the client sends with the request, so a stale server-side
+set cannot produce a fix for a squiggle that is already gone.
+
 ## Host libraries
 
 Clients can pass `initializationOptions.libraries` (e.g. `["leekwars"]`, or

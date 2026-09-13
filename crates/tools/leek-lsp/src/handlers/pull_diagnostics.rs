@@ -16,10 +16,9 @@
 //! instead of unwinding out of the tower-lsp service future.
 
 use leek_pipeline::salsa::SourceFile;
-use leek_recipes::Target;
 use tower_lsp::lsp_types as lsp;
 
-use crate::diagnostics::to_lsp;
+use crate::diagnostics::{file_diagnostics, to_lsp};
 use crate::util::guard::guard;
 use crate::util::position::PosMap;
 use crate::workspace::{AnalysisTarget, Workspace};
@@ -85,8 +84,8 @@ fn workspace_report<'a>(
     lsp::WorkspaceDiagnosticReportResult::Report(lsp::WorkspaceDiagnosticReport { items: entries })
 }
 
-/// Run the diagnostic-producing pipeline and convert each
-/// `leek_diagnostics::Diagnostic` to its LSP shape.
+/// Convert each `leek_diagnostics::Diagnostic` in the file's published
+/// set to its LSP shape.
 fn collect(ws: &Workspace, uri: &lsp::Url) -> Vec<lsp::Diagnostic> {
     let Some(doc) = ws.docs.get(uri) else {
         return Vec::new();
@@ -100,20 +99,8 @@ fn collect_target(
     pm: PosMap<'_>,
     source_file: SourceFile,
 ) -> Vec<lsp::Diagnostic> {
-    let source = source_file.source(&ws.db);
-    // Recipe planning can fail; degrade to "no diagnostics" rather than crash.
-    // `Linted` runs the lint pass on top of type checking so lint findings
-    // surface in pull-model diagnostics too.
-    let Some(run) = crate::pipeline::run_on_file_with_includes(ws, source_file, Target::Linted)
-    else {
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: recipe planning failed for {uri}; no diagnostics");
-        }
-        return Vec::new();
-    };
-    run.diagnostics()
+    file_diagnostics(ws, uri, source_file)
         .iter()
-        .filter(|d| d.span.source == source)
         .map(|d| to_lsp(d, pm, Some(uri)))
         .collect()
 }
