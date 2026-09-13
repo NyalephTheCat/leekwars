@@ -554,6 +554,12 @@ fn collect_const_decls(stmts: &[Stmt], map: &mut HashMap<DefId, Literal>) {
 /// Mark every local that is written, address-taken, passed to a call, or
 /// captured by a lambda — i.e. anything that could make it non-constant.
 fn analyze_stmt(s: &Stmt, disq: &mut HashSet<DefId>) {
+    // A bare foreach binding (`for (x in arr)`) writes `x` every iteration.
+    if let Stmt::Foreach(fe) = s {
+        for bind in fe.key.iter().chain([&fe.value]) {
+            collect_local_reads(&bind.target, disq);
+        }
+    }
     walk_stmt_child_exprs(s, &mut |e| analyze_expr(e, disq));
     walk_stmt_child_stmts(s, &mut |c| analyze_stmt(c, disq));
 }
@@ -843,51 +849,130 @@ fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
 /// initializer lives in a `VarDecl { is_global: true }` in `main`; reads from
 /// any function, method, field initializer, or `main` resolve to the same
 /// [`NameRef::Global`]. A global qualifies only when:
-/// - it has exactly one initializer and that initializer is a type-matched
-///   literal (so a coercing slot like `global real G = 5` is left alone),
-/// - it is never assigned, incremented/decremented, `@`-referenced, or passed
-///   as a call argument anywhere — including inside lambda bodies (globals are
-///   accessed directly, not captured, so a lambda that only *reads* one is
-///   fine; one that *writes* it disqualifies).
+/// - it is declared exactly once in `main` (nested declarations count), at
+///   top level, and that initializer is a type-matched literal (so a coercing
+///   slot like `global real G = 5` is left alone);
+/// - it is never assigned, incremented/decremented, `@`-referenced, passed as
+///   a call argument, or bound by a bare foreach anywhere — including inside
+///   lambda bodies (globals are accessed directly, not captured, so a lambda
+///   that only *reads* one is fine; one that *writes* it disqualifies);
+/// - its initializer provably runs before every read: `main` doesn't read it
+///   before the initializing statement, and — when a function, method or
+///   field initializer reads it — nothing before that statement can call into
+///   user code (a call, `new`, or unspliced `include`). A read from a static
+///   field initializer (run before `main`) disqualifies outright;
+/// - its name is never used as a [`NameRef::Builtin`] / [`NameRef::Unresolved`].
+///
+/// The last rule is the interim fix for #53: HIR doesn't pre-declare globals,
+/// so a use lowered before the `global` statement (a function body above it
+/// in a single file; *every* function body in `lower_files`, which lowers
+/// bodies before any main block) resolves by name, and its writes and reads
+/// are invisible to the `DefId`-based checks. Remaining (R3): once globals are
+/// pre-declared through resolver bindings those uses become `Global` and the
+/// name rule can go — the ordering rule stays.
 pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
-    // 1. Candidate globals from their initializers in `main`. A global with
-    //    more than one initializer isn't a simple constant.
-    let mut candidates: HashMap<DefId, Literal> = HashMap::new();
-    let mut seen_init: HashSet<DefId> = HashSet::new();
-    for s in &hir.main {
+    // 1. Candidate globals from their top-level initializers in `main`, with
+    //    the index of the initializing statement. A global declared more
+    //    than once (a nested `global G = 2` included) isn't a simple constant.
+    let mut decl_counts: HashMap<DefId, usize> = HashMap::new();
+    for_each_stmt_deep(&hir.main, &mut |s| {
         if let Stmt::VarDecl(v) = s
             && v.is_global
         {
-            if !seen_init.insert(v.def) {
-                candidates.remove(&v.def);
-                continue;
-            }
-            if let Some(init) = &v.init
-                && let ExprKind::Literal(lit) = &init.kind
-                && literal_matches_decl(lit, v.ty.as_ref())
-            {
-                candidates.insert(v.def, lit.clone());
-            }
+            *decl_counts.entry(v.def).or_default() += 1;
+        }
+    });
+    let mut candidates: HashMap<DefId, (Literal, usize)> = HashMap::new();
+    for (i, s) in hir.main.iter().enumerate() {
+        if let Stmt::VarDecl(v) = s
+            && v.is_global
+            && decl_counts.get(&v.def) == Some(&1)
+            && let Some(init) = &v.init
+            && let ExprKind::Literal(lit) = &init.kind
+            && literal_matches_decl(lit, v.ty.as_ref())
+        {
+            candidates.insert(v.def, (lit.clone(), i));
         }
     }
     if candidates.is_empty() {
         return 0;
     }
 
-    // 2. Disqualify any global written / address-taken / passed to a call,
-    //    scanning every expression in the file (lambda bodies included).
+    // 2. Disqualify any global written / address-taken / passed to a call /
+    //    bound by a foreach, scanning the whole file (lambda bodies included),
+    //    and any global whose name is also used by name (see the doc above).
     let mut disq: HashSet<DefId> = HashSet::new();
-    for_each_file_expr(hir, &mut |e| analyze_global_expr(e, &mut disq));
-    candidates.retain(|d, _| !disq.contains(d));
+    let mut by_name: HashSet<String> = HashSet::new();
+    for_each_file_expr(hir, &mut |e| {
+        analyze_global_expr(e, &mut disq);
+        collect_name_keyed_uses(e, &mut by_name);
+    });
+    for_each_file_stmt(hir, &mut |s| {
+        if let Stmt::Foreach(fe) = s {
+            for bind in fe.key.iter().chain([&fe.value]) {
+                disq.extend(bind.global_def());
+                collect_name_keyed_uses(&bind.target, &mut by_name);
+            }
+        }
+    });
+
+    // 3. Disqualify any global that may be read before its initializer runs.
+    let mut body_reads: HashSet<DefId> = HashSet::new();
+    for_each_def_expr(hir, &mut |e| collect_global_reads(e, &mut body_reads));
+    let mut static_init_reads: HashSet<DefId> = HashSet::new();
+    let mut static_init_calls = false;
+    for def in &hir.defs {
+        if let Def::Class(c) = def {
+            for init in c
+                .fields
+                .iter()
+                .filter(|f| f.is_static)
+                .filter_map(|f| f.init.as_ref())
+            {
+                collect_global_reads(init, &mut static_init_reads);
+                visit_expr_all(init, &mut |e| {
+                    static_init_calls |= matches!(e.kind, ExprKind::Call(_) | ExprKind::New(_));
+                });
+            }
+        }
+    }
+    // Index of the first `main` statement that can run user code.
+    let first_call = if static_init_calls {
+        0
+    } else {
+        hir.main
+            .iter()
+            .position(stmt_may_call)
+            .unwrap_or(hir.main.len())
+    };
+    // Index of the first `main` statement that reads each global.
+    let mut first_main_read: HashMap<DefId, usize> = HashMap::new();
+    for (i, s) in hir.main.iter().enumerate() {
+        visit_stmt_all_exprs(s, &mut |e| {
+            if let ExprKind::Name(NameRef::Global(d)) = &e.kind {
+                first_main_read.entry(*d).or_insert(i);
+            }
+        });
+    }
+    candidates.retain(|d, (_, init_at)| {
+        let named = match hir.defs.get(d.0 as usize) {
+            Some(Def::Global(g)) => by_name.contains(&g.name),
+            _ => false,
+        };
+        let read_early = first_main_read.get(d).is_some_and(|r| r < init_at)
+            || static_init_reads.contains(d)
+            || (body_reads.contains(d) && first_call < *init_at);
+        !disq.contains(d) && !named && !read_early
+    });
     if candidates.is_empty() {
         return 0;
     }
 
-    // 3. Replace reads everywhere, then 4. drop the now-dead initializers.
+    // 4. Replace reads everywhere, then 5. drop the now-dead initializers.
     let mut count = 0;
     for_each_file_expr_mut(hir, &mut |e| {
         if let ExprKind::Name(NameRef::Global(d)) = &e.kind
-            && let Some(lit) = candidates.get(d)
+            && let Some((lit, _)) = candidates.get(d)
         {
             e.kind = ExprKind::Literal(lit.clone());
             count += 1;
@@ -930,6 +1015,75 @@ fn collect_global_reads(e: &Expr, set: &mut HashSet<DefId>) {
     visit_expr_all(e, &mut |x| {
         if let ExprKind::Name(NameRef::Global(d)) = &x.kind {
             set.insert(*d);
+        }
+    });
+}
+
+/// Record the name of `e` when it is a by-name use — a `Builtin` or
+/// `Unresolved` name, as a value or as a call's callee. Shallow: callers
+/// already visit every expression.
+fn collect_name_keyed_uses(e: &Expr, names: &mut HashSet<String>) {
+    let nr = match &e.kind {
+        ExprKind::Name(nr) => nr,
+        ExprKind::Call(c) => match &c.callee {
+            Callee::Function(nr) => nr,
+            _ => return,
+        },
+        _ => return,
+    };
+    if let NameRef::Builtin(n) | NameRef::Unresolved(n) = nr {
+        names.insert(n.clone());
+    }
+}
+
+/// Whether running `s` can call into user code before the next statement:
+/// it contains a call, a `new`, or an unspliced `include`.
+fn stmt_may_call(s: &Stmt) -> bool {
+    let mut found = false;
+    for_each_stmt_deep(std::slice::from_ref(s), &mut |st| {
+        found |= matches!(st, Stmt::Include(_));
+    });
+    visit_stmt_all_exprs(s, &mut |e| {
+        found |= matches!(e.kind, ExprKind::Call(_) | ExprKind::New(_));
+    });
+    found
+}
+
+/// Run `f` on each of `stmts` and every statement nested in them, without
+/// descending into lambda bodies.
+fn for_each_stmt_deep(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
+    for s in stmts {
+        f(s);
+        walk_stmt_child_stmts(s, &mut |c| for_each_stmt_deep(std::slice::from_ref(c), f));
+    }
+}
+
+/// Run `f` on every statement in the file: function, method and constructor
+/// bodies, the main block, and lambda bodies, at any depth.
+fn for_each_file_stmt(hir: &HirFile, f: &mut impl FnMut(&Stmt)) {
+    for def in &hir.defs {
+        match def {
+            Def::Function(fun) => {
+                if let Some(b) = &fun.body {
+                    for_each_stmt_deep(&b.stmts, f);
+                }
+            }
+            Def::Class(c) => {
+                for m in c.methods.iter().chain(&c.constructors) {
+                    if let Some(b) = &m.body {
+                        for_each_stmt_deep(&b.stmts, f);
+                    }
+                }
+            }
+            Def::Global(_) | Def::Local(_) => {}
+        }
+    }
+    for_each_stmt_deep(&hir.main, f);
+    for_each_file_expr(hir, &mut |e| {
+        if let ExprKind::Lambda(lam) = &e.kind
+            && let LambdaBody::Block(b) = &lam.body
+        {
+            for_each_stmt_deep(&b.stmts, f);
         }
     });
 }
@@ -991,6 +1145,15 @@ fn visit_stmt_all_exprs_mut(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
 /// Run `f` on every expression in the file: function and method bodies, their
 /// parameter defaults, class field initializers, and the main block.
 fn for_each_file_expr(hir: &HirFile, f: &mut impl FnMut(&Expr)) {
+    for_each_def_expr(hir, f);
+    for s in &hir.main {
+        visit_stmt_all_exprs(s, f);
+    }
+}
+
+/// [`for_each_file_expr`] minus the main block: every expression that lives in
+/// a function, method, constructor, parameter default or field initializer.
+fn for_each_def_expr(hir: &HirFile, f: &mut impl FnMut(&Expr)) {
     for def in &hir.defs {
         match def {
             Def::Function(fun) => {
@@ -1026,9 +1189,6 @@ fn for_each_file_expr(hir: &HirFile, f: &mut impl FnMut(&Expr)) {
             }
             Def::Global(_) | Def::Local(_) => {}
         }
-    }
-    for s in &hir.main {
-        visit_stmt_all_exprs(s, f);
     }
 }
 
@@ -1492,6 +1652,105 @@ mod tests {
     fn global_written_inside_lambda_is_not_propagated() {
         // A lambda that writes the global disqualifies it (we scan lambda bodies).
         let mut hir = lower("global G = 1\nvar f = () => { G = 5 }\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_bound_by_foreach_is_not_propagated() {
+        // `for (G in …)` writes the global each iteration (#86).
+        let mut hir = lower("global G = 1\nfor (G in [2, 3]) {}\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+        let mut hir = lower("global G = 1\nfunction f() { for (G in [2]) {} }\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn local_bound_by_foreach_is_not_propagated() {
+        let mut hir = lower("var x = 5\nfor (x in [1, 2]) {}\nvar y = x\n");
+        assert_eq!(propagate_const_locals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_written_by_function_above_its_declaration_is_not_propagated() {
+        // `f` is lowered before `global G` exists, so its write is the
+        // name-keyed `Builtin("G")` — still a write to `G` (#53).
+        let mut hir = lower("function f() { G = 2 }\nglobal G = 1\nf()\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_read_by_function_called_before_initializer_is_not_propagated() {
+        // `f` runs (and reads `G`, still null) before the initializer (#53).
+        let mut hir = lower("f()\nglobal G = 5\nfunction f() { return G + 1 }\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_read_by_function_is_propagated_when_calls_follow_initializer() {
+        let mut hir = lower("global G = 5\nf()\nfunction f() { return G + 1 }\n");
+        assert_eq!(propagate_const_globals(&mut hir), 1);
+    }
+
+    #[test]
+    fn global_redeclared_in_nested_block_is_not_propagated() {
+        let mut hir = lower("global G = 1\nif (true) { global G = 2 }\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    /// Lower an entry file that includes one other file through `lower_files`.
+    fn lower_with_include(entry: &str, included: &str) -> HirFile {
+        use leek_parser::ast::{AstNode, SourceFile};
+        use leek_span::SourceId;
+        use leek_syntax::{SyntaxNode, Version};
+        use std::collections::BTreeMap;
+        use std::path::{Path, PathBuf};
+        let parse = |src: &str, id: u32| {
+            let source = SourceId::new(id).unwrap();
+            let parsed = leek_parser::parse(src, source, Version::V4);
+            (
+                SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parses"),
+                source,
+            )
+        };
+        let (entry_ast, entry_src) = parse(entry, 1);
+        let (inc_ast, inc_src) = parse(included, 2);
+        let (entry_path, inc_path) = (Path::new("/main.leek"), Path::new("/lib.leek"));
+        let mut resolved = BTreeMap::new();
+        resolved.insert(
+            (PathBuf::from(entry_path), "lib".to_string()),
+            PathBuf::from(inc_path),
+        );
+        let unit = |ast, source, path| crate::LowerUnit {
+            ast,
+            source,
+            path,
+            version: Version::V4,
+        };
+        crate::lower_files(
+            unit(&entry_ast, entry_src, entry_path),
+            &[unit(&inc_ast, inc_src, inc_path)],
+            Some(&resolved),
+            leek_span::FeatureFlags::none(),
+        )
+        .0
+    }
+
+    #[test]
+    fn included_global_read_before_include_is_not_propagated() {
+        // The entry's `var y = G` is lowered after the included main block, so
+        // it resolves to `Global` — but it runs before the spliced initializer.
+        let mut hir = lower_with_include("var y = G\ninclude(\"lib\")\n", "global G = 1\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn included_global_written_by_any_function_is_not_propagated() {
+        // `lower_files` lowers every function body before any main block, so
+        // the write in `f` is by name even though `f` follows the include.
+        let mut hir = lower_with_include(
+            "include(\"lib\")\nfunction f() { G = 2 }\nf()\nvar y = G\n",
+            "global G = 1\n",
+        );
         assert_eq!(propagate_const_globals(&mut hir), 0);
     }
 
