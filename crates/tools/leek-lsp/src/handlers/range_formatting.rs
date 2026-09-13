@@ -36,6 +36,9 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
     if original_slice == replacement {
         return Some(Vec::new());
     }
+    if !super::formatting::edit_is_safe(ws, uri, doc, target_range.clone(), &replacement) {
+        return Some(Vec::new());
+    }
 
     let span = Span::new(
         doc.source_file_source_id(&ws.db),
