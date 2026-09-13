@@ -50,7 +50,9 @@ mod translate;
 
 pub use debug::{DebugHook, frame_name, render_frame_vars, set_debug_hook};
 pub use game::{GameRuntime, set_game_runtime};
-pub use options::{DEFAULT_OP_BUDGET, NativeEmit, NativeError, NativeOptions, OptLevel};
+pub use options::{
+    CodegenKey, DEFAULT_OP_BUDGET, NativeEmit, NativeError, NativeOptions, OptLevel,
+};
 pub use runtime::ops_used;
 
 use std::collections::HashMap;
@@ -93,21 +95,26 @@ pub fn last_jit_split() -> Option<(std::time::Duration, std::time::Duration)> {
     LAST_JIT_SPLIT.with(std::cell::Cell::get)
 }
 
-/// Convenience: JIT-compile `hir` with `opts` and run it, returning the
-/// program's value. Forces [`NativeEmit::Jit`].
+/// Convenience: JIT-compile `hir` with `opts` and run it once, returning the
+/// program's value. Always JITs, whatever `opts.emit` says.
+///
+/// The module is built and thrown away around the single run. A caller that
+/// runs the same program repeatedly — a fight turn loop — should keep a
+/// [`CompiledProgram`] from [`compile_program`] instead and call
+/// [`CompiledProgram::run`] per run.
+///
+/// # Errors
+/// Compile errors (including constructs outside the native subset) and runtime
+/// faults alike.
 pub fn run(hir: &HirFile, opts: &NativeOptions) -> Result<Value, NativeError> {
-    let mut opts = opts.clone();
-    opts.emit = NativeEmit::Jit;
-    match compile_entry(hir, &opts, JitEntry::Main)? {
-        NativeArtifact::Value(v) => Ok(v),
-        _ => unreachable!("Jit emit yields a Value"),
-    }
+    compile_program(hir, opts)?.run(opts)
 }
 
 /// JIT-compile `hir` and invoke the stored function *value* `callee` with
 /// `args` instead of running `main`. The full per-run setup/teardown of
 /// [`run`] applies (tables installed, ops armed, module memory reclaimed) —
-/// only the entry differs.
+/// only the entry differs. See [`CompiledProgram::run_call`] to reuse the
+/// module across calls.
 ///
 /// This is how a summon's AI function runs: the `Value::Function` was
 /// captured during an earlier run of the *same* `hir` (so its
@@ -125,12 +132,7 @@ pub fn run_call(
     callee: &Value,
     args: Vec<Value>,
 ) -> Result<Value, NativeError> {
-    let mut opts = opts.clone();
-    opts.emit = NativeEmit::Jit;
-    match compile_entry(hir, &opts, JitEntry::CallValue(callee, args))? {
-        NativeArtifact::Value(v) => Ok(v),
-        _ => unreachable!("Jit emit yields a Value"),
-    }
+    compile_program(hir, opts)?.run_call(opts, callee, args)
 }
 
 /// What the [`NativeEmit::Jit`] path invokes once the module is finalized
@@ -147,11 +149,21 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
     compile_entry(hir, opts, JitEntry::Main)
 }
 
-fn compile_entry(
-    hir: &HirFile,
-    opts: &NativeOptions,
-    entry: JitEntry<'_>,
-) -> Result<NativeArtifact, NativeError> {
+/// The MIR half of a compile: everything between the HIR and the choice of
+/// backend target. Shared by the inspection / object paths and by
+/// [`compile_program`], so all four see exactly the same program.
+struct Lowered {
+    program: leek_mir::ir::MirProgram,
+    main_idx: usize,
+    lang: Lang,
+    /// Class `DefId` raw → constructor-thunk `program.functions` index.
+    class_thunks: HashMap<u32, usize>,
+    fn_rets: translate::FnRets,
+    global_tys: HashMap<String, ValTy>,
+    native_directives: HashMap<leek_hir::DefId, String>,
+}
+
+fn lower(hir: &HirFile, opts: &NativeOptions) -> Result<Lowered, NativeError> {
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
         return Err(NativeError::Compile(format!(
@@ -175,12 +187,43 @@ fn compile_entry(
     let class_thunks = translate::append_ctor_thunks(&mut program, opts.version);
     // Pin provably-integer untyped params to `integer` so they compile unboxed.
     translate::specialize_param_types(&mut program, lang);
-    let main = &program.functions[main_idx];
     // Program-wide function result kinds (drives cross-call typing) and
     // declared scalar kinds of typed globals (drives write coercion).
     let fn_rets = translate::compute_fn_rets(&program, lang);
     let global_tys = translate::global_scalar_tys(&program);
     let native_directives = collect_native_directives(hir);
+    Ok(Lowered {
+        program,
+        main_idx,
+        lang,
+        class_thunks,
+        fn_rets,
+        global_tys,
+        native_directives,
+    })
+}
+
+fn compile_entry(
+    hir: &HirFile,
+    opts: &NativeOptions,
+    entry: JitEntry<'_>,
+) -> Result<NativeArtifact, NativeError> {
+    // The JIT path is just "compile once, run once" over the same two pieces a
+    // repeated runner (a fight turn loop) drives separately.
+    if matches!(opts.emit, NativeEmit::Jit) {
+        let program = compile_program(hir, opts)?;
+        return Ok(NativeArtifact::Value(program.run_entry(opts, entry)?));
+    }
+    let Lowered {
+        program,
+        main_idx,
+        lang,
+        class_thunks,
+        fn_rets,
+        global_tys,
+        native_directives,
+    } = lower(hir, opts)?;
+    let main = &program.functions[main_idx];
 
     match &opts.emit {
         NativeEmit::Clif => {
@@ -270,225 +313,397 @@ fn compile_entry(
             std::fs::write(path, bytes).map_err(|e| NativeError::Compile(e.to_string()))?;
             Ok(NativeArtifact::Object)
         }
-        NativeEmit::Jit => {
-            let t_compile = std::time::Instant::now();
-            let isa = build_isa(opts)?;
-            let mut jb = cranelift_jit::JITBuilder::with_isa(isa, default_libcall_names());
-            // Register the shared runtime math builtins (and the `**`
-            // integer-power helper) so `call`s to them resolve at finalize.
-            for b in leek_runtime::math_builtins() {
-                jb.symbol(b.symbol, b.addr);
-            }
-            let (ipow_sym, ipow_addr) = leek_runtime::ipow_addr();
-            jb.symbol(ipow_sym, ipow_addr);
-            // Composite-value runtime shims (arrays, box/unbox, …).
-            for (sym, addr) in runtime::runtime_symbols() {
-                jb.symbol(sym, addr);
-            }
-            let mut module = cranelift_jit::JITModule::new(jb);
-            let (
-                id,
-                ret_ty,
-                lambda_funcs,
-                method_resolve,
-                static_init,
-                user_fn_idx,
-                exact_arity,
-                class_string_method,
-            ) = define_program(
-                &mut module,
-                &program,
-                main,
-                lang,
-                &fn_rets,
-                &global_tys,
-                &native_directives,
-                &class_thunks,
-                opts.debug_hooks,
-                opts.link_game,
-                false,
-                &opts.hook_roots,
-            )?;
-            module
-                .finalize_definitions()
-                .map_err(|e| NativeError::Compile(e.to_string()))?;
-            // Publish each lambda / bound-method's finalized address (+ param
-            // count) so `call_value` / indirect calls can invoke them.
-            let lambda_addrs: HashMap<usize, (*const u8, usize)> = lambda_funcs
-                .iter()
-                .map(|(&idx, &(fid, nparams))| (idx, (module.get_finalized_function(fid), nparams)))
-                .collect();
-            runtime::set_lambda_fns(lambda_addrs);
-            // Per-lambda user-param `@`-by-ref masks (captures excluded) for the
-            // higher-order builtins. A lambda's MIR params are
-            // `[captures…, user-params…]`; the capture count comes from the
-            // `MakeLambda` that builds it.
-            {
-                use leek_mir::ir::{Rvalue, Statement};
-                let mut ncaptures: HashMap<usize, usize> = HashMap::new();
-                for f in &program.functions {
-                    for b in &f.blocks {
-                        for s in &b.statements {
-                            if let Statement::Assign(
-                                _,
-                                Rvalue::MakeLambda {
-                                    function_idx,
-                                    captures,
-                                },
-                            ) = s
-                            {
-                                ncaptures.insert(*function_idx, captures.len());
-                            }
-                        }
-                    }
-                }
-                let masks: HashMap<usize, Vec<bool>> = lambda_funcs
-                    .keys()
-                    .map(|&idx| {
-                        let f = &program.functions[idx];
-                        let nc = ncaptures.get(&idx).copied().unwrap_or(0);
-                        let mask = f
-                            .params
-                            .iter()
-                            .skip(nc)
-                            .map(|p| f.locals[p.0 as usize].is_by_ref)
-                            .collect();
-                        (idx, mask)
-                    })
-                    .collect();
-                runtime::set_lambda_byref(masks);
-            }
-            runtime::set_method_resolve(method_resolve);
-            runtime::set_static_init(static_init);
-            runtime::set_user_fn_idx(user_fn_idx);
-            runtime::set_user_fn_exact_arity(exact_arity);
-            // Class hierarchy for runtime `.super` (`x.class.super`): each
-            // class → its explicit parent, or `None` for the implicit `Value`.
-            let class_parent: HashMap<u32, Option<(u32, std::string::String)>> = program
-                .classes
-                .iter()
-                .map(|c| {
-                    let parent = c
-                        .parent_def
-                        .and_then(|pd| program.class(pd).map(|pc| (pd.0, pc.name.clone())));
-                    (c.def_id.0, parent)
-                })
-                .collect();
-            runtime::set_class_parent(class_parent);
-            // Per-class constructor thunks: class `DefId` → thunk function idx
-            // (its finalized address is already in `LAMBDA_FNS`), so a
-            // `Value::ClassRef` invoked as a value constructs.
-            runtime::set_class_ctor_thunk(class_thunks);
-            // Per-class `string()` display overrides (applied to the top-level
-            // result below). Their addresses are already in `LAMBDA_FNS`.
-            runtime::set_class_string_method(class_string_method);
-            // Per-class reflection name tables for runtime `x.class.fields` etc.
-            runtime::set_class_reflect(translate::reflect_name_tables(&program));
-            let ptr = module.get_finalized_function(id);
-            // Reset file-level globals so this run can't observe a previous
-            // run's values (the global store is a process-wide thread-local).
-            runtime::clear_globals();
-            // Arm the runtime-fault channel: shims (e.g. a v4-strict OOB array
-            // write) record a fault here instead of unwinding; we surface it
-            // after `main` returns. `set_strict` lets those rules match the
-            // interpreter's strict-gated behavior.
-            runtime::reset_runtime_error();
-            runtime::set_strict(opts.strict);
-            // Set the value-display version BEFORE running, so version-specific
-            // string conversions during execution (e.g. a real's `.` vs `,`
-            // decimal separator in v1) and the caller's final `value.to_string()`
-            // both format correctly. (Was previously an interpreter side effect.)
-            leek_runtime::DISPLAY_VERSION.with(|c| c.set(opts.version));
-            // Arm the op counter + budget for this run. The JIT'd body charges
-            // ops at the same MIR sites the interpreter does (so counts match);
-            // `ops_used()` reads the total after `main` returns.
-            runtime::reset_ops(opts.op_limit);
-            // Arm the recursion guard: frames start at zero for this run, and
-            // the stack budget is measured from here (just above the entry).
-            runtime::arm_call_guard(opts.max_call_depth, opts.max_stack_bytes);
-            // Everything above is codegen + runtime wiring; the program itself
-            // hasn't run yet. Split the timing here so the benchmark can report
-            // JIT compilation separately from execution.
-            let compile_dur = t_compile.elapsed();
-            let t_exec = std::time::Instant::now();
-            // SAFETY: `leek_main` was declared with the matching ABI
-            // (`() -> i64` or `() -> f64`) and the module finalized; the
-            // pointer is a valid host function.
-            let value = match entry {
-                JitEntry::Main => match ret_ty {
-                    ValTy::Real => {
-                        let f = unsafe {
-                            std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr)
-                        };
-                        Value::Real(f())
-                    }
-                    ValTy::Bool => {
-                        let f = unsafe {
-                            std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)
-                        };
-                        Value::Bool(f() != 0)
-                    }
-                    ValTy::Int => {
-                        let f = unsafe {
-                            std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)
-                        };
-                        Value::Int(f())
-                    }
-                    // A composite / boxed result: the function returns a
-                    // handle; recover the owned `Value` (freeing the box). A
-                    // top-level instance whose class declares `string()` is routed
-                    // through it (matching the interpreter's display).
-                    ValTy::Ref => {
-                        let f = unsafe {
-                            std::mem::transmute::<*const u8, extern "C" fn() -> *mut Value>(ptr)
-                        };
-                        // Clone the result out of its handle (don't free the box —
-                        // `free_run_boxes` below reclaims every handle at once). The
-                        // clone keeps the result's `Rc`-backed data alive past the
-                        // sweep.
-                        runtime::invoke_top_level_string(unsafe { runtime::read_handle(f()) })
-                    }
-                },
-                // `run_call`: skip `main` entirely and dispatch the stored
-                // function value (its indexes resolve against the tables
-                // installed above). The result is already an owned `Value`.
-                JitEntry::CallValue(callee, args) => {
-                    let _ = ptr;
-                    runtime::call_value_entry(callee, args, opts.version)
-                }
-            };
-            LAST_JIT_SPLIT.with(|c| c.set(Some((compile_dur, t_exec.elapsed()))));
-            // The program has finished running and its result is now an owned,
-            // JIT-independent `Value` (any class `string()` display override
-            // already ran during extraction above; scalars and composites live
-            // on the normal heap). Reclaim the module's executable + data
-            // memory now — a plain `JITModule` drop LEAKS these mmap'd regions,
-            // which accumulates across runs and OOMs a process that JIT-compiles
-            // many programs (e.g. the upstream-suite regression test compiles
-            // 10k+ cases in one process).
-            //
-            // SAFETY: `free_memory` requires that no function from this module
-            // is executing or called afterward. `main` has returned, no JIT
-            // function is invoked past this point (a returned function value
-            // stringifies without being called), and the per-run runtime tables
-            // of finalized addresses (`LAMBDA_FNS`, …) are overwritten at the
-            // start of the next run before they could be consulted again.
-            unsafe { module.free_memory() };
-            // Reclaim every boxed `Value` handle this run allocated. The result
-            // was cloned out above (`read_handle`), so it and its reachable data
-            // survive; all intermediate boxes — including the ones the global
-            // store held — are freed here instead of leaking until process exit.
-            runtime::free_run_boxes();
-            // A runtime fault recorded by a shim during the run (e.g. a
-            // v4-strict out-of-bounds array write) takes precedence over the
-            // computed value: the program errored.
-            if let Some(code) = runtime::take_runtime_error() {
-                drop(value);
-                return Err(NativeError::Runtime(code));
-            }
-            Ok(NativeArtifact::Value(value))
-        }
+        // Unreachable: handled at the top of this function, where the JIT
+        // path splits into `compile_program` + `CompiledProgram::run_entry`.
+        NativeEmit::Jit => unreachable!("Jit emit is handled before this match"),
     }
+}
+
+/// Everything a run publishes to the runtime's thread-local dispatch tables
+/// before entering JIT'd code: this module's finalized addresses plus the
+/// program-derived maps the shims resolve through.
+///
+/// A compile fills it once; every run reinstalls it, unconditionally. With more
+/// than one compiled program live on a thread (a fight holds one per AI), the
+/// tables in place belong to whichever program ran last, so "install only if it
+/// changed" would hand a program another one's dispatch.
+struct RuntimeTables {
+    /// `function_idx` → (finalized uniform-ABI address, param count).
+    lambda_fns: HashMap<usize, (*const u8, usize)>,
+    /// `function_idx` → per-lambda `@`-by-ref mask over its user params.
+    lambda_byref: HashMap<usize, Vec<bool>>,
+    method_resolve: HashMap<u32, HashMap<String, usize>>,
+    static_init: HashMap<(u32, String), usize>,
+    user_fn_idx: HashMap<u32, usize>,
+    user_fn_exact_arity: std::collections::HashSet<u32>,
+    class_parent: HashMap<u32, Option<(u32, String)>>,
+    class_ctor_thunk: HashMap<u32, usize>,
+    class_string_method: HashMap<u32, usize>,
+    class_reflect: HashMap<u32, HashMap<String, Vec<String>>>,
+}
+
+impl RuntimeTables {
+    fn install(&self) {
+        runtime::set_lambda_fns(self.lambda_fns.clone());
+        runtime::set_lambda_byref(self.lambda_byref.clone());
+        runtime::set_method_resolve(self.method_resolve.clone());
+        runtime::set_static_init(self.static_init.clone());
+        runtime::set_user_fn_idx(self.user_fn_idx.clone());
+        runtime::set_user_fn_exact_arity(self.user_fn_exact_arity.clone());
+        runtime::set_class_parent(self.class_parent.clone());
+        runtime::set_class_ctor_thunk(self.class_ctor_thunk.clone());
+        runtime::set_class_string_method(self.class_string_method.clone());
+        runtime::set_class_reflect(self.class_reflect.clone());
+    }
+}
+
+/// A JIT-compiled program, ready to run any number of times.
+///
+/// Splitting compilation from execution is what lets a fight compile each AI
+/// **once** and then run it every turn: Cranelift codegen, module finalize and
+/// the constant pool happen in [`compile_program`], while everything a run must
+/// not inherit from the previous one — globals, static fields, the PRNG seed,
+/// the op counter, the recursion guard, the runtime-fault channel — is (re)armed
+/// per call in [`CompiledProgram::run`].
+///
+/// Deliberately neither `Send` nor `Sync` (it holds raw code addresses, and
+/// every table and arena it installs is thread-local): compile and run a
+/// program on the same thread.
+pub struct CompiledProgram {
+    /// `ManuallyDrop` because `JITModule::free_memory` consumes the module
+    /// while `Drop::drop` only gets `&mut self`.
+    module: std::mem::ManuallyDrop<cranelift_jit::JITModule>,
+    main: cranelift_module::FuncId,
+    ret_ty: ValTy,
+    tables: RuntimeTables,
+    /// The compile-time constants whose addresses are baked into this module's
+    /// code (see `runtime::box_value`). Owned here, so they stay valid for
+    /// every run and are released only when the module is — the per-run sweep
+    /// (`free_run_boxes`) never sees them.
+    _consts: runtime::ConstArena,
+    /// How long the compile took. Reported by the *first* run through
+    /// [`last_jit_split`] and zero after that, so a caller summing the split
+    /// across a fight gets the one real compile cost, not one copy per turn.
+    compile_dur: std::cell::Cell<std::time::Duration>,
+}
+
+impl std::fmt::Debug for CompiledProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledProgram")
+            .field("ret_ty", &self.ret_ty)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for CompiledProgram {
+    fn drop(&mut self) {
+        // A plain `JITModule` drop LEAKS its mmap'd executable + data memory,
+        // which accumulates across compiles and OOMs a process that JIT-compiles
+        // many programs (e.g. the upstream-suite regression test compiles 10k+
+        // cases in one process).
+        //
+        // SAFETY: `free_memory` requires that no function from this module is
+        // executing or called afterwards. `run` returns only owned, JIT-
+        // independent `Value`s (results are cloned out of their handles), no
+        // JIT function is invoked outside a `run`, and this program is gone the
+        // moment `drop` returns, so nothing can dispatch into it again. The
+        // runtime tables it installed are overwritten by the next run's
+        // `RuntimeTables::install` before they could be consulted.
+        unsafe { std::mem::ManuallyDrop::take(&mut self.module).free_memory() };
+    }
+}
+
+impl CompiledProgram {
+    /// Run the program's `main`, returning its value. See [`run`] for the
+    /// single-shot equivalent.
+    ///
+    /// # Errors
+    /// [`NativeError::Runtime`] if the program faulted or exhausted its op
+    /// budget (`opts.op_limit`, armed here — it is not part of the compile).
+    pub fn run(&self, opts: &NativeOptions) -> Result<Value, NativeError> {
+        self.run_entry(opts, JitEntry::Main)
+    }
+
+    /// Dispatch the stored function value `callee` with `args` instead of
+    /// running `main`, with the same per-run setup. See [`run_call`].
+    ///
+    /// # Errors
+    /// Same as [`CompiledProgram::run`].
+    pub fn run_call(
+        &self,
+        opts: &NativeOptions,
+        callee: &Value,
+        args: Vec<Value>,
+    ) -> Result<Value, NativeError> {
+        self.run_entry(opts, JitEntry::CallValue(callee, args))
+    }
+
+    fn run_entry(&self, opts: &NativeOptions, entry: JitEntry<'_>) -> Result<Value, NativeError> {
+        // Publish this module's dispatch tables (another program may have run
+        // since — see `RuntimeTables`).
+        self.tables.install();
+        let ptr = self.module.get_finalized_function(self.main);
+        // Reset file-level globals so this run can't observe a previous
+        // run's values (the global store is a process-wide thread-local).
+        runtime::clear_globals();
+        // Arm the runtime-fault channel: shims (e.g. a v4-strict OOB array
+        // write) record a fault here instead of unwinding; we surface it
+        // after `main` returns. `set_strict` lets those rules match the
+        // interpreter's strict-gated behavior.
+        runtime::reset_runtime_error();
+        runtime::set_strict(opts.strict);
+        // Set the value-display version BEFORE running, so version-specific
+        // string conversions during execution (e.g. a real's `.` vs `,`
+        // decimal separator in v1) and the caller's final `value.to_string()`
+        // both format correctly. (Was previously an interpreter side effect.)
+        leek_runtime::DISPLAY_VERSION.with(|c| c.set(opts.version));
+        // Arm the op counter + budget for this run. The JIT'd body charges
+        // ops at the same MIR sites the interpreter does (so counts match);
+        // `ops_used()` reads the total after `main` returns.
+        runtime::reset_ops(opts.op_limit);
+        // Arm the recursion guard: frames start at zero for this run, and
+        // the stack budget is measured from here (just above the entry).
+        runtime::arm_call_guard(opts.max_call_depth, opts.max_stack_bytes);
+        let t_exec = std::time::Instant::now();
+        // SAFETY: `leek_main` was declared with the matching ABI
+        // (`() -> i64` or `() -> f64`) and the module finalized; the
+        // pointer is a valid host function.
+        let value = match entry {
+            JitEntry::Main => match self.ret_ty {
+                ValTy::Real => {
+                    let f =
+                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr) };
+                    Value::Real(f())
+                }
+                ValTy::Bool => {
+                    let f =
+                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
+                    Value::Bool(f() != 0)
+                }
+                ValTy::Int => {
+                    let f =
+                        unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
+                    Value::Int(f())
+                }
+                // A composite / boxed result: the function returns a
+                // handle; recover the owned `Value` (freeing the box). A
+                // top-level instance whose class declares `string()` is routed
+                // through it (matching the interpreter's display).
+                ValTy::Ref => {
+                    let f = unsafe {
+                        std::mem::transmute::<*const u8, extern "C" fn() -> *mut Value>(ptr)
+                    };
+                    // Clone the result out of its handle (don't free the box —
+                    // `free_run_boxes` below reclaims every handle at once). The
+                    // clone keeps the result's `Rc`-backed data alive past the
+                    // sweep.
+                    runtime::invoke_top_level_string(unsafe { runtime::read_handle(f()) })
+                }
+            },
+            // `run_call`: skip `main` entirely and dispatch the stored
+            // function value (its indexes resolve against the tables
+            // installed above). The result is already an owned `Value`.
+            JitEntry::CallValue(callee, args) => {
+                let _ = ptr;
+                runtime::call_value_entry(callee, args, opts.version)
+            }
+        };
+        LAST_JIT_SPLIT.with(|c| c.set(Some((self.compile_dur.take(), t_exec.elapsed()))));
+        // Reclaim every boxed `Value` handle this run allocated. The result
+        // was cloned out above (`read_handle`), so it and its reachable data
+        // survive; all intermediate boxes — including the ones the global
+        // store held — are freed here instead of leaking until process exit.
+        // The module's *constants* live in a separate arena (`_consts`) and are
+        // untouched, so the next run still reads live values.
+        runtime::free_run_boxes();
+        // A runtime fault recorded by a shim during the run (e.g. a
+        // v4-strict out-of-bounds array write) takes precedence over the
+        // computed value: the program errored.
+        if let Some(code) = runtime::take_runtime_error() {
+            drop(value);
+            return Err(NativeError::Runtime(code));
+        }
+        Ok(value)
+    }
+}
+
+thread_local! {
+    /// How many JIT modules have been built on this thread — the measurement
+    /// behind "compile once per fight, not once per turn". Bumped by every
+    /// successful [`compile_program`].
+    static JIT_COMPILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of JIT modules compiled on this thread since the last
+/// [`reset_jit_compiles`]. A fight that reuses its modules keeps this at one
+/// per (AI, codegen options) pair instead of one per AI per turn.
+#[must_use]
+pub fn jit_compiles() -> u64 {
+    JIT_COMPILES.with(std::cell::Cell::get)
+}
+
+/// Zero the [`jit_compiles`] counter.
+pub fn reset_jit_compiles() {
+    JIT_COMPILES.with(|c| c.set(0));
+}
+
+/// JIT-compile `hir` into a reusable [`CompiledProgram`], WITHOUT running it.
+///
+/// This is the half of [`run`] a caller that executes the same AI many times
+/// (the fight turn loop) wants to pay for once. `opts.emit` is ignored — the
+/// result is always a JIT module — and so is everything else that only affects
+/// execution; see [`CodegenKey`] for exactly which options
+/// the produced code depends on, and therefore which ones a cache must key on.
+///
+/// # Errors
+/// [`NativeError::Unsupported`] if the program uses a construct outside the
+/// native subset, [`NativeError::Compile`] if MIR lowering or Cranelift fails.
+pub fn compile_program(
+    hir: &HirFile,
+    opts: &NativeOptions,
+) -> Result<CompiledProgram, NativeError> {
+    let built = build_jit_program(hir, opts);
+    if built.is_err() {
+        // A compile that bailed part-way may already have boxed some constants.
+        // They belong to no module, so drop them here rather than let the next
+        // compile adopt (and keep alive) another program's constants.
+        drop(runtime::take_const_arena());
+    }
+    built
+}
+
+fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProgram, NativeError> {
+    let t_compile = std::time::Instant::now();
+    let lw = lower(hir, opts)?;
+    let main = &lw.program.functions[lw.main_idx];
+    let isa = build_isa(opts)?;
+    let mut jb = cranelift_jit::JITBuilder::with_isa(isa, default_libcall_names());
+    // Register the shared runtime math builtins (and the `**`
+    // integer-power helper) so `call`s to them resolve at finalize.
+    for b in leek_runtime::math_builtins() {
+        jb.symbol(b.symbol, b.addr);
+    }
+    let (ipow_sym, ipow_addr) = leek_runtime::ipow_addr();
+    jb.symbol(ipow_sym, ipow_addr);
+    // Composite-value runtime shims (arrays, box/unbox, …).
+    for (sym, addr) in runtime::runtime_symbols() {
+        jb.symbol(sym, addr);
+    }
+    let mut module = cranelift_jit::JITModule::new(jb);
+    let (
+        id,
+        ret_ty,
+        lambda_funcs,
+        method_resolve,
+        static_init,
+        user_fn_idx,
+        exact_arity,
+        class_string_method,
+    ) = define_program(
+        &mut module,
+        &lw.program,
+        main,
+        lw.lang,
+        &lw.fn_rets,
+        &lw.global_tys,
+        &lw.native_directives,
+        &lw.class_thunks,
+        opts.debug_hooks,
+        opts.link_game,
+        false,
+        &opts.hook_roots,
+    )?;
+    module
+        .finalize_definitions()
+        .map_err(|e| NativeError::Compile(e.to_string()))?;
+    // Publish each lambda / bound-method's finalized address (+ param
+    // count) so `call_value` / indirect calls can invoke them.
+    let lambda_fns: HashMap<usize, (*const u8, usize)> = lambda_funcs
+        .iter()
+        .map(|(&idx, &(fid, nparams))| (idx, (module.get_finalized_function(fid), nparams)))
+        .collect();
+    // Per-lambda user-param `@`-by-ref masks (captures excluded) for the
+    // higher-order builtins. A lambda's MIR params are
+    // `[captures…, user-params…]`; the capture count comes from the
+    // `MakeLambda` that builds it.
+    let lambda_byref: HashMap<usize, Vec<bool>> = {
+        use leek_mir::ir::{Rvalue, Statement};
+        let mut ncaptures: HashMap<usize, usize> = HashMap::new();
+        for f in &lw.program.functions {
+            for b in &f.blocks {
+                for s in &b.statements {
+                    if let Statement::Assign(
+                        _,
+                        Rvalue::MakeLambda {
+                            function_idx,
+                            captures,
+                        },
+                    ) = s
+                    {
+                        ncaptures.insert(*function_idx, captures.len());
+                    }
+                }
+            }
+        }
+        lambda_funcs
+            .keys()
+            .map(|&idx| {
+                let f = &lw.program.functions[idx];
+                let nc = ncaptures.get(&idx).copied().unwrap_or(0);
+                let mask = f
+                    .params
+                    .iter()
+                    .skip(nc)
+                    .map(|p| f.locals[p.0 as usize].is_by_ref)
+                    .collect();
+                (idx, mask)
+            })
+            .collect()
+    };
+    // Class hierarchy for runtime `.super` (`x.class.super`): each
+    // class → its explicit parent, or `None` for the implicit `Value`.
+    let class_parent: HashMap<u32, Option<(u32, std::string::String)>> = lw
+        .program
+        .classes
+        .iter()
+        .map(|c| {
+            let parent = c
+                .parent_def
+                .and_then(|pd| lw.program.class(pd).map(|pc| (pd.0, pc.name.clone())));
+            (c.def_id.0, parent)
+        })
+        .collect();
+    let tables = RuntimeTables {
+        lambda_fns,
+        lambda_byref,
+        method_resolve,
+        static_init,
+        user_fn_idx,
+        user_fn_exact_arity: exact_arity,
+        class_parent,
+        // Per-class constructor thunks: class `DefId` → thunk function idx
+        // (its finalized address is already in `LAMBDA_FNS`), so a
+        // `Value::ClassRef` invoked as a value constructs.
+        class_ctor_thunk: lw.class_thunks,
+        // Per-class `string()` display overrides (applied to the top-level
+        // result). Their addresses are already in `LAMBDA_FNS`.
+        class_string_method,
+        // Per-class reflection name tables for runtime `x.class.fields` etc.
+        class_reflect: translate::reflect_name_tables(&lw.program),
+    };
+    JIT_COMPILES.with(|c| c.set(c.get().saturating_add(1)));
+    Ok(CompiledProgram {
+        module: std::mem::ManuallyDrop::new(module),
+        main: id,
+        ret_ty,
+        tables,
+        // Everything above is codegen + runtime wiring; the program itself
+        // hasn't run yet. Take ownership of the constants it baked in, and
+        // stop the clock so the benchmark can report JIT compilation
+        // separately from execution.
+        _consts: runtime::take_const_arena(),
+        compile_dur: std::cell::Cell::new(t_compile.elapsed()),
+    })
 }
 
 /// Declare and define `main` plus every user function reachable from it

@@ -39,8 +39,54 @@ use leek_runtime::Value;
 // The item catalogs ride along for scenario validation, and the backend's
 // run-options type so callers can configure launches without a direct
 // `leek-backend-native` edge.
-pub use leek_backend_native::{NativeError, NativeOptions};
+pub use leek_backend_native::{CompiledProgram, NativeError, NativeOptions};
 pub use leek_game_runtime::{ActiveEffect, Entity, Fight, FightRef, chips, shared, weapons};
+
+/// The compiled AI modules of one fight, built on first use and reused for
+/// every later turn.
+///
+/// Compiling an AI is orders of magnitude more expensive than running one turn
+/// of it, and a fight runs the same handful of AIs up to `MAX_TURNS` times —
+/// so the turn loop compiles each AI **once** and then only executes it
+/// ([`CompiledProgram`] keeps everything a run must not inherit from the
+/// previous one out of the module).
+///
+/// Keyed by the *identity* of the HIR (its address — every AI is alive for the
+/// whole fight, and callers share one `Arc<HirFile>` per script, so a mirror
+/// match compiles one module, not two) together with the
+/// [`CodegenKey`](leek_backend_native::CodegenKey) of the options, since the
+/// debugger runs one entity's AI with safepoints and the rest without.
+///
+/// Failures are cached too, and handed back by clone: an AI outside the native
+/// subset failed to compile on every turn before this cache existed, and must
+/// still record one error per turn (see [`Outcome::errors`]).
+#[derive(Default)]
+pub struct AiPrograms {
+    by_key: HashMap<(usize, leek_backend_native::CodegenKey), Result<CompiledProgram, NativeError>>,
+}
+
+impl AiPrograms {
+    /// The module for `hir` under `opts`, compiling it if this fight hasn't
+    /// already.
+    ///
+    /// # Errors
+    /// A clone of the compile error, every time it is asked for.
+    pub fn get(
+        &mut self,
+        hir: &HirFile,
+        opts: &NativeOptions,
+    ) -> Result<&CompiledProgram, NativeError> {
+        let key = (std::ptr::from_ref(hir) as usize, opts.codegen_key());
+        match self
+            .by_key
+            .entry(key)
+            .or_insert_with(|| leek_backend_native::compile_program(hir, opts))
+        {
+            Ok(p) => Ok(p),
+            Err(e) => Err(e.clone()),
+        }
+    }
+}
 
 /// The official per-turn operation budget: `AI.MAX_OPERATIONS` (20M), which
 /// `EntityAI.runTurn` resets at the start of every turn. An AI that goes over
@@ -101,6 +147,25 @@ pub fn run_ai_with(
 ) -> Result<Value, NativeError> {
     leek_backend_native::set_game_runtime(Some(Box::new(FightRuntime(fight.clone()))));
     let result = leek_backend_native::run(hir, opts);
+    leek_backend_native::set_game_runtime(None);
+    result
+}
+
+/// Launch one **already-compiled** AI: install the fight runtime and run its
+/// `main` under `opts`. The reusable counterpart of [`run_ai_with`], which
+/// compiles the AI afresh on every call — the turn loop uses this one so a
+/// fight pays for codegen once (see [`AiPrograms`]).
+///
+/// # Errors
+/// Propagates a [`NativeError`] if the AI faults or exhausts its op budget.
+/// Actions it took before that stay applied.
+pub fn run_ai_program(
+    fight: &FightRef,
+    program: &CompiledProgram,
+    opts: &NativeOptions,
+) -> Result<Value, NativeError> {
+    leek_backend_native::set_game_runtime(Some(Box::new(FightRuntime(fight.clone()))));
+    let result = program.run(opts);
     leek_backend_native::set_game_runtime(None);
     result
 }
@@ -197,6 +262,8 @@ fn fight_loop<'a>(
     get_ai: impl Fn(i64) -> Option<(&'a HirFile, &'a NativeOptions)>,
 ) -> Outcome {
     let mut errors = Vec::new();
+    // One compiled module per AI for the whole fight, not one per turn.
+    let mut programs = AiPrograms::default();
     // `StartOrder.compute`, drawn once before the fight and kept for every
     // turn, like the reference's `Order`.
     let order = fight_start_order(&fight.borrow());
@@ -218,8 +285,12 @@ fn fight_loop<'a>(
                 continue;
             }
             if let Some((hir, opts)) = get_ai(id)
-                && let Err(e) = run_ai_with(fight, hir, opts)
+                && let Err(e) = programs
+                    .get(hir, opts)
+                    .and_then(|p| run_ai_program(fight, p, opts))
             {
+                // A cached compile failure is replayed every turn, exactly as a
+                // per-turn recompile used to fail every turn.
                 errors.push(AiError::new(turn, id, &e));
             }
             if fight.borrow().living_teams().len() <= 1 {
