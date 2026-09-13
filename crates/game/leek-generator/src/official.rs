@@ -25,6 +25,7 @@ pub use leek_game_runtime::state::{
     STAT_MP, STAT_RESISTANCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
 };
 
+use crate::AiPrograms;
 use leek_backend_native::{NativeError, NativeOptions, ops_used};
 use leek_game_runtime::actions::Action;
 use leek_game_runtime::official_builtins::call_official_builtin;
@@ -62,16 +63,20 @@ const HOOK_OPS_BONUS: u64 = 1_000_000;
 /// escaping. See [`harvest_run`] for which ops count.
 fn run_entity_ai(
     state: &Rc<RefCell<State>>,
+    programs: &mut AiPrograms,
     fid: usize,
     hir: &HirFile,
     opts: &NativeOptions,
 ) -> u64 {
-    leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
-        state: Rc::clone(state),
-        current: fid,
-    })));
-    let result = leek_backend_native::run(hir, opts);
-    leek_backend_native::set_game_runtime(None);
+    let result = programs.get(hir, opts).and_then(|program| {
+        leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+            state: Rc::clone(state),
+            current: fid,
+        })));
+        let result = program.run(opts);
+        leek_backend_native::set_game_runtime(None);
+        result
+    });
     harvest_run(state, fid, fid, &result)
 }
 
@@ -113,18 +118,24 @@ fn harvest_run(
 /// `ActionAIError` names the bulb.
 fn run_bulb_ai(
     state: &Rc<RefCell<State>>,
+    programs: &mut AiPrograms,
     fid: usize,
     owner: usize,
     ai_fn: &Value,
     hir: &HirFile,
     opts: &NativeOptions,
 ) -> u64 {
-    leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
-        state: Rc::clone(state),
-        current: fid,
-    })));
-    let result = leek_backend_native::run_call(hir, opts, ai_fn, Vec::new());
-    leek_backend_native::set_game_runtime(None);
+    // The owner's turn module, already compiled — a bulb turn no longer
+    // re-JITs the whole owning AI.
+    let result = programs.get(hir, opts).and_then(|program| {
+        leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+            state: Rc::clone(state),
+            current: fid,
+        })));
+        let result = program.run_call(opts, ai_fn, Vec::new());
+        leek_backend_native::set_game_runtime(None);
+        result
+    });
     harvest_run(state, fid, owner, &result)
 }
 
@@ -193,6 +204,7 @@ fn find_hook(hir: &HirFile, name: &str) -> Option<Value> {
 /// stopping the other hooks or the fight.
 fn run_hooks(
     state: &Rc<RefCell<State>>,
+    programs: &mut AiPrograms,
     ais: &HashMap<usize, std::sync::Arc<HirFile>>,
     opts: &NativeOptions,
     phase: HookPhase,
@@ -209,12 +221,18 @@ fn run_hooks(
             continue;
         };
         state.borrow_mut().hook_phase = phase;
-        leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
-            state: Rc::clone(state),
-            current: fid,
-        })));
-        let result = leek_backend_native::run_call(hir, &hook_opts, &hook_fn, Vec::new());
-        leek_backend_native::set_game_runtime(None);
+        // A distinct module from the turn one: `hook_roots` is part of the
+        // codegen key, so the turn module's code stays byte-identical to what
+        // it was before hooks existed as a separate compile.
+        let result = programs.get(hir, &hook_opts).and_then(|program| {
+            leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+                state: Rc::clone(state),
+                current: fid,
+            })));
+            let result = program.run_call(&hook_opts, &hook_fn, Vec::new());
+            leek_backend_native::set_game_runtime(None);
+            result
+        });
         let mut s = state.borrow_mut();
         s.hook_phase = HookPhase::None;
         if let Err(e) = result {
@@ -242,6 +260,9 @@ pub fn run_official_fight(
     opts: &NativeOptions,
 ) -> serde_json::Value {
     let state = Rc::new(RefCell::new(state));
+    // One compiled module per (AI, codegen options) for the whole fight — the
+    // turn loop below runs each AI up to `MAX_TURNS` times.
+    let mut programs = AiPrograms::default();
     // Total operations per fid, reported once at the end like
     // `Actions.addOpsAndTimes(state.statistics)`.
     let mut total_ops: HashMap<usize, u64> = HashMap::new();
@@ -251,7 +272,14 @@ pub fn run_official_fight(
     // `Fight.startFight`: the `beforeFight()` hooks run after init but before
     // the initial-state snapshot, so any `setLoadout()` they apply is reflected
     // in the report's max-life / displayed stats.
-    run_hooks(&state, ais, opts, HookPhase::BeforeFight, "beforeFight");
+    run_hooks(
+        &state,
+        &mut programs,
+        ais,
+        opts,
+        HookPhase::BeforeFight,
+        "beforeFight",
+    );
 
     state.borrow_mut().record_initial_state();
 
@@ -278,11 +306,11 @@ pub fn run_official_fight(
                 };
                 if let Some((owner, ai_fn)) = summon {
                     if let (Some(ai_fn), Some(hir)) = (ai_fn, ais.get(&owner)) {
-                        let ops = run_bulb_ai(&state, fid, owner, &ai_fn, hir, opts);
+                        let ops = run_bulb_ai(&state, &mut programs, fid, owner, &ai_fn, hir, opts);
                         *total_ops.entry(owner).or_insert(0) += ops;
                     }
                 } else if let Some(hir) = ais.get(&fid) {
-                    let ops = run_entity_ai(&state, fid, hir, opts);
+                    let ops = run_entity_ai(&state, &mut programs, fid, hir, opts);
                     *total_ops.entry(fid).or_insert(0) += ops;
                 }
                 let mut s = state.borrow_mut();
@@ -315,7 +343,14 @@ pub fn run_official_fight(
     }
 
     // `afterFight()` hooks run after the winner is computed.
-    run_hooks(&state, ais, opts, HookPhase::AfterFight, "afterFight");
+    run_hooks(
+        &state,
+        &mut programs,
+        ais,
+        opts,
+        HookPhase::AfterFight,
+        "afterFight",
+    );
 
     let s = state.borrow();
     build_outcome(

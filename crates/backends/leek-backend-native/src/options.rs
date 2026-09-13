@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub const DEFAULT_OP_BUDGET: u64 = 20_000_000;
 
 /// Cranelift optimization level — the debug/release switch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OptLevel {
     /// No optimization. Fastest compiles, best for debugging (maps
     /// closely to the source MIR). The "debug" profile.
@@ -231,8 +231,53 @@ impl NativeOptions {
     }
 }
 
+/// The subset of [`NativeOptions`] that changes the *generated code*, so two
+/// runs whose keys are equal can share one compiled module.
+///
+/// Everything left out is applied at run time, after codegen, and therefore
+/// costs nothing to vary per run: `op_limit` (armed by `reset_ops`, and polled
+/// by a back-edge check that is emitted unconditionally), `max_call_depth` /
+/// `max_stack_bytes` (armed by `arm_call_guard`), `debug_info` (object emit
+/// only) and `emit` itself (only JIT modules are ever cached). That is what
+/// lets a fight's hook runs, which add `HOOK_OPS_BONUS` to the budget, reuse a
+/// module built for the same roots.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CodegenKey {
+    opt_level: OptLevel,
+    enable_verifier: bool,
+    preserve_frame_pointers: bool,
+    version: u8,
+    strict: bool,
+    debug_hooks: bool,
+    link_game: bool,
+    hook_roots: Vec<String>,
+}
+
+impl NativeOptions {
+    /// This options set's [`CodegenKey`] — its identity as far as codegen is
+    /// concerned.
+    #[must_use]
+    pub fn codegen_key(&self) -> CodegenKey {
+        CodegenKey {
+            opt_level: self.opt_level,
+            enable_verifier: self.enable_verifier,
+            preserve_frame_pointers: self.preserve_frame_pointers,
+            version: self.version,
+            strict: self.strict,
+            debug_hooks: self.debug_hooks,
+            link_game: self.link_game,
+            hook_roots: self.hook_roots.clone(),
+        }
+    }
+}
+
 /// Outcome of a native compile/run.
-#[derive(Debug)]
+///
+/// `Clone` because a compiled module is cached for the length of a fight (see
+/// [`crate::CompiledProgram`]): an AI that fails to compile must still report
+/// that same failure on *every* turn, as it did back when each turn recompiled
+/// it, so the cached `Err` is handed out by clone.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeError {
     /// A MIR construct the backend doesn't lower yet. The corpus
     /// runner treats this as "skip", so the supported subset still

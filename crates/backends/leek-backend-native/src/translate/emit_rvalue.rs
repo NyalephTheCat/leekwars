@@ -278,10 +278,13 @@ impl Tx<'_, '_> {
                 return Ok((v, ValTy::Ref));
             }
             // Reflective members (`C.fields`, `C.methods`, …) are known at
-            // compile time — materialise the array as a leaked handle.
+            // compile time — materialise the array once and hand out a fresh
+            // copy per read. The interpreter rebuilds the array on every
+            // evaluation, so a `C.fields.push(x)` must not be visible to the
+            // next read (nor, once the module is reused across turns, to the
+            // next run).
             if let Some(v) = class_reflect(self.program, &cls, name) {
-                let ptr = crate::runtime::box_value(v) as i64;
-                return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
+                return self.fresh_composite_default(&v);
             }
             // A static method read as a *value* (`var f = C.staticMethod`):
             // box a `Function::User` handle (the method is uniform-compiled +
@@ -568,10 +571,10 @@ impl Tx<'_, '_> {
                     let v = self.static_field_get(owner, name, coerce)?;
                     return Ok((v, ValTy::Ref));
                 }
-                // A reflective member (`C['fields']`, …).
+                // A reflective member (`C['fields']`, …) — a fresh copy per
+                // read, like the `C.fields` field path above.
                 if let Some(v) = class_reflect(self.program, &cls, name) {
-                    let ptr = crate::runtime::box_value(v) as i64;
-                    return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
+                    return self.fresh_composite_default(&v);
                 }
                 // A static or instance method read as a value (`A['m']`) — box
                 // a `Function::User` handle (uniform-compiled + registered via

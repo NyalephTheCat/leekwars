@@ -82,6 +82,16 @@ thread_local! {
     static BOX_STATE: RefCell<BoxState> =
         const { RefCell::new(BoxState { arena: None, boxes: Vec::new() }) };
 
+    /// Storage for the handles baked into *generated code* as constants (see
+    /// [`box_value`]). Kept apart from [`BOX_STATE`] because their lifetime is
+    /// the compiled module's, not the run's: a module that is reused across
+    /// turns ([`crate::CompiledProgram`]) would read freed memory on its second
+    /// run if its constants were swept by [`free_run_boxes`]. The compiler
+    /// hands the accumulated arena to the module it just built with
+    /// [`take_const_arena`], and the module frees it when it is dropped.
+    static CONST_STATE: RefCell<BoxState> =
+        const { RefCell::new(BoxState { arena: None, boxes: Vec::new() }) };
+
     /// File-level globals, keyed by name (matching the interpreter), each
     /// holding a value handle. Cleared by [`clear_globals`] before every
     /// JIT run so programs don't see a previous run's globals.
@@ -226,10 +236,76 @@ unsafe fn val<'a>(p: *mut Value) -> &'a Value {
 }
 
 /// Box an arbitrary compile-time-known `Value` (e.g. a builtin constant
-/// like `PI` / `SORT_ASC`) into a leaked handle whose pointer is embedded
-/// as a constant in the generated code.
+/// like `PI` / `SORT_ASC`) into a handle whose pointer is embedded as a
+/// constant in the generated code.
+///
+/// Called from `translate/` *during codegen* only, so the handle must outlive
+/// every run of the module being built — not just the current one. It is
+/// allocated from [`CONST_STATE`], which [`take_const_arena`] transfers to the
+/// finished module; [`free_run_boxes`] never touches it.
 pub fn box_value(v: Value) -> *mut Value {
-    handle(v)
+    const_handle(v)
+}
+
+/// [`handle`], but allocating from the compile-time arena. Same drop-list rule:
+/// only values that own heap are recorded, the rest ride the arena.
+fn const_handle(v: Value) -> *mut Value {
+    CONST_STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let r = s.arena.get_or_insert_with(bumpalo::Bump::new).alloc(v);
+        let needs_drop = !matches!(
+            r,
+            Value::Int(_) | Value::Real(_) | Value::Bool(_) | Value::Null | Value::BuiltinClass(_)
+        );
+        let p = std::ptr::from_mut(r);
+        if needs_drop {
+            s.boxes.push(p);
+        }
+        p
+    })
+}
+
+/// The constant handles allocated since the last [`take_const_arena`] — i.e.
+/// every constant baked into the module currently being compiled. Owned by
+/// that module from here on: dropping it drops the values and releases the
+/// arena, which invalidates the pointers the module's code holds, so it must
+/// not outlive the machine code that reads them.
+pub struct ConstArena {
+    /// Held only to be dropped: releasing it reclaims the bump storage every
+    /// `boxes` pointer below lives in.
+    _arena: Option<bumpalo::Bump>,
+    boxes: Vec<*mut Value>,
+}
+
+impl Drop for ConstArena {
+    fn drop(&mut self) {
+        for p in self.boxes.drain(..) {
+            // SAFETY: `p` is a unique, still-live value in `arena`, produced by
+            // `const_handle` and dropped exactly once (reads clone, never free),
+            // and `arena` is dropped only after this loop.
+            unsafe { std::ptr::drop_in_place(p) };
+        }
+    }
+}
+
+impl std::fmt::Debug for ConstArena {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConstArena")
+            .field("boxes", &self.boxes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Hand the constants accumulated during the compile just finished to their
+/// module, leaving a fresh arena for the next compile.
+pub fn take_const_arena() -> ConstArena {
+    CONST_STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        ConstArena {
+            _arena: s.arena.take(),
+            boxes: std::mem::take(&mut s.boxes),
+        }
+    })
 }
 
 /// Read the `Value` behind a handle by cloning it, WITHOUT freeing the box.
