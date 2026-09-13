@@ -634,7 +634,8 @@ pub enum Rvalue {
     /// A compiler-synthesized rvalue: evaluates exactly like the
     /// inner rvalue but charges no ops. Wraps the foreach loop
     /// machinery (the `pos < len` test, the `pos + 1` step, the
-    /// snapshot pair reads) whose upstream equivalents are free.
+    /// snapshot pair reads) whose upstream equivalents are free, and
+    /// the `??` null test (charged by its explicit flow-control tick).
     ///
     /// As the source of an `Assign(Place::Index(..), ..)` it marks the
     /// nested-index promotion write-back (`a[i][j] = v` re-storing

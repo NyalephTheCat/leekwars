@@ -540,10 +540,18 @@ impl FnLowerer<'_> {
             Place::Local(result),
             Rvalue::Use(l_val.clone()),
         ));
+        // The comparison is `Synthetic`: upstream prices `a ?? b` as a
+        // single operator op (`load(a) != null ? a : b`), which the
+        // explicit flow-control charge below already covers — a
+        // charged `Binary` here would bill it twice (#78).
         let is_null = self.fresh_temp(Type::Boolean, span);
         self.push_stmt(Statement::Assign(
             Place::Local(is_null),
-            Rvalue::Binary(BinOp::IdentityEq, l_val, Operand::Const(Const::Null)),
+            Rvalue::Synthetic(Box::new(Rvalue::Binary(
+                BinOp::IdentityEq,
+                l_val,
+                Operand::Const(Const::Null),
+            ))),
         ));
         let rhs_bb = self.new_block();
         let join = self.new_block();

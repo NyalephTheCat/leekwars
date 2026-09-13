@@ -234,11 +234,14 @@ fn null_coalesce_branches_on_identity_eq_null() {
     };
     let prog = build(vec![Stmt::VarDecl(v)]);
     let main = prog.main().unwrap();
+    // The comparison is compiler-synthesized (uncharged): the `??` op is
+    // billed once by its flow-control `Charge`.
     let saw_id_eq = main.blocks.iter().any(|b| {
         b.statements.iter().any(|s| {
             matches!(
                 s,
-                Statement::Assign(_, Rvalue::Binary(BinOp::IdentityEq, _, _))
+                Statement::Assign(_, Rvalue::Synthetic(inner))
+                    if matches!(**inner, Rvalue::Binary(BinOp::IdentityEq, _, _))
             )
         })
     });

@@ -28,6 +28,14 @@ fn ops_v(src: &str, version: u8) -> u64 {
 }
 
 #[test]
+fn null_coalesce_charges_a_single_op() {
+    // Upstream JVM op counts (tests/fixtures/ops/snapshot.tsv): `??` is one
+    // operator op; the synthesized null comparison must not add another (#78).
+    assert_eq!(ops("var f = integer? x => x ?? 0 return f(null)"), 3);
+    assert_eq!(ops("var f = integer? x => x ?? 0 return f(7)"), 3);
+}
+
+#[test]
 fn nested_index_write_charges_no_writeback() {
     // A nested write costs exactly what the same write through an explicit
     // alias does (minus the alias's `var` op): the promotion write-back is
