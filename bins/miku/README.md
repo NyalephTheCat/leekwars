@@ -69,7 +69,29 @@ miku fight duel.toml --mode tournament \
 miku fight duel.toml --mode random \
     --runs 50 --capital 800                # fuzz the AI against random builds
 miku fight duel.toml --emit ./duel-fight   # standalone native executable
+miku fight duel.toml --report              # also write the JSON report to a file
+miku fight duel.toml --report=run.json     # ... at a path of your choosing
 ```
+
+### The `[fight]` manifest table
+
+```toml
+[fight]
+default_scenario = "duel.toml"        # what a bare `miku fight` plays
+scenarios_dir    = "scenarios"        # where scenario arguments are looked up
+reports_dir      = "build/fight-reports"  # where a bare `--report` writes (default)
+jobs             = 4                  # sweep workers
+```
+
+All four keys are optional. A scenario argument is resolved as given first,
+then under `scenarios_dir`, then against the project root. A bare `--report`
+writes `<mode>.json` (`single.json`, `matrix.json`, …) under `reports_dir`;
+`--report=<PATH>` overrides it. `jobs` is parsed, validated (`>= 1`) and
+exposed on the manifest, but the matrix / tournament / random drivers still
+run sequentially — it takes effect when they learn to run in parallel.
+
+Fights work outside a project too: with no `Miku.toml` in scope the defaults
+apply, so `--report` writes under `build/fight-reports/`.
 
 A complete, runnable example — AIs, reusable leek builds, composable
 scenarios, and debugger launch configs — lives in

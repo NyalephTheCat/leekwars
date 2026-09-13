@@ -5,8 +5,8 @@
 
 use crate::format::FormatOptions;
 use crate::types::{
-    BackendSettings, BackendTable, JavaMode, LintTable, Manifest, PathsTable, ProjectTable,
-    TestTable,
+    BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest, PathsTable,
+    ProjectTable, TestTable,
 };
 use std::path::PathBuf;
 
@@ -70,6 +70,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "lint",
     "format",
     "test",
+    "fight",
     "lsp",
     "bench",
     "experimental",
@@ -172,6 +173,16 @@ pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), Manifes
         }
     };
 
+    let fight = match root.get("fight") {
+        None => FightTable::default(),
+        Some(v) => {
+            let tbl = v
+                .as_table()
+                .ok_or_else(|| ManifestError::new("Miku.toml: `fight` must be a table"))?;
+            parse_fight(tbl, &mut warnings)?
+        }
+    };
+
     Ok((
         Manifest {
             project,
@@ -180,6 +191,7 @@ pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), Manifes
             lint,
             format,
             test,
+            fight,
         },
         warnings,
     ))
@@ -411,6 +423,36 @@ fn parse_test(
     Ok(out)
 }
 
+fn parse_fight(
+    tbl: &toml::value::Table,
+    warnings: &mut Vec<ManifestWarning>,
+) -> Result<FightTable, ManifestError> {
+    const KNOWN: &[&str] = &["default_scenario", "scenarios_dir", "reports_dir", "jobs"];
+    warn_unknown(tbl, "fight", KNOWN, warnings);
+    let mut out = FightTable::default();
+    if let Some(v) = tbl.get("default_scenario") {
+        out.default_scenario = Some(PathBuf::from(string_val(v, "fight.default_scenario")?));
+    }
+    if let Some(v) = tbl.get("scenarios_dir") {
+        out.scenarios_dir = Some(PathBuf::from(string_val(v, "fight.scenarios_dir")?));
+    }
+    if let Some(v) = tbl.get("reports_dir") {
+        out.reports_dir = PathBuf::from(string_val(v, "fight.reports_dir")?);
+    }
+    if let Some(v) = tbl.get("jobs") {
+        let n = int_val(v, "fight.jobs")?;
+        if n < 1 {
+            return Err(ManifestError::new(format!(
+                "Miku.toml: fight.jobs must be >= 1, got {n}"
+            )));
+        }
+        out.jobs = Some(u32::try_from(n).map_err(|_| {
+            ManifestError::new(format!("Miku.toml: fight.jobs must be 1..={}", u32::MAX))
+        })?);
+    }
+    Ok(out)
+}
+
 // ---- helpers ----
 
 fn warn_unknown(
@@ -613,6 +655,84 @@ mod tests {
         assert_eq!(m.lint.deny, ["L0006"]);
         assert_eq!(m.lint.warn, ["L0001"]);
         assert_eq!(m.lint.allow, ["L0004"]);
+    }
+
+    #[test]
+    fn fight_table_defaults() {
+        let (m, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            "#,
+        );
+        assert_eq!(m.fight.default_scenario, None);
+        assert_eq!(m.fight.scenarios_dir, None);
+        assert_eq!(m.fight.reports_dir, PathBuf::from("build/fight-reports"));
+        assert_eq!(m.fight.jobs, None);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn fight_table_parsed() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            default_scenario = "duel.toml"
+            scenarios_dir = "scenarios"
+            reports_dir = "out/fights"
+            jobs = 8
+        "#;
+        let (m, warnings) = parse_ok(src);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(m.fight.default_scenario, Some(PathBuf::from("duel.toml")));
+        assert_eq!(m.fight.scenarios_dir, Some(PathBuf::from("scenarios")));
+        assert_eq!(m.fight.reports_dir, PathBuf::from("out/fights"));
+        assert_eq!(m.fight.jobs, Some(8));
+    }
+
+    #[test]
+    fn fight_unknown_key_warns() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            reports_dir = "out/fights"
+            worker_count = 4
+        "#;
+        let (m, warnings) = parse_ok(src);
+        assert_eq!(m.fight.reports_dir, PathBuf::from("out/fights"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("fight.worker_count"));
+    }
+
+    #[test]
+    fn fight_jobs_must_be_positive() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            jobs = 0
+        "#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("fight.jobs"), "{}", err.message);
+    }
+
+    #[test]
+    fn fight_reports_dir_must_be_a_string() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [fight]
+            reports_dir = 3
+        "#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("fight.reports_dir"), "{}", err.message);
     }
 
     #[test]

@@ -73,6 +73,39 @@ impl Project {
         self.root.join("build")
     }
 
+    /// Where `miku fight --report` writes when given no path —
+    /// `[fight].reports_dir` (default `build/fight-reports`).
+    pub fn fight_reports_dir(&self) -> PathBuf {
+        self.root.join(&self.manifest.fight.reports_dir)
+    }
+
+    /// Resolve a scenario argument against the project. Absolute paths and
+    /// paths that already exist as given are kept as-is; anything else is
+    /// looked up under `[fight].scenarios_dir` first, then under the
+    /// project root.
+    pub fn scenario_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() || path.exists() {
+            return path.to_path_buf();
+        }
+        if let Some(dir) = &self.manifest.fight.scenarios_dir {
+            let candidate = self.root.join(dir).join(path);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        self.root.join(path)
+    }
+
+    /// The scenario `miku fight` plays when given no path —
+    /// `[fight].default_scenario`, resolved like any scenario argument.
+    pub fn default_scenario(&self) -> Option<PathBuf> {
+        self.manifest
+            .fight
+            .default_scenario
+            .clone()
+            .map(|p| self.scenario_path(&p))
+    }
+
     pub fn walk_sources(&self) -> Vec<PathBuf> {
         walk_leek_files(&self.src_dir())
     }

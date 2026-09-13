@@ -91,7 +91,13 @@ miku fight duel.toml --mode tournament \   # round-robin / single-elim leaderboa
 miku fight duel.toml --mode random \       # fuzz the AI against random point-buy builds
     --runs 50 --capital 800 --random-stats strength,agility,wisdom
 miku fight duel.toml --emit ./duel-fight   # generate a standalone native executable
+miku fight duel.toml --mode matrix --report   # also write the JSON report to a file
 ```
+
+The manifest's `[fight]` table supplies the defaults: `default_scenario` (what
+a bare `miku fight` plays), `scenarios_dir` (where scenario names are looked
+up), `reports_dir` (where a bare `--report` writes, default
+`build/fight-reports`), and `jobs` (sweep workers).
 
 Scenarios are **composable**: a file can `extends` a base arena, pull reusable
 leek builds from separate files (`leek = "leeks/hero.toml"`), and carry named

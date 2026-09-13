@@ -13,6 +13,7 @@ pub struct Manifest {
     pub lint: LintTable,
     pub format: FormatOptions,
     pub test: TestTable,
+    pub fight: FightTable,
 }
 
 /// `[project]` — required.
@@ -215,6 +216,35 @@ impl Default for TestTable {
             timeout: None,
             parallel: true,
             junit_xml: None,
+        }
+    }
+}
+
+/// `[fight]` — defaults for `miku fight`.
+#[derive(Debug, Clone)]
+pub struct FightTable {
+    /// Scenario played when `miku fight` is given no path. Resolved like
+    /// any other scenario argument (see [`FightTable::scenarios_dir`]).
+    pub default_scenario: Option<PathBuf>,
+    /// Directory searched for scenarios named without a directory part.
+    /// `None` means "look next to the manifest".
+    pub scenarios_dir: Option<PathBuf>,
+    /// Where `--report` writes when it is given no path.
+    /// Default `build/fight-reports`.
+    pub reports_dir: PathBuf,
+    /// Worker count for the parallel sweep drivers. `None` means "let the
+    /// driver decide". Parsed and exposed today; the matrix/tournament/
+    /// random drivers still run sequentially.
+    pub jobs: Option<u32>,
+}
+
+impl Default for FightTable {
+    fn default() -> Self {
+        Self {
+            default_scenario: None,
+            scenarios_dir: None,
+            reports_dir: PathBuf::from("build/fight-reports"),
+            jobs: None,
         }
     }
 }

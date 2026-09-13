@@ -1,28 +1,34 @@
 //! `miku fight` — run a leek-wars fight from a scenario file, or test the hero
 //! AI against many settings (matrix sweep, tournament, randomized builds).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use leek_manifest::FightTable;
+use leek_project::Project;
 use leek_scenario::{
     Bracket, MatrixAxes, RandomSpec, RandomTarget, Scenario, StatKind, TestReport, TournamentSpec,
 };
 
 use crate::cli::{BracketArg, Fight, FightFormat, FightMode, RandomTargetArg};
 
-pub fn run(args: &Fight, quiet: bool) -> Result<ExitCode> {
+pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     // A fight always needs the leek-wars game builtins resolvable at compile
     // time, so register them up front (idempotent — harmless if `--library
     // leekwars` already did). This makes plain `miku fight scenario.toml` work.
     leek_recipes::load_and_register_libraries(["leekwars"])
         .map_err(|e| anyhow!("registering the leekwars library: {e}"))?;
 
-    let Some(scenario_path) = args.scenario.clone() else {
-        return Err(anyhow!(
-            "no scenario file given (usage: miku fight <scenario.toml>)"
-        ));
+    // Fights run on bare scenario files too, so a missing `Miku.toml` is not
+    // an error here — the `[fight]` defaults apply. An explicit
+    // `--manifest-path` still has to load.
+    let project = match manifest_path {
+        Some(path) => Some(Project::discover(Some(path))?),
+        None => Project::discover(None).ok(),
     };
+
+    let scenario_path = resolve_scenario(args, project.as_ref())?;
     let base_dir = scenario_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -51,26 +57,103 @@ pub fn run(args: &Fight, quiet: bool) -> Result<ExitCode> {
         .or_else(|| scn.testing.as_ref().and_then(|t| t.hero_team))
         .unwrap_or_else(|| scn.entities.first().and_then(|e| e.team).unwrap_or(0));
 
+    // `--report` writes the same JSON the `--format json` renderer prints;
+    // with no path it lands in the manifest's `[fight].reports_dir`.
+    let report_dest = report_dest(args, project.as_ref());
+
     // `--mode` selects the driver (default `single`); the scenario's
     // `[testing]` table supplies that driver's parameters.
     match args.mode {
-        FightMode::Single => run_single(&scn, &base_dir, hero_team, args.format, quiet),
+        FightMode::Single => run_single(
+            &scn,
+            &base_dir,
+            hero_team,
+            args.format,
+            report_dest.as_deref(),
+            quiet,
+        ),
         FightMode::Matrix => {
             let report = run_matrix_mode(args, &scn, &base_dir, hero_team)?;
             render_report(&report, args.format);
+            write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
             Ok(verdict(&report))
         }
         FightMode::Tournament => {
             let report = run_tournament_mode(args, &scn, &base_dir, hero_team)?;
             render_report(&report, args.format);
+            write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
             Ok(ExitCode::SUCCESS)
         }
         FightMode::Random => {
             let report = run_random_mode(args, &scn, &base_dir, hero_team)?;
             render_report(&report, args.format);
+            write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
             Ok(verdict(&report))
         }
     }
+}
+
+/// The scenario to play: the CLI path (resolved against the project), else
+/// the manifest's `[fight].default_scenario`.
+fn resolve_scenario(args: &Fight, project: Option<&Project>) -> Result<PathBuf> {
+    match (args.scenario.as_deref(), project) {
+        (Some(path), Some(project)) => Ok(project.scenario_path(path)),
+        (Some(path), None) => Ok(path.to_path_buf()),
+        (None, Some(project)) => project.default_scenario().ok_or_else(|| {
+            anyhow!(
+                "no scenario file given and no `[fight].default_scenario` in the manifest \
+                 (usage: miku fight <scenario.toml>)"
+            )
+        }),
+        (None, None) => Err(anyhow!(
+            "no scenario file given (usage: miku fight <scenario.toml>)"
+        )),
+    }
+}
+
+/// Where `--report` writes, or `None` when it wasn't asked for. A bare
+/// `--report` writes `<[fight].reports_dir>/<mode>.json`; outside a project
+/// that is the manifest default, `build/fight-reports`.
+fn report_dest(args: &Fight, project: Option<&Project>) -> Option<PathBuf> {
+    let requested = args.report.as_ref()?;
+    if let Some(path) = requested {
+        return Some(path.clone());
+    }
+    let dir = project.map_or_else(
+        || FightTable::default().reports_dir,
+        Project::fight_reports_dir,
+    );
+    Some(dir.join(format!("{}.json", mode_name(args.mode))))
+}
+
+fn mode_name(mode: FightMode) -> &'static str {
+    match mode {
+        FightMode::Single => "single",
+        FightMode::Matrix => "matrix",
+        FightMode::Tournament => "tournament",
+        FightMode::Random => "random",
+    }
+}
+
+/// Write the JSON report to `dest` (creating its directory), and say where
+/// it went unless `--quiet`.
+fn write_report(dest: Option<&Path>, value: &serde_json::Value, quiet: bool) -> Result<()> {
+    let Some(dest) = dest else {
+        return Ok(());
+    };
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(value).context("serializing the fight report")?;
+    std::fs::write(dest, format!("{text}\n"))
+        .with_context(|| format!("writing {}", dest.display()))?;
+    if !quiet {
+        eprintln!("report written to {}", dest.display());
+    }
+    Ok(())
 }
 
 fn run_single(
@@ -78,6 +161,7 @@ fn run_single(
     base_dir: &Path,
     hero_team: i64,
     format: FightFormat,
+    report_dest: Option<&Path>,
     quiet: bool,
 ) -> Result<ExitCode> {
     let lf = leek_scenario::build_fight(scn, base_dir)?;
@@ -92,27 +176,12 @@ fn run_single(
     );
 
     let f = fight.borrow();
+    let json = (format == FightFormat::Json || report_dest.is_some())
+        .then(|| single_json(f.log(), &outcome));
     match format {
         FightFormat::Json => {
-            let log: Vec<_> = f
-                .log()
-                .iter()
-                .map(|(id, msg)| serde_json::json!({ "entity": id, "message": msg }))
-                .collect();
-            let errors: Vec<_> = outcome
-                .errors
-                .iter()
-                .map(
-                    |e| serde_json::json!({ "turn": e.turn, "entity": e.entity, "error": e.error }),
-                )
-                .collect();
-            let obj = serde_json::json!({
-                "winner_team": outcome.winner_team,
-                "turns": outcome.turns,
-                "log": log,
-                "errors": errors,
-            });
-            println!("{}", serde_json::to_string_pretty(&obj)?);
+            let obj = json.as_ref().expect("built for the json format above");
+            println!("{}", serde_json::to_string_pretty(obj)?);
         }
         FightFormat::Human => {
             match outcome.winner_team {
@@ -130,6 +199,10 @@ fn run_single(
                 eprintln!("  AI error: {e}");
             }
         }
+    }
+
+    if let Some(obj) = &json {
+        write_report(report_dest, obj, quiet)?;
     }
 
     let hero_won = outcome.winner_team == Some(hero_team);
@@ -343,7 +416,35 @@ fn render_human(report: &TestReport) {
     }
 }
 
+/// The JSON body of a single fight — what `--format json` prints and what
+/// `--report` writes.
+fn single_json(log: &[(i64, String)], outcome: &leek_generator::Outcome) -> serde_json::Value {
+    let log: Vec<_> = log
+        .iter()
+        .map(|(id, msg)| serde_json::json!({ "entity": id, "message": msg }))
+        .collect();
+    let errors: Vec<_> = outcome
+        .errors
+        .iter()
+        .map(|e| serde_json::json!({ "turn": e.turn, "entity": e.entity, "error": e.error }))
+        .collect();
+    serde_json::json!({
+        "winner_team": outcome.winner_team,
+        "turns": outcome.turns,
+        "log": log,
+        "errors": errors,
+    })
+}
+
 fn render_json(report: &TestReport) {
+    match serde_json::to_string_pretty(&report_json(report)) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("error serializing report: {e}"),
+    }
+}
+
+/// The JSON body of a sweep/tournament/random report.
+fn report_json(report: &TestReport) -> serde_json::Value {
     use leek_scenario::FightResult;
 
     let cells: Vec<_> = report
@@ -379,7 +480,7 @@ fn render_json(report: &TestReport) {
             })
         })
         .collect();
-    let obj = serde_json::json!({
+    serde_json::json!({
         "mode": report.mode,
         "wins": report.wins,
         "losses": report.losses,
@@ -388,11 +489,7 @@ fn render_json(report: &TestReport) {
         "win_rate": report.win_rate(),
         "cells": cells,
         "standings": standings,
-    });
-    match serde_json::to_string_pretty(&obj) {
-        Ok(s) => println!("{s}"),
-        Err(e) => eprintln!("error serializing report: {e}"),
-    }
+    })
 }
 
 fn truncate(s: &str, max: usize) -> String {

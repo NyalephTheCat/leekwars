@@ -897,3 +897,89 @@ version = "0.1.0"
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A scenario with two idle leeks: no AI files, ends in a draw at the turn
+/// limit. Enough to exercise the `miku fight` plumbing without compiling.
+const IDLE_DUEL: &str = r"seed = 1
+max_turns = 2
+
+[map]
+width = 10
+height = 10
+
+[[entities]]
+id = 1
+team = 0
+cell = 0
+
+[[entities]]
+id = 2
+team = 1
+cell = 99
+";
+
+#[test]
+fn fight_uses_manifest_fight_table() {
+    let dir = scratch_dir("fight_manifest");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name = "fights"
+version = "0.1.0"
+
+[fight]
+default_scenario = "duel.toml"
+scenarios_dir = "scenarios"
+reports_dir = "out/reports"
+jobs = 2
+"#,
+    );
+    write(&dir, "scenarios/duel.toml", IDLE_DUEL);
+
+    // No scenario argument: `[fight].default_scenario` resolved under
+    // `[fight].scenarios_dir`. Bare `--report`: `[fight].reports_dir`.
+    let out = miku(&["fight", "--report"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("draw"), "stdout: {}", out.stdout);
+
+    let report = dir.join("out/reports/single.json");
+    assert!(
+        report.is_file(),
+        "expected a report at {}; stderr: {}",
+        report.display(),
+        out.stderr
+    );
+    let json = std::fs::read_to_string(&report).unwrap();
+    assert!(json.contains("\"turns\""), "report body: {json}");
+
+    // An explicit path wins over `[fight].reports_dir`.
+    let out = miku(&["fight", "--report=elsewhere/run.json"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(dir.join("elsewhere/run.json").is_file());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fight_without_default_scenario_explains_itself() {
+    let dir = scratch_dir("fight_no_scenario");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name = "fights"
+version = "0.1.0"
+"#,
+    );
+
+    let out = miku(&["fight"], &dir);
+    assert_ne!(out.status, 0, "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("default_scenario"),
+        "stderr: {}",
+        out.stderr
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
