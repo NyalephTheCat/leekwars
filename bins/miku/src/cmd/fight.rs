@@ -82,9 +82,14 @@ fn run_single(
 ) -> Result<ExitCode> {
     let lf = leek_scenario::build_fight(scn, base_dir)?;
     let fight = leek_generator::shared(lf.fight);
-    let outcome =
-        leek_generator::run_fight_release(&fight, &lf.ais, lf.max_turns, lf.version, lf.strict)
-            .map_err(|e| anyhow!("fight execution error: {e}"))?;
+    let outcome = leek_generator::run_fight_release(
+        &fight,
+        &lf.ais,
+        lf.max_turns,
+        lf.version,
+        lf.strict,
+        lf.max_ops_per_turn,
+    );
 
     let f = fight.borrow();
     match format {
@@ -94,10 +99,18 @@ fn run_single(
                 .iter()
                 .map(|(id, msg)| serde_json::json!({ "entity": id, "message": msg }))
                 .collect();
+            let errors: Vec<_> = outcome
+                .errors
+                .iter()
+                .map(
+                    |e| serde_json::json!({ "turn": e.turn, "entity": e.entity, "error": e.error }),
+                )
+                .collect();
             let obj = serde_json::json!({
                 "winner_team": outcome.winner_team,
                 "turns": outcome.turns,
                 "log": log,
+                "errors": errors,
             });
             println!("{}", serde_json::to_string_pretty(&obj)?);
         }
@@ -110,6 +123,11 @@ fn run_single(
                 for (id, msg) in f.log() {
                     println!("  [{id}] {msg}");
                 }
+            }
+            // AI errors are the one thing `--quiet` doesn't hide: they explain
+            // a turn an entity lost.
+            for e in &outcome.errors {
+                eprintln!("  AI error: {e}");
             }
         }
     }
@@ -222,8 +240,9 @@ fn parse_stats(names: &[String]) -> Result<Vec<StatKind>> {
 }
 
 fn verdict(report: &TestReport) -> ExitCode {
-    // Non-zero if the hero lost any fight — useful as a regression gate.
-    if report.losses > 0 {
+    // Non-zero if the hero lost any fight, or a fight couldn't be run —
+    // useful as a regression gate.
+    if report.losses > 0 || report.errors > 0 {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -251,6 +270,7 @@ fn render_human(report: &TestReport) {
             FightResult::Win => "WIN",
             FightResult::Loss => "LOSS",
             FightResult::Draw => "DRAW",
+            FightResult::Error => "ERROR",
         };
         println!(
             "{:<48} {:>10} {:>8} {:>6} {:>6}",
@@ -262,10 +282,11 @@ fn render_human(report: &TestReport) {
         );
     }
     println!(
-        "\nwins {}  losses {}  draws {}   (win rate {:.1}%)",
+        "\nwins {}  losses {}  draws {}  errors {}   (win rate {:.1}%)",
         report.wins,
         report.losses,
         report.draws,
+        report.errors,
         report.win_rate()
     );
 
@@ -301,6 +322,25 @@ fn render_human(report: &TestReport) {
             println!("  {label}");
         }
     }
+
+    // Surface cells that failed outright and AI errors inside fights that ran.
+    let troubled: Vec<&leek_scenario::CellResult> = report
+        .cells
+        .iter()
+        .filter(|c| c.failure.is_some() || !c.ai_errors.is_empty())
+        .collect();
+    if !troubled.is_empty() {
+        println!("\nerrors:");
+        for c in troubled {
+            println!("  {}", c.label);
+            if let Some(failure) = &c.failure {
+                println!("    fight not run: {failure}");
+            }
+            for e in &c.ai_errors {
+                println!("    AI error: {e}");
+            }
+        }
+    }
 }
 
 fn render_json(report: &TestReport) {
@@ -319,7 +359,10 @@ fn render_json(report: &TestReport) {
                     FightResult::Win => "win",
                     FightResult::Loss => "loss",
                     FightResult::Draw => "draw",
+                    FightResult::Error => "error",
                 },
+                "failure": c.failure,
+                "ai_errors": c.ai_errors,
             })
         })
         .collect();
@@ -341,6 +384,7 @@ fn render_json(report: &TestReport) {
         "wins": report.wins,
         "losses": report.losses,
         "draws": report.draws,
+        "errors": report.errors,
         "win_rate": report.win_rate(),
         "cells": cells,
         "standings": standings,

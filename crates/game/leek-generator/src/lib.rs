@@ -13,6 +13,12 @@
 //! The **turn loop** ([`run_fight`] and friends) runs each living entity's AI
 //! once per turn, regenerating MP/TP and ticking effects, until one team
 //! remains or `max_turns` elapses.
+//!
+//! **Budget and errors**: every AI turn runs under a per-turn operation budget
+//! ([`DEFAULT_MAX_OPS_PER_TURN`] unless the caller configures one). Like the
+//! official generator's `EntityAI.runTurn`, an AI that exhausts it or faults
+//! loses the rest of that turn, the error is recorded against the entity
+//! ([`Outcome::errors`]), and the fight goes on.
 
 pub mod official;
 
@@ -31,6 +37,23 @@ use leek_runtime::Value;
 pub use leek_backend_native::{NativeError, NativeOptions};
 pub use leek_game_runtime::{ActiveEffect, Entity, Fight, FightRef, chips, shared, weapons};
 
+/// The official per-turn operation budget: `AI.MAX_OPERATIONS` (20M), which
+/// `EntityAI.runTurn` resets at the start of every turn. An AI that goes over
+/// it gets `TOO_MUCH_OPERATIONS` and loses the rest of its turn.
+pub const DEFAULT_MAX_OPS_PER_TURN: u64 = leek_backend_native::DEFAULT_OP_BUDGET;
+
+/// The standard fight launch options: release profile, the fight builtins
+/// linked, the given language settings, and `max_ops_per_turn` as the op
+/// budget of each AI run (every run is one turn, and the backend resets its
+/// counter per run, so the budget is per turn).
+#[must_use]
+pub fn fight_options(version: u8, strict: bool, max_ops_per_turn: u64) -> NativeOptions {
+    NativeOptions::release()
+        .with_lang(version, strict)
+        .with_link_game(true)
+        .with_op_limit(max_ops_per_turn)
+}
+
 /// Bridges the native backend's game-runtime hook to the fight functions,
 /// dispatching against the shared [`Fight`] as the
 /// [`GameHost`](leek_game_runtime::GameHost).
@@ -46,12 +69,13 @@ impl leek_backend_native::GameRuntime for FightRuntime {
 /// against `fight` (the fight's current entity is the subject), with the fight
 /// builtins linked in. Returns the AI's value.
 ///
-/// The caller chooses the options — pass `NativeOptions::release()…` for a
-/// normal fight or `NativeOptions::debug()…with_debug_hooks(true)` to run the
-/// AI under the debugger. `opts` is expected to have `with_link_game(true)`.
+/// The caller chooses the options — pass [`fight_options`] for a normal fight
+/// or `NativeOptions::debug()…with_debug_hooks(true)` to run the AI under the
+/// debugger. `opts` is expected to have `with_link_game(true)`.
 ///
 /// # Errors
-/// Propagates a [`NativeError`] if the AI isn't in the native subset.
+/// Propagates a [`NativeError`] if the AI isn't in the native subset, faults,
+/// or exhausts its op budget. Actions it took before that stay applied.
 pub fn run_ai_with(
     fight: &FightRef,
     hir: &HirFile,
@@ -63,21 +87,61 @@ pub fn run_ai_with(
     result
 }
 
-/// Launch one AI with the default release profile. Convenience wrapper over
-/// [`run_ai_with`].
+/// Launch one AI with the standard fight options and the official per-turn
+/// budget. Convenience wrapper over [`run_ai_with`].
 ///
 /// # Errors
-/// Propagates a [`NativeError`] if the AI isn't in the native subset.
+/// Same as [`run_ai_with`].
 pub fn run_ai(
     fight: &FightRef,
     hir: &HirFile,
     version: u8,
     strict: bool,
 ) -> Result<Value, NativeError> {
-    let opts = NativeOptions::release()
-        .with_lang(version, strict)
-        .with_link_game(true);
-    run_ai_with(fight, hir, &opts)
+    run_ai_with(
+        fight,
+        hir,
+        &fight_options(version, strict, DEFAULT_MAX_OPS_PER_TURN),
+    )
+}
+
+/// An AI turn that ended in an error: the fight kept going, and this records
+/// what went wrong for the report (the engine-native counterpart of the
+/// official farmer-log entry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiError {
+    /// Turn the error happened on.
+    pub turn: u32,
+    /// Entity whose AI errored.
+    pub entity: i64,
+    /// What went wrong: the runtime error code (`TOO_MUCH_OPERATIONS`,
+    /// `STACKOVERFLOW`, …) or the compile/unsupported message.
+    pub error: String,
+}
+
+impl AiError {
+    fn new(turn: u32, entity: i64, err: &NativeError) -> Self {
+        let error = match err {
+            // The bare code, like the official log key, not "runtime error: …".
+            NativeError::Runtime(code) => code.clone(),
+            other => other.to_string(),
+        };
+        Self {
+            turn,
+            entity,
+            error,
+        }
+    }
+}
+
+impl std::fmt::Display for AiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "turn {}: entity {}: {}",
+            self.turn, self.entity, self.error
+        )
+    }
 }
 
 /// How a fight ended.
@@ -88,6 +152,8 @@ pub struct Outcome {
     pub winner_team: Option<i64>,
     /// Turns played.
     pub turns: u32,
+    /// Every AI turn that ended in an error, in the order they happened.
+    pub errors: Vec<AiError>,
 }
 
 /// The turn loop, generic over how an entity's AI **and its run options** are
@@ -97,11 +163,18 @@ pub struct Outcome {
 /// which `get_ai` returns `None` act only as targets. Returning per-entity
 /// options lets the debugger run one entity with debug hooks and the rest
 /// without (see [`run_fight_debug`]).
+///
+/// An AI that errors (a runtime fault, an exhausted op budget, or code outside
+/// the native subset) ends its own turn, keeping the actions it already took;
+/// the error goes into [`Outcome::errors`] and the loop moves on to the next
+/// entity, like `EntityAI.runTurn`'s catch blocks. So one faulty AI can't abort
+/// the fight or anything driving it.
 fn fight_loop<'a>(
     fight: &FightRef,
     max_turns: u32,
     get_ai: impl Fn(i64) -> Option<(&'a HirFile, &'a NativeOptions)>,
-) -> Result<Outcome, NativeError> {
+) -> Outcome {
+    let mut errors = Vec::new();
     for turn in 1..=max_turns {
         fight.borrow_mut().set_turn(i64::from(turn));
         let order: Vec<i64> = {
@@ -124,18 +197,21 @@ fn fight_loop<'a>(
             if fight.borrow().life(id).is_none_or(|l| l <= 0) {
                 continue;
             }
-            if let Some((hir, opts)) = get_ai(id) {
-                run_ai_with(fight, hir, opts)?;
+            if let Some((hir, opts)) = get_ai(id)
+                && let Err(e) = run_ai_with(fight, hir, opts)
+            {
+                errors.push(AiError::new(turn, id, &e));
             }
             if fight.borrow().living_teams().len() <= 1 {
-                return Ok(Outcome {
+                return Outcome {
                     winner_team: fight.borrow().living_teams().first().copied(),
                     turns: turn,
-                });
+                    errors,
+                };
             }
         }
     }
-    Ok(Outcome {
+    Outcome {
         winner_team: fight
             .borrow()
             .living_teams()
@@ -143,62 +219,56 @@ fn fight_loop<'a>(
             .copied()
             .filter(|_| fight.borrow().living_teams().len() == 1),
         turns: max_turns,
-    })
+        errors,
+    }
 }
 
-/// Run the fight to a conclusion with the default release profile. Convenience
-/// wrapper over [`run_fight_with`] (see [`fight_loop`] for the turn semantics).
-///
-/// # Errors
-/// Propagates the first [`NativeError`] from launching an AI.
+/// Run the fight to a conclusion with the standard fight options (see
+/// [`fight_options`]; [`fight_loop`] for the turn and error semantics).
+/// `max_ops_per_turn` is each AI turn's op budget — pass
+/// [`DEFAULT_MAX_OPS_PER_TURN`] for the official one.
 pub fn run_fight(
     fight: &FightRef,
     ais: &HashMap<i64, HirFile>,
     max_turns: u32,
     version: u8,
     strict: bool,
-) -> Result<Outcome, NativeError> {
-    let opts = NativeOptions::release()
-        .with_lang(version, strict)
-        .with_link_game(true);
+    max_ops_per_turn: u64,
+) -> Outcome {
+    let opts = fight_options(version, strict, max_ops_per_turn);
     fight_loop(fight, max_turns, |id| ais.get(&id).map(|h| (h, &opts)))
 }
 
 /// Run the fight to a conclusion under explicit [`NativeOptions`], with AIs
 /// shared via [`Arc`] (so callers — the matrix runner, the debugger — can hold
 /// the compiled HIR across constructions without cloning it). `opts` is
-/// expected to have `with_link_game(true)` and the desired language/version.
-///
-/// # Errors
-/// Propagates the first [`NativeError`] from launching an AI.
+/// expected to have `with_link_game(true)`, the desired language/version, and
+/// a finite per-turn op budget (an unlimited one lets a looping AI hang the
+/// fight).
 pub fn run_fight_with(
     fight: &FightRef,
     ais: &HashMap<i64, Arc<HirFile>>,
     max_turns: u32,
     opts: &NativeOptions,
-) -> Result<Outcome, NativeError> {
+) -> Outcome {
     fight_loop(fight, max_turns, |id| {
         ais.get(&id).map(|a| (a.as_ref(), opts))
     })
 }
 
-/// Run a fight with the default release profile and [`Arc`]-shared AIs. The
+/// Run a fight with the standard fight options and [`Arc`]-shared AIs. The
 /// convenience wrapper most callers (the scenario runner, the matrix/tournament
-/// drivers) want: it builds the standard release [`NativeOptions`] with the
-/// game builtins linked and delegates to [`run_fight_with`].
-///
-/// # Errors
-/// Propagates the first [`NativeError`] from launching an AI.
+/// drivers) want: it builds [`fight_options`] and delegates to
+/// [`run_fight_with`].
 pub fn run_fight_release(
     fight: &FightRef,
     ais: &HashMap<i64, Arc<HirFile>>,
     max_turns: u32,
     version: u8,
     strict: bool,
-) -> Result<Outcome, NativeError> {
-    let opts = NativeOptions::release()
-        .with_lang(version, strict)
-        .with_link_game(true);
+    max_ops_per_turn: u64,
+) -> Outcome {
+    let opts = fight_options(version, strict, max_ops_per_turn);
     run_fight_with(fight, ais, max_turns, &opts)
 }
 
@@ -208,9 +278,6 @@ pub fn run_fight_release(
 /// hooks, only it emits safepoints — so the process-global debug hook fires for
 /// that entity alone, keeping breakpoints scoped to the AI under test even
 /// though all AIs share the loop.
-///
-/// # Errors
-/// Propagates the first [`NativeError`] from launching an AI.
 pub fn run_fight_debug(
     fight: &FightRef,
     ais: &HashMap<i64, Arc<HirFile>>,
@@ -218,7 +285,7 @@ pub fn run_fight_debug(
     debug_entity: i64,
     debug_opts: &NativeOptions,
     other_opts: &NativeOptions,
-) -> Result<Outcome, NativeError> {
+) -> Outcome {
     fight_loop(fight, max_turns, |id| {
         ais.get(&id).map(|a| {
             let opts = if id == debug_entity {

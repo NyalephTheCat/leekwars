@@ -1712,10 +1712,8 @@ fn run() -> Result<serde_json::Value> {
         ais.insert(fid, leek_scenario::compile_ai(Path::new(path), 4, false)?);
     }
 
-    let opts = leek_generator::NativeOptions::release()
-        .with_lang(4, false)
-        .with_link_game(true);
-    run_official_fight(state, &ais, &[0], &opts).map_err(|e| anyhow!("running fight: {e}"))
+    let opts = leek_generator::fight_options(4, false, leek_generator::DEFAULT_MAX_OPS_PER_TURN);
+    Ok(run_official_fight(state, &ais, &[0], &opts))
 }
 
 fn main() -> ExitCode {

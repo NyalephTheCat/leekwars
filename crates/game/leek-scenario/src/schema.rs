@@ -24,6 +24,10 @@ pub struct Scenario {
     pub seed: Option<u64>,
     /// Turn limit (default 64 at build time).
     pub max_turns: Option<u32>,
+    /// Operation budget of each AI turn (default the official 20M,
+    /// `leek_generator::DEFAULT_MAX_OPS_PER_TURN`). An AI that exceeds it
+    /// loses the rest of that turn; the fight goes on.
+    pub max_ops_per_turn: Option<u64>,
     /// Language version the AIs compile under (default 4).
     pub version: Option<u8>,
     /// Strict mode (default false): AIs compile strictly, and entities may
@@ -136,6 +140,8 @@ pub struct ScenarioPatch {
     pub seed: Option<u64>,
     #[serde(default)]
     pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_ops_per_turn: Option<u64>,
     #[serde(default)]
     pub version: Option<u8>,
     #[serde(default)]
@@ -253,6 +259,8 @@ struct RawScenario {
     #[serde(default)]
     max_turns: Option<u32>,
     #[serde(default)]
+    max_ops_per_turn: Option<u64>,
+    #[serde(default)]
     version: Option<u8>,
     #[serde(default)]
     strict: Option<bool>,
@@ -306,6 +314,7 @@ impl From<RawScenario> for Scenario {
             extends: r.extends,
             seed: r.seed,
             max_turns: r.max_turns,
+            max_ops_per_turn: r.max_ops_per_turn,
             version: r.version,
             strict: r.strict,
             map: r.map,

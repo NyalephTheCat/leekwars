@@ -25,6 +25,8 @@ pub struct LoadedFight {
     pub fight: Fight,
     pub ais: HashMap<i64, Arc<HirFile>>,
     pub max_turns: u32,
+    /// Operation budget of each AI turn.
+    pub max_ops_per_turn: u64,
     pub version: u8,
     pub strict: bool,
 }
@@ -35,6 +37,8 @@ pub struct LoadedFight {
 pub struct World {
     pub fight: Fight,
     pub max_turns: u32,
+    /// Operation budget of each AI turn.
+    pub max_ops_per_turn: u64,
     pub version: u8,
     pub strict: bool,
 }
@@ -52,6 +56,9 @@ pub fn build_world(scn: &Scenario) -> Result<World> {
     let version = scn.version.unwrap_or(4);
     let strict = scn.strict.unwrap_or(false);
     let max_turns = scn.max_turns.unwrap_or(64);
+    let max_ops_per_turn = scn
+        .max_ops_per_turn
+        .unwrap_or(leek_generator::DEFAULT_MAX_OPS_PER_TURN);
 
     let first_id = scn.entities.first().and_then(|e| e.id).unwrap_or(0);
     let mut fight = Fight::new(map.width, map.height, first_id);
@@ -70,6 +77,7 @@ pub fn build_world(scn: &Scenario) -> Result<World> {
     Ok(World {
         fight,
         max_turns,
+        max_ops_per_turn,
         version,
         strict,
     })
@@ -115,6 +123,7 @@ pub fn build_fight_with_cache(
         fight: world.fight,
         ais,
         max_turns: world.max_turns,
+        max_ops_per_turn: world.max_ops_per_turn,
         version: world.version,
         strict: world.strict,
     })
@@ -272,7 +281,36 @@ pub fn compile_ai_source(
 
 #[cfg(test)]
 mod tests {
-    use super::compile_ai_source;
+    use super::{build_world, compile_ai_source};
+    use crate::schema::Scenario;
+
+    /// Regression (#38): the scenario had no op-budget setting and fights ran
+    /// unbounded. `max_ops_per_turn` defaults to the official 20M, can be set
+    /// at the top level, and overlays from a profile like the other settings.
+    #[test]
+    fn max_ops_per_turn_defaults_to_official_budget_and_is_configurable() {
+        let scenario = |top: &str| {
+            Scenario::from_toml_str(&format!(
+                "{top}\n\
+                 [map]\nwidth = 5\nheight = 5\n\
+                 [[entities]]\nid = 1\ncell = 0\n\
+                 [profiles.tight]\nmax_ops_per_turn = 1000\n"
+            ))
+            .expect("parse scenario")
+        };
+
+        let default = build_world(&scenario("")).expect("world");
+        assert_eq!(
+            default.max_ops_per_turn,
+            leek_generator::DEFAULT_MAX_OPS_PER_TURN
+        );
+        assert_eq!(default.max_ops_per_turn, 20_000_000);
+
+        let mut set = scenario("max_ops_per_turn = 5000");
+        assert_eq!(build_world(&set).expect("world").max_ops_per_turn, 5000);
+        set.apply_profile("tight").expect("profile");
+        assert_eq!(build_world(&set).expect("world").max_ops_per_turn, 1000);
+    }
 
     /// `class` is only a keyword from v2 on, so this AI compiles only when its
     /// own `@version:1` pragma wins over the world's default version.

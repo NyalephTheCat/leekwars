@@ -7,13 +7,16 @@
 //! - [`run_random`] — randomized point-buy build fuzzing (see [`build_gen`]).
 //!
 //! All classify each fight relative to a *hero team* (the AI under test) and
-//! return a [`TestReport`].
+//! return a [`TestReport`]. One bad cell never sinks the run: an AI error
+//! inside a fight is contained by the generator and listed on the cell
+//! ([`CellResult::ai_errors`]), and a fight that can't even be set up (an AI
+//! that doesn't compile, say) becomes a [`FightResult::Error`] cell.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use leek_generator::Outcome;
 use leek_hir::HirFile;
 
@@ -27,6 +30,8 @@ pub enum FightResult {
     Win,
     Loss,
     Draw,
+    /// The fight couldn't be run; [`CellResult::failure`] says why.
+    Error,
 }
 
 /// One fight in a report.
@@ -37,6 +42,11 @@ pub struct CellResult {
     pub winner: Option<i64>,
     pub turns: u32,
     pub result: FightResult,
+    /// AI turns that ended in an error during the fight (each rendered as
+    /// `turn N: entity E: ERROR`); the fight still played out.
+    pub ai_errors: Vec<String>,
+    /// Why the fight couldn't be run, for a [`FightResult::Error`] cell.
+    pub failure: Option<String>,
 }
 
 /// A competitor's aggregate record (tournament leaderboard row).
@@ -58,6 +68,8 @@ pub struct TestReport {
     pub wins: u32,
     pub losses: u32,
     pub draws: u32,
+    /// Cells whose fight couldn't be run ([`FightResult::Error`]).
+    pub errors: u32,
 }
 
 impl TestReport {
@@ -69,6 +81,7 @@ impl TestReport {
             wins: 0,
             losses: 0,
             draws: 0,
+            errors: 0,
         }
     }
 
@@ -84,6 +97,7 @@ impl TestReport {
             FightResult::Win => self.wins += 1,
             FightResult::Loss => self.losses += 1,
             FightResult::Draw => self.draws += 1,
+            FightResult::Error => self.errors += 1,
         }
         self.cells.push(CellResult {
             label,
@@ -91,11 +105,28 @@ impl TestReport {
             winner: outcome.winner_team,
             turns: outcome.turns,
             result,
+            ai_errors: outcome.errors.iter().map(ToString::to_string).collect(),
+            failure: None,
         });
         result
     }
 
-    /// Win rate over decisive + drawn fights, as a percentage.
+    /// Record a cell whose fight couldn't be run.
+    fn record_failure(&mut self, label: String, seed: u64, err: &anyhow::Error) {
+        self.errors += 1;
+        self.cells.push(CellResult {
+            label,
+            seed,
+            winner: None,
+            turns: 0,
+            result: FightResult::Error,
+            ai_errors: Vec::new(),
+            failure: Some(format!("{err:#}")),
+        });
+    }
+
+    /// Win rate over the fights that ran (wins, losses and draws; error cells
+    /// don't count), as a percentage.
     #[must_use]
     pub fn win_rate(&self) -> f64 {
         let total = self.wins + self.losses + self.draws;
@@ -117,6 +148,10 @@ fn classify(winner: Option<i64>, hero_team: i64) -> FightResult {
 
 /// The shared unit of work: build the fight from a (cache-backed) scenario and
 /// run it to an [`Outcome`]. Compiles nothing when every AI is in `cache`.
+///
+/// # Errors
+/// Only when the fight can't be built (e.g. an AI missing from `cache` fails
+/// to compile); AI errors during the fight are part of the [`Outcome`].
 fn play_one(
     scn: &Scenario,
     base_dir: &Path,
@@ -124,17 +159,27 @@ fn play_one(
 ) -> Result<Outcome> {
     let lf = build_fight_with_cache(scn, base_dir, Some(cache))?;
     let fight = leek_generator::shared(lf.fight);
-    leek_generator::run_fight_release(&fight, &lf.ais, lf.max_turns, lf.version, lf.strict)
-        .map_err(|e| anyhow!("fight execution error: {e}"))
+    Ok(leek_generator::run_fight_release(
+        &fight,
+        &lf.ais,
+        lf.max_turns,
+        lf.version,
+        lf.strict,
+        lf.max_ops_per_turn,
+    ))
 }
 
 /// Compile every distinct AI path used by `base` plus the `extra` opponents
 /// once, keyed by the joined path (matching [`build_fight_with_cache`]).
+///
+/// An AI that fails to compile is left out rather than failing the run: the
+/// cells that use it retry the compile and report the error as their own
+/// [`FightResult::Error`], while the other cells still play.
 fn precompile(
     base: &Scenario,
     base_dir: &Path,
     extra: &[PathBuf],
-) -> Result<HashMap<PathBuf, Arc<HirFile>>> {
+) -> HashMap<PathBuf, Arc<HirFile>> {
     let version = base.version.unwrap_or(4);
     let strict = base.strict.unwrap_or(false);
 
@@ -146,11 +191,13 @@ fn precompile(
         .chain(extra.iter().cloned());
     for path in paths {
         let joined = base_dir.join(&path);
-        if let std::collections::hash_map::Entry::Vacant(slot) = cache.entry(joined.clone()) {
-            slot.insert(compile_ai(&joined, version, strict)?);
+        if let std::collections::hash_map::Entry::Vacant(slot) = cache.entry(joined.clone())
+            && let Ok(hir) = compile_ai(&joined, version, strict)
+        {
+            slot.insert(hir);
         }
     }
-    Ok(cache)
+    cache
 }
 
 /// Return the team ids present in `scn`, in first-seen order.
@@ -190,17 +237,21 @@ pub struct MatrixAxes {
 }
 
 /// Run a cartesian sweep of seeds × opponents × profiles, classifying each
-/// fight relative to `hero_team`.
+/// fight relative to `hero_team`. A cell whose fight can't be run is reported
+/// as [`FightResult::Error`] and the sweep continues.
 ///
 /// # Errors
-/// Compilation/fight errors, or a profile name not found in the scenario.
+/// A profile name not found in the scenario (checked before any fight runs).
 pub fn run_matrix(
     base: &Scenario,
     base_dir: &Path,
     axes: &MatrixAxes,
     hero_team: i64,
 ) -> Result<TestReport> {
-    let cache = precompile(base, base_dir, &axes.opponents)?;
+    for name in &axes.profiles {
+        base.clone().apply_profile(name)?;
+    }
+    let cache = precompile(base, base_dir, &axes.opponents);
     let opp_team = team_ids(base).into_iter().find(|&t| t != hero_team);
 
     let seeds = if axes.seeds.is_empty() {
@@ -231,13 +282,17 @@ pub fn run_matrix(
                 if let (Some(opp_path), Some(team)) = (opp, opp_team) {
                     set_team_lead_ai(&mut scn, team, opp_path);
                 }
-                let outcome = play_one(&scn, base_dir, &cache)?;
                 let label = format!(
                     "seed={seed} opp={} profile={}",
                     opp.map_or("-", |p| p.to_str().unwrap_or("?")),
                     prof.map_or("-", String::as_str),
                 );
-                report.record(label, seed, &outcome, hero_team);
+                match play_one(&scn, base_dir, &cache) {
+                    Ok(outcome) => {
+                        report.record(label, seed, &outcome, hero_team);
+                    }
+                    Err(e) => report.record_failure(label, seed, &e),
+                }
             }
         }
     }
@@ -260,6 +315,8 @@ pub struct TournamentSpec {
 }
 
 /// Run a tournament among `entrants`, returning a leaderboard in `standings`.
+/// A game that can't be run is reported as a [`FightResult::Error`] cell and
+/// counts for neither side.
 ///
 /// # Errors
 /// Needs at least two entrants and two teams in the base scenario.
@@ -277,7 +334,7 @@ pub fn run_tournament(
         bail!("the base scenario needs two teams for a tournament");
     };
 
-    let cache = precompile(base, base_dir, &spec.entrants)?;
+    let cache = precompile(base, base_dir, &spec.entrants);
     let seeds = if spec.seeds.is_empty() {
         vec![base.seed.unwrap_or(1)]
     } else {
@@ -300,31 +357,29 @@ pub fn run_tournament(
     }
 
     // Play A (team_a) vs B (team_b) over the seeds; returns (a_wins, b_wins, draws).
-    let mut play_match = |a: &Path, b: &Path| -> Result<(u32, u32, u32)> {
+    let mut play_match = |a: &Path, b: &Path| -> (u32, u32, u32) {
         let (mut aw, mut bw, mut dw) = (0, 0, 0);
         for &seed in &seeds {
             let mut scn = base.clone();
             scn.seed = Some(seed);
             set_team_lead_ai(&mut scn, team_a, a);
             set_team_lead_ai(&mut scn, team_b, b);
-            let outcome = play_one(&scn, base_dir, &cache)?;
             let label = format!("{} vs {} @seed={seed}", label_of(a), label_of(b));
+            let outcome = match play_one(&scn, base_dir, &cache) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    report.record_failure(label, seed, &e);
+                    continue;
+                }
+            };
             match outcome.winner_team {
-                Some(t) if t == team_a => {
-                    aw += 1;
-                    report.record(label, seed, &outcome, team_a);
-                }
-                Some(_) => {
-                    bw += 1;
-                    report.record(label, seed, &outcome, team_a);
-                }
-                None => {
-                    dw += 1;
-                    report.record(label, seed, &outcome, team_a);
-                }
+                Some(t) if t == team_a => aw += 1,
+                Some(_) => bw += 1,
+                None => dw += 1,
             }
+            report.record(label, seed, &outcome, team_a);
         }
-        Ok((aw, bw, dw))
+        (aw, bw, dw)
     };
 
     match spec.bracket {
@@ -333,7 +388,7 @@ pub fn run_tournament(
                 for j in (i + 1)..spec.entrants.len() {
                     let a = &spec.entrants[i];
                     let b = &spec.entrants[j];
-                    let (aw, bw, _dw) = play_match(a, b)?;
+                    let (aw, bw, _dw) = play_match(a, b);
                     let (la, lb) = (label_of(a), label_of(b));
                     match aw.cmp(&bw) {
                         std::cmp::Ordering::Greater => award(&mut standings, &la, &lb),
@@ -353,7 +408,7 @@ pub fn run_tournament(
                         continue;
                     }
                     let (a, b) = (&pair[0], &pair[1]);
-                    let (aw, bw, _dw) = play_match(a, b)?;
+                    let (aw, bw, _dw) = play_match(a, b);
                     let (la, lb) = (label_of(a), label_of(b));
                     if bw > aw {
                         award(&mut standings, &lb, &la);
@@ -410,10 +465,11 @@ fn label_of(path: &Path) -> String {
 
 /// Run randomized point-buy fuzzing: generate `spec.runs` seeded builds, apply
 /// each to the targeted entities, and fight. Builds that beat the hero are kept
-/// as `Loss` cells so the caller can surface them.
+/// as `Loss` cells so the caller can surface them; a build whose fight can't be
+/// run is an `Error` cell.
 ///
 /// # Errors
-/// Compilation/fight errors.
+/// None today; the `Result` keeps the driver signatures uniform.
 pub fn run_random(
     base: &Scenario,
     base_dir: &Path,
@@ -421,7 +477,7 @@ pub fn run_random(
     hero_team: i64,
 ) -> Result<TestReport> {
     // AIs are fixed across runs — only stats change — so the cache is built once.
-    let cache = precompile(base, base_dir, &[])?;
+    let cache = precompile(base, base_dir, &[]);
     let mut report = TestReport::new("random");
 
     for run in 0..spec.runs {
@@ -443,9 +499,13 @@ pub fn run_random(
         let fight_seed = base.seed.unwrap_or(1).wrapping_add(u64::from(run));
         scn.seed = Some(fight_seed);
 
-        let outcome = play_one(&scn, base_dir, &cache)?;
         let label = format!("build#{run} {}", fmt_build(&build));
-        report.record(label, fight_seed, &outcome, hero_team);
+        match play_one(&scn, base_dir, &cache) {
+            Ok(outcome) => {
+                report.record(label, fight_seed, &outcome, hero_team);
+            }
+            Err(e) => report.record_failure(label, fight_seed, &e),
+        }
     }
     Ok(report)
 }
@@ -454,4 +514,56 @@ fn fmt_build(build: &HashMap<crate::schema::StatKind, i64>) -> String {
     let mut parts: Vec<String> = build.iter().map(|(k, v)| format!("{k:?}={v}")).collect();
     parts.sort();
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A two-leek, AI-less arena: every fight is an idle 1-turn draw, so the
+    /// only thing that can go wrong in a cell is the opponent AI itself.
+    fn arena() -> Scenario {
+        Scenario::from_toml_str(
+            r"
+            max_turns = 1
+            [map]
+            width = 5
+            height = 5
+            [[entities]]
+            id = 1
+            team = 0
+            cell = 0
+            [[entities]]
+            id = 2
+            team = 1
+            cell = 24
+            ",
+        )
+        .expect("parse arena")
+    }
+
+    /// Regression (#67): a matrix cell whose opponent can't be compiled used to
+    /// abort the whole sweep with `?`; it's now an `Error` cell and the other
+    /// cells still play.
+    #[test]
+    fn matrix_reports_a_failing_cell_and_keeps_going() {
+        let dir = std::env::temp_dir().join(format!("leek-matrix-cell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("idle.leek"), "return 0;\n").expect("write AI");
+
+        let axes = MatrixAxes {
+            seeds: vec![1],
+            opponents: vec![PathBuf::from("missing.leek"), PathBuf::from("idle.leek")],
+            profiles: Vec::new(),
+        };
+        let report = run_matrix(&arena(), &dir, &axes, 0).expect("the sweep itself succeeds");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(report.cells.len(), 2);
+        assert_eq!(report.cells[0].result, FightResult::Error);
+        let failure = report.cells[0].failure.as_deref().unwrap_or_default();
+        assert!(failure.contains("missing.leek"), "failure: {failure}");
+        assert_eq!(report.cells[1].result, FightResult::Draw);
+        assert_eq!((report.errors, report.draws), (1, 1));
+    }
 }
