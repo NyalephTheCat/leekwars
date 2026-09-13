@@ -300,6 +300,14 @@ impl Tx<'_, '_> {
         idx: &Operand,
         rv: &Rvalue,
     ) -> Result<(), NativeError> {
+        // A `Synthetic` store is the nested-index promotion write-back
+        // (`a[i][j] = v` re-storing `a[i]`). It only matters when v1-v3
+        // LegacyArray promotion morphed the intermediate container, so v4
+        // skips it, and it never charges (upstream promotes in place).
+        let charged = !matches!(rv, Rvalue::Synthetic(_));
+        if !charged && self.lang.version >= 4 {
+            return Ok(());
+        }
         // `C['staticField'] = v` — write to per-class static storage.
         if let Some(cls) = self.classref_locals.get(&base).cloned() {
             if let Operand::Const(Const::String(name)) = idx
@@ -374,10 +382,18 @@ impl Tx<'_, '_> {
         // A statically-integer index needs no heap box (`a[i] = v`); the boxed
         // path stays for map keys of any kind.
         if it == ValTy::Int {
-            let set = self.imports.rt("leek_set_index_int")?;
+            let set = self.imports.rt(if charged {
+                "leek_set_index_int"
+            } else {
+                "leek_set_index_int_raw"
+            })?;
             self.b.ins().call(set, &[arr, i, elem, ver]);
         } else {
-            let set = self.imports.rt("leek_value_set_index")?;
+            let set = self.imports.rt(if charged {
+                "leek_value_set_index"
+            } else {
+                "leek_value_set_index_raw"
+            })?;
             let idx_h = self.coerce(i, it, ValTy::Ref)?;
             self.b.ins().call(set, &[arr, idx_h, elem, ver]);
         }

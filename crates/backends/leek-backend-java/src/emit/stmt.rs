@@ -747,6 +747,7 @@ impl Emitter<'_> {
             writer: JavaWriter::new(),
             in_function: true,
             iter_counter: self.iter_counter,
+            switch_counter: std::cell::Cell::new(self.switch_counter.get()),
             lambda_depth: std::cell::Cell::new(self.lambda_depth.get()),
             outlined: std::cell::RefCell::new(Vec::new()),
             fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -768,6 +769,7 @@ impl Emitter<'_> {
         // synthesized to the parent, and advance our counter so
         // subsequent outlines don't collide.
         self.outline_counter.set(scratch.outline_counter.get());
+        self.switch_counter.set(scratch.switch_counter.get());
         self.outlined
             .borrow_mut()
             .append(&mut *scratch.outlined.borrow_mut());

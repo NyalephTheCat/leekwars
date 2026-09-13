@@ -326,3 +326,151 @@ fn lambda_writing_captured_parameter_uses_null_stub_known_limitation() {
         "captured-parameter write is expected to still hit the null stub: {java}"
     );
 }
+
+/// Every Java local a lowered switch declares (`Object __sw_N`, `int __si_N`,
+/// …), in emission order.
+fn switch_temp_decls(java: &str) -> Vec<String> {
+    java.lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let rest = l
+                .strip_prefix("Object ")
+                .or_else(|| l.strip_prefix("int "))?;
+            let name = rest.split([' ', ';']).next()?;
+            name.starts_with("__s").then(|| name.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn sequential_and_nested_switches_use_unique_braced_temporaries() {
+    // #42: two sequential string switches plus a nested one used to declare
+    // `__scrut` / `__idx` three times in the same Java scope (javac: "variable
+    // already defined"). Each switch now gets its own numbered temporaries
+    // inside its own `{ … }` block, in both modes.
+    let src = "var a = 'x' var y = 2 var r = 0 \
+               switch (a) { case 'x': r += 1 case 'y': r += 2 } \
+               switch (a) { case 'x': switch (y) { case 2: r += 5 break } break default: r += 20 } \
+               return r";
+    for opts in [
+        Options::exact(Version::V4, 1),
+        Options::clean(Version::V4, 1),
+    ] {
+        let java = java_for(src, &opts);
+        let decls = switch_temp_decls(&java);
+        let unique: std::collections::HashSet<_> = decls.iter().collect();
+        assert_eq!(decls.len(), unique.len(), "duplicate switch temp: {java}");
+        for name in ["__sw_0", "__si_0", "__sw_1", "__si_1", "__sw_2", "__si_2"] {
+            assert!(decls.iter().any(|d| d == name), "missing {name}: {java}");
+        }
+        assert!(
+            !java.contains("__scrut") && !java.contains("__idx"),
+            "{java}"
+        );
+    }
+}
+
+#[test]
+fn exact_switch_matches_upstream_lowering_shape() {
+    // #75: upstream `SwitchBlock.writeComparisonChain` shape, byte for byte:
+    // a braced block, `__sw_N` / `__si_N`, grouped labels in an `else if`
+    // chain charging 1 op per label, and braced arms charging `ops(1)`.
+    let java = java_for(
+        "var x = 1 switch (x) { case 1: case 2: return 'a' case 3: return 'b' } return 'none'",
+        &Options::exact(Version::V4, 1),
+    );
+    let expected = "{\n\
+                    Object __sw_0 = u_x;\n\
+                    int __si_0 = -1;\n\
+                    if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;\n\
+                    else if (ops(eq(__sw_0, 3l), 1)) __si_0 = 1;\n\
+                    switch (__si_0) {\n\
+                    case 0: {\n\
+                    ops(1);return \"a\";\n\
+                    }\n\
+                    case 1: {\n\
+                    ops(1);return \"b\";\n\
+                    }\n\
+                    }\n\
+                    }\n";
+    assert!(java.contains(expected), "{java}");
+}
+
+#[test]
+fn switch_arms_get_their_own_java_scope() {
+    // #42: the same local declared in two arms collided in the single scope
+    // of an unbraced Java switch block.
+    let java = java_for(
+        "var x = 1 switch (x) { case 1: var u = 1 return u case 2: var u = 2 return u } return 0",
+        &Options::exact(Version::V4, 1),
+    );
+    assert!(
+        java.contains("case 0: {\n") && java.contains("case 1: {\n"),
+        "{java}"
+    );
+}
+
+#[test]
+fn switch_ending_in_empty_label_arm_needs_no_trailing_return() {
+    // `case 1: case 2: return …` — the empty label arm falls through into a
+    // returning arm, so javac sees the switch as never completing normally
+    // and rejects a trailing `return null;` as unreachable.
+    let src = "function f(x) { switch (x) { case 1: case 2: return 'a' default: return 'd' } } return f(1)";
+    for opts in [
+        Options::exact(Version::V4, 1),
+        Options::clean(Version::V4, 1),
+    ] {
+        let java = java_for(src, &opts);
+        let f = java
+            .split("private Object f")
+            .nth(1)
+            .and_then(|rest| rest.split("runIA").next())
+            .expect("function body");
+        assert!(
+            !f.contains("return null;"),
+            "unreachable trailing return: {java}"
+        );
+    }
+}
+
+#[test]
+fn clean_native_switch_guards_the_discriminant() {
+    // #72: the native path used to emit `switch ((int) ((Number) x).longValue())`,
+    // which truncates reals (1.7 matched `case 1`), wraps longs, and throws on
+    // strings / null. It now dispatches only a `Long` that fits an `int`, and
+    // sends every other subject through the loose-equality `eq` chain.
+    let java = java_for(
+        "var x = 1.7 switch (x) { case 1: return 'one' case -2: return 'minus' default: return 'd' }",
+        &Options::clean(Version::V4, 1),
+    );
+    assert!(!java.contains("((Number)"), "unguarded int cast: {java}");
+    assert!(
+        java.contains("if (__sw_0 instanceof Long __swv_0) {"),
+        "{java}"
+    );
+    assert!(
+        java.contains("int __swk_0 = (int) (long) __swv_0;"),
+        "{java}"
+    );
+    assert!(java.contains("if (__swk_0 == (long) __swv_0)"), "{java}");
+    assert!(java.contains("case -2:"), "{java}");
+    assert!(
+        java.contains("if (eq(__sw_0, 1l)) __si_0 = 0;"),
+        "eq fallback: {java}"
+    );
+}
+
+#[test]
+fn clean_switch_with_out_of_range_or_duplicate_labels_uses_eq_chain() {
+    // #72: a label beyond `int` range, or a repeated label, made the native
+    // Java switch fail to compile (or match the wrong arm after truncation).
+    for src in [
+        "var x = 1 switch (x) { case 4294967297: return 'big' case 1: return 'one' } return 'd'",
+        "var x = 1 switch (x) { case 1: return 'a' case 1: return 'b' } return 'd'",
+    ] {
+        let java = java_for(src, &Options::clean(Version::V4, 1));
+        assert!(!java.contains("instanceof Long"), "{src}: {java}");
+        assert!(!java.contains("((Number)"), "{src}: {java}");
+        assert!(java.contains("if (eq(__sw_0, "), "{src}: {java}");
+    }
+}
