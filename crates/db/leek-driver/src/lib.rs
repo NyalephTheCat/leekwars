@@ -52,7 +52,17 @@ pub fn run_with_reporter(
     reporter: &Reporter,
 ) -> DriverRun<'static> {
     let run = pipeline.run(input);
-    let had_error = match run.get::<leek_resolver::pipeline::IncludeGraphArtifact>() {
+    let had_error = report(&run, source_text, file_label, reporter);
+    DriverRun { run, had_error }
+}
+
+/// Render `run`'s diagnostics through `reporter` (manifest lint levels
+/// applied); returns whether any error was emitted.
+///
+/// When the pipeline resolved includes, diagnostics raised in included
+/// files render against those files' own text and path.
+pub fn report(run: &Run<'_>, source_text: &str, file_label: &str, reporter: &Reporter) -> bool {
+    match run.get::<leek_resolver::pipeline::IncludeGraphArtifact>() {
         Some(graph) if !graph.includes.is_empty() => {
             let labels: Vec<String> = graph
                 .includes
@@ -72,8 +82,41 @@ pub fn run_with_reporter(
             reporter.emit_run_sources(run.diagnostics(), source_text, file_label, &sources)
         }
         _ => reporter.emit_run(run.diagnostics(), source_text, file_label),
+    }
+}
+
+/// The [`Reporter`] for `project`: the manifest's `[lint]` deny/warn/allow
+/// levels over the catalog defaults. Every command that renders or acts on
+/// diagnostics builds its reporter here, so `check`, `lint` and `fix` agree
+/// on which diagnostics exist and at what severity.
+pub fn reporter_for(
+    project: &Project,
+    color: ColorWhen,
+    format: MessageFormat,
+) -> Result<Reporter> {
+    let lint = LintLevels {
+        deny: &project.manifest.lint.deny,
+        warn: &project.manifest.lint.warn,
+        allow: &project.manifest.lint.allow,
     };
-    DriverRun { run, had_error }
+    Reporter::new(color, format, lint).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The pipeline for one project file: `config`'s target and params merged
+/// with the manifest's opt-in lint groups, with the file's includes resolved
+/// from disk (included files get `SourceId`s following `source_id`).
+pub fn file_pipeline(
+    project: &Project,
+    path: &Path,
+    source_id: leek_span::SourceId,
+    config: &DriverConfig,
+) -> Result<Pipeline> {
+    let merged = merge_manifest_lints(project, config);
+    Ok(leek_recipes::pipeline_with_includes(
+        merged.target,
+        includes_step(path, source_id),
+        &merged.params,
+    )?)
 }
 
 /// Merge the manifest's opt-in lint groups into `config`'s params.
@@ -107,19 +150,8 @@ pub fn run_file(
     config: &DriverConfig,
 ) -> Result<DriverRun<'static>> {
     let (src, text) = project.pipeline_input(source_id, path)?;
-    let lint = LintLevels {
-        deny: &project.manifest.lint.deny,
-        warn: &project.manifest.lint.warn,
-        allow: &project.manifest.lint.allow,
-    };
-    let reporter =
-        Reporter::new(config.color, config.format, lint).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let merged = merge_manifest_lints(project, config);
-    let pipeline = leek_recipes::pipeline_with_includes(
-        merged.target,
-        includes_step(path, source_id),
-        &merged.params,
-    )?;
+    let reporter = reporter_for(project, config.color, config.format)?;
+    let pipeline = file_pipeline(project, path, source_id, config)?;
     let label = path.display().to_string();
     Ok(run_with_reporter(
         &pipeline,
@@ -150,13 +182,7 @@ pub fn run_file_timed(
     sink: &TimingSink,
 ) -> Result<DriverRun<'static>> {
     let (src, text) = project.pipeline_input(source_id, path)?;
-    let lint = LintLevels {
-        deny: &project.manifest.lint.deny,
-        warn: &project.manifest.lint.warn,
-        allow: &project.manifest.lint.allow,
-    };
-    let reporter =
-        Reporter::new(config.color, config.format, lint).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let reporter = reporter_for(project, config.color, config.format)?;
     let merged = merge_manifest_lints(project, config);
     let pipeline = leek_recipes::pipeline_with_includes_timed(
         merged.target,

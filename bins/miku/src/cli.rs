@@ -77,6 +77,21 @@ pub enum Command {
     /// Run diagnostics across the project without producing output.
     Check,
     /// Run every `.leek` file under `tests/` via the native JIT.
+    ///
+    /// Each test states what it expects with `// miku-test:` directives in
+    /// its leading comment block (a malformed, unknown, conflicting or
+    /// misplaced directive fails the test):
+    ///
+    ///   expect-pass                   compiles and runs without error (default)
+    ///   expect-output: <text>         ...and its result prints as <text>
+    ///   expect-compile-error: <CODE>  compilation reports error <CODE> (e.g. E0100)
+    ///   expect-runtime-error: <CODE>  the run fails with runtime error <CODE>
+    ///                                 (e.g. STACKOVERFLOW, TOO_MUCH_OPERATIONS)
+    ///   expect-fail                   the run fails with some runtime error; op-budget
+    ///                                 exhaustion (TOO_MUCH_OPERATIONS) only counts
+    ///                                 when `timeout` is set
+    ///   timeout <ops>                 op budget for the run (integer)
+    #[command(verbatim_doc_comment)]
     Test(Test),
     /// Format all `.leek` sources.
     Fmt(Fmt),
@@ -334,8 +349,10 @@ pub struct Lint {
 
 #[derive(Debug, clap::Args)]
 pub struct Fight {
-    /// Scenario file (`.toml` or `.json`) describing the fight. Falls back to
-    /// the manifest's `[fight].default_scenario` if omitted.
+    /// Scenario file (`.toml` or `.json`) describing the fight. If omitted,
+    /// runs the project manifest's `[fight].default_scenario` (relative to the
+    /// project root); without one, lists the scenarios in
+    /// `[fight].scenarios_dir`.
     pub scenario: Option<PathBuf>,
 
     /// What to run. `single` plays one fight; the others test the hero AI

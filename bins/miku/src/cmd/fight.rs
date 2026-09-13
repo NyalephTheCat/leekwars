@@ -1,28 +1,30 @@
 //! `miku fight` — run a leek-wars fight from a scenario file, or test the hero
 //! AI against many settings (matrix sweep, tournament, randomized builds).
 
-use std::path::Path;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Result, anyhow};
+use leek_project::Project;
 use leek_scenario::{
     Bracket, MatrixAxes, RandomSpec, RandomTarget, Scenario, StatKind, TestReport, TournamentSpec,
 };
 
 use crate::cli::{BracketArg, Fight, FightFormat, FightMode, RandomTargetArg};
 
-pub fn run(args: &Fight, quiet: bool) -> Result<ExitCode> {
+pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
+    let scenario_path = match &args.scenario {
+        Some(path) => path.clone(),
+        None => scenario_from_manifest(manifest_path)?,
+    };
+
     // A fight always needs the leek-wars game builtins resolvable at compile
     // time, so register them up front (idempotent — harmless if `--library
     // leekwars` already did). This makes plain `miku fight scenario.toml` work.
     leek_recipes::load_and_register_libraries(["leekwars"])
         .map_err(|e| anyhow!("registering the leekwars library: {e}"))?;
 
-    let Some(scenario_path) = args.scenario.clone() else {
-        return Err(anyhow!(
-            "no scenario file given (usage: miku fight <scenario.toml>)"
-        ));
-    };
     let base_dir = scenario_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -71,6 +73,76 @@ pub fn run(args: &Fight, quiet: bool) -> Result<ExitCode> {
             Ok(verdict(&report))
         }
     }
+}
+
+const USAGE: &str = "usage: miku fight <scenario.toml>";
+
+/// No scenario argument: take the project manifest's
+/// `[fight].default_scenario`, or explain what is available.
+fn scenario_from_manifest(manifest_path: Option<&Path>) -> Result<PathBuf> {
+    let project = Project::discover(manifest_path).map_err(|e| {
+        anyhow!("no scenario file given ({USAGE}) and no Miku.toml to read `[fight].default_scenario` from: {e}")
+    })?;
+    for w in &project.warnings {
+        eprintln!("warning: {w}");
+    }
+    let fight = &project.manifest.fight;
+
+    if let Some(default) = &fight.default_scenario {
+        let path = project.root.join(default);
+        if !path.is_file() {
+            return Err(anyhow!(
+                "Miku.toml: `[fight].default_scenario` = `{}` does not exist ({})",
+                default.display(),
+                path.display()
+            ));
+        }
+        return Ok(path);
+    }
+
+    let mut message = format!(
+        "no scenario file given ({USAGE}) and Miku.toml sets no `[fight].default_scenario`"
+    );
+    if let Some(dir) = &fight.scenarios_dir {
+        let dir = project.root.join(dir);
+        let scenarios = list_scenarios(&dir)?;
+        if scenarios.is_empty() {
+            let _ = write!(message, "; no scenarios in {}", dir.display());
+        } else {
+            let _ = write!(message, "; scenarios in {}:", dir.display());
+            for scenario in scenarios {
+                let _ = write!(
+                    message,
+                    "\n  {}",
+                    display_relative(&project.root, &scenario)
+                );
+            }
+        }
+    }
+    Err(anyhow!(message))
+}
+
+/// Scenario files (`.toml`/`.json`, the manifest itself excluded) directly
+/// inside `dir`, sorted.
+fn list_scenarios(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| anyhow!("reading `[fight].scenarios_dir` {}: {e}", dir.display()))?;
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name().is_some_and(|n| n != "Miku.toml")
+                && p.extension()
+                    .is_some_and(|ext| ext == "toml" || ext == "json")
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+fn display_relative(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root).unwrap_or(p).display().to_string()
 }
 
 fn run_single(

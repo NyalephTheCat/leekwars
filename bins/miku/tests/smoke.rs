@@ -381,6 +381,260 @@ version = "0.1.0"
 }
 
 #[test]
+fn test_runner_typed_expectations_pass() {
+    let dir = scratch_dir("test_typed_pass");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"typed\"\nversion = \"0.1.0\"\n",
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 0;\n");
+    // A program meant to be rejected at compile time.
+    write(
+        &dir,
+        "tests/compile_error.leek",
+        "// miku-test: expect-compile-error: E0202\n// @version:4\nvar a = 1;\nvar a = 2;\nreturn a;\n",
+    );
+    write(
+        &dir,
+        "tests/stack_overflow.leek",
+        "// miku-test: expect-runtime-error: STACKOVERFLOW\n// @version:4\nfunction f(n) { return f(n + 1); }\nreturn f(0);\n",
+    );
+    write(
+        &dir,
+        "tests/budget.leek",
+        "// miku-test: expect-runtime-error: TOO_MUCH_OPERATIONS\n// miku-test: timeout 1000\n// @version:4\nwhile (true) { var x = 1; }\n",
+    );
+    write(
+        &dir,
+        "tests/output.leek",
+        "// miku-test: expect-output: 3\n// @version:4\nreturn 1 + 2;\n",
+    );
+
+    let out = miku(&["test"], &dir);
+    assert_eq!(
+        out.status, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
+    assert!(
+        out.stdout.contains("4 passed, 0 failed"),
+        "summary: {}",
+        out.stdout
+    );
+    // The expected compile error is the test passing, not noise.
+    assert!(!out.stderr.contains("E0202"), "stderr: {}", out.stderr);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_runner_typed_expectations_fail_when_unmet() {
+    let dir = scratch_dir("test_typed_fail");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"typed\"\nversion = \"0.1.0\"\n",
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 0;\n");
+    let cases = [
+        (
+            "wrong_code",
+            "// miku-test: expect-compile-error: E0100\n// @version:4\nvar a = 1;\nvar a = 2;\nreturn a;\n",
+        ),
+        (
+            "compiles",
+            "// miku-test: expect-compile-error: E0200\n// @version:4\nreturn 1;\n",
+        ),
+        // Running out of the default op budget is not "the expected failure".
+        (
+            "budget_only",
+            "// miku-test: expect-fail\n// @version:4\nwhile (true) { var x = 1; }\n",
+        ),
+        (
+            "wrong_runtime",
+            "// miku-test: expect-runtime-error: STACKOVERFLOW\n// @version:4\nreturn 1;\n",
+        ),
+        (
+            "wrong_output",
+            "// miku-test: expect-output: 4\n// @version:4\nreturn 1 + 2;\n",
+        ),
+        (
+            "bad_timeout",
+            "// miku-test: timeout lots\n// @version:4\nreturn 1;\n",
+        ),
+    ];
+    for (name, src) in cases {
+        write(&dir, &format!("tests/{name}.leek"), src);
+    }
+
+    let out = miku(&["test"], &dir);
+    assert_ne!(out.status, 0, "stdout: {}", out.stdout);
+    for (name, _) in cases {
+        assert!(
+            out.stdout.contains(&format!("FAIL tests/{name}.leek")),
+            "{name} should fail\nstdout: {}",
+            out.stdout
+        );
+    }
+    assert!(
+        out.stdout.contains("0 passed, 6 failed"),
+        "summary: {}",
+        out.stdout
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_help_documents_expectations() {
+    let dir = scratch_dir("test_help");
+    let out = miku(&["test", "--help"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    for directive in [
+        "expect-compile-error",
+        "expect-runtime-error",
+        "expect-output",
+        "expect-fail",
+        "timeout",
+    ] {
+        assert!(
+            out.stdout.contains(directive),
+            "`miku test --help` should document {directive}: {}",
+            out.stdout
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fix_honors_manifest_lint_levels() {
+    // L0013 (double negation) ships a MachineApplicable fix.
+    let dir = scratch_dir("fix_levels");
+    let source = "// @version:4\nvar a = true;\nreturn !!a;\n";
+    write(&dir, "src/main.leek", source);
+
+    // `allow`ed: `miku lint` hides it, so `miku fix` must not apply it.
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"fixme\"\nversion = \"0.1.0\"\n[lint]\nallow = [\"L0013\"]\n",
+    );
+    let allowed = miku(&["fix"], &dir);
+    assert_eq!(allowed.status, 0, "stderr: {}", allowed.stderr);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/main.leek")).unwrap(),
+        source,
+        "an allowed lint's suggestion must not be applied"
+    );
+
+    // `deny`ed: still a lint, not a compile error — the fix applies.
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"fixme\"\nversion = \"0.1.0\"\n[lint]\ndeny = [\"L0013\"]\n",
+    );
+    let denied = miku(&["fix"], &dir);
+    assert_eq!(denied.status, 0, "stderr: {}", denied.stderr);
+    let after = std::fs::read_to_string(dir.join("src/main.leek")).unwrap();
+    assert!(
+        !after.contains("!!"),
+        "a denied lint's fix should apply: {after}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fix_skips_files_with_compile_errors() {
+    let dir = scratch_dir("fix_errors");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"fixme\"\nversion = \"0.1.0\"\n",
+    );
+    // A fixable `!!a`, but the file doesn't resolve (redeclared variable).
+    let broken = "// @version:4\nvar a = true;\nvar a = false;\nreturn !!a;\n";
+    write(&dir, "src/main.leek", broken);
+    let fixable = "// @version:4\nvar b = true;\nreturn !!b;\n";
+    write(&dir, "src/ok.leek", fixable);
+
+    let out = miku(&["fix"], &dir);
+    assert_ne!(out.status, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/main.leek")).unwrap(),
+        broken,
+        "a file with compile errors must not be rewritten"
+    );
+    assert!(
+        out.stderr.contains("skipped 1 file") && out.stderr.contains("src/main.leek"),
+        "skipped file should be reported: {}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("E0202"), "stderr: {}", out.stderr);
+    assert!(
+        !std::fs::read_to_string(dir.join("src/ok.leek"))
+            .unwrap()
+            .contains("!!"),
+        "healthy files are still fixed"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fight_without_scenario_uses_manifest_fight_table() {
+    let dir = scratch_dir("fight_manifest");
+    write(&dir, "src/main.leek", "// @version:4\nreturn 0;\n");
+
+    // `default_scenario` is what a bare `miku fight` runs.
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"fighter\"\nversion = \"0.1.0\"\n[fight]\ndefault_scenario = \"missing.toml\"\n",
+    );
+    let out = miku(&["fight"], &dir);
+    assert_ne!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("default_scenario") && out.stderr.contains("missing.toml"),
+        "stderr: {}",
+        out.stderr
+    );
+
+    // Without a default, the scenarios in `scenarios_dir` are listed.
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"fighter\"\nversion = \"0.1.0\"\n[fight]\nscenarios_dir = \"scenarios\"\n",
+    );
+    write(&dir, "scenarios/duel.toml", "");
+    write(&dir, "scenarios/arena.json", "{}");
+    let out = miku(&["fight"], &dir);
+    assert_ne!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("scenarios/duel.toml") && out.stderr.contains("scenarios/arena.json"),
+        "stderr: {}",
+        out.stderr
+    );
+
+    // Unknown keys in `[fight]` are errors.
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"fighter\"\nversion = \"0.1.0\"\n[fight]\ndefault_senario = \"duel.toml\"\n",
+    );
+    let out = miku(&["fight"], &dir);
+    assert_ne!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("fight.default_senario"),
+        "stderr: {}",
+        out.stderr
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn clean_removes_build_dir() {
     let dir = scratch_dir("clean");
     write(
