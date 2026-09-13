@@ -267,6 +267,10 @@ fn lambda_write_to_captured_local_is_boxed() {
         !java.contains("throws LeekRunException {return null;}}"),
         "must not emit the null-returning stub: {java}"
     );
+    assert!(
+        !java.contains(NULL_STUB),
+        "must not emit the null stub: {java}"
+    );
 }
 
 #[test]
@@ -307,23 +311,221 @@ fn for_loop_var_captured_and_written_is_boxed_in_header() {
     );
 }
 
+/// The null-returning lambda body the emitter used to fall back to when a
+/// lambda wrote a captured binding it couldn't box. Nothing may emit it again:
+/// it compiles, then silently computes the wrong answer.
+const NULL_STUB: &str = "Object... values) throws LeekRunException {return null;}";
+
 #[test]
-fn lambda_writing_captured_parameter_uses_null_stub_known_limitation() {
-    // KNOWN LIMITATION (item 3 / round-3 boxing scope boundary): the boxing
-    // that makes a captured-and-written *local* shared (see
-    // `lambda_write_to_captured_local_is_boxed`) does NOT yet cover a captured
-    // *parameter*. A lambda that writes to an outer parameter still falls back
-    // to the null-returning stub — it compiles but returns the wrong value at
-    // runtime (the java backend is emit-only here, so the corpus can't catch
-    // it). This test pins that boundary: when boxing is extended to parameters,
-    // this assertion will flip and should be updated to assert the box instead.
+fn lambda_writing_captured_parameter_is_boxed() {
+    // A lambda that writes an outer *parameter* used to emit a null-returning
+    // stub (a silent miscompile). Leek closures capture by reference, so the
+    // param now binds to a runtime `Box` at function entry in **both** modes:
+    // the lambda's write routes through `Box.set(...)` and the post-lambda read
+    // through `.get()`, so `f(5)` really returns 6.
+    for (opts, body_name) in [
+        (Options::clean(Version::V4, 1), "p"),
+        (Options::exact(Version::V4, 1), "u_p"),
+    ] {
+        let java = java_for(
+            "// @version:4\nfunction f(p) { var g = function() { p = p + 1 } g() return p }\nreturn f(5)\n",
+            &opts,
+        );
+        assert!(
+            java.contains(&format!("final Box {body_name} = new Box(")),
+            "captured param should bind to a Box at entry: {java}"
+        );
+        assert!(
+            java.contains(&format!(
+                "private FunctionLeekValue __anon_0(final Box {body_name})"
+            )),
+            "factory should take the Box: {java}"
+        );
+        assert!(
+            java.contains(&format!("{body_name}.set(")),
+            "the lambda's write should route through the Box: {java}"
+        );
+        assert!(
+            !java.contains(NULL_STUB),
+            "must not emit the null stub: {java}"
+        );
+    }
+}
+
+#[test]
+fn v1_lambda_writing_captured_parameter_is_boxed() {
+    // Same at v1, where params keep value semantics: the Box still holds a
+    // `copy(...)` of the argument, but the closure shares that box.
+    let java = java_for(
+        "// @version:1\nfunction f(p) { var g = function() { p = p + 1 } g() return p }\nreturn f(5)\n",
+        &Options::exact(Version::V1, 1),
+    );
+    assert!(
+        java.contains("Box u_p = new Box(this, copy(p_p));"),
+        "v1 captured param should bind to a value-copy Box: {java}"
+    );
+    assert!(java.contains("u_p.set("), "{java}");
+    assert!(
+        !java.contains(NULL_STUB),
+        "must not emit the null stub: {java}"
+    );
+}
+
+#[test]
+fn lambda_write_visible_to_later_read() {
+    // The write has to be visible to a read *after* the lambda ran: the
+    // post-lambda `return p` must go through the box, not a stale copy.
     let java = java_for(
         "// @version:4\nfunction f(p) { var g = function() { p = p + 1 } g() return p }\nreturn f(5)\n",
         &Options::clean(Version::V4, 1),
     );
     assert!(
-        java.contains("Object... values) throws LeekRunException {return null;}"),
-        "captured-parameter write is expected to still hit the null stub: {java}"
+        java.contains("return p.get();"),
+        "post-lambda read must go through the box: {java}"
+    );
+    assert!(
+        !java.contains(NULL_STUB),
+        "must not emit the null stub: {java}"
+    );
+}
+
+#[test]
+fn class_method_param_written_by_lambda_is_boxed() {
+    // Class method / constructor params take the same entry rebind as a
+    // top-level function's — they used to get no rebind at all, so a lambda
+    // writing one fell through to the null stub.
+    let java = java_for(
+        "// @version:4\nclass A { method m(p) { var g = function() { p = p + 1 } g() return p } }\nvar o = new A()\nreturn o.m(5)\n",
+        &Options::exact(Version::V4, 1),
+    );
+    assert!(
+        java.contains("public Object u_m(Object p_p) throws LeekRunException {"),
+        "boxed method param should take the p_ signature slot: {java}"
+    );
+    assert!(
+        java.contains("final Box u_p = new Box(AI_1.this, p_p);"),
+        "method param should be rebound to a Box: {java}"
+    );
+    assert!(java.contains("u_p.set("), "{java}");
+    assert!(java.contains("return u_p.get();"), "{java}");
+    assert!(
+        !java.contains(NULL_STUB),
+        "must not emit the null stub: {java}"
+    );
+}
+
+#[test]
+fn lambda_writing_captured_int_is_boxed_in_both_modes() {
+    // The plain "lambda increments a captured counter" case, in both modes.
+    for (opts, name) in [
+        (Options::clean(Version::V4, 1), "n"),
+        (Options::exact(Version::V4, 1), "u_n"),
+    ] {
+        let java = java_for(
+            "// @version:4\nvar n = 0\nvar inc = function() { n = n + 1 }\ninc()\ninc()\nreturn n\n",
+            &opts,
+        );
+        assert!(
+            java.contains(&format!("Object[] {name} = new Object[]{{")),
+            "captured-written local should be boxed: {java}"
+        );
+        assert!(java.contains(&format!("{name}[0]")), "{java}");
+        assert!(
+            java.contains(&format!(
+                "private FunctionLeekValue __anon_0(final Object[] {name})"
+            )),
+            "factory should take the box: {java}"
+        );
+        assert!(
+            !java.contains(NULL_STUB),
+            "must not emit the null stub: {java}"
+        );
+    }
+}
+
+#[test]
+fn nested_lambda_writing_outer_local_is_boxed() {
+    // The write is two lambda levels down from the declaration, so the box has
+    // to be threaded through *both* factories. The capture/write walkers used
+    // to stop at the first lambda body, which left this on the null stub.
+    let java = java_for(
+        "// @version:4\nvar c = 0\nvar f = function() { var g = function() { c = c + 1 } g() }\nf()\nreturn c\n",
+        &Options::clean(Version::V4, 1),
+    );
+    assert!(java.contains("Object[] c = new Object[]{"), "{java}");
+    assert!(java.contains("c[0] = (Object) add(c[0], 1l)"), "{java}");
+    assert!(
+        java.contains("private FunctionLeekValue __anon_0(final Object[] c)"),
+        "outer factory must take the box: {java}"
+    );
+    assert!(
+        java.contains("private FunctionLeekValue __anon_1(final Object[] c)"),
+        "inner factory must take the box: {java}"
+    );
+    assert!(
+        !java.contains(NULL_STUB),
+        "must not emit the null stub: {java}"
+    );
+}
+
+#[test]
+fn lambda_local_written_by_inner_lambda_is_boxed() {
+    // The local is declared *inside* a lambda body and written by a lambda
+    // nested in it. The box is an ordinary Java local of the outer lambda's
+    // `run` method, which the inner factory call captures.
+    let java = java_for(
+        "// @version:4\nvar f = function() { var c = 0 var g = function() { c = c + 1 } g() return c }\nreturn f()\n",
+        &Options::clean(Version::V4, 1),
+    );
+    assert!(
+        java.contains("Object[] c = new Object[]{"),
+        "a local declared inside a lambda must be boxable too: {java}"
+    );
+    assert!(java.contains("__anon_0(c)"), "{java}");
+    assert!(
+        java.contains("private FunctionLeekValue __anon_0(final Object[] c)"),
+        "{java}"
+    );
+    assert!(
+        !java.contains(NULL_STUB),
+        "must not emit the null stub: {java}"
+    );
+}
+
+#[test]
+fn nested_lambda_capture_is_threaded_through_outer_factory() {
+    // `a` is referenced *only* from the inner lambda. The outer factory still
+    // has to receive it, or the `__anon_1(a)` call it emits names a symbol that
+    // isn't in scope — a javac "cannot find symbol", not a silent wrong value.
+    let java = java_for(
+        "// @version:4\nvar a = 0\nvar b = 0\nvar f = function() { b = b + 1 var g = function() { return a } return g() }\nreturn f()\n",
+        &Options::clean(Version::V4, 1),
+    );
+    assert!(
+        java.contains("private FunctionLeekValue __anon_0(final Object[] b, final Object a)"),
+        "outer factory must take both the written box and the inner-only capture: {java}"
+    );
+    assert!(java.contains("__anon_0(b, a)"), "{java}");
+    assert!(java.contains("__anon_1(a)"), "{java}");
+}
+
+#[test]
+fn self_recursive_lambda_with_nested_lambda_routes_through_self_box() {
+    // A nested lambda may reference the var the enclosing lambda is being
+    // assigned to. The Java local is mid-initialization at that point, so the
+    // inner factory's call site has to read it out of `_self_box` — passing
+    // the bare name is a javac "might not have been initialized".
+    let java = java_for(
+        "// @version:4\nvar fact = function(n) { var h = function() { if (n <= 1) { return 1 } return n * fact(n - 1) } return h() }\nreturn fact(5)\n",
+        &Options::clean(Version::V4, 1),
+    );
+    assert!(
+        java.contains("__anon_0(n, _self_box[0], _self_box)"),
+        "the in-construction var must be passed out of the self box: {java}"
+    );
+    assert!(
+        !java.contains("__anon_0(n, fact,"),
+        "must not pass the mid-initialization local: {java}"
     );
 }
 
