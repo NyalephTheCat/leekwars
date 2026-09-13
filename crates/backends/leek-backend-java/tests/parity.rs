@@ -31,7 +31,16 @@
 //! unless `UPDATE_SNAPSHOTS=1` is set, in which case they overwrite them
 //! (review and commit the result). Reports must therefore be
 //! deterministic: rows whose op count depends on the RNG are excluded
-//! from exact ops comparison (see [`is_rng_dependent`]).
+//! from exact ops comparison (see [`is_rng_dependent`]). A fixture
+//! input without a golden fails the test rather than being skipped.
+//!
+//! The reports are pinned on Linux: they embed values from native math
+//! builtins, which use the platform libm, and other libms round
+//! differently (RT-N1). On any other OS each report comparison prints a
+//! `SKIPPED <report>` line and passes, while the value/ops ratio gates
+//! still run. Set `LEEK_REQUIRE_SNAPSHOTS=1` to compare anyway (and fail
+//! on mismatch). `UPDATE_SNAPSHOTS=1` is refused off Linux with a notice,
+//! so a non-Linux run never overwrites the pinned reports.
 //!
 //! # JVM-dependent tests
 //!
@@ -70,26 +79,103 @@ fn snapshot_out_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("leek-backend-java-snapshots")
 }
 
-/// Whether `UPDATE_SNAPSHOTS=1` asks to overwrite the tracked reports.
-fn update_snapshots() -> bool {
-    std::env::var_os("UPDATE_SNAPSHOTS").is_some_and(|v| v == "1")
+/// The only OS whose snapshot reports are pinned. The reports embed
+/// values computed by native math builtins, which go through the platform
+/// libm; other libms round differently (RT-N1).
+const PINNED_SNAPSHOT_OS: &str = "linux";
+
+/// What a snapshot check does with a fresh report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotAction {
+    /// Compare against the tracked report and fail on a mismatch.
+    Compare,
+    /// Overwrite the tracked report (`UPDATE_SNAPSHOTS=1` on Linux).
+    Update,
+    /// Write the fresh report only; the tracked copy is not comparable here.
+    Skip,
 }
 
-/// Write `actual` as report `name` under `out_dir`, then either overwrite
-/// `tracked_dir/name` (`update`) or compare against it. Returns a
-/// human-readable description of the mismatch on failure.
+/// How snapshot reports are handled on this run, plus a notice to print
+/// once when the environment asked for something that was not honoured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotPolicy {
+    action: SnapshotAction,
+    notice: Option<String>,
+}
+
+/// Decide the snapshot action for `target_os` given the environment.
+///
+/// On Linux, `UPDATE_SNAPSHOTS=1` updates and anything else compares.
+/// Elsewhere the reports are skipped unless `LEEK_REQUIRE_SNAPSHOTS=1`
+/// asks to compare anyway, and `UPDATE_SNAPSHOTS=1` is refused so a
+/// non-Linux libm never overwrites the Linux-pinned reports.
+fn snapshot_policy(target_os: &str, env: impl Fn(&str) -> Option<String>) -> SnapshotPolicy {
+    let flag = |name: &str| env(name).is_some_and(|v| v == "1");
+    let (update, require) = (flag("UPDATE_SNAPSHOTS"), flag("LEEK_REQUIRE_SNAPSHOTS"));
+    if target_os == PINNED_SNAPSHOT_OS {
+        let action = if update {
+            SnapshotAction::Update
+        } else {
+            SnapshotAction::Compare
+        };
+        return SnapshotPolicy {
+            action,
+            notice: None,
+        };
+    }
+    let action = if require {
+        SnapshotAction::Compare
+    } else {
+        SnapshotAction::Skip
+    };
+    let notice = update.then(|| {
+        format!(
+            "UPDATE_SNAPSHOTS=1 ignored on {target_os}: snapshot reports are pinned on \
+             {PINNED_SNAPSHOT_OS} and platform libm differs (see RT-N1); regenerate them on \
+             {PINNED_SNAPSHOT_OS}"
+        )
+    });
+    SnapshotPolicy { action, notice }
+}
+
+/// [`snapshot_policy`] for the platform and environment of this run. The
+/// notice, if any, is printed once.
+fn current_snapshot_action() -> SnapshotAction {
+    static POLICY: std::sync::OnceLock<SnapshotPolicy> = std::sync::OnceLock::new();
+    let policy = POLICY.get_or_init(|| {
+        let policy = snapshot_policy(std::env::consts::OS, |name| std::env::var(name).ok());
+        if let Some(notice) = &policy.notice {
+            eprintln!("{notice}");
+        }
+        policy
+    });
+    policy.action.clone()
+}
+
+/// Write `actual` as report `name` under `out_dir`, then act on
+/// `tracked_dir/name` as `action` says: overwrite it, compare against it,
+/// or skip the comparison with a `SKIPPED` line. Returns a human-readable
+/// description of the mismatch on failure.
 fn check_snapshot_in(
     tracked_dir: &std::path::Path,
     out_dir: &std::path::Path,
     name: &str,
     actual: &str,
-    update: bool,
+    action: &SnapshotAction,
 ) -> Result<(), String> {
     fs::create_dir_all(out_dir).expect("snapshot out dir");
     let fresh = out_dir.join(name);
     fs::write(&fresh, actual).expect("write fresh snapshot");
     let tracked = tracked_dir.join(name);
-    if update {
+    if *action == SnapshotAction::Skip {
+        eprintln!(
+            "SKIPPED {name}: exact snapshot reports are pinned on Linux; platform libm differs \
+             (see RT-N1). Set LEEK_REQUIRE_SNAPSHOTS=1 to compare anyway (fresh output: {})",
+            fresh.display()
+        );
+        return Ok(());
+    }
+    if *action == SnapshotAction::Update {
         fs::create_dir_all(tracked_dir).expect("snapshot dir");
         if fs::read_to_string(&tracked).ok().as_deref() != Some(actual) {
             fs::write(&tracked, actual).expect("write tracked snapshot");
@@ -127,7 +213,7 @@ fn check_snapshot(name: &str, actual: &str) -> Result<(), String> {
         &snapshot_out_dir(),
         name,
         actual,
-        update_snapshots(),
+        &current_snapshot_action(),
     )
 }
 
@@ -172,6 +258,15 @@ fn fixture_inputs() -> Vec<PathBuf> {
         .collect();
     entries.sort();
     entries
+}
+
+/// Stems of the fixture `inputs` that have no `<stem>.java` in `golden_dir`.
+fn fixtures_missing_golden(inputs: &[PathBuf], golden_dir: &std::path::Path) -> Vec<String> {
+    inputs
+        .iter()
+        .map(|input| input.file_stem().unwrap().to_string_lossy().into_owned())
+        .filter(|stem| !golden_dir.join(format!("{stem}.java")).exists())
+        .collect()
 }
 
 fn rust_emit(src: &str, ai_id: u64, path: &str) -> String {
@@ -220,18 +315,23 @@ fn unified_diff(expected: &str, actual: &str) -> String {
 /// structural invariants we already meet (shape, runtime surface).
 #[test]
 fn parity_with_java_reference() {
+    let inputs = fixture_inputs();
+    let golden_dir = fixtures_dir().join("golden");
+    let missing = fixtures_missing_golden(&inputs, &golden_dir);
+    assert!(
+        missing.is_empty(),
+        "fixtures without a golden (run tools/java-emitter/build.sh and re-capture, or delete \
+         the fixture and its stale *.exact.diff): {}",
+        missing.join(", ")
+    );
     let mut failures = Vec::new();
     let mut summary = String::new();
-    for input in fixture_inputs() {
+    for input in inputs {
         let stem = input.file_stem().unwrap().to_string_lossy().into_owned();
         let src = fs::read_to_string(&input).expect("read input");
         let actual = rust_emit(&src, 1, &format!("{stem}.leek"));
 
-        let golden_path = fixtures_dir().join("golden").join(format!("{stem}.java"));
-        if !golden_path.exists() {
-            eprintln!("missing golden for {stem}; run tools/java-emitter/build.sh and re-capture");
-            continue;
-        }
+        let golden_path = golden_dir.join(format!("{stem}.java"));
         let golden = fs::read_to_string(&golden_path).expect("read golden");
 
         // Check the diff regardless of whether we're at byte parity.
@@ -871,59 +971,18 @@ fn rust_emit_matches_snapshot_on_jvm() {
         }
     };
 
-    let mut value_ok = 0u32;
-    let mut value_mismatch = 0u32;
-    let mut ops_ok = 0u32;
-    let mut ops_mismatch = 0u32;
-    let mut ops_nondet = 0u32;
-    let mut jvm_err = 0u32;
-    let mut mismatches = String::new();
-    let mut ops_diffs: Vec<(String, u8, String, i64, u64, u64)> = Vec::new();
+    let JvmTally {
+        value_ok,
+        value_mismatch,
+        ops_ok,
+        ops_mismatch,
+        ops_nondet,
+        jvm_err,
+        mismatches,
+        mut ops_diffs,
+    } = tally_jvm_results(&cases, &results);
     let mut failures = Vec::new();
 
-    for case in &cases {
-        let Some(res) = results.get(&case.id) else {
-            jvm_err += 1;
-            continue;
-        };
-        if !res.error.is_empty() {
-            jvm_err += 1;
-            // Cap lifted: with strict-mode rows filtered out, the
-            // remaining errors all warrant inspection.
-            let _ = writeln!(
-                mismatches,
-                "{}: v{} code={:?}\n  jvm err: {}",
-                case.id, case.version, case.code, res.error
-            );
-            continue;
-        }
-        if res.value == case.expected_value {
-            value_ok += 1;
-        } else {
-            value_mismatch += 1;
-            let _ = writeln!(
-                mismatches,
-                "{}: v{} code={:?}\n  expected={:?}\n  got     ={:?}",
-                case.id, case.version, case.code, case.expected_value, res.value
-            );
-        }
-        if is_rng_dependent(&case.code) {
-            ops_nondet += 1;
-        } else if res.ops == case.expected_ops {
-            ops_ok += 1;
-        } else {
-            ops_mismatch += 1;
-            let delta = i64::try_from(res.ops).unwrap() - i64::try_from(case.expected_ops).unwrap();
-            ops_diffs.push((
-                case.id.clone(),
-                case.version,
-                case.code.clone(),
-                delta,
-                case.expected_ops,
-                res.ops,
-            ));
-        }
-    }
     // Persist ops drift detail to a sidecar file — separate from
     // JVM_PARITY.txt so the main report stays scannable.
     {
@@ -1015,6 +1074,81 @@ struct JvmResult {
     value: String,
     ops: u64,
     error: String,
+}
+
+/// Per-case JVM outcome counts. `ops_ok + ops_mismatch + ops_nondet` plus
+/// the non-RNG JVM errors add up to the case count, so
+/// `total - ops_nondet` is the deterministic ops denominator.
+#[derive(Debug, Default)]
+struct JvmTally {
+    value_ok: u32,
+    value_mismatch: u32,
+    ops_ok: u32,
+    ops_mismatch: u32,
+    /// RNG-dependent rows, erroring or not: never part of the ops ratio.
+    ops_nondet: u32,
+    jvm_err: u32,
+    mismatches: String,
+    ops_diffs: Vec<(String, u8, String, i64, u64, u64)>,
+}
+
+/// Tally the harness `results` for `cases`. The RNG exclusion is applied
+/// before a JVM error short-circuits the row, so an erroring RNG row never
+/// lands in the deterministic ops denominator.
+fn tally_jvm_results(
+    cases: &[JvmCase],
+    results: &std::collections::HashMap<String, JvmResult>,
+) -> JvmTally {
+    let mut t = JvmTally::default();
+    for case in cases {
+        let rng = is_rng_dependent(&case.code);
+        if rng {
+            t.ops_nondet += 1;
+        }
+        let Some(res) = results.get(&case.id) else {
+            t.jvm_err += 1;
+            continue;
+        };
+        if !res.error.is_empty() {
+            t.jvm_err += 1;
+            // Cap lifted: with strict-mode rows filtered out, the
+            // remaining errors all warrant inspection.
+            let _ = writeln!(
+                t.mismatches,
+                "{}: v{} code={:?}\n  jvm err: {}",
+                case.id, case.version, case.code, res.error
+            );
+            continue;
+        }
+        if res.value == case.expected_value {
+            t.value_ok += 1;
+        } else {
+            t.value_mismatch += 1;
+            let _ = writeln!(
+                t.mismatches,
+                "{}: v{} code={:?}\n  expected={:?}\n  got     ={:?}",
+                case.id, case.version, case.code, case.expected_value, res.value
+            );
+        }
+        if rng {
+            continue;
+        }
+        if res.ops == case.expected_ops {
+            t.ops_ok += 1;
+        } else {
+            t.ops_mismatch += 1;
+            let delta = i64::try_from(res.ops).unwrap() - i64::try_from(case.expected_ops).unwrap();
+            t.ops_diffs.push((
+                case.id.clone(),
+                case.version,
+                case.code.clone(),
+                delta,
+                case.expected_ops,
+                res.ops,
+            ));
+        }
+    }
+    t
 }
 
 fn workspace_root() -> std::path::PathBuf {
@@ -1152,15 +1286,16 @@ fn snapshot_compare_mode_never_rewrites_tracked_file() {
     fs::create_dir_all(&tracked).unwrap();
     fs::write(tracked.join("R.txt"), "old\n").unwrap();
 
-    let err = check_snapshot_in(&tracked, &out, "R.txt", "new\n", false)
+    let compare = SnapshotAction::Compare;
+    let err = check_snapshot_in(&tracked, &out, "R.txt", "new\n", &compare)
         .expect_err("a changed report must fail");
     assert!(err.contains("-old") && err.contains("+new"), "{err}");
     assert_eq!(fs::read_to_string(tracked.join("R.txt")).unwrap(), "old\n");
     assert_eq!(fs::read_to_string(out.join("R.txt")).unwrap(), "new\n");
 
-    assert!(check_snapshot_in(&tracked, &out, "R.txt", "old\n", false).is_ok());
+    assert!(check_snapshot_in(&tracked, &out, "R.txt", "old\n", &compare).is_ok());
     assert!(
-        check_snapshot_in(&tracked, &out, "Missing.txt", "x", false).is_err(),
+        check_snapshot_in(&tracked, &out, "Missing.txt", "x", &compare).is_err(),
         "an uncommitted report must fail rather than be created"
     );
     assert!(!tracked.join("Missing.txt").exists());
@@ -1172,8 +1307,139 @@ fn snapshot_update_mode_overwrites_tracked_file() {
     let root = snapshot_out_dir().join("self-test-update");
     let (tracked, out) = (root.join("tracked"), root.join("out"));
     let _ = fs::remove_dir_all(&tracked);
-    assert!(check_snapshot_in(&tracked, &out, "R.txt", "new\n", true).is_ok());
+    assert!(check_snapshot_in(&tracked, &out, "R.txt", "new\n", &SnapshotAction::Update).is_ok());
     assert_eq!(fs::read_to_string(tracked.join("R.txt")).unwrap(), "new\n");
+}
+
+/// Skip mode passes on a mismatching report, still writes the fresh copy,
+/// and leaves the tracked report untouched.
+#[test]
+fn snapshot_skip_mode_passes_and_keeps_tracked_file() {
+    let root = snapshot_out_dir().join("self-test-skip");
+    let (tracked, out) = (root.join("tracked"), root.join("out"));
+    fs::create_dir_all(&tracked).unwrap();
+    fs::write(tracked.join("R.txt"), "old\n").unwrap();
+    assert!(check_snapshot_in(&tracked, &out, "R.txt", "new\n", &SnapshotAction::Skip).is_ok());
+    assert_eq!(fs::read_to_string(tracked.join("R.txt")).unwrap(), "old\n");
+    assert_eq!(fs::read_to_string(out.join("R.txt")).unwrap(), "new\n");
+}
+
+/// Exact reports are compared (or updated) on Linux only; elsewhere they
+/// are skipped unless `LEEK_REQUIRE_SNAPSHOTS=1`, and `UPDATE_SNAPSHOTS=1`
+/// is refused with a notice (RT-N1).
+#[test]
+fn snapshot_policy_pins_reports_to_linux() {
+    fn policy(os: &str, vars: &[(&str, &str)]) -> SnapshotPolicy {
+        snapshot_policy(os, |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        })
+    }
+    use SnapshotAction::{Compare, Skip, Update};
+
+    assert_eq!(policy("linux", &[]).action, Compare);
+    assert_eq!(policy("linux", &[("UPDATE_SNAPSHOTS", "1")]).action, Update);
+    assert_eq!(
+        policy("linux", &[("UPDATE_SNAPSHOTS", "0")]).action,
+        Compare
+    );
+    assert_eq!(
+        policy("linux", &[("LEEK_REQUIRE_SNAPSHOTS", "1")]).action,
+        Compare
+    );
+    assert!(
+        policy("linux", &[("UPDATE_SNAPSHOTS", "1")])
+            .notice
+            .is_none()
+    );
+
+    for os in ["macos", "windows"] {
+        let skip = policy(os, &[]);
+        assert_eq!(
+            skip,
+            SnapshotPolicy {
+                action: Skip,
+                notice: None
+            }
+        );
+        assert_eq!(
+            policy(os, &[("LEEK_REQUIRE_SNAPSHOTS", "1")]).action,
+            Compare
+        );
+        assert_eq!(policy(os, &[("LEEK_REQUIRE_SNAPSHOTS", "0")]).action, Skip);
+
+        let refused = policy(os, &[("UPDATE_SNAPSHOTS", "1")]);
+        assert_eq!(refused.action, Skip);
+        let notice = refused.notice.expect("refused update must say so");
+        assert!(notice.contains("UPDATE_SNAPSHOTS=1 ignored") && notice.contains("RT-N1"));
+
+        let both = policy(
+            os,
+            &[("UPDATE_SNAPSHOTS", "1"), ("LEEK_REQUIRE_SNAPSHOTS", "1")],
+        );
+        assert_eq!(both.action, Compare, "never Update off Linux");
+        assert!(both.notice.is_some());
+    }
+}
+
+/// A fixture without a golden is reported by stem, not skipped (so its
+/// committed `*.exact.diff` cannot go stale unnoticed).
+#[test]
+fn fixtures_missing_golden_are_listed() {
+    let root = snapshot_out_dir().join("self-test-goldens");
+    let golden = root.join("golden");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&golden).unwrap();
+    fs::write(golden.join("a.java"), "").unwrap();
+    let inputs = [root.join("inputs/a.leek"), root.join("inputs/b.leek")];
+    assert_eq!(
+        fixtures_missing_golden(&inputs, &golden),
+        vec!["b".to_string()]
+    );
+    assert!(fixtures_missing_golden(&fixture_inputs(), &fixtures_dir().join("golden")).is_empty());
+}
+
+/// An RNG-dependent row that errors on the JVM (or has no result) is
+/// excluded from the ops denominator like any other RNG row.
+#[test]
+fn jvm_tally_excludes_erroring_rng_rows_from_ops() {
+    let case = |id: &str, code: &str| JvmCase {
+        id: id.to_string(),
+        version: 4,
+        code: code.to_string(),
+        java: String::new(),
+        expected_value: "1".to_string(),
+        expected_ops: 3,
+    };
+    let result = |error: &str| JvmResult {
+        value: "1".to_string(),
+        ops: 3,
+        error: error.to_string(),
+    };
+    let cases = [
+        case("ok", "return 1"),
+        case("rng_ok", "return randInt(1, 1)"),
+        case("rng_err", "return randInt(1, 1)"),
+        case("rng_missing", "return rand()"),
+        case("det_err", "return 1"),
+    ];
+    let results = std::collections::HashMap::from([
+        ("ok".to_string(), result("")),
+        ("rng_ok".to_string(), result("")),
+        ("rng_err".to_string(), result("boom")),
+        ("det_err".to_string(), result("boom")),
+    ]);
+    let t = tally_jvm_results(&cases, &results);
+    assert_eq!(
+        t.ops_nondet, 3,
+        "every RNG row is excluded, erroring or not"
+    );
+    assert_eq!(t.jvm_err, 3);
+    assert_eq!((t.ops_ok, t.ops_mismatch), (1, 0));
+    assert_eq!(t.value_ok, 2);
+    let ops_total = u32::try_from(cases.len()).unwrap() - t.ops_nondet;
+    assert_eq!(ops_total, 2, "only the deterministic rows remain");
 }
 
 /// The ops-drift reports exclude exactly the programs calling an RNG
