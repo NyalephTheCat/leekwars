@@ -45,5 +45,30 @@ about values. Read them accordingly:
   and `leek-backend-java`'s parity tests — neither of which is wired into this
   corpus yet (#70).
 
+## Why all three columns look the same
+
+Every column currently reads `total = 11005, pass = 10153,
+pass_expected_error = 828`, with zero failures and zero unknown skips. That is
+a real result, not a baseline saved while the backends shared a code path — a
+run on today's HEAD reproduces the numbers recorded three months ago exactly,
+column for column.
+
+It is also the *expected* shape while `native` is at 100%: a case native
+compiles, runs and value-checks necessarily compiles for `pipeline` and emits
+for `java-emit`, so the three columns can only diverge once something fails.
+Do not read identical columns as "the baseline is broken", and do not add a
+check that requires them to differ — that is a check that requires the
+compiler to be broken. What separates the columns is their check *logic*,
+pinned in `leek-test-driver/tests/safety_net_honesty.rs`.
+
+The corollary is that these summaries carry no per-backend signal today. The
+numbers that would carry it — a real JVM value check for the Java backend —
+live outside this corpus (see `java-emit` above, and #70).
+
+## CI
+
 `.github/workflows/corpus.yml` runs the whole thing nightly and on PRs that
 touch the compiler; a regression against `baseline.toml` fails that workflow.
+A failing run uploads the baseline it would have written as an artifact —
+download and commit it verbatim, because `upstream_suite.rs` checks the
+committed file is byte-identical to what `--save-baseline` produces.

@@ -1,6 +1,6 @@
 schema_version = 3
 
-[backends.java.outcomes]
+[backends.java-emit.outcomes]
 "TestFunction.java::testTypes::21@v1" = "skipped_disabled"
 "TestFunction.java::testTypes::2@v1" = "skipped_disabled"
 "TestFunction.java::testTypes::2@v2" = "skipped_disabled"
@@ -26,7 +26,7 @@ schema_version = 3
 "TestSet.java::testSet_operator_EqualsEquals::5@v3" = "skipped_disabled"
 "TestSet.java::testSet_operator_EqualsEquals::5@v4" = "skipped_disabled"
 
-[backends.java.summary]
+[backends.java-emit.summary]
 total = 11005
 pass = 10153
 pass_expected_error = 828

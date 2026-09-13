@@ -43,37 +43,51 @@ fn committed_baseline_is_canonical_failures_only() {
     );
 }
 
-/// The three columns are checked by visibly different logic — `native` runs
-/// the program and compares the value, `pipeline` only compiles it, and
-/// `java-emit` only emits Java — so they cannot all agree on every one of
-/// ~11k cases. When they do, the baseline was saved while the backends shared
-/// a code path (or was never re-run), and a green corpus says nothing about
-/// any individual backend.
+/// Every backend this build runs must have its own full-size column in the
+/// baseline. That is what stops the baseline from saying nothing about a
+/// backend: a column that is missing (a rename, a newly linked backend) diffs
+/// against nothing and reads as all-passing, and a column whose summary covers
+/// a handful of cases was recorded against a truncated manifest.
 ///
-/// `native` is the discriminator: it is the only column that can report a
-/// wrong value, and the only one that skips constructs outside the compiled
-/// subset.
+/// Note what this deliberately does *not* assert: that the columns differ from
+/// each other. They are identical today, and legitimately so — `native` passes
+/// every active case, and a case native runs and value-checks necessarily also
+/// compiles (`pipeline`) and emits (`java-emit`). The columns can only diverge
+/// once something fails, so requiring them to differ would be requiring the
+/// compiler to be broken. What separates them is the *check logic*, which is
+/// pinned in `leek-test-driver/tests/safety_net_honesty.rs`, not the data.
 #[test]
-fn backends_with_different_check_logic_do_not_share_a_column() {
+fn every_backend_has_a_full_size_baseline_column() {
     let path = baseline_path();
     let baseline = MultiReport::load(&path).expect("malformed baseline");
 
-    let Some(native) = baseline.backends.get("native") else {
-        return; // native isn't linked in this build — nothing to compare.
-    };
-
-    for other in ["pipeline", "java-emit"] {
-        let Some(report) = baseline.backends.get(other) else {
-            continue;
-        };
+    for backend in leek_test_corpus::suite_backends() {
         assert!(
-            native.outcomes != report.outcomes || native.summary != report.summary,
-            "baseline columns `native` and `{other}` are identical across the \
-             whole corpus, but they are checked by different logic (native \
-             runs and value-checks; pipeline is a compile gate; java-emit only \
-             emits). The baseline was saved while the backends shared a code \
-             path, or predates the split — re-create it with \
+            baseline.backends.contains_key(backend.as_str()),
+            "backend `{}` has no column in {} — it would diff against nothing \
+             and report zero regressions. Refresh with \
              `cargo run -p leek-test-corpus -- run --save-baseline`",
+            backend.as_str(),
+            path.display(),
+        );
+    }
+
+    let totals: Vec<_> = baseline
+        .backends
+        .iter()
+        .map(|(name, r)| (name.as_str(), r.summary.total))
+        .collect();
+    let largest = totals.iter().map(|(_, t)| *t).max().unwrap_or(0);
+    assert!(
+        largest > 5_000,
+        "the largest baseline column covers only {largest} cases — it was \
+         saved against a truncated or empty manifest: {totals:?}",
+    );
+    for (name, total) in &totals {
+        assert_eq!(
+            *total, largest,
+            "baseline column `{name}` covers {total} of {largest} cases, so it \
+             was recorded from a different run than the others: {totals:?}",
         );
     }
 }
