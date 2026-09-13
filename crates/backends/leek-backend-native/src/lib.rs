@@ -152,9 +152,6 @@ fn compile_entry(
     opts: &NativeOptions,
     entry: JitEntry<'_>,
 ) -> Result<NativeArtifact, NativeError> {
-    // Emit op-budget back-edge checks (so an unbounded loop stops) only when a
-    // finite budget is set — keeps zero-overhead the common unlimited runs.
-    runtime::set_enforce_budget(opts.op_limit != u64::MAX);
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
         return Err(NativeError::Compile(format!(
@@ -534,7 +531,6 @@ pub fn compile_object_with_meta(
     opts: &NativeOptions,
     obj_path: &std::path::Path,
 ) -> Result<aot_meta::AotMeta, NativeError> {
-    runtime::set_enforce_budget(opts.op_limit != u64::MAX);
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
         return Err(NativeError::Compile(format!(

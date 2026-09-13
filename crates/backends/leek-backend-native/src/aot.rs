@@ -55,7 +55,6 @@ const SYS_LIBS: &[&str] = &["-lpthread", "-ldl", "-lm", "-lrt", "-lgcc_s", "-lut
 
 /// Per-run runtime initialization before `leek_main`, mirroring the JIT path.
 pub fn aot_setup(strict: bool, op_limit: u64, max_call_depth: u32, max_stack_bytes: usize) {
-    crate::runtime::set_enforce_budget(op_limit != u64::MAX);
     crate::runtime::reset_ops(op_limit);
     crate::runtime::arm_call_guard(max_call_depth, max_stack_bytes);
     crate::runtime::clear_globals();

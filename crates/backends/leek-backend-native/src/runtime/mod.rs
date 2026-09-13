@@ -184,13 +184,7 @@ thread_local! {
     static OP_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
 }
 
-thread_local! {
-    /// Whether the *currently-compiling* function should emit op-budget checks
-    /// at branch back-edges (so an unbounded loop stops instead of spinning /
-    /// exhausting memory). Set from `opts.op_limit != u64::MAX` at compile time;
-    /// off for ordinary runs (unlimited budget) to avoid per-branch overhead.
-    static ENFORCE_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
+thread_local! {}
 
 #[inline]
 fn handle(v: Value) -> *mut Value {

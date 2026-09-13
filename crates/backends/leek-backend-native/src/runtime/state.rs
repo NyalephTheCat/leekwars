@@ -4,21 +4,11 @@
 //! before `main` runs.
 
 use super::{
-    CLASS_CTOR_THUNK, CLASS_PARENT, CLASS_REFLECT, CLASS_STRING_METHOD, DISPATCH, ENFORCE_BUDGET,
-    GLOBALS, NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELDS, STATIC_INIT, STRICT,
+    CLASS_CTOR_THUNK, CLASS_PARENT, CLASS_REFLECT, CLASS_STRING_METHOD, DISPATCH, GLOBALS,
+    NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELDS, STATIC_INIT, STRICT,
 };
 use leek_runtime::{Rng, Value};
 use std::collections::{HashMap, HashSet};
-
-/// Set whether op-budget back-edge checks are emitted (compile-time flag).
-pub fn set_enforce_budget(on: bool) {
-    ENFORCE_BUDGET.with(|c| c.set(on));
-}
-
-/// Whether to emit op-budget back-edge checks for the function being compiled.
-pub fn enforce_budget() -> bool {
-    ENFORCE_BUDGET.with(std::cell::Cell::get)
-}
 
 /// Reset the op counter and install the budget for a new run.
 pub fn reset_ops(limit: u64) {

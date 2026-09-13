@@ -185,3 +185,46 @@ fn returns_pop_their_frames() {
         .with_max_call_depth(3);
     assert_eq!(outcome(src, &opts), "10000");
 }
+
+/// Run `src` with no op limit on its own thread, failing if it doesn't finish
+/// within a deadline — an unbounded run can only stop through the back-edge
+/// abort poll.
+fn unbounded_outcome_within_deadline(src: &'static str, strict: bool) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let opts = NativeOptions::release().with_lang(4, strict);
+        let _ = tx.send(outcome(src, &opts));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(60))
+        .unwrap_or_else(|_| panic!("`{src}` never stopped after its runtime error"))
+}
+
+#[test]
+fn unbounded_loop_stops_after_a_callee_overflows_the_stack() {
+    // With no op budget, every call after the overflow returns at its entry
+    // prologue; the caller's loop must still poll the abort flag and stop.
+    for src in [
+        "function f(x) { return f(x) } while (true) { f(1) } return 0",
+        "function f(x) { return f(x) } for (;;) { f(1) } return 0",
+    ] {
+        assert_eq!(
+            unbounded_outcome_within_deadline(src, false),
+            STACK_OVERFLOW,
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn unbounded_loop_stops_after_a_strict_out_of_bounds_write() {
+    for src in [
+        "var a = [1] for (;;) { a[5] = 2 } return a",
+        "var a = [1] a[5] = 2 while (true) {} return a",
+    ] {
+        assert_eq!(
+            unbounded_outcome_within_deadline(src, true),
+            "runtime error ARRAY_OUT_OF_BOUND",
+            "{src}"
+        );
+    }
+}
