@@ -61,3 +61,63 @@ fn op_budget_stops_a_runaway_loop() {
         other => panic!("expected a runtime op-budget trip, got {other:?}"),
     }
 }
+
+/// Run `src` (v4) with a small op budget on a worker thread and return the
+/// error code, failing the test (instead of hanging it) if the program is
+/// still running after a generous deadline.
+fn budget_error_within_deadline(src: &'static str) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let s = SourceId::new(1).unwrap();
+        let p = parse(src, s, Version::V4);
+        let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).unwrap();
+        let (h, _) = leek_hir::lower_file_versioned(&sf, s, 4);
+        let out = run(
+            &h,
+            &NativeOptions::release()
+                .with_lang(4, false)
+                .with_op_limit(10_000),
+        );
+        let _ = tx.send(match out {
+            Err(leek_backend_native::NativeError::Runtime(c)) => c,
+            Err(e) => format!("other error: {e}"),
+            Ok(v) => format!("completed with {v}"),
+        });
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(60))
+        .unwrap_or_else(|_| panic!("`{src}` never stopped: the op budget was not enforced"))
+}
+
+#[test]
+fn op_budget_stops_goto_only_loops() {
+    // No `Branch` terminator anywhere in these cycles — the header/step are
+    // plain `Goto`s — so only a back-edge check on `Goto` can stop them.
+    for src in [
+        "var a = 0 for (;;) { a++ } return a",
+        "for (;;) {} return 0",
+        "var a = 0 for (;;) { a = a + 1 } return a",
+    ] {
+        assert_eq!(
+            budget_error_within_deadline(src),
+            "TOO_MUCH_OPERATIONS",
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn op_budget_stops_loops_whose_ops_are_charged_in_callees() {
+    // The budget trips inside `f` (whose trap just returns its default); the
+    // caller's loop must notice the recorded error at its own back-edge.
+    for src in [
+        "var n = 0 function f() { n = n + 1 } for (;;) { f() } return n",
+        "function f() { var x = 1 return x } while (true) { f() } return 0",
+        "function f() { var x = 1 return x } do { f() } while (true) return 0",
+    ] {
+        assert_eq!(
+            budget_error_within_deadline(src),
+            "TOO_MUCH_OPERATIONS",
+            "{src}"
+        );
+    }
+}

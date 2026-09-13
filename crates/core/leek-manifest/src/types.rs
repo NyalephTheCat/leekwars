@@ -175,6 +175,9 @@ pub struct BackendSettings {
     pub target: Option<String>,
     /// `[backend.native].opt_level`.
     pub opt_level: Option<u8>,
+    /// `[backend.native].max_call_depth` — nested user-function calls allowed
+    /// before a run fails with `STACKOVERFLOW` (`None`: the backend default).
+    pub max_call_depth: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

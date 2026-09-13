@@ -7,12 +7,12 @@
 
 use std::path::{Path, PathBuf};
 
-use leek_hir::{Def, Stmt, lower_files};
+use leek_hir::{Def, ExprKind, Literal, LowerUnit, Stmt, lower_files};
 use leek_parser::ast::{AstNode, SourceFile};
 use leek_parser::parse;
 use leek_resolver::folder::MemFolder;
 use leek_resolver::include_graph::{ResolvedFile, build_include_graph};
-use leek_span::SourceId;
+use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::{SyntaxNode, Version};
 
 struct Compiled {
@@ -31,8 +31,12 @@ fn compile(entry: &str, files: &[(&str, &str)]) -> Compiled {
         .map(|(_, t)| (*t).to_string())
         .expect("entry exists in fixture");
 
+    compile_at(entry, Version::V4, &entry_text, &folder)
+}
+
+fn compile_at(entry: &str, version: Version, entry_text: &str, folder: &MemFolder) -> Compiled {
     let mut next: u32 = 1;
-    let graph = build_include_graph(Path::new(entry), &entry_text, &folder, |_| {
+    let graph = build_include_graph(Path::new(entry), entry_text, version, folder, |_| {
         let id = SourceId::new(next).unwrap();
         next += 1;
         id
@@ -66,21 +70,72 @@ fn compile(entry: &str, files: &[(&str, &str)]) -> Compiled {
     let entry_parsed = parsed.pop().expect("at least one file (entry)");
 
     // The remaining `parsed` slice is the includes, leaves-first.
-    let includes_owned: Vec<(SourceFile, SourceId, PathBuf)> = parsed
-        .into_iter()
-        .map(|p| (p.ast, p.source, p.path))
+    let includes: Vec<LowerUnit<'_>> = parsed
+        .iter()
+        .map(|p| LowerUnit {
+            ast: &p.ast,
+            source: p.source,
+            path: &p.path,
+            version: p.version,
+        })
         .collect();
+    let entry_unit = LowerUnit {
+        ast: &entry_parsed.ast,
+        source: entry_parsed.source,
+        path: &entry_parsed.path,
+        version: entry_parsed.version,
+    };
 
     let (hir, diags) = lower_files(
-        (&entry_parsed.ast, entry_parsed.source, &entry_parsed.path),
-        &includes_owned,
-        &graph.resolved,
+        entry_unit,
+        &includes,
+        Some(&graph.resolved),
+        FeatureFlags::none(),
     );
     let mut diagnostics = graph.diagnostics;
     diagnostics.extend(diags);
-    // Silence the unused-import warnings.
-    let _ = entry_parsed.version;
     Compiled { hir, diagnostics }
+}
+
+/// Every string literal value in the merged main block's var inits.
+fn string_inits(hir: &leek_hir::HirFile) -> Vec<(String, String)> {
+    hir.main
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::VarDecl(v) => match v.init.as_ref().map(|e| &e.kind) {
+                Some(ExprKind::Literal(Literal::String(s))) => Some((v.name.clone(), s.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn included_files_lower_at_their_own_version() {
+    // v1 keeps the backslash of `\"` inside a double-quoted string
+    // (`length("a\"b") == 4`), v2+ unescapes it. Before the fix every
+    // file of an include program was lowered at v4.
+    let mut folder = MemFolder::new();
+    let entry_text = "var e = \"a\\\"b\"\ninclude(\"inherits\")\ninclude(\"modern\")\n";
+    folder.insert("/main.leek", entry_text);
+    // No pragma: inherits the entry's v1.
+    folder.insert("/inherits.leek", "var i = \"a\\\"b\"\n");
+    // Explicit pragma: lowered at v4 even inside a v1 program.
+    folder.insert("/modern.leek", "// @version:4\nvar m = \"a\\\"b\"\n");
+
+    let c = compile_at("/main.leek", Version::V1, entry_text, &folder);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    let inits = string_inits(&c.hir);
+    let get = |name: &str| {
+        inits.iter().find(|(n, _)| n == name).map_or_else(
+            || panic!("{name} missing from {inits:?}"),
+            |(_, s)| s.clone(),
+        )
+    };
+    assert_eq!(get("e"), "a\\\"b", "entry lowers at v1");
+    assert_eq!(get("i"), "a\\\"b", "pragma-less include inherits v1");
+    assert_eq!(get("m"), "a\"b", "pragma include lowers at its own v4");
 }
 
 fn fn_names(hir: &leek_hir::HirFile) -> Vec<String> {

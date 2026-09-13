@@ -67,12 +67,7 @@ pub fn pick_java_out_dir(
 
 /// Map a pipeline version byte to [`Version`].
 pub fn version_from_byte(byte: u8) -> Version {
-    match byte {
-        1 => Version::V1,
-        2 => Version::V2,
-        3 => Version::V3,
-        _ => Version::V4,
-    }
+    Version::from_byte(byte)
 }
 
 /// Whether to use clean Java emission mode.

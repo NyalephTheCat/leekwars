@@ -16,6 +16,12 @@
 //! real compile pass. See `doc/pipeline.md` §5.1.7. We honor this
 //! by re-parsing each file with its declared version before
 //! scanning for include tokens.
+//!
+//! The entry file's version is the caller's settled `Input::version_byte`
+//! (never re-derived here). An included file uses its own explicit
+//! `@version` pragma when it has one and otherwise **inherits the entry's
+//! version**, so a pragma-less include in a v2 program is lexed, parsed,
+//! resolved, checked and lowered at v2 rather than silently at v4.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -74,12 +80,7 @@ impl ResolvedFile {
     /// Pragma byte (1..=4) for downstream consumers that prefer the
     /// pipeline's byte representation of the version.
     pub fn version_byte(&self) -> u8 {
-        match self.version {
-            Version::V1 => 1,
-            Version::V2 => 2,
-            Version::V3 => 3,
-            Version::V4 => 4,
-        }
+        u8::from(self.version)
     }
 }
 
@@ -92,9 +93,14 @@ impl ResolvedFile {
 /// care about ids (e.g. simple tests) can pass `|_| SourceId::new(1).unwrap()`
 /// — diagnostics still attach to the right text but spans across
 /// files become indistinguishable.
+///
+/// `entry_version` is the entry's settled language version (the
+/// pipeline's `Input::version_byte`); pragma-less included files
+/// inherit it.
 pub fn build_include_graph(
     entry_path: &Path,
     entry_text: &str,
+    entry_version: Version,
     folder: &dyn Folder,
     mut source_for: impl FnMut(&Path) -> SourceId,
 ) -> IncludeGraphResult {
@@ -113,7 +119,6 @@ pub fn build_include_graph(
     // Seed the entry file.
     let entry_canonical = canonical_or_normalized(entry_path);
     let entry_source = source_for(&entry_canonical);
-    let entry_version = pragma_version(entry_text);
     files.insert(
         entry_canonical.clone(),
         ResolvedFile {
@@ -136,6 +141,7 @@ pub fn build_include_graph(
         done: &mut BTreeSet<PathBuf>,
         folder: &dyn Folder,
         source_for: &mut dyn FnMut(&Path) -> SourceId,
+        entry_version: Version,
     ) {
         if done.contains(&current) {
             return;
@@ -171,7 +177,7 @@ pub fn build_include_graph(
                 Ok(LoadedFile { path, text }) => {
                     if !files.contains_key(&path) {
                         let src = source_for(&path);
-                        let ver = pragma_version(&text);
+                        let ver = included_version(&text, entry_version);
                         files.insert(
                             path.clone(),
                             ResolvedFile {
@@ -206,6 +212,7 @@ pub fn build_include_graph(
                         done,
                         folder,
                         source_for,
+                        entry_version,
                     );
                 }
                 Err(e) => {
@@ -238,6 +245,7 @@ pub fn build_include_graph(
         &mut done,
         folder,
         &mut source_for,
+        entry_version,
     );
 
     // Project `order` (canonical paths) onto `ResolvedFile` so
@@ -293,13 +301,13 @@ fn extract_include_calls(file: &ResolvedFile) -> Vec<IncludeCall> {
     out
 }
 
-/// Apply the file's `@version` pragma to figure out which version
-/// to tokenize at. Defaults to V4 when the pragma is absent.
-fn pragma_version(text: &str) -> Version {
-    // `parse_pragmas` wants a SourceId for its diagnostics; we
-    // don't care about those at this layer.
+/// An included file's version: its own explicit `@version` pragma,
+/// else the entry's settled version.
+fn included_version(text: &str, entry_version: Version) -> Version {
+    // `parse_pragmas` wants a SourceId for its diagnostics; the
+    // included file's own pragma diagnostics are not reported here.
     let (pragmas, _diags) = parse_pragmas(text, SourceId::new(1).unwrap());
-    pragmas.version
+    pragmas.effective_version(entry_version)
 }
 
 #[cfg(test)]
@@ -308,6 +316,10 @@ mod tests {
     use crate::folder::MemFolder;
 
     fn build(entry: &str, files: &[(&str, &str)]) -> IncludeGraphResult {
+        build_at(entry, Version::V4, files)
+    }
+
+    fn build_at(entry: &str, version: Version, files: &[(&str, &str)]) -> IncludeGraphResult {
         let mut folder = MemFolder::new();
         for (p, t) in files {
             folder.insert(*p, *t);
@@ -318,11 +330,63 @@ mod tests {
             .map(|(_, t)| (*t).to_string())
             .unwrap_or_default();
         let mut next: u32 = 1;
-        build_include_graph(Path::new(entry), &entry_text, &folder, |_| {
+        build_include_graph(Path::new(entry), &entry_text, version, &folder, |_| {
             let id = SourceId::new(next).unwrap();
             next += 1;
             id
         })
+    }
+
+    fn version_of(result: &IncludeGraphResult, path: &str) -> Version {
+        result
+            .files
+            .iter()
+            .find(|f| f.path == Path::new(path))
+            .expect("path present")
+            .version
+    }
+
+    #[test]
+    fn entry_uses_caller_version_and_pragmaless_include_inherits_it() {
+        // The entry has no pragma: its version is the caller's (the
+        // settled `Input::version_byte`), not a V4 default. The include
+        // has no pragma either, so it inherits the entry's version.
+        let result = build_at(
+            "/main.leek",
+            Version::V2,
+            &[
+                ("/main.leek", "include(\"util\")\n"),
+                ("/util.leek", "var x = 1;\n"),
+            ],
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(version_of(&result, "/main.leek"), Version::V2);
+        assert_eq!(version_of(&result, "/util.leek"), Version::V2);
+    }
+
+    #[test]
+    fn include_pragma_overrides_entry_version() {
+        let result = build_at(
+            "/main.leek",
+            Version::V4,
+            &[
+                ("/main.leek", "// @version:4\ninclude(\"old\")\n"),
+                ("/old.leek", "// @version:1\nvar x = 1;\n"),
+            ],
+        );
+        assert_eq!(version_of(&result, "/old.leek"), Version::V1);
+    }
+
+    #[test]
+    fn entry_version_is_not_re_derived_from_its_pragma() {
+        // The caller already settled the entry's version (e.g. a CLI
+        // override); the walker must not second-guess it from the text.
+        let result = build_at(
+            "/main.leek",
+            Version::V3,
+            &[("/main.leek", "// @version:1\nvar x = 1;\n")],
+        );
+        assert_eq!(version_of(&result, "/main.leek"), Version::V3);
     }
 
     #[test]

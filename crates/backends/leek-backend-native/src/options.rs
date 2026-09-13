@@ -2,6 +2,11 @@
 
 use std::path::PathBuf;
 
+/// Default operation budget for a single CLI run (`miku run`, `miku test`
+/// without a `timeout` annotation, `leekc --emit run`): 20M, the in-game
+/// `OPERATIONS_LIMIT`.
+pub const DEFAULT_OP_BUDGET: u64 = 20_000_000;
+
 /// Cranelift optimization level — the debug/release switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptLevel {
@@ -88,7 +93,35 @@ pub struct NativeOptions {
     /// the `beforeFight()` / `afterFight()` lifecycle hooks: they're never
     /// called from the AI body, so reachability would otherwise prune them.
     pub hook_roots: Vec<String>,
+    /// Maximum number of nested user-function calls. Entering a frame beyond
+    /// it records `STACKOVERFLOW` (upstream's `Error.STACKOVERFLOW`) and the
+    /// program winds down, instead of recursing until the native stack
+    /// overflows and the OS kills the host process. Defaults to
+    /// [`DEFAULT_MAX_CALL_DEPTH`]; lower it to exercise the error in tests.
+    pub max_call_depth: u32,
+    /// Native stack the program's user frames may use, in bytes, measured
+    /// from where the run starts. Entering a frame below that also records
+    /// `STACKOVERFLOW`. A backstop for [`max_call_depth`](Self::max_call_depth):
+    /// recursion through a function value crosses the Rust dispatch shims and
+    /// costs ~100x the stack of a direct call, so no single depth fits every
+    /// call path. `usize::MAX` disables it. Defaults to
+    /// [`DEFAULT_MAX_STACK_BYTES`]; the calling thread must have at least this
+    /// much stack free (plus slack for the runtime) when the run starts.
+    pub max_stack_bytes: usize,
 }
+
+/// Default [`NativeOptions::max_call_depth`].
+///
+/// Upstream has no explicit counter: the JVM throws `StackOverflowError`
+/// when the thread stack runs out, so its depth depends on the stack size.
+/// This default admits every recursion the upstream corpus runs to completion
+/// (the deepest is `rec(1000)`; `rec(10000)` is only run under an op budget it
+/// exhausts first).
+pub const DEFAULT_MAX_CALL_DEPTH: u32 = 5_000;
+
+/// Default [`NativeOptions::max_stack_bytes`]: 1 MiB, half the 2 MiB stack a
+/// spawned Rust thread (test, DAP or fight worker) gets by default.
+pub const DEFAULT_MAX_STACK_BYTES: usize = 1 << 20;
 
 impl Default for NativeOptions {
     fn default() -> Self {
@@ -112,6 +145,8 @@ impl NativeOptions {
             link_game: false,
             op_limit: u64::MAX,
             hook_roots: Vec::new(),
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            max_stack_bytes: DEFAULT_MAX_STACK_BYTES,
         }
     }
 
@@ -129,7 +164,21 @@ impl NativeOptions {
             link_game: false,
             op_limit: u64::MAX,
             hook_roots: Vec::new(),
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            max_stack_bytes: DEFAULT_MAX_STACK_BYTES,
         }
+    }
+
+    /// Set the call-depth limit (see [`max_call_depth`](Self::max_call_depth)).
+    pub fn with_max_call_depth(mut self, depth: u32) -> Self {
+        self.max_call_depth = depth;
+        self
+    }
+
+    /// Set the native stack budget (see [`max_stack_bytes`](Self::max_stack_bytes)).
+    pub fn with_max_stack_bytes(mut self, bytes: usize) -> Self {
+        self.max_stack_bytes = bytes;
+        self
     }
 
     /// Enable per-statement debug safepoints (see [`NativeOptions::debug_hooks`]).
@@ -147,6 +196,17 @@ impl NativeOptions {
     pub fn with_emit(mut self, emit: NativeEmit) -> Self {
         self.emit = emit;
         self
+    }
+
+    /// Debug-profile JIT options for running a pipeline result: always at
+    /// the input's settled language version **and** strict mode (so `miku
+    /// run`, `miku test` and `leekc --emit run` can't drift from each other or
+    /// from `miku build --backend native`), with the given op budget.
+    pub fn jit_for_input(input: &leek_pipeline::Input, op_limit: u64) -> Self {
+        Self::debug()
+            .with_emit(NativeEmit::Jit)
+            .with_lang(input.version_byte, input.strict)
+            .with_op_limit(op_limit)
     }
 
     /// Set the language semantics (version + strict typing) the compiled
@@ -195,3 +255,27 @@ impl std::fmt::Display for NativeError {
 }
 
 impl std::error::Error for NativeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jit_for_input_carries_version_and_strict() {
+        // Regression: `miku run` / `miku test` built `NativeOptions::debug()`
+        // and set only the version, so a `@strict` file (or `strict = true`
+        // manifest) ran non-strict under the JIT.
+        let input = leek_pipeline::Input {
+            source: leek_span::SourceId::new(1).unwrap(),
+            text: "".into(),
+            version_byte: 2,
+            strict: true,
+            flags: leek_pipeline::FeatureFlags::none(),
+        };
+        let opts = NativeOptions::jit_for_input(&input, 1234);
+        assert_eq!(opts.version, 2);
+        assert!(opts.strict);
+        assert_eq!(opts.op_limit, 1234);
+        assert_eq!(opts.emit, NativeEmit::Jit);
+    }
+}

@@ -21,8 +21,18 @@ use leek_runtime::Value;
 /// Per-run runtime initialization, called by the generated `main` before
 /// `leek_main`. `strict` is a C boolean (0 / non-0).
 #[unsafe(no_mangle)]
-pub extern "C" fn leek_aot_setup(strict: i32, op_limit: u64) {
-    leek_backend_native::aot::aot_setup(strict != 0, op_limit);
+pub extern "C" fn leek_aot_setup(
+    strict: i32,
+    op_limit: u64,
+    max_call_depth: u32,
+    max_stack_bytes: u64,
+) {
+    leek_backend_native::aot::aot_setup(
+        strict != 0,
+        op_limit,
+        max_call_depth,
+        usize::try_from(max_stack_bytes).unwrap_or(usize::MAX),
+    );
 }
 
 /// The runtime error recorded during the run as a freshly-allocated C string,

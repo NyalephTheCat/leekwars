@@ -61,7 +61,7 @@ want to run one in isolation:
 
 ```sh
 cargo fmt --all                          # format (--check to verify only)
-tools/check-layers.sh                    # enforce the crate-layering rule
+cargo xtask check-layers                 # enforce the crate-layering rule
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude leek-test-corpus   # fast tests
 ```
@@ -88,16 +88,19 @@ supply-chain audit and a VS Code extension build — see
 ### The layering rule
 
 Crates are organized into layers, and dependencies may only point *down* the
-stack. [`tools/check-layers.sh`](tools/check-layers.sh) enforces this and CI
-fails if it's violated:
+stack. `cargo xtask check-layers` enforces this and CI fails if it's violated:
 
 ```
-core → frontend → middle → db → backends · tools · testing
+core → frontend → middle → db → backends → game → tools · testing → bins · xtask
 ```
 
-(`leek-pipeline` is special: it must depend only on `core`.) If you find
-yourself wanting an "upward" dependency, that's usually a sign the abstraction
-belongs in a lower layer — see [`docs/architecture.md`](docs/architecture.md).
+A crate's layer is its directory. Peers (`·`) may not depend on each other,
+dev-dependencies may reach one layer up, and `leek-pipeline` must depend only
+on `core`. Known exceptions live in
+[`xtask/layer-allowlist.txt`](xtask/layer-allowlist.txt); that list should only
+shrink. If you find yourself wanting an "upward" dependency, that's usually a
+sign the abstraction belongs in a lower layer — see
+[`docs/architecture.md`](docs/architecture.md).
 
 ## Commit messages
 
@@ -148,8 +151,9 @@ than one sprawling change.
    `[workspace.dependencies]` in [`Cargo.toml`](Cargo.toml).
 3. Use `version`, `edition`, and `license` via `workspace = true`, and inherit
    the workspace lints with `[lints] workspace = true`.
-4. If it participates in the layering rule, add it to the `LAYER` map in
-   [`tools/check-layers.sh`](tools/check-layers.sh).
+4. There is no crate list to update for the layering rule: `cargo xtask
+   check-layers` takes the layer from the directory and fails on a crate that
+   is not under a layer directory.
 
 ## Questions
 

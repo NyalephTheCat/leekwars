@@ -308,7 +308,19 @@ pub(super) fn declare_imports(
             // can appear in any function, so the shim is unconditional too.
             ("leek_to_bigint", &[i], Some(i)),
         ];
-        for (sym, params, ret) in op_shims {
+        // Call-depth guard: every user function counts its frame on entry and
+        // pops it on return (`main` is exempt). Declared only where it's used,
+        // so the emitters key the prologue/epilogue off these imports.
+        let frame_shims: &[(&'static str, &[ClType], Option<ClType>)] =
+            if mir_fn.kind == leek_mir::ir::FunctionKind::Main {
+                &[]
+            } else {
+                &[
+                    ("leek_enter_frame", &[], Some(i)),
+                    ("leek_leave_frame", &[], None),
+                ]
+            };
+        for (sym, params, ret) in op_shims.iter().chain(frame_shims) {
             let mut sig = m.make_signature();
             for &p in *params {
                 sig.params.push(AbiParam::new(p));

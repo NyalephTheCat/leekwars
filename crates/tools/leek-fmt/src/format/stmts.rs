@@ -6,8 +6,8 @@ use leek_syntax::{SyntaxKind as S, SyntaxNode};
 use crate::doc::{Doc, concat, group, hardline, indent, line, softline, space, text};
 
 use super::{
-    block_lead, child_nodes, comma_sep, count_newlines, fmt_node, format_raw, is_trivia,
-    lone_child_node, peel_context_parens, space_if, token_text, with_ctx,
+    block_lead, child_nodes, comma_sep, count_newlines, fmt_node, is_trivia, lone_child_node,
+    peel_context_parens, space_if, token_text, with_ctx,
 };
 
 // ---- Trivial passthroughs / utilities ----
@@ -89,10 +89,6 @@ fn maybe_semicolon(node: &SyntaxNode, saw_semi: bool) -> Doc {
     text(";")
 }
 
-pub(super) fn format_passthrough(node: &SyntaxNode) -> Doc {
-    format_raw(node)
-}
-
 /// `break;` / `continue;` — keyword + optional semicolon.
 pub(super) fn format_simple_keyword_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
@@ -108,11 +104,6 @@ pub(super) fn format_simple_keyword_stmt(node: &SyntaxNode) -> Doc {
     }
     parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
-}
-
-/// `@name` or `@name(args)` annotation. Preserved verbatim.
-pub(super) fn format_annotation(node: &SyntaxNode) -> Doc {
-    format_raw(node)
 }
 
 // ---- Declarations ----
@@ -161,6 +152,11 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
     let mut members: Vec<Doc> = Vec::new();
     let mut leading: Vec<Doc> = Vec::new();
     let mut between_newlines: usize = 0;
+    // Newlines between the previous member and the first leading
+    // comment of the next one. The member separator is decided by that
+    // gap, not by the newlines after the comments — otherwise a
+    // comment on its own line would grow a blank line on every pass.
+    let mut gap_before_leading: Option<usize> = None;
     let mut saw_first = false;
     let mut prev_fnlike = false;
     let mut pending_next: Vec<(String, String)> = Vec::new();
@@ -181,11 +177,14 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
                     super::apply_pragma_to_ctx(&pragma);
                     continue;
                 }
+                gap_before_leading.get_or_insert(between_newlines);
+                between_newlines = 0;
                 leading.push(token_text(&t));
             }
             NodeOrToken::Token(_) => {}
             NodeOrToken::Node(child) => {
                 let fnlike = matches!(child.kind(), S::ClassMethod | S::ClassConstructor);
+                let gap = gap_before_leading.take().unwrap_or(between_newlines);
                 if saw_first {
                     // `blank_line_between_functions` lifts the gap on
                     // either side of a method/constructor to a blank.
@@ -193,7 +192,7 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
                         && with_ctx(|cx| {
                             cx.opts.blank_line_between_functions && cx.opts.max_blank_lines >= 1
                         });
-                    members.push(if between_newlines >= 2 || force_blank {
+                    members.push(if gap >= 2 || force_blank {
                         crate::doc::blank_line()
                     } else {
                         hardline()
@@ -223,8 +222,17 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
         }
     }
 
-    if !saw_first {
+    if !saw_first && leading.is_empty() {
         return text("{}");
+    }
+    // Comments after the last member (or in a comment-only body) have
+    // no member to lead; keep them in front of the closing brace
+    // rather than dropping them.
+    for comment in leading.drain(..) {
+        if !members.is_empty() {
+            members.push(hardline());
+        }
+        members.push(comment);
     }
 
     let body = concat(members);

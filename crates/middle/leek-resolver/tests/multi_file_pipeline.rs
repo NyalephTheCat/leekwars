@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use leek_hir::pipeline::HirArtifact;
-use leek_hir::{Def, Stmt};
+use leek_hir::{Def, ExprKind, Literal, Stmt};
 use leek_pipeline::Input;
 use leek_recipes::{RecipeParams, pipeline_hir_from_parse, pipeline_hir_with_includes};
 use leek_resolver::folder::MemFolder;
@@ -91,6 +91,77 @@ fn step_pipeline_splices_main_at_include_site() {
         })
         .collect();
     assert_eq!(names, ["before", "injected", "after"]);
+}
+
+/// String-literal values of `var` inits in the lowered main block.
+fn string_inits(hir: &leek_hir::HirFile) -> Vec<(String, String)> {
+    hir.main
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::VarDecl(v) => match v.init.as_ref().map(|e| &e.kind) {
+                Some(ExprKind::Literal(Literal::String(s))) => Some((v.name.clone(), s.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn input(text: &str, version_byte: u8) -> Input {
+    Input {
+        source: SourceId::new(1).unwrap(),
+        text: text.to_string().into(),
+        version_byte,
+        strict: false,
+        flags: leek_pipeline::FeatureFlags::none(),
+    }
+}
+
+#[test]
+fn single_file_lowering_uses_input_version_not_pragma() {
+    // `Input::version_byte` is the settled version (a driver already
+    // applied override > pragma > default). HIR lowering used to re-read
+    // the pragma, so `leekc --version-pragma 2` on a `@version:1` file was
+    // lexed/parsed at v2 but lowered (v1 string escapes) at v1.
+    let pipeline = pipeline_hir_from_parse(&RecipeParams::permissive()).expect("recipe");
+    let run = pipeline.run(input("// @version:1\nvar s = \"a\\\"b\"\n", 2));
+    let hir = run.get::<HirArtifact>().expect("HirArtifact").0.clone();
+    assert_eq!(string_inits(&hir), [("s".to_string(), "a\"b".to_string())]);
+
+    let run = pipeline.run(input("// @version:4\nvar s = \"a\\\"b\"\n", 1));
+    let hir = run.get::<HirArtifact>().expect("HirArtifact").0.clone();
+    assert_eq!(
+        string_inits(&hir),
+        [("s".to_string(), "a\\\"b".to_string())]
+    );
+}
+
+#[test]
+fn include_pipeline_lowers_each_file_at_its_version() {
+    // A v1 program: the pragma-less include inherits v1 (lexed, parsed and
+    // lowered at v1), the pragma'd include keeps its own v4. Previously the
+    // include graph defaulted pragma-less files to v4 and `lower_files`
+    // lowered every file at v4.
+    let mut folder = MemFolder::new();
+    let entry = "var e = \"a\\\"b\"\ninclude(\"inherits\")\ninclude(\"modern\")\n";
+    folder.insert("/main.leek", entry);
+    folder.insert("/inherits.leek", "var i = \"a\\\"b\"\n");
+    folder.insert("/modern.leek", "// @version:4\nvar m = \"a\\\"b\"\n");
+    let resolve_includes =
+        ResolveIncludes::with_counter(Arc::new(folder), PathBuf::from("/main.leek"), 2);
+    let pipeline =
+        pipeline_hir_with_includes(Box::new(resolve_includes), &RecipeParams::permissive())
+            .expect("recipe");
+    let run = pipeline.run(input(entry, 1));
+    let hir = run.get::<HirArtifact>().expect("HirArtifact").0.clone();
+    assert_eq!(
+        string_inits(&hir),
+        [
+            ("e".to_string(), "a\\\"b".to_string()),
+            ("i".to_string(), "a\\\"b".to_string()),
+            ("m".to_string(), "a\"b".to_string()),
+        ]
+    );
 }
 
 #[test]

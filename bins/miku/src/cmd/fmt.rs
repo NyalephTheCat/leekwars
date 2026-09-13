@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use leek_manifest::FormatOptions;
 use leek_span::SourceId;
+use leek_span::pragma::LanguageSettings;
 use leek_syntax::Version;
 
 use crate::cli::Fmt;
@@ -34,7 +35,7 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     let opts = resolve_options(args, project.as_ref())?;
 
     if args.stdin {
-        return run_stdin(args, &opts);
+        return run_stdin(args, &opts, project.as_ref());
     }
 
     let sources = collect_sources(args, project.as_ref())?;
@@ -49,12 +50,22 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     let dry_run = args.check || args.diff;
     let mut any_changes = false;
     let mut changed_files = 0usize;
+    let mut unsafe_files = 0usize;
     for (i, path) in sources.iter().enumerate() {
         let original =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
-        let version = detect_version(&original, source);
-        let formatted = leek_fmt::format_source(&original, source, version, &opts);
+        let version = detect_version(&original, project.as_ref());
+        // Never write output that lost a comment or token: leave the
+        // file untouched and report it instead.
+        let formatted = match leek_fmt::format_source_checked(&original, source, version, &opts) {
+            Ok(formatted) => formatted,
+            Err(err) => {
+                eprintln!("error: refusing to format {}: {err}", path.display());
+                unsafe_files += 1;
+                continue;
+            }
+        };
         if formatted == original {
             continue;
         }
@@ -76,6 +87,13 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         }
     }
 
+    if unsafe_files > 0 {
+        eprintln!(
+            "miku: {unsafe_files} file{} left unformatted: the formatter failed its safety check (please report this)",
+            if unsafe_files == 1 { "" } else { "s" }
+        );
+        return Ok(ExitCode::from(1));
+    }
     if dry_run && any_changes {
         if !quiet {
             eprintln!(
@@ -96,11 +114,12 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
 
 /// `--stdin`: format stdin to stdout. `--check`/`--diff` suppress the
 /// formatted output and exit non-zero when the input isn't formatted.
-fn run_stdin(args: &Fmt, opts: &FormatOptions) -> Result<ExitCode> {
+fn run_stdin(args: &Fmt, opts: &FormatOptions, project: Option<&Project>) -> Result<ExitCode> {
     let original = std::io::read_to_string(std::io::stdin()).context("reading stdin")?;
     let source = SourceId::new(1).unwrap();
-    let version = detect_version(&original, source);
-    let formatted = leek_fmt::format_source(&original, source, version, opts);
+    let version = detect_version(&original, project);
+    let formatted = leek_fmt::format_source_checked(&original, source, version, opts)
+        .map_err(|err| anyhow::anyhow!("refusing to format <stdin>: {err}"))?;
     if args.diff {
         print!(
             "{}",
@@ -167,12 +186,13 @@ fn unified_diff(original: &str, formatted: &str, path: &Path) -> String {
     )
 }
 
-fn detect_version(text: &str, source: SourceId) -> Version {
-    let (pragmas, _) = leek_syntax::parse_pragmas(text, source);
-    version_from_byte(match pragmas.version {
-        Version::V1 => 1,
-        Version::V2 => 2,
-        Version::V3 => 3,
-        Version::V4 => 4,
-    })
+/// The source's language version: its `@version:N` pragma, else the
+/// manifest's `[project].language` inside a project, else v4 — the same
+/// resolution every other subcommand gets from `Project::pipeline_input`.
+fn detect_version(text: &str, project: Option<&Project>) -> Version {
+    let lang = project.map_or_else(
+        || LanguageSettings::resolve(text, None, leek_span::pragma::LATEST_VERSION, false),
+        |p| p.index().language_settings(text),
+    );
+    version_from_byte(lang.version)
 }
