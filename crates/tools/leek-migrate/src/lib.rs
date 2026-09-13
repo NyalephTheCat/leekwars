@@ -54,6 +54,15 @@ pub trait MigrationPass: Sync {
     fn to_version(&self) -> Version;
 
     /// Walk the source's CST and contribute edits.
+    ///
+    /// An [`EditSet`] rejects an edit whose bytes another rewrite of
+    /// the same pass already claimed. Implementors must report that
+    /// (see `passes::util::record_edit`, which raises a
+    /// `MigrationSkipped` warning at the site) rather than drop it —
+    /// a half-rewritten site usually still compiles and quietly means
+    /// something else. Rewrites that are only correct as a unit go in
+    /// through [`EditSet::try_push_all`], so they land whole or not
+    /// at all.
     fn collect_edits(
         &self,
         source: &str,
@@ -69,7 +78,8 @@ pub trait MigrationPass: Sync {
 ///
 /// Always returns a [`MigrationOutput`]; if the pass contributes
 /// no edits and no pragma is present, the result text equals the
-/// input.
+/// input. Edits the pass could not apply are reported in
+/// `diagnostics` as `MigrationSkipped` warnings, never dropped.
 pub fn run_pass(pass: &dyn MigrationPass, source: &str, source_id: SourceId) -> MigrationOutput {
     let mut edits = EditSet::new(source.len());
     let mut diagnostics = Vec::new();

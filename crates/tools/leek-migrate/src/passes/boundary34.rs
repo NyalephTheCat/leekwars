@@ -33,13 +33,13 @@ use std::collections::HashSet;
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{AstNode, BinaryExpr, CallExpr, Expr, SourceFile, VarDeclStmt};
-use leek_rewrite::EditSet;
+use leek_rewrite::{Edit, EditSet};
 use leek_span::SourceId;
 use leek_syntax::language::NodeOrToken;
 use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use super::util::{
-    behavior_change, ident_of_name_ref_expr, is_assign_op, mentions_name, token_span,
+    behavior_change, ident_of_name_ref_expr, is_assign_op, mentions_name, record_edit, token_span,
 };
 
 /// Builtins whose two-parameter callback swapped order at the 3/4
@@ -84,8 +84,15 @@ pub(crate) fn swap_callback_params(
             if let [a, b] = params.as_slice() {
                 let (ta, tb) = (a.text().to_string(), b.text().to_string());
                 if ta != tb {
-                    let _ = edits.replace_token(a, tb);
-                    let _ = edits.replace_token(b, ta);
+                    // Both renames or neither: landing only the first
+                    // gives both parameters the same name, which still
+                    // compiles and silently reads the wrong one.
+                    record_edit(
+                        edits.try_push_all([Edit::for_token(a, tb), Edit::for_token(b, ta)]),
+                        leek_syntax::node_span(callback.syntax(), source_id),
+                        &format!("`{}` callback parameter swap", ident.text()),
+                        diagnostics,
+                    );
                 }
             }
         } else {
@@ -213,14 +220,24 @@ fn for_each_juggling_equality(file: &SourceFile, mut f: impl FnMut(SyntaxToken, 
 /// and likewise for mixed-class literal comparisons (`0 == '0'`).
 /// v4's `==` between operands of different types is plain false;
 /// v3's strict equality does the same, so the rewrite is faithful.
-pub(crate) fn strictify_juggling_equality(file: &SourceFile, edits: &mut EditSet) {
+pub(crate) fn strictify_juggling_equality(
+    file: &SourceFile,
+    source_id: SourceId,
+    edits: &mut EditSet,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     for_each_juggling_equality(file, |op, _| {
         let strict = if op.kind() == SyntaxKind::EqEq {
             "==="
         } else {
             "!=="
         };
-        let _ = edits.replace_token(&op, strict.to_string());
+        record_edit(
+            edits.replace_token(&op, strict.to_string()),
+            token_span(&op, source_id),
+            &format!("`{}` → `{strict}` strictification", op.text()),
+            diagnostics,
+        );
     });
 }
 

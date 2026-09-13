@@ -59,6 +59,47 @@ impl EditSet {
     /// stored sequence, and therefore [`apply`](Self::apply)'s output,
     /// is the same for any push order of the same edits.
     pub fn push(&mut self, start: u32, end: u32, replacement: String) -> Result<(), EditError> {
+        self.insert(start, end, replacement).map(|_| ())
+    }
+
+    /// Add every edit of `group` or none of them.
+    ///
+    /// A multi-edit rewrite (swapping two parameter names, renaming a
+    /// callee *and* adjusting one of its arguments) is only correct as
+    /// a unit: applying half of it produces source that still parses
+    /// but means something else. If any edit in `group` is rejected —
+    /// by an earlier edit in the set, or by another edit of the same
+    /// group — the set is restored to its state before the call and
+    /// the first error is returned.
+    ///
+    /// # Errors
+    ///
+    /// The first [`EditError`] any edit of the group is rejected with.
+    pub fn try_push_all<I>(&mut self, group: I) -> Result<(), EditError>
+    where
+        I: IntoIterator<Item = Edit>,
+    {
+        let mut inserted: Vec<usize> = Vec::new();
+        for edit in group {
+            match self.insert(edit.start, edit.end, edit.replacement) {
+                Ok(idx) => inserted.push(idx),
+                Err(e) => {
+                    // Undo in reverse insertion order: each recorded
+                    // index is the one the edit landed on in the state
+                    // that removing all later insertions restores.
+                    for idx in inserted.into_iter().rev() {
+                        self.edits.remove(idx);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// [`push`](Self::push), reporting where the edit landed so
+    /// [`try_push_all`](Self::try_push_all) can undo it.
+    fn insert(&mut self, start: u32, end: u32, replacement: String) -> Result<usize, EditError> {
         if start > end {
             return Err(EditError::InvalidRange { start, end });
         }
@@ -108,7 +149,7 @@ impl EditSet {
                 replacement,
             },
         );
-        Ok(())
+        Ok(idx)
     }
 
     /// Convenience: replace `span` with `replacement`. The span's
@@ -418,6 +459,76 @@ mod tests {
             set.push(3, 7, "x".into()),
             Err(EditError::Overlap { .. })
         ));
+    }
+
+    #[test]
+    fn try_push_all_lands_every_edit_of_a_group() {
+        let mut set = EditSet::new(src().len());
+        set.try_push_all([Edit::new(4, 5, "a".into()), Edit::new(15, 16, "b".into())])
+            .unwrap();
+        assert_eq!(
+            set.apply(src()).unwrap(),
+            "var a = 1;\nvar b = 2;\nvar z = 3;\n"
+        );
+    }
+
+    /// A group that collides with an earlier edit leaves the set
+    /// exactly as it was — no half-applied rewrite.
+    #[test]
+    fn try_push_all_rolls_back_on_conflict() {
+        let mut set = EditSet::new(src().len());
+        set.push(15, 16, "keep".into()).unwrap();
+        let before = set.apply(src()).unwrap();
+        let e = set.try_push_all([
+            Edit::new(4, 5, "a".into()),
+            Edit::new(26, 27, "c".into()),
+            Edit::new(15, 16, "clash".into()),
+        ]);
+        assert!(matches!(e, Err(EditError::Overlap { .. })));
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.apply(src()).unwrap(), before);
+    }
+
+    /// Two edits of one group that collide with each other roll the
+    /// whole group back too.
+    #[test]
+    fn try_push_all_rolls_back_a_self_conflicting_group() {
+        let mut set = EditSet::new(src().len());
+        let e = set.try_push_all([Edit::new(4, 8, "long".into()), Edit::new(6, 9, "x".into())]);
+        assert!(matches!(e, Err(EditError::Overlap { .. })));
+        assert!(set.is_empty());
+        assert_eq!(set.apply(src()).unwrap(), src());
+    }
+
+    /// Rollback restores the stored order, not just the contents:
+    /// group edits that sort before existing ones are removed from
+    /// the middle of the set.
+    #[test]
+    fn try_push_all_rollback_keeps_the_remaining_order() {
+        let mut set = EditSet::new(src().len());
+        set.push(26, 27, "c".into()).unwrap();
+        set.push(15, 16, "b".into()).unwrap();
+        let e = set.try_push_all([
+            Edit::new(0, 0, "// head\n".into()),
+            Edit::new(4, 5, "a".into()),
+            Edit::new(26, 27, "clash".into()),
+        ]);
+        assert!(matches!(e, Err(EditError::Overlap { .. })));
+        assert_eq!(
+            set.apply(src()).unwrap(),
+            "var x = 1;\nvar b = 2;\nvar c = 3;\n"
+        );
+    }
+
+    /// The swap the v3/v4 callback rewrite needs: two token renames
+    /// that must both land or neither.
+    #[test]
+    fn try_push_all_swaps_a_pair_atomically() {
+        let text = "aa bb";
+        let mut set = EditSet::new(text.len());
+        set.try_push_all([Edit::new(0, 2, "bb".into()), Edit::new(3, 5, "aa".into())])
+            .unwrap();
+        assert_eq!(set.apply(text).unwrap(), "bb aa");
     }
 
     #[test]

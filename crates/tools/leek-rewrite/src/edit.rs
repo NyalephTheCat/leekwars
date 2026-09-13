@@ -1,6 +1,7 @@
 //! Single edit and validation errors.
 
 use leek_span::Span;
+use leek_syntax::{SyntaxNode, SyntaxToken};
 
 /// A single text-replacement edit. Byte offsets are into the
 /// original source the [`EditSet`](crate::EditSet) was built for.
@@ -16,6 +17,37 @@ pub struct Edit {
 }
 
 impl Edit {
+    /// An edit replacing the byte range `[start, end)`.
+    #[must_use]
+    pub fn new(start: u32, end: u32, replacement: String) -> Self {
+        Self {
+            start,
+            end,
+            replacement,
+        }
+    }
+
+    /// An edit replacing `span`'s bytes. The span's `SourceId` is
+    /// ignored — offsets are into the source the set was built for.
+    #[must_use]
+    pub fn for_span(span: Span, replacement: String) -> Self {
+        Self::new(span.start, span.end, replacement)
+    }
+
+    /// An edit replacing a token's text.
+    #[must_use]
+    pub fn for_token(token: &SyntaxToken, replacement: String) -> Self {
+        let r = token.text_range();
+        Self::new(u32::from(r.start()), u32::from(r.end()), replacement)
+    }
+
+    /// An edit replacing a node's full text range.
+    #[must_use]
+    pub fn for_node(node: &SyntaxNode, replacement: String) -> Self {
+        let r = node.text_range();
+        Self::new(u32::from(r.start()), u32::from(r.end()), replacement)
+    }
+
     /// True when the edit adds text without removing any
     /// (`start == end`), i.e. it names a position, not a range.
     #[must_use]

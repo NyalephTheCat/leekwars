@@ -4,6 +4,7 @@
 
 use leek_diagnostics::{Diagnostic, codes};
 use leek_parser::ast::{AstNode, Expr};
+use leek_rewrite::EditError;
 use leek_span::{SourceId, Span};
 use leek_syntax::language::NodeOrToken;
 use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -63,6 +64,39 @@ pub(crate) fn token_span(tok: &SyntaxToken, source_id: SourceId) -> Span {
 /// compiles at the target version, but evaluates differently there.
 pub(crate) fn behavior_change(span: Span, message: String, note: &str) -> Diagnostic {
     Diagnostic::warning(codes::MIGRATION_BEHAVIOR_CHANGE, span, message).with_note(note.to_string())
+}
+
+/// Record the outcome of an edit a pass wanted to make; returns
+/// `true` when it landed.
+///
+/// An [`EditSet`](leek_rewrite::EditSet) rejects an edit whose bytes
+/// another rewrite already claimed. A pass that drops that rejection
+/// on the floor carries on as if its rewrite had been applied, and
+/// the half-rewritten site usually still compiles — it just means
+/// something else. Surface it as a `MigrationSkipped` (W0513)
+/// warning at the site instead, so the file is flagged for manual
+/// review.
+pub(crate) fn record_edit(
+    result: Result<(), EditError>,
+    span: Span,
+    what: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let Err(err) = result else {
+        return true;
+    };
+    diagnostics.push(
+        Diagnostic::warning(
+            codes::MIGRATION_SKIPPED,
+            span,
+            format!("{what} could not be applied: {err}"),
+        )
+        .with_note(
+            "another rewrite of this pass already covers these bytes — \
+             migrate this site by hand, then re-run the migration",
+        ),
+    );
+    false
 }
 
 /// True iff `expr` is the `null` literal.

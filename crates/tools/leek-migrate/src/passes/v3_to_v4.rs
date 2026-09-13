@@ -31,12 +31,15 @@ use std::collections::HashSet;
 use leek_diagnostics::{Diagnostic, codes};
 use leek_parser::ast::{AstNode, CallExpr, Expr, SourceFile};
 use leek_parser::parse;
-use leek_rewrite::EditSet;
+use leek_rewrite::{Edit, EditSet};
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, Version};
 
 use super::boundary34;
-use super::util::{ident_of_name_ref_expr, is_field_name_position, name_ref_ident, token_range};
+use super::util::{
+    ident_of_name_ref_expr, is_field_name_position, name_ref_ident, record_edit, token_range,
+    token_span,
+};
 use crate::MigrationPass;
 
 pub struct V3ToV4;
@@ -104,21 +107,31 @@ impl MigrationPass for V3ToV4 {
                     ));
                     continue;
                 }
-                // Rename the callee token.
-                if edits
-                    .replace_token(&ident, "arraySlice".to_string())
-                    .is_ok()
-                {
-                    consumed_ident_ranges.insert(token_range(&ident));
-                }
-                // Compensate inclusive→exclusive end semantics by
-                // bumping the third arg.
+                // Rename the callee token, and compensate the
+                // inclusive→exclusive end semantics by bumping the
+                // third arg. Either alone is an off-by-one that still
+                // compiles, so the pair goes in atomically.
                 let third = &args[2];
                 let third_text = third.syntax().text().to_string();
-                let new_third = format!("({third_text}) + 1");
-                let _ = edits.replace_node(third.syntax(), new_third);
+                let applied = record_edit(
+                    edits.try_push_all([
+                        Edit::for_token(&ident, "arraySlice".to_string()),
+                        Edit::for_node(third.syntax(), format!("({third_text}) + 1")),
+                    ]),
+                    leek_syntax::node_span(call.syntax(), source_id),
+                    "`subArray` → `arraySlice` rewrite",
+                    diagnostics,
+                );
+                if applied {
+                    consumed_ident_ranges.insert(token_range(&ident));
+                }
             } else if let Some((_, new_name)) = RENAMES.iter().find(|(old, _)| *old == name)
-                && edits.replace_token(&ident, (*new_name).to_string()).is_ok()
+                && record_edit(
+                    edits.replace_token(&ident, (*new_name).to_string()),
+                    token_span(&ident, source_id),
+                    &format!("`{name}` → `{new_name}` rename"),
+                    diagnostics,
+                )
             {
                 consumed_ident_ranges.insert(token_range(&ident));
             }
@@ -156,7 +169,12 @@ impl MigrationPass for V3ToV4 {
                 continue;
             }
             if let Some((_, new)) = RENAMES.iter().find(|(old, _)| *old == name) {
-                let _ = edits.replace_token(&ident, (*new).to_string());
+                record_edit(
+                    edits.replace_token(&ident, (*new).to_string()),
+                    Span::new(source_id, range.0, range.1),
+                    &format!("`{name}` → `{new}` rename"),
+                    diagnostics,
+                );
             }
         }
 
