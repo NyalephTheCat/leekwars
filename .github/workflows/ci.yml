@@ -32,7 +32,7 @@ jobs:
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
       - name: layer check
-        run: tools/check-layers.sh
+        run: cargo xtask check-layers
       - name: generated catalog drift
         run: tools/game-item-extract.sh --check
 

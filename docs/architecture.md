@@ -33,18 +33,37 @@ official/, official-generator/   upstream reference impls (git submodules)
 
 Crates are organized into **layers**, and dependencies may only point *down*
 the stack. This keeps the dependency graph acyclic and the boundaries honest.
-The order is:
+A crate's layer is the directory it lives in (`crates/<layer>/<crate>`,
+`bins/<crate>`, or `xtask/`). The order is:
 
 ```
-core  →  frontend  →  middle  →  db  →  backends · tools · testing
-                                          (peers; no order among these three)
+core → frontend → middle → db → backends → game → tools · testing → bins · xtask
 ```
 
-[`tools/check-layers.sh`](../tools/check-layers.sh) enforces this from each
-crate's `Cargo.toml` `[dependencies]` and is part of the CI gate, so a stray
-"upward" dependency fails the build. One special case: **`leek-pipeline` may
-depend only on `core`** — it is the generic orchestration substrate and must
-not know about any concrete frontend/middle/backend crate.
+Layers joined by `·` are peers: they share a rank, and neither may depend on
+the other. `game` sits above `backends` (the generator runs AIs on the native
+backend) and below `tools` (the debug adapter drives fights).
+
+`cargo xtask check-layers` enforces the rule over the graph reported by
+`cargo metadata`, and it is part of the CI gate. For each dependency between
+two workspace members:
+
+- **Normal and build dependencies** stay inside their layer or point at a
+  lower layer.
+- **Dev dependencies** may reach at most one rank higher, peers included, so a
+  test can use the next layer up.
+- **`leek-pipeline` may depend only on `core`** (dev dependencies excepted).
+  It is the generic orchestration substrate and must not know about any
+  concrete frontend, middle or backend crate.
+- **Every member must live in a layer directory.** A crate anywhere else fails
+  the check.
+
+Existing violations are listed, each with a justification, in
+[`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt). Today that
+includes every frontend and middle stage depending on `leek-pipeline`,
+`leek-runtime` → `leek-hir`, and `leek-recipes` → `leek-fmt`/`leek-lint`. The
+list may only shrink: an entry whose edge no longer breaks the rule fails the
+check, so remove it in the same change that fixes the edge.
 
 If you reach for an upward dependency, the abstraction you want usually belongs
 in a lower layer (or behind a trait that a lower layer defines and a higher one
@@ -123,7 +142,7 @@ drift. The scripts live in [`tools/`](../tools/):
 
 - `game-item-extract.sh` — weapon/chip catalogs (see above).
 - `builtin-extract.sh` / `game-builtin-extract.sh` — builtin function tables.
-- `check-layers.sh` — the layering rule.
+- `cargo xtask check-layers` ([`xtask/`](../xtask/)) — the layering rule.
 - `check.sh` — the full quality gate (and the contract CI honors).
 
 When you change one of these inputs, regenerate the output in the same commit so
