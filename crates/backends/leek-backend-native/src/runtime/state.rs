@@ -31,27 +31,29 @@ pub fn ops_used() -> u64 {
     OP_COUNT.with(std::cell::Cell::get)
 }
 
-/// Charge `n` operations. Called from JIT'd code at each MIR charge site
-/// (matching the interpreter's `charge_ops`). On exceeding the budget it
-/// records `TOO_MUCH_OPERATIONS`; the JIT'd code can't unwind, so loops poll
-/// [`op_budget_exceeded`] at their back-edges to stop promptly.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_charge_ops(n: i64) {
-    let next = OP_COUNT.with(|c| {
-        let v = c.get().saturating_add(n.max(0) as u64);
-        c.set(v);
-        v
-    });
-    if next > OP_LIMIT.with(std::cell::Cell::get) {
-        raise_runtime_error("TOO_MUCH_OPERATIONS");
+shim! {
+    /// Charge `n` operations. Called from JIT'd code at each MIR charge site
+    /// (matching the interpreter's `charge_ops`). On exceeding the budget it
+    /// records `TOO_MUCH_OPERATIONS`; the JIT'd code can't unwind, so loops poll
+    /// [`op_budget_exceeded`] at their back-edges to stop promptly.
+    pub extern "C" fn leek_charge_ops(n: i64) {
+        let next = OP_COUNT.with(|c| {
+            let v = c.get().saturating_add(n.max(0) as u64);
+            c.set(v);
+            v
+        });
+        if next > OP_LIMIT.with(std::cell::Cell::get) {
+            raise_runtime_error("TOO_MUCH_OPERATIONS");
+        }
     }
 }
 
-/// Whether the op budget has been exceeded — polled at loop back-edges so the
-/// JIT'd code can branch out instead of running an unbounded loop to the end.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_op_budget_exceeded() -> i64 {
-    i64::from(OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get))
+shim! {
+    /// Whether the op budget has been exceeded — polled at loop back-edges so the
+    /// JIT'd code can branch out instead of running an unbounded loop to the end.
+    pub extern "C" fn leek_op_budget_exceeded() -> i64 {
+        i64::from(OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get))
+    }
 }
 
 /// Charge upstream's string-concatenation cost (`AI.add` string branch):

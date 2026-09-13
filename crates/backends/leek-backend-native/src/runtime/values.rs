@@ -8,214 +8,234 @@ use leek_runtime::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Coerce a boxed value to a declared scalar kind (`0`=int, `1`=real,
-/// `2`=bool), preserving `null` (for nullable declared types). Used to make
-/// a typed static field's stored value match its declaration (`real? a = 12`
-/// reads back `12.0`), mirroring the interpreter's `coerce_to_type`.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_coerce_scalar(h: *mut Value, kind: i64) -> *mut Value {
-    let v = unsafe { val(h) };
-    if matches!(v, Value::Null) {
-        return h;
-    }
-    let coerced = match kind {
-        0 => Value::Int(v.to_long()),
-        1 => Value::Real(v.to_real()),
-        _ => Value::Bool(v.is_truthy()),
-    };
-    handle(coerced)
-}
-
-/// Coerce a boxed value to `Value::BigInt` for a store into a
-/// `big_integer`-declared slot (null and existing bigints pass through
-/// unchanged) — the bigint counterpart of [`leek_coerce_scalar`].
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_to_bigint(h: *mut Value) -> *mut Value {
-    let v = unsafe { val(h) };
-    if matches!(v, Value::Null | Value::BigInt(_)) {
-        return h;
-    }
-    handle(leek_runtime::coerce_value_to_bigint(v))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_box_int(i: i64) -> *mut Value {
-    handle(Value::Int(i))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_box_real(r: f64) -> *mut Value {
-    handle(Value::Real(r))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_box_bool(b: i64) -> *mut Value {
-    handle(Value::Bool(b != 0))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_box_null() -> *mut Value {
-    handle(Value::Null)
-}
-
-/// Build a `Value::String` from `len` bytes at `ptr`. The generated code
-/// materializes the literal's bytes in-binary (immediate stores) and passes a
-/// pointer to them, so nothing references the *compiler* process's heap — the
-/// AOT-relocatable replacement for baking a `box_string` handle as an immediate.
-///
-/// # Safety
-/// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_const_string(ptr: *const u8, len: i64) -> *mut Value {
-    let s = if len <= 0 || ptr.is_null() {
-        String::new()
-    } else {
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        String::from_utf8_lossy(bytes).into_owned()
-    };
-    handle(Value::String(Rc::new(s)))
-}
-
-/// Build a `Value::BigInt` from `len` decimal-digit bytes at `ptr` — the
-/// big_integer twin of [`leek_const_string`] (the digits are MIR
-/// `Const::BigInt`'s canonical decimal form).
-///
-/// # Safety
-/// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_const_bigint(ptr: *const u8, len: i64) -> *mut Value {
-    let digits = if len <= 0 || ptr.is_null() {
-        String::new()
-    } else {
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        String::from_utf8_lossy(bytes).into_owned()
-    };
-    handle(Value::BigInt(Rc::new(leek_runtime::big_from_decimal(
-        &digits,
-    ))))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_unbox_int(p: *mut Value) -> i64 {
-    unsafe { val(p) }.to_long()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_unbox_real(p: *mut Value) -> f64 {
-    unsafe { val(p) }.to_real()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_unbox_bool(p: *mut Value) -> i64 {
-    i64::from(unsafe { val(p) }.is_truthy())
-}
-
-/// Truthiness of a boxed value (for branching / `!` on a dynamic value),
-/// using the shared `Value::is_truthy`. Returns 0 or 1.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_truthy(p: *mut Value) -> i64 {
-    unsafe { val(p) }.is_truthy() as i64
-}
-
-/// Deep-clone a boxed value for v1 value semantics (assignment / pass-by-
-/// value of a composite copies it). Scalars clone trivially.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_clone_v1(p: *mut Value) -> *mut Value {
-    handle(leek_runtime::deep_clone(unsafe { val(p) }))
-}
-
-/// Give a local stable, shared `Value::Cell` storage so writes from either
-/// the enclosing scope or a closure are visible to both. If `inner` is
-/// already a cell (e.g. a lambda capture-parameter that arrives holding the
-/// enclosing scope's cell handle), it is returned unchanged so the shared
-/// `Rc` is preserved; otherwise its value is wrapped in a fresh cell.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_make_cell(inner: *mut Value) -> *mut Value {
-    match unsafe { val(inner) } {
-        Value::Cell(_) => inner,
-        v => handle(Value::Cell(std::rc::Rc::new(RefCell::new(v.clone())))),
+shim! {
+    /// Coerce a boxed value to a declared scalar kind (`0`=int, `1`=real,
+    /// `2`=bool), preserving `null` (for nullable declared types). Used to make
+    /// a typed static field's stored value match its declaration (`real? a = 12`
+    /// reads back `12.0`), mirroring the interpreter's `coerce_to_type`.
+    pub extern "C" fn leek_coerce_scalar(h: *mut Value, kind: i64) -> *mut Value {
+        let v = unsafe { val(h) };
+        if matches!(v, Value::Null) {
+            return h;
+        }
+        let coerced = match kind {
+            0 => Value::Int(v.to_long()),
+            1 => Value::Real(v.to_real()),
+            _ => Value::Bool(v.is_truthy()),
+        };
+        handle(coerced)
     }
 }
 
-/// Read a cell local: clone the value currently behind the cell (peeled).
-/// A non-cell handle (defensive) is returned cloned unchanged.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_cell_get(cell: *mut Value) -> *mut Value {
-    match unsafe { val(cell) } {
-        Value::Cell(rc) => handle(rc.borrow().clone()),
-        other => handle(other.clone()),
+shim! {
+    /// Coerce a boxed value to `Value::BigInt` for a store into a
+    /// `big_integer`-declared slot (null and existing bigints pass through
+    /// unchanged) — the bigint counterpart of [`leek_coerce_scalar`].
+    pub extern "C" fn leek_to_bigint(h: *mut Value) -> *mut Value {
+        let v = unsafe { val(h) };
+        if matches!(v, Value::Null | Value::BigInt(_)) {
+            return h;
+        }
+        handle(leek_runtime::coerce_value_to_bigint(v))
     }
 }
 
-/// Write a cell local: store `v` (peeled) into the shared slot, so any
-/// closure sharing the cell's `Rc` observes the new value. A no-op on a
-/// non-cell handle.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_cell_set(cell: *mut Value, v: *mut Value) {
-    if let Value::Cell(rc) = unsafe { val(cell) } {
-        *rc.borrow_mut() = unsafe { val(v) }.unbox();
+shim! {
+    pub extern "C" fn leek_box_int(i: i64) -> *mut Value {
+        handle(Value::Int(i))
     }
 }
 
-/// Consume a pending v1 LegacyArray promotion (stashed by a mutating
-/// builtin like `push`) and return the promoted value; if none is pending,
-/// return `current` unchanged. Used to lower `Statement::ApplyPromotion`.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_apply_promotion(current: *mut Value) -> *mut Value {
-    match leek_runtime::take_pending_promotion() {
-        Some(v) => handle(v),
-        None => current,
+shim! {
+    pub extern "C" fn leek_box_real(r: f64) -> *mut Value {
+        handle(Value::Real(r))
     }
 }
 
-/// Apply a unary operator to a boxed value, returning a new handle.
-/// `code`: 0 = negate (`-x`), 1 = bitwise-not (`~x`). Delegates to the
-/// shared `leek_runtime` ops so the result matches the interpreter.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_value_unary(code: i64, p: *mut Value) -> *mut Value {
-    let v = unsafe { val(p) };
-    let r = match code {
-        0 => leek_runtime::neg(v),
-        1 => leek_runtime::bit_not(v),
-        _ => Value::Null,
-    };
-    handle(r)
+shim! {
+    pub extern "C" fn leek_box_bool(b: i64) -> *mut Value {
+        handle(Value::Bool(b != 0))
+    }
 }
 
-/// Apply a [`leek_mir::ir::CastKind`] to a boxed value, returning a new
-/// handle. `code`: 0 = IntToReal, 1 = RealToInt, 2 = ToBool, 3 = ToString,
-/// else = User (identity clone). Mirrors the interpreter's `apply_cast`
-/// (same `Value` conversion methods), so the result matches exactly.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_apply_cast(code: i64, p: *mut Value) -> *mut Value {
-    let v = unsafe { val(p) };
-    let r = match code {
-        0 => Value::Real(v.to_real()),
-        1 => Value::Int(v.to_long()),
-        2 => Value::Bool(v.is_truthy()),
-        3 => Value::String(std::rc::Rc::new(v.to_string())),
-        _ => v.clone(),
-    };
-    handle(r)
+shim! {
+    pub extern "C" fn leek_box_null() -> *mut Value {
+        handle(Value::Null)
+    }
 }
 
-/// Apply a binary operator to two boxed values, returning a new handle.
-/// Delegates to the interpreter's shared `apply_binary`, so the result
-/// matches the interpreter exactly (string concat, array `+`, version-
-/// specific division, etc.). `code` is a [`BinOp`] encoded via
-/// [`binop_code`].
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_value_binop(
-    code: i64,
-    a: *mut Value,
-    b: *mut Value,
-    version: i64,
-) -> *mut Value {
-    let Some(op) = binop_from_code(code) else {
-        return handle(Value::Null);
-    };
-    let (l, r) = (unsafe { val(a) }, unsafe { val(b) });
-    handle(apply_binop_charged(op, l, r, version as u8))
+shim! {
+    /// Build a `Value::String` from `len` bytes at `ptr`. The generated code
+    /// materializes the literal's bytes in-binary (immediate stores) and passes a
+    /// pointer to them, so nothing references the *compiler* process's heap — the
+    /// AOT-relocatable replacement for baking a `box_string` handle as an immediate.
+    ///
+    /// # Safety
+    /// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
+    pub extern "C" fn leek_const_string(ptr: *const u8, len: i64) -> *mut Value {
+        let s = if len <= 0 || ptr.is_null() {
+            String::new()
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        handle(Value::String(Rc::new(s)))
+    }
+}
+
+shim! {
+    /// Build a `Value::BigInt` from `len` decimal-digit bytes at `ptr` — the
+    /// big_integer twin of [`leek_const_string`] (the digits are MIR
+    /// `Const::BigInt`'s canonical decimal form).
+    ///
+    /// # Safety
+    /// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
+    pub extern "C" fn leek_const_bigint(ptr: *const u8, len: i64) -> *mut Value {
+        let digits = if len <= 0 || ptr.is_null() {
+            String::new()
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        handle(Value::BigInt(Rc::new(leek_runtime::big_from_decimal(
+            &digits,
+        ))))
+    }
+}
+
+shim! {
+    pub extern "C" fn leek_unbox_int(p: *mut Value) -> i64 {
+        unsafe { val(p) }.to_long()
+    }
+}
+
+shim! {
+    pub extern "C" fn leek_unbox_real(p: *mut Value) -> f64 {
+        unsafe { val(p) }.to_real()
+    }
+}
+
+shim! {
+    pub extern "C" fn leek_unbox_bool(p: *mut Value) -> i64 {
+        i64::from(unsafe { val(p) }.is_truthy())
+    }
+}
+
+shim! {
+    /// Truthiness of a boxed value (for branching / `!` on a dynamic value),
+    /// using the shared `Value::is_truthy`. Returns 0 or 1.
+    pub extern "C" fn leek_truthy(p: *mut Value) -> i64 {
+        unsafe { val(p) }.is_truthy() as i64
+    }
+}
+
+shim! {
+    /// Deep-clone a boxed value for v1 value semantics (assignment / pass-by-
+    /// value of a composite copies it). Scalars clone trivially.
+    pub extern "C" fn leek_clone_v1(p: *mut Value) -> *mut Value {
+        handle(leek_runtime::deep_clone(unsafe { val(p) }))
+    }
+}
+
+shim! {
+    /// Give a local stable, shared `Value::Cell` storage so writes from either
+    /// the enclosing scope or a closure are visible to both. If `inner` is
+    /// already a cell (e.g. a lambda capture-parameter that arrives holding the
+    /// enclosing scope's cell handle), it is returned unchanged so the shared
+    /// `Rc` is preserved; otherwise its value is wrapped in a fresh cell.
+    pub extern "C" fn leek_make_cell(inner: *mut Value) -> *mut Value {
+        match unsafe { val(inner) } {
+            Value::Cell(_) => inner,
+            v => handle(Value::Cell(std::rc::Rc::new(RefCell::new(v.clone())))),
+        }
+    }
+}
+
+shim! {
+    /// Read a cell local: clone the value currently behind the cell (peeled).
+    /// A non-cell handle (defensive) is returned cloned unchanged.
+    pub extern "C" fn leek_cell_get(cell: *mut Value) -> *mut Value {
+        match unsafe { val(cell) } {
+            Value::Cell(rc) => handle(rc.borrow().clone()),
+            other => handle(other.clone()),
+        }
+    }
+}
+
+shim! {
+    /// Write a cell local: store `v` (peeled) into the shared slot, so any
+    /// closure sharing the cell's `Rc` observes the new value. A no-op on a
+    /// non-cell handle.
+    pub extern "C" fn leek_cell_set(cell: *mut Value, v: *mut Value) {
+        if let Value::Cell(rc) = unsafe { val(cell) } {
+            *rc.borrow_mut() = unsafe { val(v) }.unbox();
+        }
+    }
+}
+
+shim! {
+    /// Consume a pending v1 LegacyArray promotion (stashed by a mutating
+    /// builtin like `push`) and return the promoted value; if none is pending,
+    /// return `current` unchanged. Used to lower `Statement::ApplyPromotion`.
+    pub extern "C" fn leek_apply_promotion(current: *mut Value) -> *mut Value {
+        match leek_runtime::take_pending_promotion() {
+            Some(v) => handle(v),
+            None => current,
+        }
+    }
+}
+
+shim! {
+    /// Apply a unary operator to a boxed value, returning a new handle.
+    /// `code`: 0 = negate (`-x`), 1 = bitwise-not (`~x`). Delegates to the
+    /// shared `leek_runtime` ops so the result matches the interpreter.
+    pub extern "C" fn leek_value_unary(code: i64, p: *mut Value) -> *mut Value {
+        let v = unsafe { val(p) };
+        let r = match code {
+            0 => leek_runtime::neg(v),
+            1 => leek_runtime::bit_not(v),
+            _ => Value::Null,
+        };
+        handle(r)
+    }
+}
+
+shim! {
+    /// Apply a [`leek_mir::ir::CastKind`] to a boxed value, returning a new
+    /// handle. `code`: 0 = IntToReal, 1 = RealToInt, 2 = ToBool, 3 = ToString,
+    /// else = User (identity clone). Mirrors the interpreter's `apply_cast`
+    /// (same `Value` conversion methods), so the result matches exactly.
+    pub extern "C" fn leek_apply_cast(code: i64, p: *mut Value) -> *mut Value {
+        let v = unsafe { val(p) };
+        let r = match code {
+            0 => Value::Real(v.to_real()),
+            1 => Value::Int(v.to_long()),
+            2 => Value::Bool(v.is_truthy()),
+            3 => Value::String(std::rc::Rc::new(v.to_string())),
+            _ => v.clone(),
+        };
+        handle(r)
+    }
+}
+
+shim! {
+    /// Apply a binary operator to two boxed values, returning a new handle.
+    /// Delegates to the interpreter's shared `apply_binary`, so the result
+    /// matches the interpreter exactly (string concat, array `+`, version-
+    /// specific division, etc.). `code` is a [`BinOp`] encoded via
+    /// [`binop_code`].
+    pub extern "C" fn leek_value_binop(
+        code: i64,
+        a: *mut Value,
+        b: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(op) = binop_from_code(code) else {
+            return handle(Value::Null);
+        };
+        let (l, r) = (unsafe { val(a) }, unsafe { val(b) });
+        handle(apply_binop_charged(op, l, r, version as u8))
+    }
 }
 
 /// [`apply_binop`] plus the dynamic string-concat charge — the shim-side
@@ -231,71 +251,75 @@ fn apply_binop_charged(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
     apply_binop(op, l, r, v)
 }
 
-/// Like [`leek_value_binop`] but the RIGHT operand is an integer *constant*
-/// passed by value — so the backend never boxes it. Used for `dyn OP <int lit>`
-/// (`n - 1`, `n < 2`, …), removing one heap allocation per such operation; the
-/// constant `Value::Int` lives on the stack. Identical result to boxing it.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_value_binop_cir(
-    code: i64,
-    a: *mut Value,
-    c: i64,
-    version: i64,
-) -> *mut Value {
-    let Some(op) = binop_from_code(code) else {
-        return handle(Value::Null);
-    };
-    let l = unsafe { val(a) };
-    handle(apply_binop_charged(op, l, &Value::Int(c), version as u8))
+shim! {
+    /// Like [`leek_value_binop`] but the RIGHT operand is an integer *constant*
+    /// passed by value — so the backend never boxes it. Used for `dyn OP <int lit>`
+    /// (`n - 1`, `n < 2`, …), removing one heap allocation per such operation; the
+    /// constant `Value::Int` lives on the stack. Identical result to boxing it.
+    pub extern "C" fn leek_value_binop_cir(
+        code: i64,
+        a: *mut Value,
+        c: i64,
+        version: i64,
+    ) -> *mut Value {
+        let Some(op) = binop_from_code(code) else {
+            return handle(Value::Null);
+        };
+        let l = unsafe { val(a) };
+        handle(apply_binop_charged(op, l, &Value::Int(c), version as u8))
+    }
 }
 
-/// Mirror of [`leek_value_binop_cir`] for a LEFT integer constant
-/// (`<int lit> OP dyn`) — order preserved for non-commutative ops.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_value_binop_cil(
-    code: i64,
-    c: i64,
-    b: *mut Value,
-    version: i64,
-) -> *mut Value {
-    let Some(op) = binop_from_code(code) else {
-        return handle(Value::Null);
-    };
-    let r = unsafe { val(b) };
-    handle(apply_binop_charged(op, &Value::Int(c), r, version as u8))
+shim! {
+    /// Mirror of [`leek_value_binop_cir`] for a LEFT integer constant
+    /// (`<int lit> OP dyn`) — order preserved for non-commutative ops.
+    pub extern "C" fn leek_value_binop_cil(
+        code: i64,
+        c: i64,
+        b: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(op) = binop_from_code(code) else {
+            return handle(Value::Null);
+        };
+        let r = unsafe { val(b) };
+        handle(apply_binop_charged(op, &Value::Int(c), r, version as u8))
+    }
 }
 
-/// `real`-typed counterparts of [`leek_value_binop_cir`] / `_cil`: the
-/// statically-`real` operand is passed by value as an `f64`, so a `dyn OP
-/// <real>` (or `<real> OP dyn`) never heap-boxes it. Building `Value::Real(c)`
-/// on the stack is identical to boxing the operand and dispatching.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_value_binop_crr(
-    code: i64,
-    a: *mut Value,
-    c: f64,
-    version: i64,
-) -> *mut Value {
-    let Some(op) = binop_from_code(code) else {
-        return handle(Value::Null);
-    };
-    let l = unsafe { val(a) };
-    handle(apply_binop_charged(op, l, &Value::Real(c), version as u8))
+shim! {
+    /// `real`-typed counterparts of [`leek_value_binop_cir`] / `_cil`: the
+    /// statically-`real` operand is passed by value as an `f64`, so a `dyn OP
+    /// <real>` (or `<real> OP dyn`) never heap-boxes it. Building `Value::Real(c)`
+    /// on the stack is identical to boxing the operand and dispatching.
+    pub extern "C" fn leek_value_binop_crr(
+        code: i64,
+        a: *mut Value,
+        c: f64,
+        version: i64,
+    ) -> *mut Value {
+        let Some(op) = binop_from_code(code) else {
+            return handle(Value::Null);
+        };
+        let l = unsafe { val(a) };
+        handle(apply_binop_charged(op, l, &Value::Real(c), version as u8))
+    }
 }
 
-/// Left-`real`-operand mirror of [`leek_value_binop_crr`].
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_value_binop_crl(
-    code: i64,
-    c: f64,
-    b: *mut Value,
-    version: i64,
-) -> *mut Value {
-    let Some(op) = binop_from_code(code) else {
-        return handle(Value::Null);
-    };
-    let r = unsafe { val(b) };
-    handle(apply_binop_charged(op, &Value::Real(c), r, version as u8))
+shim! {
+    /// Left-`real`-operand mirror of [`leek_value_binop_crr`].
+    pub extern "C" fn leek_value_binop_crl(
+        code: i64,
+        c: f64,
+        b: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(op) = binop_from_code(code) else {
+            return handle(Value::Null);
+        };
+        let r = unsafe { val(b) };
+        handle(apply_binop_charged(op, &Value::Real(c), r, version as u8))
+    }
 }
 
 /// Pure dispatch of a [`BinOp`] onto the shared `leek_runtime` operators —

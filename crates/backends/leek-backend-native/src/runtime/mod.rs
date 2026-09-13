@@ -13,6 +13,10 @@ use std::collections::{HashMap, HashSet};
 
 use leek_runtime::{Rng, Value};
 
+// First: defines the `shim!` macro the shim modules below declare their
+// `extern "C"` functions with (`macro_rules!` scoping is textual).
+#[macro_use]
+mod guard;
 mod calls;
 mod collections;
 mod objects;
