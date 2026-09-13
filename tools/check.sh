@@ -10,11 +10,9 @@
 #     workspace denies warnings here via `-D warnings`. (The leek-test-corpus
 #     build script prints an informational `cargo:warning` about extracted
 #     upstream cases; that is not a lint and is tolerated.)
-#   * leek-backend-java's test runs rewrite OPS_DRIFT.txt, JVM_PARITY.txt and
-#     CORPUS_SUMMARY.txt (under crates/backends/leek-backend-java/tests/snapshots/)
-#     non-deterministically — several recorded programs use randInt, so op
-#     counts drift run-to-run. The gate reverts them afterwards so a check
-#     run never leaves churn in the working tree.
+#   * Tests never rewrite tracked snapshot reports; they compare against them
+#     and write fresh copies under target/. Set UPDATE_SNAPSHOTS=1 to accept
+#     changed reports.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -47,16 +45,5 @@ else
   step "cargo test --workspace (excluding leek-test-corpus; use --full to include)"
   cargo test --workspace --exclude leek-test-corpus --quiet
 fi
-
-# The java-backend tests regenerate these snapshots with non-deterministic
-# op counts (randInt); revert them so the gate is side-effect free.
-SNAPSHOTS="crates/backends/leek-backend-java/tests/snapshots"
-for f in "$SNAPSHOTS/OPS_DRIFT.txt" "$SNAPSHOTS/JVM_PARITY.txt" "$SNAPSHOTS/CORPUS_SUMMARY.txt"; do
-  if git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-     && ! git diff --quiet -- "$f" 2>/dev/null; then
-    step "reverting non-deterministic $f churn"
-    git checkout -- "$f"
-  fi
-done
 
 step "all checks passed"

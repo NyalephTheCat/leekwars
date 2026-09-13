@@ -137,10 +137,18 @@ than one sprawling change.
 - The **upstream corpus** (`leek-test-corpus`) checks thousands of
   `equals(...)` cases against the reference implementation. It's slow and gated
   behind `tools/check.sh --full`; it needs the submodules checked out.
-- **Snapshot churn:** the Java-backend tests rewrite some non-deterministic
-  snapshot files (op counts drift because of `randInt`). `tools/check.sh`
-  reverts that churn automatically; if you run those tests directly, `git
-  checkout` the snapshot files afterward.
+- **Snapshots:** tests never rewrite tracked files. The Java-backend parity
+  reports under `crates/backends/leek-backend-java/tests/snapshots/` are
+  compared against the committed copies, and each run writes fresh copies
+  under `target/tmp/`. If a change is intended, rerun with
+  `UPDATE_SNAPSHOTS=1 cargo test -p leek-backend-java`, then review and commit
+  the diff. Programs that call `rand`/`randInt`/`randFloat`/`randReal` are
+  left out of the exact op-count comparison, because their reference counts
+  come from a single unseeded JVM run.
+- **JVM tests:** `rust_emit_matches_snapshot_on_jvm` needs a JDK and
+  `tools/java-emitter/build/leekscript-emitter.jar`. Without them it prints a
+  `SKIPPED` line and passes. Set `LEEK_REQUIRE_JVM=1` to make that skip a
+  failure.
 - **Fuzzing:** [`fuzz/`](fuzz/) is a standalone nightly cargo-fuzz workspace
   (excluded from the stable build) — see its README to run a target.
 
