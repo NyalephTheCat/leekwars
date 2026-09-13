@@ -3,7 +3,7 @@
 //! [`NativeHost`] that adapts the shared builtin machinery to native.
 
 use super::{
-    CLASS_CTOR_THUNK, CLASS_STRING_METHOD, DISPATCH, GLOBALS, LambdaFn, NATIVE_RNG,
+    CLASS_CTOR_THUNK, CLASS_STRING_METHOD, DISPATCH, GLOBALS, LambdaFn, NATIVE_RNG, aborting,
     charge_builtin_ops, handle, read_handle, val,
 };
 use leek_runtime::{BuiltinFlow, BuiltinHost, Function, LambdaCapture, Value};
@@ -81,6 +81,11 @@ pub(super) fn dispatch_call_value(
     callee: &Value,
     args: Vec<Value>,
 ) -> Value {
+    // After a runtime error nothing more runs: don't enter callbacks, builtins
+    // or constructors (upstream already threw).
+    if aborting() {
+        return Value::Null;
+    }
     match callee {
         Value::Function(Function::Lambda(cap)) => {
             let Some((addr, nparams)) =
@@ -242,101 +247,108 @@ pub(super) fn dispatch_call_value(
     }
 }
 
-/// Construct a lambda value capturing `ncap` already-boxed values (snapshot,
-/// matching Leekscript value-capture). `caps` points to `ncap` handles.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_make_lambda(
-    function_idx: i64,
-    caps: *const *mut Value,
-    ncap: i64,
-) -> *mut Value {
-    let captured: Vec<Value> = (0..ncap as isize)
-        .map(|i| unsafe { val(*caps.offset(i)) }.clone())
-        .collect();
-    handle(Value::Function(Function::Lambda(std::rc::Rc::new(
-        LambdaCapture {
-            function_idx: function_idx as usize,
-            captured: RefCell::new(captured),
-        },
-    ))))
+shim! {
+    /// Construct a lambda value capturing `ncap` already-boxed values (snapshot,
+    /// matching Leekscript value-capture). `caps` points to `ncap` handles.
+    pub extern "C" fn leek_make_lambda(
+        function_idx: i64,
+        caps: *const *mut Value,
+        ncap: i64,
+    ) -> *mut Value {
+        let captured: Vec<Value> = (0..ncap as isize)
+            .map(|i| unsafe { val(*caps.offset(i)) }.clone())
+            .collect();
+        handle(Value::Function(Function::Lambda(std::rc::Rc::new(
+            LambdaCapture {
+                function_idx: function_idx as usize,
+                captured: RefCell::new(captured),
+            },
+        ))))
+    }
 }
 
-/// Indirect call (`f(args)` where `f` is a value): dispatch `callee` with the
-/// `argc` boxed args in `argv`. Returns a boxed result.
-/// Dynamic method dispatch on an unknown-class receiver: `receiver.method(args)`
-/// where the static class isn't known. Mirrors the interpreter's
-/// `dispatch_method_call`: if the receiver is a class instance whose runtime
-/// class declares `method` (looked up in `METHOD_RESOLVE`), invoke that user
-/// method with `receiver` prepended (padded to its arity); otherwise fall back
-/// to a builtin method (`run_builtin(method, [receiver, …args])`). This lets a
-/// method call on a captured `this` / an `expr as C` cast value dispatch
-/// correctly at runtime.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_call_method(
-    receiver: *mut Value,
-    name: *mut Value,
-    argv: *const *mut Value,
-    argc: i64,
-    version: i64,
-) -> *mut Value {
-    let Some(method) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    // Instance method on the receiver's runtime class — the hot path. Build the
-    // uniform-ABI handle vector DIRECTLY from the caller's receiver + arg
-    // handles, skipping the clone-to-`Value`-then-rebox round-trip: the callee
-    // shares the same boxed values (the prior `.clone()` was an `Rc` clone, not
-    // a deep copy — so field mutations were already visible to the caller).
-    if let Value::Instance(inst) = unsafe { val(receiver) } {
-        let class_def = inst.borrow().class.0;
-        // One TLS access resolves the method index AND its address+arity.
-        if let Some((addr, nparams)) = DISPATCH.with(|c| {
-            let d = c.borrow();
-            d.method_resolve
-                .get(&class_def)
-                .and_then(|mm| mm.get(method))
-                .and_then(|&idx| d.lambda_fns.get(&idx).copied())
-        }) {
-            let mut handles: Vec<*mut Value> = Vec::with_capacity(nparams.max(argc as usize + 1));
-            handles.push(receiver);
-            for i in 0..argc as isize {
-                handles.push(unsafe { *argv.offset(i) });
+shim! {
+    /// Indirect call (`f(args)` where `f` is a value): dispatch `callee` with the
+    /// `argc` boxed args in `argv`. Returns a boxed result.
+    /// Dynamic method dispatch on an unknown-class receiver: `receiver.method(args)`
+    /// where the static class isn't known. Mirrors the interpreter's
+    /// `dispatch_method_call`: if the receiver is a class instance whose runtime
+    /// class declares `method` (looked up in `METHOD_RESOLVE`), invoke that user
+    /// method with `receiver` prepended (padded to its arity); otherwise fall back
+    /// to a builtin method (`run_builtin(method, [receiver, …args])`). This lets a
+    /// method call on a captured `this` / an `expr as C` cast value dispatch
+    /// correctly at runtime.
+    pub extern "C" fn leek_call_method(
+        receiver: *mut Value,
+        name: *mut Value,
+        argv: *const *mut Value,
+        argc: i64,
+        version: i64,
+    ) -> *mut Value {
+        let Some(method) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        // Instance method on the receiver's runtime class — the hot path. Build the
+        // uniform-ABI handle vector DIRECTLY from the caller's receiver + arg
+        // handles, skipping the clone-to-`Value`-then-rebox round-trip: the callee
+        // shares the same boxed values (the prior `.clone()` was an `Rc` clone, not
+        // a deep copy — so field mutations were already visible to the caller).
+        if let Value::Instance(inst) = unsafe { val(receiver) } {
+            let class_def = inst.borrow().class.0;
+            // One TLS access resolves the method index AND its address+arity.
+            if let Some((addr, nparams)) = DISPATCH.with(|c| {
+                let d = c.borrow();
+                d.method_resolve
+                    .get(&class_def)
+                    .and_then(|mm| mm.get(method))
+                    .and_then(|&idx| d.lambda_fns.get(&idx).copied())
+            }) {
+                let mut handles: Vec<*mut Value> = Vec::with_capacity(nparams.max(argc as usize + 1));
+                handles.push(receiver);
+                for i in 0..argc as isize {
+                    handles.push(unsafe { *argv.offset(i) });
+                }
+                // Pad missing params with null; truncate any surplus args.
+                handles.resize_with(nparams, || handle(Value::Null));
+                let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
+                return f(handles.as_ptr(), handles.len() as i64);
             }
-            // Pad missing params with null; truncate any surplus args.
-            handles.resize_with(nparams, || handle(Value::Null));
-            let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
-            return f(handles.as_ptr(), handles.len() as i64);
         }
+        // Builtin method fallback (an unknown name / non-number receiver yields null,
+        // exactly as the interpreter's `run_builtin` does) — needs owned `Value`s.
+        // Skipped once the run has errored, like every other builtin dispatch.
+        if aborting() {
+            return handle(Value::Null);
+        }
+        let recv = unsafe { val(receiver) }.clone();
+        let mut all = Vec::with_capacity(argc as usize + 1);
+        all.push(recv);
+        for i in 0..argc as isize {
+            all.push(unsafe { val(*argv.offset(i)) }.clone());
+        }
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        handle(leek_runtime::call_builtin(&mut host, method, &all).unwrap_or(Value::Null))
     }
-    // Builtin method fallback (an unknown name / non-number receiver yields null,
-    // exactly as the interpreter's `run_builtin` does) — needs owned `Value`s.
-    let recv = unsafe { val(receiver) }.clone();
-    let mut all = Vec::with_capacity(argc as usize + 1);
-    all.push(recv);
-    for i in 0..argc as isize {
-        all.push(unsafe { val(*argv.offset(i)) }.clone());
-    }
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    handle(leek_runtime::call_builtin(&mut host, method, &all).unwrap_or(Value::Null))
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_call_value(
-    callee: *mut Value,
-    argv: *const *mut Value,
-    argc: i64,
-    version: i64,
-) -> *mut Value {
-    let args: Vec<Value> = (0..argc as isize)
-        .map(|i| unsafe { val(*argv.offset(i)) }.clone())
-        .collect();
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    let callee_v = unsafe { val(callee) };
-    handle(dispatch_call_value(&mut host, callee_v, args))
+shim! {
+    pub extern "C" fn leek_call_value(
+        callee: *mut Value,
+        argv: *const *mut Value,
+        argc: i64,
+        version: i64,
+    ) -> *mut Value {
+        let args: Vec<Value> = (0..argc as isize)
+            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .collect();
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        let callee_v = unsafe { val(callee) };
+        handle(dispatch_call_value(&mut host, callee_v, args))
+    }
 }
 
 /// A [`BuiltinHost`] for the native backend's stdlib-builtin calls. Supplies
@@ -417,72 +429,80 @@ impl BuiltinHost for NativeHost {
     }
 }
 
-/// Per-statement debug safepoint. Emitted by the backend when
-/// `debug_hooks` is on; forwards the statement's source byte offset and the
-/// current frame's local-variable pointers to the installed
-/// [`crate::debug::DebugHook`] (which may pause execution).
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_dbg_safepoint(offset: i64, desc: i64, values: i64) {
-    crate::debug::fire_safepoint(offset as u32, desc as usize, values as usize);
-}
-
-/// Function-entry debug hook: pushes a shadow call frame for `desc` (the
-/// function's `*const VarTable`).
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_dbg_enter(desc: i64) {
-    crate::debug::fire_enter(desc as usize);
-}
-
-/// Function-return debug hook: pops the top shadow call frame.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_dbg_leave() {
-    crate::debug::fire_leave();
-}
-
-/// Read a name that is a builtin shadowed by a same-named global
-/// (`abs = 2; return abs`, or `var _c = count; count = …`). Mirrors the
-/// interpreter's dynamic resolution: the global's value if one has been
-/// assigned, otherwise the builtin handle (constant or `Function::Builtin`).
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_ref_or_builtin(name: *mut Value) -> *mut Value {
-    let Some(n) = builtin_name(name) else {
-        return handle(Value::Null);
-    };
-    if let Some(h) = GLOBALS.with(|g| g.borrow().get(&n).copied()) {
-        return h;
+shim! {
+    /// Per-statement debug safepoint. Emitted by the backend when
+    /// `debug_hooks` is on; forwards the statement's source byte offset and the
+    /// current frame's local-variable pointers to the installed
+    /// [`crate::debug::DebugHook`] (which may pause execution).
+    pub extern "C" fn leek_dbg_safepoint(offset: i64, desc: i64, values: i64) {
+        crate::debug::fire_safepoint(offset as u32, desc as usize, values as usize);
     }
-    if let Some(v) = leek_runtime::lookup_constant(&n) {
-        return handle(v);
-    }
-    handle(Value::Function(Function::Builtin(n)))
 }
 
-/// Call a name that is a builtin shadowed by a same-named global
-/// (`cos = function(…){…}; cos(1, 2, 3)`). If a global has been assigned,
-/// invoke its value; otherwise dispatch the builtin directly.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_call_ref_or_builtin(
-    name: *mut Value,
-    argv: *const *mut Value,
-    argc: i64,
-    version: i64,
-) -> *mut Value {
-    let Some(n) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let args: Vec<Value> = (0..argc as isize)
-        .map(|i| unsafe { val(*argv.offset(i)) }.clone())
-        .collect();
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    if let Some(g) = GLOBALS.with(|g| g.borrow().get(n).copied()) {
-        let gv = unsafe { val(g) }.clone();
-        return handle(dispatch_call_value(&mut host, &gv, args));
+shim! {
+    /// Function-entry debug hook: pushes a shadow call frame for `desc` (the
+    /// function's `*const VarTable`).
+    pub extern "C" fn leek_dbg_enter(desc: i64) {
+        crate::debug::fire_enter(desc as usize);
     }
-    match leek_runtime::call_builtin(&mut host, n, &args) {
-        Ok(v) => handle(v),
-        Err(_) => handle(Value::Null),
+}
+
+shim! {
+    /// Function-return debug hook: pops the top shadow call frame.
+    pub extern "C" fn leek_dbg_leave() {
+        crate::debug::fire_leave();
+    }
+}
+
+shim! {
+    /// Read a name that is a builtin shadowed by a same-named global
+    /// (`abs = 2; return abs`, or `var _c = count; count = …`). Mirrors the
+    /// interpreter's dynamic resolution: the global's value if one has been
+    /// assigned, otherwise the builtin handle (constant or `Function::Builtin`).
+    pub extern "C" fn leek_ref_or_builtin(name: *mut Value) -> *mut Value {
+        let Some(n) = builtin_name(name) else {
+            return handle(Value::Null);
+        };
+        if let Some(h) = GLOBALS.with(|g| g.borrow().get(&n).copied()) {
+            return h;
+        }
+        if let Some(v) = leek_runtime::lookup_constant(&n) {
+            return handle(v);
+        }
+        handle(Value::Function(Function::Builtin(n)))
+    }
+}
+
+shim! {
+    /// Call a name that is a builtin shadowed by a same-named global
+    /// (`cos = function(…){…}; cos(1, 2, 3)`). If a global has been assigned,
+    /// invoke its value; otherwise dispatch the builtin directly.
+    pub extern "C" fn leek_call_ref_or_builtin(
+        name: *mut Value,
+        argv: *const *mut Value,
+        argc: i64,
+        version: i64,
+    ) -> *mut Value {
+        let Some(n) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let args: Vec<Value> = (0..argc as isize)
+            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .collect();
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        if let Some(g) = GLOBALS.with(|g| g.borrow().get(n).copied()) {
+            let gv = unsafe { val(g) }.clone();
+            return handle(dispatch_call_value(&mut host, &gv, args));
+        }
+        if aborting() {
+            return handle(Value::Null);
+        }
+        match leek_runtime::call_builtin(&mut host, n, &args) {
+            Ok(v) => handle(v),
+            Err(_) => handle(Value::Null),
+        }
     }
 }
 
@@ -510,139 +530,153 @@ pub(super) fn builtin_name_ref<'a>(h: *mut Value) -> Option<&'a str> {
     }
 }
 
-/// `new <BuiltinClass>(args)` — construct an `Array`/`Map`/`Set`/`Object`/
-/// boxed scalar from the boxed args. Delegates to the shared
-/// `construct_builtin_class`.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_construct_builtin(
-    name: *mut Value,
-    argv: *const *mut Value,
-    argc: i64,
-) -> *mut Value {
-    let Some(name) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let args: Vec<Value> = (0..argc as isize)
-        .map(|i| unsafe { val(*argv.offset(i)) }.clone())
-        .collect();
-    handle(leek_runtime::construct_builtin_class(name, args))
-}
-
-/// Host game builtin (`getCell`, `getLife`, …): unbox the args and forward
-/// to the installed [`crate::game::GameRuntime`]. Emitted by the backend when
-/// `link_game` is on for a builtin it doesn't otherwise handle.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_game_builtin(
-    name: *mut Value,
-    argv: *const *mut Value,
-    argc: i64,
-) -> *mut Value {
-    let Some(name) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let args: Vec<Value> = (0..argc as isize)
-        .map(|i| unsafe { val(*argv.offset(i)) }.clone())
-        .collect();
-    handle(crate::game::dispatch(name, &args))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_builtin0(name: *mut Value, version: i64) -> *mut Value {
-    let Some(name) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    if charge_builtin_ops(name, &[], version) {
-        return handle(Value::Null);
+shim! {
+    /// `new <BuiltinClass>(args)` — construct an `Array`/`Map`/`Set`/`Object`/
+    /// boxed scalar from the boxed args. Delegates to the shared
+    /// `construct_builtin_class`.
+    pub extern "C" fn leek_construct_builtin(
+        name: *mut Value,
+        argv: *const *mut Value,
+        argc: i64,
+    ) -> *mut Value {
+        let Some(name) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let args: Vec<Value> = (0..argc as isize)
+            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .collect();
+        handle(leek_runtime::construct_builtin_class(name, args))
     }
-    handle(leek_runtime::call_builtin(&mut host, name, &[]).unwrap_or(Value::Null))
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_builtin1(name: *mut Value, a0: *mut Value, version: i64) -> *mut Value {
-    let Some(name) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    let args = [unsafe { val(a0) }.clone()];
-    if charge_builtin_ops(name, &args, version) {
-        return handle(Value::Null);
+shim! {
+    /// Host game builtin (`getCell`, `getLife`, …): unbox the args and forward
+    /// to the installed [`crate::game::GameRuntime`]. Emitted by the backend when
+    /// `link_game` is on for a builtin it doesn't otherwise handle.
+    ///
+    /// Once the run has errored (op budget spent, strict OOB write, …) the call
+    /// has no effect and yields null: upstream already threw, so a trailing
+    /// `useWeapon` / `moveToward` in the same block must not touch the fight.
+    pub extern "C" fn leek_game_builtin(
+        name: *mut Value,
+        argv: *const *mut Value,
+        argc: i64,
+    ) -> *mut Value {
+        if aborting() {
+            return handle(Value::Null);
+        }
+        let Some(name) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let args: Vec<Value> = (0..argc as isize)
+            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .collect();
+        handle(crate::game::dispatch(name, &args))
     }
-    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_builtin2(
-    name: *mut Value,
-    a0: *mut Value,
-    a1: *mut Value,
-    version: i64,
-) -> *mut Value {
-    let Some(name) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    let args = [unsafe { val(a0) }.clone(), unsafe { val(a1) }.clone()];
-    if charge_builtin_ops(name, &args, version) {
-        return handle(Value::Null);
+shim! {
+    pub extern "C" fn leek_builtin0(name: *mut Value, version: i64) -> *mut Value {
+        let Some(name) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        if charge_builtin_ops(name, &[], version) {
+            return handle(Value::Null);
+        }
+        handle(leek_runtime::call_builtin(&mut host, name, &[]).unwrap_or(Value::Null))
     }
-    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_builtin3(
-    name: *mut Value,
-    a0: *mut Value,
-    a1: *mut Value,
-    a2: *mut Value,
-    version: i64,
-) -> *mut Value {
-    let Some(name) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    let args = [
-        unsafe { val(a0) }.clone(),
-        unsafe { val(a1) }.clone(),
-        unsafe { val(a2) }.clone(),
-    ];
-    if charge_builtin_ops(name, &args, version) {
-        return handle(Value::Null);
+shim! {
+    pub extern "C" fn leek_builtin1(name: *mut Value, a0: *mut Value, version: i64) -> *mut Value {
+        let Some(name) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        let args = [unsafe { val(a0) }.clone()];
+        if charge_builtin_ops(name, &args, version) {
+            return handle(Value::Null);
+        }
+        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
     }
-    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_builtin4(
-    name: *mut Value,
-    a0: *mut Value,
-    a1: *mut Value,
-    a2: *mut Value,
-    a3: *mut Value,
-    version: i64,
-) -> *mut Value {
-    let Some(name) = builtin_name_ref(name) else {
-        return handle(Value::Null);
-    };
-    let mut host = NativeHost {
-        version: version as u8,
-    };
-    let args = [
-        unsafe { val(a0) }.clone(),
-        unsafe { val(a1) }.clone(),
-        unsafe { val(a2) }.clone(),
-        unsafe { val(a3) }.clone(),
-    ];
-    if charge_builtin_ops(name, &args, version) {
-        return handle(Value::Null);
+shim! {
+    pub extern "C" fn leek_builtin2(
+        name: *mut Value,
+        a0: *mut Value,
+        a1: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(name) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        let args = [unsafe { val(a0) }.clone(), unsafe { val(a1) }.clone()];
+        if charge_builtin_ops(name, &args, version) {
+            return handle(Value::Null);
+        }
+        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
     }
-    handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
+}
+
+shim! {
+    pub extern "C" fn leek_builtin3(
+        name: *mut Value,
+        a0: *mut Value,
+        a1: *mut Value,
+        a2: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(name) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        let args = [
+            unsafe { val(a0) }.clone(),
+            unsafe { val(a1) }.clone(),
+            unsafe { val(a2) }.clone(),
+        ];
+        if charge_builtin_ops(name, &args, version) {
+            return handle(Value::Null);
+        }
+        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
+    }
+}
+
+shim! {
+    pub extern "C" fn leek_builtin4(
+        name: *mut Value,
+        a0: *mut Value,
+        a1: *mut Value,
+        a2: *mut Value,
+        a3: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(name) = builtin_name_ref(name) else {
+            return handle(Value::Null);
+        };
+        let mut host = NativeHost {
+            version: version as u8,
+        };
+        let args = [
+            unsafe { val(a0) }.clone(),
+            unsafe { val(a1) }.clone(),
+            unsafe { val(a2) }.clone(),
+            unsafe { val(a3) }.clone(),
+        ];
+        if charge_builtin_ops(name, &args, version) {
+            return handle(Value::Null);
+        }
+        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
+    }
 }

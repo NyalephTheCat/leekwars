@@ -166,7 +166,16 @@ fn run_one(
     // Execute via the native JIT (the interpreter backend was removed), at the
     // input's settled version and strict mode. A runtime error surfaces as
     // `Err(NativeError::Runtime(..))`.
-    let opts = leek_backend_native::NativeOptions::jit_for_input(result.input(), budget);
+    let mut opts = leek_backend_native::NativeOptions::jit_for_input(result.input(), budget);
+    if let Some(depth) = project
+        .manifest
+        .backend
+        .native
+        .as_ref()
+        .and_then(|s| s.max_call_depth)
+    {
+        opts.max_call_depth = depth;
+    }
     let err = leek_backend_native::compile(hir.0.as_ref(), &opts).err();
 
     match (&err, annotations.expect_fail) {

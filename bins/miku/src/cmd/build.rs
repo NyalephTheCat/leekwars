@@ -109,10 +109,19 @@ fn emit_native(
         .clone()
         .unwrap_or_else(|| project.root.join(&project.manifest.project.name));
 
-    let opts = leek_backend_native::NativeOptions::release()
+    let mut opts = leek_backend_native::NativeOptions::release()
         .with_lang(input.version_byte, input.strict)
         // A standalone binary runs unbounded — no per-turn op budget.
         .with_op_limit(u64::MAX);
+    if let Some(depth) = project
+        .manifest
+        .backend
+        .native
+        .as_ref()
+        .and_then(|s| s.max_call_depth)
+    {
+        opts.max_call_depth = depth;
+    }
     leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, quiet)
         .with_context(|| format!("compiling native executable to {}", out.display()))?;
     Ok(ExitCode::SUCCESS)

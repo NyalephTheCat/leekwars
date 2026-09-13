@@ -46,7 +46,16 @@ pub fn run(
     // Execute via the native JIT (the interpreter backend was removed), at the
     // input's settled version *and* strict mode.
     use leek_backend_native::{DEFAULT_OP_BUDGET, NativeArtifact, NativeOptions};
-    let opts = NativeOptions::jit_for_input(driver_run.run.input(), DEFAULT_OP_BUDGET);
+    let mut opts = NativeOptions::jit_for_input(driver_run.run.input(), DEFAULT_OP_BUDGET);
+    if let Some(depth) = project
+        .manifest
+        .backend
+        .native
+        .as_ref()
+        .and_then(|s| s.max_call_depth)
+    {
+        opts.max_call_depth = depth;
+    }
     match leek_backend_native::compile(hir.0.as_ref(), &opts) {
         Ok(NativeArtifact::Value(v)) => {
             println!("{v}");

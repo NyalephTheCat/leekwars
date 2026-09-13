@@ -50,12 +50,37 @@ impl Tx<'_, '_> {
         Ok(())
     }
 
-    /// Emit an op-budget back-edge check before a branch: if the budget is
-    /// exhausted, jump to a trap block (which returns the function's default)
-    /// instead of continuing — so an unbounded loop stops promptly. The runtime
-    /// already recorded `TOO_MUCH_OPERATIONS`, which `run()` surfaces. Only
-    /// emitted when a finite budget is in force (see
-    /// [`crate::runtime::enforce_budget`]).
+    /// Pop this function's call-depth frame before a real return — the match
+    /// for the entry prologue's `leek_enter_frame`. Emits nothing where the
+    /// guard isn't declared (`main`, text-dump mode).
+    pub(super) fn emit_leave_frame(&mut self) {
+        if let Ok(leave) = self.imports.rt("leek_leave_frame") {
+            self.b.ins().call(leave, &[]);
+        }
+    }
+
+    /// Whether the edge `from → to` may close a loop: `to` is emitted at or
+    /// before `from`. Every CFG cycle has at least one such edge, so a budget
+    /// check on each of them bounds every loop — `Goto`-only ones included.
+    pub(super) fn is_back_edge(&self, from: BlockId, to: BlockId) -> bool {
+        match (self.block_pos.get(&from), self.block_pos.get(&to)) {
+            (Some(f), Some(t)) => t <= f,
+            // Unknown blocks can't be ordered; checking is always safe.
+            _ => true,
+        }
+    }
+
+    /// Emit an op-budget back-edge check before a branch: if the run must stop
+    /// (the budget is exhausted, or any runtime error was recorded — possibly
+    /// inside a callee), jump to a trap block (which returns the function's
+    /// default) instead of continuing — so an unbounded loop stops promptly.
+    /// The runtime already recorded the error, which `run()` surfaces.
+    ///
+    /// Emitted whether or not a finite budget is set: the poll is what ends a
+    /// loop after *any* runtime error, and once one is recorded every callee
+    /// returns at its entry prologue — so an unbounded run (`op_limit ==
+    /// u64::MAX`: the DAP, AOT executables) whose loop calls a recursing
+    /// function would otherwise spin forever after `STACKOVERFLOW`.
     ///
     /// The order matters for Cranelift: we emit the `brif` *first* (which fills
     /// the current block) and only then `switch_to_block` to fill the trap and
@@ -64,10 +89,10 @@ impl Tx<'_, '_> {
     /// "you have to fill your block before switching" invariant, since the
     /// current loop block already holds the back-edge's charge instruction.
     pub(super) fn emit_budget_check(&mut self) -> Result<(), NativeError> {
-        if !crate::runtime::enforce_budget() {
+        // Text-dump (CLIF inspection) mode declares no imports — nothing to poll.
+        let Ok(f) = self.imports.rt("leek_op_budget_exceeded") else {
             return Ok(());
-        }
-        let f = self.imports.rt("leek_op_budget_exceeded")?;
+        };
         let inst = self.b.ins().call(f, &[]);
         let over = self.b.inst_results(inst)[0];
         let trap = self.b.create_block();
@@ -486,6 +511,14 @@ impl Tx<'_, '_> {
         match t {
             Terminator::Goto(b) => {
                 self.flush_charge()?;
+                // A `for (;;)` loop, a `for` step, or a `do … while` body
+                // re-enters its header through a plain `Goto` — with no
+                // `Branch` anywhere in the cycle, the check below is the only
+                // thing that stops it once the budget is spent (or a callee
+                // errored).
+                if self.is_back_edge(block_id, *b) {
+                    self.emit_budget_check()?;
+                }
                 self.b.ins().jump(self.blocks[b], &[]);
             }
             Terminator::Branch {
@@ -503,7 +536,7 @@ impl Tx<'_, '_> {
                 self.flush_charge()?;
                 // Back-edge budget check: a branch is the only way to re-enter a
                 // block, so checking here bounds every loop. Stops an unbounded
-                // loop once the op budget is spent (when a finite one is set).
+                // loop once the op budget is spent or any runtime error is set.
                 self.emit_budget_check()?;
                 let (c, ty) = self.operand(cond)?;
                 // brif tests an integer for non-zero; a real condition
@@ -545,6 +578,7 @@ impl Tx<'_, '_> {
                 };
                 let v = self.coerce(v, ty, self.ret_ty)?;
                 self.flush_charge()?;
+                self.emit_leave_frame();
                 self.b.ins().return_(&[v]);
             }
             // A void function returns null. With a `Ref` result that's a
@@ -552,6 +586,7 @@ impl Tx<'_, '_> {
             // dead dummy zero.
             Terminator::Return(None) => {
                 self.flush_charge()?;
+                self.emit_leave_frame();
                 let z = match self.ret_ty {
                     ValTy::Ref => {
                         let null = self.imports.rt("leek_box_null")?;
@@ -569,6 +604,14 @@ impl Tx<'_, '_> {
                 default,
             } => {
                 self.flush_charge()?;
+                if arms
+                    .iter()
+                    .map(|(_, target)| target)
+                    .chain(std::iter::once(default))
+                    .any(|target| self.is_back_edge(block_id, *target))
+                {
+                    self.emit_budget_check()?;
+                }
                 let (disc, dty) = self.operand(discriminant)?;
                 if dty == ValTy::Real {
                     return Err(unsupported("switch on real"));

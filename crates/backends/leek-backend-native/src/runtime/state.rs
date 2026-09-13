@@ -4,21 +4,11 @@
 //! before `main` runs.
 
 use super::{
-    CLASS_CTOR_THUNK, CLASS_PARENT, CLASS_REFLECT, CLASS_STRING_METHOD, DISPATCH, ENFORCE_BUDGET,
-    GLOBALS, NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELDS, STATIC_INIT, STRICT,
+    CLASS_CTOR_THUNK, CLASS_PARENT, CLASS_REFLECT, CLASS_STRING_METHOD, DISPATCH, GLOBALS,
+    NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELDS, STATIC_INIT, STRICT,
 };
 use leek_runtime::{Rng, Value};
 use std::collections::{HashMap, HashSet};
-
-/// Set whether op-budget back-edge checks are emitted (compile-time flag).
-pub fn set_enforce_budget(on: bool) {
-    ENFORCE_BUDGET.with(|c| c.set(on));
-}
-
-/// Whether to emit op-budget back-edge checks for the function being compiled.
-pub fn enforce_budget() -> bool {
-    ENFORCE_BUDGET.with(std::cell::Cell::get)
-}
 
 /// Reset the op counter and install the budget for a new run.
 pub fn reset_ops(limit: u64) {
@@ -31,27 +21,95 @@ pub fn ops_used() -> u64 {
     OP_COUNT.with(std::cell::Cell::get)
 }
 
-/// Charge `n` operations. Called from JIT'd code at each MIR charge site
-/// (matching the interpreter's `charge_ops`). On exceeding the budget it
-/// records `TOO_MUCH_OPERATIONS`; the JIT'd code can't unwind, so loops poll
-/// [`op_budget_exceeded`] at their back-edges to stop promptly.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_charge_ops(n: i64) {
-    let next = OP_COUNT.with(|c| {
-        let v = c.get().saturating_add(n.max(0) as u64);
-        c.set(v);
-        v
-    });
-    if next > OP_LIMIT.with(std::cell::Cell::get) {
-        raise_runtime_error("TOO_MUCH_OPERATIONS");
+shim! {
+    /// Charge `n` operations. Called from JIT'd code at each MIR charge site
+    /// (matching the interpreter's `charge_ops`). On exceeding the budget it
+    /// records `TOO_MUCH_OPERATIONS`; the JIT'd code can't unwind, so loops poll
+    /// [`op_budget_exceeded`] at their back-edges to stop promptly.
+    pub extern "C" fn leek_charge_ops(n: i64) {
+        let next = OP_COUNT.with(|c| {
+            let v = c.get().saturating_add(n.max(0) as u64);
+            c.set(v);
+            v
+        });
+        if next > OP_LIMIT.with(std::cell::Cell::get) {
+            raise_runtime_error("TOO_MUCH_OPERATIONS");
+        }
     }
 }
 
-/// Whether the op budget has been exceeded — polled at loop back-edges so the
-/// JIT'd code can branch out instead of running an unbounded loop to the end.
-#[unsafe(no_mangle)]
-pub extern "C" fn leek_op_budget_exceeded() -> i64 {
-    i64::from(OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get))
+shim! {
+    /// Whether the run must stop — polled at loop back-edges so the JIT'd code
+    /// branches out instead of running on. True once any runtime error has been
+    /// recorded, which includes the op budget being exceeded
+    /// ([`leek_charge_ops`] records `TOO_MUCH_OPERATIONS`), so a loop whose ops
+    /// are charged inside callees stops too.
+    pub extern "C" fn leek_op_budget_exceeded() -> i64 {
+        i64::from(aborting())
+    }
+}
+
+/// Arm the recursion guard for a new run: reset the frame counter, install the
+/// call-depth limit, and set the stack floor `max_stack_bytes` below the
+/// caller's current stack position (`usize::MAX` disables the stack check).
+///
+/// Call it from the frame that then invokes the JIT'd entry, so the budget
+/// covers only the program's own frames.
+#[inline(never)]
+pub fn arm_call_guard(max_call_depth: u32, max_stack_bytes: usize) {
+    super::MAX_CALL_DEPTH.with(|c| c.set(max_call_depth));
+    super::CALL_DEPTH.with(|c| c.set(0));
+    let marker = 0u8;
+    let sp = std::ptr::addr_of!(marker) as usize;
+    super::STACK_FLOOR.with(|c| c.set(sp.saturating_sub(max_stack_bytes)));
+}
+
+/// The upstream error for runaway recursion (`Error.STACKOVERFLOW`, which the
+/// generator records when the JVM throws `StackOverflowError`).
+pub const STACK_OVERFLOW: &str = "STACKOVERFLOW";
+
+shim! {
+    /// Function-entry prologue of every compiled user function (not `main`).
+    /// Returns non-zero when the function must return its default value at
+    /// once: the run has already errored, or entering this frame would exceed
+    /// the call-depth limit or the native stack budget (the frame starts below
+    /// the floor [`arm_call_guard`] set) — which records [`STACK_OVERFLOW`]. Only a frame
+    /// that returns 0 is counted, and must be matched by [`leek_leave_frame`].
+    ///
+    /// Without it, unbounded recursion (`function f(x) { return f(x) }`) runs
+    /// the native thread out of stack and the OS kills the whole host process.
+    pub extern "C" fn leek_enter_frame() -> i64 {
+        if aborting() {
+            return 1;
+        }
+        let depth = super::CALL_DEPTH.with(std::cell::Cell::get).saturating_add(1);
+        let marker = 0u8;
+        let sp = std::ptr::addr_of!(marker) as usize;
+        if depth > super::MAX_CALL_DEPTH.with(std::cell::Cell::get)
+            || sp < super::STACK_FLOOR.with(std::cell::Cell::get)
+        {
+            raise_runtime_error(STACK_OVERFLOW);
+            return 1;
+        }
+        super::CALL_DEPTH.with(|c| c.set(depth));
+        0
+    }
+}
+
+shim! {
+    /// Function-return epilogue: pops the frame [`leek_enter_frame`] counted.
+    /// (Early returns taken after an error skip it; the counter only matters
+    /// until the run stops and is reset for the next one.)
+    pub extern "C" fn leek_leave_frame() {
+        super::CALL_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// Whether a runtime error has been recorded this run, i.e. execution must
+/// stop. Side-effecting shims check it and do nothing once it is set, matching
+/// upstream, where the error is an exception that ends the AI immediately.
+pub(super) fn aborting() -> bool {
+    super::ABORT.with(std::cell::Cell::get)
 }
 
 /// Charge upstream's string-concatenation cost (`AI.add` string branch):
@@ -117,15 +175,17 @@ pub(super) fn charge_eq(l: &Value, r: &Value) {
 /// `leek_builtinN` shims before dispatch, mirroring the interpreter's
 /// `run_builtin`, so a `.ops(N)` case over a builtin matches.
 ///
-/// Returns `true` if the budget is now exhausted — the shim then skips the
-/// actual dispatch (returning null) so a single huge-allocation builtin
+/// Returns `true` if the run must stop (the budget is now exhausted, or an
+/// earlier runtime error was recorded) — the shim then skips the actual
+/// dispatch (returning null) so a single huge-allocation builtin
 /// (`fill(a, 1, 1e9)`, `range(0, huge)`) can't exhaust host memory after the
-/// budget is already spent. Mirrors the interpreter's `run_builtin`, which
-/// returns the over-budget error *before* calling the builtin.
+/// budget is already spent, and no builtin acts after an error. Mirrors the
+/// interpreter's `run_builtin`, which returns the over-budget error *before*
+/// calling the builtin.
 #[must_use]
 pub(super) fn charge_builtin_ops(name: &str, args: &[Value], version: i64) -> bool {
     leek_charge_ops(leek_runtime::builtin_op_cost(name, args, version as u8) as i64);
-    OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get)
+    aborting()
 }
 
 /// Install the strict-typing flag for this run.
@@ -133,9 +193,10 @@ pub fn set_strict(strict: bool) {
     STRICT.with(|s| s.set(strict));
 }
 
-/// Clear any recorded runtime error before a run begins.
+/// Clear any recorded runtime error (and the abort flag) before a run begins.
 pub fn reset_runtime_error() {
     RUNTIME_ERROR.with(|e| *e.borrow_mut() = None);
+    super::ABORT.with(|a| a.set(false));
 }
 
 /// Take the runtime error recorded during the run, if any.
@@ -143,9 +204,11 @@ pub fn take_runtime_error() -> Option<String> {
     RUNTIME_ERROR.with(|e| e.borrow_mut().take())
 }
 
-/// Record a runtime error (first one wins). Called by shims that detect a
-/// fault the JIT'd code can't itself signal.
+/// Record a runtime error (first one wins) and raise the abort flag, so loop
+/// back-edges and side-effecting shims stop the run from here on. Called by
+/// shims that detect a fault the JIT'd code can't itself signal.
 pub(super) fn raise_runtime_error(code: &str) {
+    super::ABORT.with(|a| a.set(true));
     RUNTIME_ERROR.with(|e| {
         let mut slot = e.borrow_mut();
         if slot.is_none() {

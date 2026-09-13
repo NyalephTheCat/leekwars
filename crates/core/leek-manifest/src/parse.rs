@@ -303,6 +303,7 @@ fn parse_backend_settings(
         "main_class",
         "target",
         "opt_level",
+        "max_call_depth",
     ];
     let scope = format!("backend.{kind}");
     warn_unknown(tbl, &scope, KNOWN, warnings);
@@ -352,6 +353,15 @@ fn parse_backend_settings(
         let n = int_val(v, &format!("{scope}.opt_level"))?;
         out.opt_level = Some(u8::try_from(n).map_err(|_| {
             ManifestError::new(format!("Miku.toml: {scope}.opt_level must be 0..=255"))
+        })?);
+    }
+    if let Some(v) = tbl.get("max_call_depth") {
+        let n = int_val(v, &format!("{scope}.max_call_depth"))?;
+        out.max_call_depth = Some(u32::try_from(n).map_err(|_| {
+            ManifestError::new(format!(
+                "Miku.toml: {scope}.max_call_depth must be 0..={}",
+                u32::MAX
+            ))
         })?);
     }
     Ok(out)
@@ -571,6 +581,21 @@ mod tests {
             m.backend.default_kind(),
             Some(crate::types::BackendKind::Native)
         );
+    }
+
+    #[test]
+    fn native_max_call_depth_parsed() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.native]
+            enable = true
+            max_call_depth = 250
+        "#;
+        let (m, warnings) = parse_ok(src);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(m.backend.native.as_ref().unwrap().max_call_depth, Some(250));
     }
 
     #[test]

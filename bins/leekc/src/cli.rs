@@ -201,6 +201,12 @@ pub struct Cli {
     /// runtime they return `null` at run time.
     #[arg(long)]
     pub link_game: bool,
+
+    /// For `--emit run` / `--emit native`: maximum nested user-function
+    /// calls before the program fails with `STACKOVERFLOW` (default: the
+    /// backend's `DEFAULT_MAX_CALL_DEPTH`).
+    #[arg(long, value_name = "N")]
+    pub max_call_depth: Option<u32>,
 }
 
 fn parse_version(s: &str) -> Result<Version, String> {

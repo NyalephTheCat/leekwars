@@ -152,9 +152,6 @@ fn compile_entry(
     opts: &NativeOptions,
     entry: JitEntry<'_>,
 ) -> Result<NativeArtifact, NativeError> {
-    // Emit op-budget back-edge checks (so an unbounded loop stops) only when a
-    // finite budget is set — keeps zero-overhead the common unlimited runs.
-    runtime::set_enforce_budget(opts.op_limit != u64::MAX);
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
         return Err(NativeError::Compile(format!(
@@ -406,6 +403,9 @@ fn compile_entry(
             // ops at the same MIR sites the interpreter does (so counts match);
             // `ops_used()` reads the total after `main` returns.
             runtime::reset_ops(opts.op_limit);
+            // Arm the recursion guard: frames start at zero for this run, and
+            // the stack budget is measured from here (just above the entry).
+            runtime::arm_call_guard(opts.max_call_depth, opts.max_stack_bytes);
             // Everything above is codegen + runtime wiring; the program itself
             // hasn't run yet. Split the timing here so the benchmark can report
             // JIT compilation separately from execution.
@@ -531,7 +531,6 @@ pub fn compile_object_with_meta(
     opts: &NativeOptions,
     obj_path: &std::path::Path,
 ) -> Result<aot_meta::AotMeta, NativeError> {
-    runtime::set_enforce_budget(opts.op_limit != u64::MAX);
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
         return Err(NativeError::Compile(format!(

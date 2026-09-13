@@ -240,7 +240,10 @@ pub fn run() -> Result<ExitCode> {
                 // `--emit run` executes via the native JIT (the interpreter was
                 // removed), with the same helper and budget as `miku run`.
                 use leek_backend_native::{DEFAULT_OP_BUDGET, NativeArtifact, NativeOptions};
-                let opts = NativeOptions::jit_for_input(result.input(), DEFAULT_OP_BUDGET);
+                let mut opts = NativeOptions::jit_for_input(result.input(), DEFAULT_OP_BUDGET);
+                if let Some(depth) = cli.max_call_depth {
+                    opts.max_call_depth = depth;
+                }
                 match leek_backend_native::compile(hir.0.as_ref(), &opts) {
                     Ok(NativeArtifact::Value(v)) => println!("{v}"),
                     Ok(_) => unreachable!("Jit emit yields a Value"),
@@ -277,6 +280,9 @@ pub fn run() -> Result<ExitCode> {
                 let input = result.input();
                 opts = opts.with_lang(input.version_byte, input.strict);
                 opts.link_game = cli.link_game;
+                if let Some(depth) = cli.max_call_depth {
+                    opts.max_call_depth = depth;
+                }
                 let obj_path = cli
                     .native_out
                     .clone()
