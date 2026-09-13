@@ -49,11 +49,21 @@ shim! {
 }
 
 shim! {
-    /// Whether the op budget has been exceeded — polled at loop back-edges so the
-    /// JIT'd code can branch out instead of running an unbounded loop to the end.
+    /// Whether the run must stop — polled at loop back-edges so the JIT'd code
+    /// branches out instead of running on. True once any runtime error has been
+    /// recorded, which includes the op budget being exceeded
+    /// ([`leek_charge_ops`] records `TOO_MUCH_OPERATIONS`), so a loop whose ops
+    /// are charged inside callees stops too.
     pub extern "C" fn leek_op_budget_exceeded() -> i64 {
-        i64::from(OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get))
+        i64::from(aborting())
     }
+}
+
+/// Whether a runtime error has been recorded this run, i.e. execution must
+/// stop. Side-effecting shims check it and do nothing once it is set, matching
+/// upstream, where the error is an exception that ends the AI immediately.
+pub(super) fn aborting() -> bool {
+    super::ABORT.with(std::cell::Cell::get)
 }
 
 /// Charge upstream's string-concatenation cost (`AI.add` string branch):
@@ -119,15 +129,17 @@ pub(super) fn charge_eq(l: &Value, r: &Value) {
 /// `leek_builtinN` shims before dispatch, mirroring the interpreter's
 /// `run_builtin`, so a `.ops(N)` case over a builtin matches.
 ///
-/// Returns `true` if the budget is now exhausted — the shim then skips the
-/// actual dispatch (returning null) so a single huge-allocation builtin
+/// Returns `true` if the run must stop (the budget is now exhausted, or an
+/// earlier runtime error was recorded) — the shim then skips the actual
+/// dispatch (returning null) so a single huge-allocation builtin
 /// (`fill(a, 1, 1e9)`, `range(0, huge)`) can't exhaust host memory after the
-/// budget is already spent. Mirrors the interpreter's `run_builtin`, which
-/// returns the over-budget error *before* calling the builtin.
+/// budget is already spent, and no builtin acts after an error. Mirrors the
+/// interpreter's `run_builtin`, which returns the over-budget error *before*
+/// calling the builtin.
 #[must_use]
 pub(super) fn charge_builtin_ops(name: &str, args: &[Value], version: i64) -> bool {
     leek_charge_ops(leek_runtime::builtin_op_cost(name, args, version as u8) as i64);
-    OP_COUNT.with(std::cell::Cell::get) > OP_LIMIT.with(std::cell::Cell::get)
+    aborting()
 }
 
 /// Install the strict-typing flag for this run.
@@ -135,9 +147,10 @@ pub fn set_strict(strict: bool) {
     STRICT.with(|s| s.set(strict));
 }
 
-/// Clear any recorded runtime error before a run begins.
+/// Clear any recorded runtime error (and the abort flag) before a run begins.
 pub fn reset_runtime_error() {
     RUNTIME_ERROR.with(|e| *e.borrow_mut() = None);
+    super::ABORT.with(|a| a.set(false));
 }
 
 /// Take the runtime error recorded during the run, if any.
@@ -145,9 +158,11 @@ pub fn take_runtime_error() -> Option<String> {
     RUNTIME_ERROR.with(|e| e.borrow_mut().take())
 }
 
-/// Record a runtime error (first one wins). Called by shims that detect a
-/// fault the JIT'd code can't itself signal.
+/// Record a runtime error (first one wins) and raise the abort flag, so loop
+/// back-edges and side-effecting shims stop the run from here on. Called by
+/// shims that detect a fault the JIT'd code can't itself signal.
 pub(super) fn raise_runtime_error(code: &str) {
+    super::ABORT.with(|a| a.set(true));
     RUNTIME_ERROR.with(|e| {
         let mut slot = e.borrow_mut();
         if slot.is_none() {

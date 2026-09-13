@@ -43,3 +43,70 @@ fn a_panicking_shim_becomes_a_runtime_error_instead_of_aborting() {
         other => panic!("expected INTERNAL_PANIC, got {other:?}"),
     }
 }
+
+/// Records every game function the AI calls.
+struct Recorder(Rc<RefCell<Vec<String>>>);
+
+impl GameRuntime for Recorder {
+    fn call(&mut self, name: &str, _args: &[Value]) -> Value {
+        self.0.borrow_mut().push(name.to_string());
+        Value::Null
+    }
+}
+
+/// Run `src` with the fight builtins linked to a [`Recorder`], returning the
+/// run's outcome and the game calls it made.
+fn run_recording(src: &str, opts: &NativeOptions) -> (Result<Value, NativeError>, Vec<String>) {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    set_game_runtime(Some(Box::new(Recorder(Rc::clone(&calls)))));
+    let out = run(&hir(src), &opts.clone().with_link_game(true));
+    set_game_runtime(None);
+    let calls = calls.borrow().clone();
+    (out, calls)
+}
+
+#[test]
+fn no_game_action_after_the_op_budget_runs_out_mid_block() {
+    // Straight-line block: the concat charges 3 + 200 ops at runtime, blowing
+    // the 100-op budget before `useWeapon` runs. Upstream throws on the
+    // concat, so the action must never reach the fight.
+    let long = "a".repeat(100);
+    let src = format!("var a = \"{long}\" var b = a + a useWeapon(1) return b");
+    let opts = NativeOptions::release()
+        .with_lang(4, false)
+        .with_op_limit(100);
+    let (out, calls) = run_recording(&src, &opts);
+    assert!(
+        matches!(&out, Err(NativeError::Runtime(c)) if c == "TOO_MUCH_OPERATIONS"),
+        "expected TOO_MUCH_OPERATIONS, got {out:?}"
+    );
+    assert!(
+        calls.is_empty(),
+        "game actions ran after the error: {calls:?}"
+    );
+}
+
+#[test]
+fn no_game_action_after_a_strict_out_of_bounds_write() {
+    let src = "var a = [1] a[5] = 2 useWeapon(1) return a";
+    let opts = NativeOptions::release().with_lang(4, true);
+    let (out, calls) = run_recording(src, &opts);
+    assert!(
+        matches!(&out, Err(NativeError::Runtime(c)) if c == "ARRAY_OUT_OF_BOUND"),
+        "expected ARRAY_OUT_OF_BOUND, got {out:?}"
+    );
+    assert!(
+        calls.is_empty(),
+        "game actions ran after the error: {calls:?}"
+    );
+}
+
+#[test]
+fn game_actions_before_an_error_still_happen() {
+    // Only what follows the fault is suppressed.
+    let src = "useWeapon(1) var a = [1] a[5] = 2 moveToward(3) return a";
+    let opts = NativeOptions::release().with_lang(4, true);
+    let (out, calls) = run_recording(src, &opts);
+    assert!(matches!(out, Err(NativeError::Runtime(_))), "got {out:?}");
+    assert_eq!(calls, vec!["useWeapon".to_string()]);
+}

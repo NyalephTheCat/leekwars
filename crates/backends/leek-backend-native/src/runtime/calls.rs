@@ -3,7 +3,7 @@
 //! [`NativeHost`] that adapts the shared builtin machinery to native.
 
 use super::{
-    CLASS_CTOR_THUNK, CLASS_STRING_METHOD, DISPATCH, GLOBALS, LambdaFn, NATIVE_RNG,
+    CLASS_CTOR_THUNK, CLASS_STRING_METHOD, DISPATCH, GLOBALS, LambdaFn, NATIVE_RNG, aborting,
     charge_builtin_ops, handle, read_handle, val,
 };
 use leek_runtime::{BuiltinFlow, BuiltinHost, Function, LambdaCapture, Value};
@@ -81,6 +81,11 @@ pub(super) fn dispatch_call_value(
     callee: &Value,
     args: Vec<Value>,
 ) -> Value {
+    // After a runtime error nothing more runs: don't enter callbacks, builtins
+    // or constructors (upstream already threw).
+    if aborting() {
+        return Value::Null;
+    }
     match callee {
         Value::Function(Function::Lambda(cap)) => {
             let Some((addr, nparams)) =
@@ -311,6 +316,10 @@ shim! {
         }
         // Builtin method fallback (an unknown name / non-number receiver yields null,
         // exactly as the interpreter's `run_builtin` does) — needs owned `Value`s.
+        // Skipped once the run has errored, like every other builtin dispatch.
+        if aborting() {
+            return handle(Value::Null);
+        }
         let recv = unsafe { val(receiver) }.clone();
         let mut all = Vec::with_capacity(argc as usize + 1);
         all.push(recv);
@@ -487,6 +496,9 @@ shim! {
             let gv = unsafe { val(g) }.clone();
             return handle(dispatch_call_value(&mut host, &gv, args));
         }
+        if aborting() {
+            return handle(Value::Null);
+        }
         match leek_runtime::call_builtin(&mut host, n, &args) {
             Ok(v) => handle(v),
             Err(_) => handle(Value::Null),
@@ -541,11 +553,18 @@ shim! {
     /// Host game builtin (`getCell`, `getLife`, …): unbox the args and forward
     /// to the installed [`crate::game::GameRuntime`]. Emitted by the backend when
     /// `link_game` is on for a builtin it doesn't otherwise handle.
+    ///
+    /// Once the run has errored (op budget spent, strict OOB write, …) the call
+    /// has no effect and yields null: upstream already threw, so a trailing
+    /// `useWeapon` / `moveToward` in the same block must not touch the fight.
     pub extern "C" fn leek_game_builtin(
         name: *mut Value,
         argv: *const *mut Value,
         argc: i64,
     ) -> *mut Value {
+        if aborting() {
+            return handle(Value::Null);
+        }
         let Some(name) = builtin_name_ref(name) else {
             return handle(Value::Null);
         };

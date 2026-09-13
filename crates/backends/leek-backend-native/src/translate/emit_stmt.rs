@@ -50,10 +50,22 @@ impl Tx<'_, '_> {
         Ok(())
     }
 
-    /// Emit an op-budget back-edge check before a branch: if the budget is
-    /// exhausted, jump to a trap block (which returns the function's default)
-    /// instead of continuing — so an unbounded loop stops promptly. The runtime
-    /// already recorded `TOO_MUCH_OPERATIONS`, which `run()` surfaces. Only
+    /// Whether the edge `from → to` may close a loop: `to` is emitted at or
+    /// before `from`. Every CFG cycle has at least one such edge, so a budget
+    /// check on each of them bounds every loop — `Goto`-only ones included.
+    pub(super) fn is_back_edge(&self, from: BlockId, to: BlockId) -> bool {
+        match (self.block_pos.get(&from), self.block_pos.get(&to)) {
+            (Some(f), Some(t)) => t <= f,
+            // Unknown blocks can't be ordered; checking is always safe.
+            _ => true,
+        }
+    }
+
+    /// Emit an op-budget back-edge check before a branch: if the run must stop
+    /// (the budget is exhausted, or any runtime error was recorded — possibly
+    /// inside a callee), jump to a trap block (which returns the function's
+    /// default) instead of continuing — so an unbounded loop stops promptly.
+    /// The runtime already recorded the error, which `run()` surfaces. Only
     /// emitted when a finite budget is in force (see
     /// [`crate::runtime::enforce_budget`]).
     ///
@@ -486,6 +498,14 @@ impl Tx<'_, '_> {
         match t {
             Terminator::Goto(b) => {
                 self.flush_charge()?;
+                // A `for (;;)` loop, a `for` step, or a `do … while` body
+                // re-enters its header through a plain `Goto` — with no
+                // `Branch` anywhere in the cycle, the check below is the only
+                // thing that stops it once the budget is spent (or a callee
+                // errored).
+                if self.is_back_edge(block_id, *b) {
+                    self.emit_budget_check()?;
+                }
                 self.b.ins().jump(self.blocks[b], &[]);
             }
             Terminator::Branch {
@@ -569,6 +589,14 @@ impl Tx<'_, '_> {
                 default,
             } => {
                 self.flush_charge()?;
+                if arms
+                    .iter()
+                    .map(|(_, target)| target)
+                    .chain(std::iter::once(default))
+                    .any(|target| self.is_back_edge(block_id, *target))
+                {
+                    self.emit_budget_check()?;
+                }
                 let (disc, dty) = self.operand(discriminant)?;
                 if dty == ValTy::Real {
                     return Err(unsupported("switch on real"));

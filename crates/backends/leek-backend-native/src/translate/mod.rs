@@ -1445,12 +1445,20 @@ pub fn translate_function(
     let object_locals = object_locals(mir_fn);
     let object_field_srcs = object_field_srcs(mir_fn);
 
+    let block_pos: HashMap<BlockId, usize> = mir_fn
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
     for b in &mir_fn.blocks {
         let clif_block = blocks[&b.id];
         builder.switch_to_block(clif_block);
         let mut tx = Tx {
             b: &mut builder,
             blocks: &blocks,
+            block_pos: &block_pos,
             vars: &vars,
             var_tys: &var_tys,
             ret_ty,
@@ -1556,6 +1564,11 @@ impl Imports {
 struct Tx<'a, 'b> {
     b: &'a mut FunctionBuilder<'b>,
     blocks: &'a HashMap<BlockId, Block>,
+    /// Each MIR block's position in the emission order. An edge whose target
+    /// sits at or before its source is treated as a back-edge: every CFG cycle
+    /// contains at least one such edge, so checking the op budget on all of
+    /// them bounds every loop regardless of how lowering shaped it.
+    block_pos: &'a HashMap<BlockId, usize>,
     vars: &'a [Variable],
     var_tys: &'a [ValTy],
     ret_ty: ValTy,

@@ -167,6 +167,10 @@ shim! {
     /// closure sharing the cell's `Rc` observes the new value. A no-op on a
     /// non-cell handle.
     pub extern "C" fn leek_cell_set(cell: *mut Value, v: *mut Value) {
+        // After a runtime error the store never happens (upstream threw).
+        if super::aborting() {
+            return;
+        }
         if let Value::Cell(rc) = unsafe { val(cell) } {
             *rc.borrow_mut() = unsafe { val(v) }.unbox();
         }

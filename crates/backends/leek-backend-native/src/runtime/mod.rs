@@ -142,6 +142,14 @@ thread_local! {
     /// statements may run, but the program's outcome is the first fault).
     static RUNTIME_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 
+    /// Set the moment [`RUNTIME_ERROR`] is first recorded (op budget spent,
+    /// out-of-bounds strict write, internal panic, …). Upstream Java throws at
+    /// that point, so nothing after it may take effect: loop back-edges poll
+    /// this flag to leave the JIT'd code, and every side-effecting shim (game
+    /// actions, builtins, stores) becomes a no-op once it is set. A plain
+    /// `Cell<bool>` so the hot polls skip the `RefCell` borrow.
+    static ABORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// Whether the current run uses strict typing. Mirrors the interpreter's
     /// `strict` flag, which some runtime-fault rules depend on (e.g. an
     /// out-of-bounds array write only errors under v4 *strict*).

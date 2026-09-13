@@ -2,7 +2,7 @@
 //! value- and int-indexed reads and writes, slices, counts, and the
 //! foreach iterator.
 
-use super::{handle, member_by_value, set_member, val};
+use super::{aborting, handle, member_by_value, set_member, val};
 use leek_runtime::{IntervalValue, MapData, SetData, Value, key_repr};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -188,6 +188,9 @@ shim! {
     /// Charges the legacy per-insert runtime cost for v1–3 (upstream's v4
     /// `ArrayLeekValue.push` charges nothing at runtime).
     pub extern "C" fn leek_array_push(arr: *mut Value, elem: *mut Value, version: i64) {
+        if aborting() {
+            return;
+        }
         if let Value::Array(a) = unsafe { val(arr) }.unbox() {
             let mut a = a.borrow_mut();
             a.push(unsafe { val(elem) }.clone());
@@ -324,6 +327,9 @@ shim! {
     /// literal entry goes through `getOrCreate` upstream); upstream's v4
     /// `MapLeekValue` ctor uses raw `HashMap.put` — no runtime ops.
     pub extern "C" fn leek_map_put(map: *mut Value, key: *mut Value, value: *mut Value, version: i64) {
+        if aborting() {
+            return;
+        }
         if let Value::Map(m) = unsafe { val(map) } {
             let k = unsafe { val(key) }.clone();
             let v = unsafe { val(value) }.clone();
@@ -350,6 +356,9 @@ shim! {
 
 shim! {
     pub extern "C" fn leek_set_add(set: *mut Value, elem: *mut Value) {
+        if aborting() {
+            return;
+        }
         if let Value::Set(s) = unsafe { val(set) } {
             s.borrow_mut().insert(unsafe { val(elem) }.clone());
         }

@@ -4,7 +4,7 @@
 
 use super::{
     CLASS_PARENT, CLASS_REFLECT, DISPATCH, GLOBALS, LambdaFn, STATIC_FIELDS, STATIC_INIT, STRICT,
-    builtin_name, builtin_name_ref, handle, raise_runtime_error, val,
+    aborting, builtin_name, builtin_name_ref, handle, raise_runtime_error, val,
 };
 use leek_hir::DefId;
 use leek_runtime::{Function, Instance, ObjectData, Value};
@@ -260,6 +260,10 @@ shim! {
 /// # Safety
 /// `base` must be a live handle.
 pub(super) unsafe fn set_member(base: *mut Value, idx: &Value, value: Value, version: u8) {
+    // The run already errored: upstream threw, so the store never happens.
+    if aborting() {
+        return;
+    }
     // v4-strict: an out-of-bounds array write is a runtime error
     // (`ARRAY_OUT_OF_BOUND`). Non-strict v4 silently drops the write and
     // v1–v3 promote the array to a sparse map, so the check is gated exactly
@@ -299,6 +303,9 @@ shim! {
         value: *mut Value,
         version: i64,
     ) {
+        if aborting() {
+            return;
+        }
         let name = unsafe { member_name(name_ptr, name_len) };
         let v = unsafe { val(value) }.clone();
         match unsafe { val(base) } {
@@ -333,6 +340,9 @@ shim! {
         value: *mut Value,
         version: i64,
     ) {
+        if aborting() {
+            return;
+        }
         if let Value::Instance(inst) = unsafe { val(base) } {
             let mut b = inst.borrow_mut();
             if (slot as usize) < b.fields.len() {
