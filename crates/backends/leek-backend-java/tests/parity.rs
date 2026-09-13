@@ -19,6 +19,13 @@
 //!    on diff churn once we close the parity gap; today the file is
 //!    purely a tracking artifact, not a hard gate.
 //!
+//! The per-run *reports* (`JVM_PARITY.txt`, `OPS_DRIFT.txt`,
+//! `CORPUS_SUMMARY.txt`, `NATIVE_OPS_DRIFT.txt`) are statistics, not
+//! goldens — their op counts are non-deterministic because the corpus
+//! uses `randInt`. A plain run writes them under `CARGO_TARGET_TMPDIR`;
+//! `UPDATE_SNAPSHOTS=1` refreshes the tracked copies in
+//! `tests/snapshots/` instead.
+//!
 //! Byte parity is an explicit Phase-3 goal — this test infrastructure
 //! is the substrate that closes that gap one lowering at a time. The
 //! remaining gaps are catalogued in `docs/java-backend.md` §9.
@@ -46,6 +53,64 @@ fn fixtures_dir() -> PathBuf {
 
 fn snapshots_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots")
+}
+
+/// Whether the run was asked to refresh the tracked run reports.
+/// `UPDATE_SNAPSHOTS=1` (anything but empty or `0`) opts in, the way
+/// `insta` accepts a pending snapshot.
+fn update_requested(flag: Option<&str>) -> bool {
+    matches!(flag, Some(v) if !v.is_empty() && v != "0")
+}
+
+/// Where the per-run reports (`NATIVE_OPS_DRIFT.txt`, `CORPUS_SUMMARY.txt`,
+/// `OPS_DRIFT.txt`, `JVM_PARITY.txt`) are written.
+///
+/// They are statistics about the run, not golden files: the JVM-side op
+/// counts drift between runs because the corpus exercises `randInt`. Writing
+/// them into `tests/snapshots/` on every `cargo test` left tracked churn in
+/// the working tree, so by default they land under `CARGO_TARGET_TMPDIR`
+/// instead and the tracked copies are refreshed only on request.
+fn reports_root(update: bool) -> PathBuf {
+    if update {
+        snapshots_dir()
+    } else {
+        // CARGO_TARGET_TMPDIR is shared workspace-wide; namespace it.
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("leek-backend-java/reports")
+    }
+}
+
+fn reports_dir() -> PathBuf {
+    let flag = std::env::var("UPDATE_SNAPSHOTS").ok();
+    reports_root(update_requested(flag.as_deref()))
+}
+
+/// Persist a run report and hand back where it landed, so the assertion
+/// messages can point at the file this run actually wrote.
+fn write_report(name: &str, contents: &str) -> PathBuf {
+    let dir = reports_dir();
+    fs::create_dir_all(&dir).ok();
+    let path = dir.join(name);
+    let _ = fs::write(&path, contents);
+    path
+}
+
+/// A plain `cargo test` must not write into the tracked snapshot
+/// directory; only `UPDATE_SNAPSHOTS=1` may.
+#[test]
+fn run_reports_stay_out_of_the_source_tree_by_default() {
+    assert!(!update_requested(None));
+    assert!(!update_requested(Some("")));
+    assert!(!update_requested(Some("0")));
+    assert!(update_requested(Some("1")));
+    assert!(update_requested(Some("yes")));
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !reports_root(false).starts_with(&manifest),
+        "default report dir {} is inside the crate source tree",
+        reports_root(false).display()
+    );
+    assert_eq!(reports_root(true), snapshots_dir());
 }
 
 fn fixture_inputs() -> Vec<PathBuf> {
@@ -557,7 +622,7 @@ fn corpus_value_matches_snapshot() {
                 "L{lineno}: v{v} delta={delta:+} expected={exp} got={got} code={code:?}"
             );
         }
-        let _ = fs::write(snapshots_dir().join("NATIVE_OPS_DRIFT.txt"), drift_report);
+        write_report("NATIVE_OPS_DRIFT.txt", &drift_report);
     }
 
     let report = format!(
@@ -566,13 +631,7 @@ fn corpus_value_matches_snapshot() {
          \u{2717} {value_mismatch} value mismatches\n\
          \u{2717} {interp_err} interpreter errors / panics avoided\n",
     );
-    let snap_dir = snapshots_dir();
-    fs::create_dir_all(&snap_dir).ok();
-    fs::write(
-        snap_dir.join("CORPUS_SUMMARY.txt"),
-        format!("{report}\n{mismatches}"),
-    )
-    .ok();
+    write_report("CORPUS_SUMMARY.txt", &format!("{report}\n{mismatches}"));
 
     // Surface the report regardless of pass/fail so a CI log shows
     // current parity health.
@@ -818,7 +877,7 @@ fn rust_emit_matches_snapshot_on_jvm() {
                 "{id}: v{v} delta={delta:+} expected={exp} got={got} code={code:?}"
             );
         }
-        let _ = fs::write(snapshots_dir().join("OPS_DRIFT.txt"), drift_report);
+        write_report("OPS_DRIFT.txt", &drift_report);
     }
 
     let total = u32::try_from(cases.len()).unwrap();
@@ -832,13 +891,8 @@ fn rust_emit_matches_snapshot_on_jvm() {
         100.0 * f64::from(value_ok) / f64::from(total.max(1)),
         100.0 * f64::from(ops_ok) / f64::from(total.max(1)),
     );
-    let snap_dir = snapshots_dir();
-    fs::create_dir_all(&snap_dir).ok();
-    fs::write(
-        snap_dir.join("JVM_PARITY.txt"),
-        format!("{report}\n{mismatches}"),
-    )
-    .ok();
+    let parity_report = write_report("JVM_PARITY.txt", &format!("{report}\n{mismatches}"));
+    let parity_report = parity_report.display();
     eprintln!("{report}");
 
     // Three ratchets — each tightens as emit gaps close. Bump them
@@ -850,13 +904,13 @@ fn rust_emit_matches_snapshot_on_jvm() {
     assert!(
         value_ratio >= 0.96,
         "rust-emit JVM value parity below 96%: {value_ok}/{total} = {:.1}%\n\
-         See tests/snapshots/JVM_PARITY.txt for the per-case breakdown",
+         See {parity_report} for the per-case breakdown",
         value_ratio * 100.0
     );
     assert!(
         ops_ratio >= 0.89,
         "rust-emit JVM ops parity below 89%: {ops_ok}/{total} = {:.1}%\n\
-         See tests/snapshots/JVM_PARITY.txt for the per-case breakdown",
+         See {parity_report} for the per-case breakdown",
         ops_ratio * 100.0
     );
     // Strict ceiling — every javac/JVM compile failure has a clear
@@ -865,7 +919,7 @@ fn rust_emit_matches_snapshot_on_jvm() {
     assert!(
         jvm_err == 0,
         "rust-emit JVM error count above 0: {jvm_err}\n\
-         See tests/snapshots/JVM_PARITY.txt for the per-case breakdown"
+         See {parity_report} for the per-case breakdown"
     );
 }
 

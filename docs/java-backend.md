@@ -231,12 +231,16 @@ name falls back to a bare `name(...)` call.
    comparing both returned value and op count against the reference. Ratchets
    guard the pass rates (value parity, op parity, and a zero-tolerance ceiling
    on compile/run errors); the per-case breakdown is written to
-   `tests/snapshots/JVM_PARITY.txt`. Bump the ratchets up as fixes land so
-   regressions cannot sneak back in.
+   `JVM_PARITY.txt`. Bump the ratchets up as fixes land so regressions cannot
+   sneak back in.
 
-Note that the JVM cross-check rewrites tracked snapshot files whose op counts
-are non-deterministic (anything driven by `randInt`); `git checkout` them after
-a local run unless updating them is the point of the change.
+The per-run reports — `JVM_PARITY.txt`, `OPS_DRIFT.txt`, `CORPUS_SUMMARY.txt`
+and `NATIVE_OPS_DRIFT.txt` — are statistics about the run, not goldens: their
+op counts are non-deterministic (anything driven by `randInt`). A test run
+writes them under `target/tmp/leek-backend-java/reports/` and the failure
+messages point at the file it actually wrote. The tracked copies in
+`tests/snapshots/` are refreshed only by `UPDATE_SNAPSHOTS=1 cargo test -p
+leek-backend-java`, so a plain run never leaves churn in the working tree.
 
 ## 9. Known gaps
 

@@ -88,6 +88,11 @@ jobs:
       # upstream corpus suite (run separately in the nightly job below).
       - name: cargo test --workspace (fast)
         run: cargo test --workspace --exclude leek-test-corpus --locked
+      # The Java-backend parity tests write their per-run reports under
+      # target/ (see tools/check.sh); a test run must leave the tracked
+      # snapshots byte-identical to what was committed.
+      - name: test run left the tracked snapshots alone
+        run: git diff --exit-code -- crates/backends/leek-backend-java/tests/snapshots
 
   # Supply-chain / license audit driven by deny.toml.
   deny:
