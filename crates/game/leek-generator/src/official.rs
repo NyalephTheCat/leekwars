@@ -59,7 +59,7 @@ const HOOK_OPS_BONUS: u64 = 1_000_000;
 /// compiled HIR, harvest the op count. Mirrors `Fight.startTurn`'s
 /// `entity.getAi().runTurn()`, including its catch blocks: an error ends the
 /// turn and is logged against the entity (see [`log_ai_error`]) instead of
-/// escaping. The ops the AI used up to the error still count.
+/// escaping. See [`harvest_run`] for which ops count.
 fn run_entity_ai(
     state: &Rc<RefCell<State>>,
     fid: usize,
@@ -72,10 +72,34 @@ fn run_entity_ai(
     })));
     let result = leek_backend_native::run(hir, opts);
     leek_backend_native::set_game_runtime(None);
-    if let Err(e) = result {
-        log_ai_error(&mut state.borrow_mut(), fid, fid, &e);
+    harvest_run(state, fid, fid, &result)
+}
+
+/// Finish an AI run: log its error, if any (see [`log_ai_error`]), and return
+/// the ops it used.
+///
+/// Only a run that actually executed has ops to report. A runtime error
+/// (fault, exhausted budget) ends a program that ran, so the ops it used up to
+/// the error count. A compile or unsupported error happens before the backend
+/// arms its op counter, which then still holds a previous run's count (often
+/// another entity's), so that run reports 0.
+fn harvest_run(
+    state: &Rc<RefCell<State>>,
+    acting: usize,
+    log_fid: usize,
+    result: &Result<Value, NativeError>,
+) -> u64 {
+    match result {
+        Ok(_) => ops_used(),
+        Err(e) => {
+            log_ai_error(&mut state.borrow_mut(), acting, log_fid, e);
+            if matches!(e, NativeError::Runtime(_)) {
+                ops_used()
+            } else {
+                0
+            }
+        }
     }
-    ops_used()
 }
 
 /// Run a bulb's turn: invoke the AI function stored at `summon()` time inside
@@ -101,10 +125,7 @@ fn run_bulb_ai(
     })));
     let result = leek_backend_native::run_call(hir, opts, ai_fn, Vec::new());
     leek_backend_native::set_game_runtime(None);
-    if let Err(e) = result {
-        log_ai_error(&mut state.borrow_mut(), fid, owner, &e);
-    }
-    ops_used()
+    harvest_run(state, fid, owner, &result)
 }
 
 /// Record a contained AI error the way `EntityAI.runTurn` /
@@ -165,8 +186,11 @@ fn find_hook(hir: &HirFile, name: &str) -> Option<Value> {
 /// [`HookPhase`] set (so `setLoadout` is allowed and combat actions are gated)
 /// and the AI's `current` entity installed. Hook operations are NOT charged to
 /// the entity (`runHook` doesn't feed `statistics`), matching the reference.
-/// A hook gets the turn budget plus `HOOK_OPS_BONUS`, and an error in it is
-/// logged like a turn error without stopping the other hooks or the fight.
+/// A hook gets the turn budget plus `HOOK_OPS_BONUS` (`EntityAI.runHook`): since
+/// `opts.op_limit` already carries the reach-the-budget adjustment of
+/// [`crate::fight_op_limit`], adding the bonus to it gives the hook the same
+/// boundary as Java. An error in a hook is logged like a turn error without
+/// stopping the other hooks or the fight.
 fn run_hooks(
     state: &Rc<RefCell<State>>,
     ais: &HashMap<usize, std::sync::Arc<HirFile>>,

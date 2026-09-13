@@ -67,7 +67,7 @@ pub(crate) fn run_fight_debug(config: &LaunchConfig, program: &Compiled) -> RunO
         .with_lang(program.version, program.strict)
         .with_link_game(true)
         .with_debug_hooks(true)
-        .with_op_limit(lf.max_ops_per_turn);
+        .with_op_limit(leek_generator::fight_op_limit(lf.max_ops_per_turn));
     let other_opts = leek_generator::fight_options(lf.version, lf.strict, lf.max_ops_per_turn);
 
     let outcome = leek_generator::run_fight_debug(

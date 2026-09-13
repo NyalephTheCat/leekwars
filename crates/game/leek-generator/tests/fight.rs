@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use leek_game_runtime::{EffectKind, GameHost}; // `life`/… accessors on `Fight`
 use leek_generator::{
-    ActiveEffect, AiError, DEFAULT_MAX_OPS_PER_TURN, Entity, Fight, FightRef, run_ai, run_fight,
-    shared,
+    ActiveEffect, AiError, DEFAULT_MAX_OPS_PER_TURN, Entity, Fight, FightRef, NativeError,
+    fight_options, run_ai, run_ai_with, run_fight, shared,
 };
 use leek_hir::{HirFile, lower_file_versioned};
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
@@ -774,4 +774,25 @@ fn runtime_error_mid_fight_is_recorded_and_the_fight_continues() {
     );
     let log: Vec<String> = f.borrow().log().iter().map(|(_, m)| m.clone()).collect();
     assert_eq!(log, ["bot1", "bot3"]);
+}
+
+/// Boundary (#38): Java's `AI.ops` throws `TOO_MUCH_OPERATIONS` once the count
+/// *reaches* the budget, so a turn whose charges land exactly on
+/// `max_ops_per_turn` errors; one more op of budget lets it finish.
+#[test]
+fn turn_budget_trips_when_ops_reach_it_like_java() {
+    let hir = compile("var s = 0\nfor (var i = 0; i < 10; i++) { s += i }\nsay(\"\" + s)");
+    let fight = || arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
+
+    run_ai_with(&fight(), &hir, &fight_options(4, false, u64::MAX)).expect("unbounded run");
+    let used = leek_backend_native::ops_used();
+    assert!(used > 0, "the AI charges ops");
+
+    let at_budget = run_ai_with(&fight(), &hir, &fight_options(4, false, used));
+    assert!(
+        matches!(&at_budget, Err(NativeError::Runtime(code)) if code == "TOO_MUCH_OPERATIONS"),
+        "ops == budget must error, got {at_budget:?}"
+    );
+    run_ai_with(&fight(), &hir, &fight_options(4, false, used + 1))
+        .expect("one op of headroom completes");
 }

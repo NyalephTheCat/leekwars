@@ -208,3 +208,36 @@ fn looping_ai_is_logged_per_turn_and_the_fight_goes_on() {
     );
     assert!(!actions.contains("[1002,1]"), "fid 1 never errored");
 }
+
+/// Regression: an AI the native backend can't compile errors before the op
+/// counter is armed, so the counter still holds the previous run's count (here
+/// fid 0's). That stale count must not be charged to the failing entity: it
+/// reports no ops, while its error is still logged every turn.
+#[test]
+fn uncompilable_ai_is_not_charged_a_stale_op_count() {
+    let mut state = State::new(1);
+    state.add_entity(0, leek(1, "A", 100));
+    state.add_entity(1, leek(2, "B", 200));
+    state.weapon_specs.insert(37, pistol());
+
+    let mut ais: HashMap<usize, Arc<HirFile>> = HashMap::new();
+    ais.insert(
+        0,
+        compile("var s = 0; for (var i = 0; i < 100; i++) { s += i; } return s;"),
+    );
+    // A `break` outside any loop fails MIR lowering: a compile error raised
+    // before the op counter is armed.
+    ais.insert(1, compile("break;"));
+
+    let opts = leek_generator::fight_options(4, false, 1_000_000);
+    let outcome = run_official_fight(state, &ais, &[100, 200], &opts);
+
+    let actions = serde_json::to_string(&outcome).expect("outcome serializes");
+    assert!(actions.contains("[1002,1]"), "fid 1's compile error logged");
+    let ops = &outcome["fight"]["ops"];
+    assert!(ops["0"].as_i64().is_some_and(|n| n > 0), "fid 0 ran: {ops}");
+    assert!(
+        ops.get("1").is_none_or(|n| n == &serde_json::json!(0)),
+        "fid 1 never ran, so no ops: {ops}"
+    );
+}

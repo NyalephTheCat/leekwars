@@ -42,16 +42,29 @@ pub use leek_game_runtime::{ActiveEffect, Entity, Fight, FightRef, chips, shared
 /// it gets `TOO_MUCH_OPERATIONS` and loses the rest of its turn.
 pub const DEFAULT_MAX_OPS_PER_TURN: u64 = leek_backend_native::DEFAULT_OP_BUDGET;
 
+/// The backend `op_limit` that enforces a per-turn budget of
+/// `max_ops_per_turn` the way the official generator does.
+///
+/// Java's `AI.ops` throws `TOO_MUCH_OPERATIONS` once the count *reaches* the
+/// budget (`mOperations >= maxOperations`), while the native backend keeps its
+/// interpreter-parity rule of raising only when the count *exceeds* its limit.
+/// A limit one below the budget makes the two agree: a turn whose charges land
+/// exactly on `max_ops_per_turn` errors, as in Java.
+#[must_use]
+pub const fn fight_op_limit(max_ops_per_turn: u64) -> u64 {
+    max_ops_per_turn.saturating_sub(1)
+}
+
 /// The standard fight launch options: release profile, the fight builtins
-/// linked, the given language settings, and `max_ops_per_turn` as the op
-/// budget of each AI run (every run is one turn, and the backend resets its
-/// counter per run, so the budget is per turn).
+/// linked, the given language settings, and a per-turn op budget of
+/// `max_ops_per_turn` (see [`fight_op_limit`]). Every run is one turn and the
+/// backend resets its counter per run, so the budget is per turn.
 #[must_use]
 pub fn fight_options(version: u8, strict: bool, max_ops_per_turn: u64) -> NativeOptions {
     NativeOptions::release()
         .with_lang(version, strict)
         .with_link_game(true)
-        .with_op_limit(max_ops_per_turn)
+        .with_op_limit(fight_op_limit(max_ops_per_turn))
 }
 
 /// Bridges the native backend's game-runtime hook to the fight functions,
