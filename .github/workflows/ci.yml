@@ -77,7 +77,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # A JDK is only needed for the (snapshot-gated) Java-backend parity
       # tests; without it those tests skip cleanly. Installing it gives the
-      # broadest coverage.
+      # broadest coverage. The JVM cross-check itself still skips here — it
+      # also needs tools/java-emitter/build.sh to have produced the upstream
+      # emitter jar, which this job does not build. Runners that do have it
+      # should set LEEK_REQUIRE_JVM=1 so the parity ratchets cannot pass by
+      # skipping; `tools/check.sh` exports it automatically.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -88,9 +92,10 @@ jobs:
       # upstream corpus suite (run separately in the nightly job below).
       - name: cargo test --workspace (fast)
         run: cargo test --workspace --exclude leek-test-corpus --locked
-      # The Java-backend parity tests write their per-run reports under
-      # target/ (see tools/check.sh); a test run must leave the tracked
-      # snapshots byte-identical to what was committed.
+      # The Java-backend parity tests compare against tests/snapshots/ and
+      # write everything they produce under target/ (see tools/check.sh); a
+      # test run must leave every tracked snapshot byte-identical to what was
+      # committed.
       - name: test run left the tracked snapshots alone
         run: git diff --exit-code -- crates/backends/leek-backend-java/tests/snapshots
 

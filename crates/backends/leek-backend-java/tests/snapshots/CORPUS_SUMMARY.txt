@@ -1,5 +1,6 @@
 snapshot cross-check: 3443 cases
-✓ 3443 matched value (3259 also matched ops, 184 ops drift)
+✓ 3443 matched value (3201 also matched ops, 170 ops drift)
 ✗ 0 value mismatches
 ✗ 0 interpreter errors / panics avoided
+– 72 ops comparisons skipped (RNG-driven snippet)
 

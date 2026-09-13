@@ -161,15 +161,21 @@ than one sprawling change.
 - The **upstream corpus** (`leek-test-corpus`) checks thousands of
   `equals(...)` cases against the reference implementation. It's slow and gated
   behind `tools/check.sh --full`; it needs the submodules checked out.
-- **Run reports:** the Java-backend parity tests emit per-run reports
-  (`OPS_DRIFT.txt`, `JVM_PARITY.txt`, `CORPUS_SUMMARY.txt`,
-  `NATIVE_OPS_DRIFT.txt`). They are not reproducible — op counts drift because
-  the corpus uses `randInt` — so a test run writes them under `target/` and
-  leaves the tracked copies in
-  `crates/backends/leek-backend-java/tests/snapshots/` alone. Refresh those on
-  purpose with `UPDATE_SNAPSHOTS=1 cargo test -p leek-backend-java`, and commit
-  the result only when the refresh is the point of the change. `tools/check.sh`
-  fails if a run touches them without the flag.
+- **Java-backend snapshots:** nothing under
+  `crates/backends/leek-backend-java/tests/snapshots/` is written by a plain
+  test run. The per-fixture `.diff` files and `SUMMARY.txt` are goldens and are
+  *compared*; the four run reports (`OPS_DRIFT.txt`, `JVM_PARITY.txt`,
+  `CORPUS_SUMMARY.txt`, `NATIVE_OPS_DRIFT.txt`) are statistics and go to
+  `target/`. Accept new output on purpose with `UPDATE_SNAPSHOTS=1 cargo test
+  -p leek-backend-java`, and commit it only when that is the point of the
+  change. `tools/check.sh` fails if a run touches the directory without the
+  flag.
+- **JVM parity gates:** the Java-backend cross-check against the upstream
+  harness skips (with a `SKIPPED` line) when `leekscript-emitter.jar` or the
+  captured `snapshot.tsv` is missing, so the suite runs without a JDK. Set
+  `LEEK_REQUIRE_JVM=1` to turn those skips into failures; `tools/check.sh`
+  does it for you when the jar is built. See
+  [`docs/java-backend.md`](docs/java-backend.md) §8.
 - **Fuzzing:** [`fuzz/`](fuzz/) is a standalone nightly cargo-fuzz workspace
   (excluded from the stable build) — see its README to run a target.
 

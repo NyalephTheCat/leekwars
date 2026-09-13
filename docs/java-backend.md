@@ -224,23 +224,48 @@ name falls back to a bare `name(...)` call.
    `tests/fixtures/golden/<name>.java`. Goldens are produced by
    `tools/java-emitter/build/leekscript-emitter.jar`, a thin driver around the
    upstream `IACompiler`.
-2. **Diff snapshots** — the full unified diff between exact-mode output and the
-   golden lands in `tests/snapshots/<name>.exact.diff` on every run. Today it is
-   a tracking artifact, not a hard gate.
+2. **Diff snapshots** — the unified diff between exact-mode output and the
+   golden (`tests/snapshots/<name>.exact.diff`), plus the clean-vs-exact
+   diffs and `SUMMARY.txt`, are goldens: the text is a pure function of the
+   fixtures and the emitter. A run writes the fresh diff under
+   `target/tmp/leek-backend-java/reports/` and compares it with the tracked
+   copy, so unreviewed emit drift fails the test instead of quietly rewriting
+   a tracked file.
 3. **JVM cross-check** — the corpus is emitted, compiled with `javac` and run,
    comparing both returned value and op count against the reference. Ratchets
-   guard the pass rates (value parity, op parity, and a zero-tolerance ceiling
-   on compile/run errors); the per-case breakdown is written to
-   `JVM_PARITY.txt`. Bump the ratchets up as fixes land so regressions cannot
-   sneak back in.
+   guard the pass rates (value parity, op parity, a zero-tolerance ceiling on
+   compile/run errors, and a zero-tolerance ceiling on cases the harness never
+   answered for); the per-case breakdown is written to `JVM_PARITY.txt`. Bump
+   the ratchets up as fixes land so regressions cannot sneak back in.
+
+Op comparisons are skipped for snippets that draw from the RNG (`rand`,
+`randInt`, `randFloat`, `randReal`). The recorded `jvm_ops` column came from a
+single JVM run and the harness RNG is unseeded, so those rows drift by a few
+dozen ops out of 13.6M between runs — comparing them made `OPS_DRIFT.txt` churn
+and turned the op ratchet into a coin flip. Their *values* are still compared,
+and both reports print how many comparisons were skipped.
 
 The per-run reports — `JVM_PARITY.txt`, `OPS_DRIFT.txt`, `CORPUS_SUMMARY.txt`
-and `NATIVE_OPS_DRIFT.txt` — are statistics about the run, not goldens: their
-op counts are non-deterministic (anything driven by `randInt`). A test run
-writes them under `target/tmp/leek-backend-java/reports/` and the failure
+and `NATIVE_OPS_DRIFT.txt` — are statistics about the run, not goldens. A test
+run writes them under `target/tmp/leek-backend-java/reports/` and the failure
 messages point at the file it actually wrote. The tracked copies in
 `tests/snapshots/` are refreshed only by `UPDATE_SNAPSHOTS=1 cargo test -p
-leek-backend-java`, so a plain run never leaves churn in the working tree.
+leek-backend-java`, which is also how you accept a new diff snapshot — so a
+plain run never leaves churn in the working tree.
+
+### Running without a JDK
+
+The JVM cross-check needs `tools/java-emitter/build/leekscript-emitter.jar`
+(built by `tools/java-emitter/build.sh`) and `tests/fixtures/ops/snapshot.tsv`.
+Without either, or when `java` fails to spawn, it prints a `SKIPPED` line
+naming what is missing and passes — that keeps the suite runnable on machines
+without a JDK, but it also means the ratchets above are not running.
+
+Set `LEEK_REQUIRE_JVM=1` wherever the harness is supposed to be there and every
+such skip becomes a failure. `tools/check.sh` exports it automatically when the
+jar is present. CI installs a JDK but does not build the jar, so the JVM
+cross-check currently skips there; the native cross-check
+(`corpus_value_matches_snapshot`) runs everywhere.
 
 ## 9. Known gaps
 
