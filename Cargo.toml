@@ -50,6 +50,7 @@ members = [
     "bins/leek-lsp",
     "bins/leek-dap",
     "bins/miku",
+    "xtask",
 ]
 
 [workspace.package]
