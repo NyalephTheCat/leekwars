@@ -6,8 +6,14 @@
 //! holds were invisible to them. A capture written only from a slice
 //! bound was therefore never boxed, and the outlined factory took it
 //! as a `final` parameter — javac's "cannot assign to final variable".
-//! Both walkers now delegate to `leek_hir::walk_expr_children`, whose
-//! `match` is variant-complete.
+//! Both walkers, and `lambda_outer_captures` alongside them, now delegate
+//! to `leek_hir::walk_expr_children`, whose `match` is variant-complete.
+//!
+//! The same drift had a second axis: *where* a walk starts. Each analysis
+//! enumerated the file's executable roots itself and reached a different
+//! subset of them, so a lambda in a class field initialiser was analysed by
+//! none of them; they are all rooted at `leek_hir::walk_file_bodies` now
+//! (#253).
 
 use leek_backend_java::{Options, emit};
 use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
@@ -45,4 +51,29 @@ fn capture_written_only_in_an_interval_bound_is_boxed() {
          var f = function() { return [acc++ .. 3] }\nreturn f()\n",
     );
     assert!(java.contains("Object[] u_acc = new Object[]{"), "{java}");
+}
+
+/// A lambda living in a **class field initialiser** is code like any other:
+/// the local it declares and the deeper lambda that writes it decide a box
+/// exactly as they would in the main block. `collect_boxed_locals` used to
+/// enumerate its own roots — top-level functions, class methods and
+/// constructors, the main block — so a field initialiser (and a global
+/// initialiser, and a parameter default) was never analysed at all, and the
+/// outlined factory took the written capture as a `final Object` parameter:
+/// javac's "cannot assign to final variable" (#253).
+#[test]
+fn capture_written_inside_a_class_field_initialiser_is_boxed() {
+    let java = java_for(
+        "// @version:4\n\
+         class A { static g = function() { var acc = 0\n\
+         var h = function() { acc = 1 }\n\
+         h()\n\
+         return acc } }\n\
+         return A.g\n",
+    );
+    assert!(java.contains("Object[] u_acc = new Object[]{"), "{java}");
+    assert!(
+        !java.contains("final Object u_acc"),
+        "the written capture must not be threaded as a plain final: {java}"
+    );
 }

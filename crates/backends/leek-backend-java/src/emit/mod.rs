@@ -1150,169 +1150,68 @@ pub(crate) fn java_class_name(ty: &Type) -> &'static str {
     }
 }
 
-/// Walk the entire HIR (main + every function/method body) and
-/// collect builtin names that appear on the left-hand side of an
-/// `=` assignment. Those names get routed through `__shadows` at
-/// emit time so subsequent reads see the user-assigned value
-/// instead of the original builtin function reference.
+/// Collect every builtin name this file *writes*.
+///
+/// A write to a name-keyed reference (`NameRef::Builtin` / `Unresolved`) has
+/// no Java variable behind it, so the emitter routes it through the AI class's
+/// `__shadows` map and makes every later read or call of that name test the
+/// map first. Two positions write a name that way:
+///
+/// - an **assignment** whose left-hand side is such a reference. Every form in
+///   the family counts, not just plain `=`: `cos += 1` stores to `cos` as
+///   surely as `cos = 1` does, and the store site (`write_place_store`) needs
+///   the name in this set either way.
+/// - a bare **`foreach` binding** (`for (push in […])`), which stores one slot
+///   per iteration into whatever the name already denotes with no assignment
+///   anywhere in the file (#371). The bind targets are l-values that
+///   `walk_stmt_child_exprs` deliberately does not report, so they are asked
+///   for by name through [`lambda::foreach_bind_targets`], the same helper
+///   every other walk in this backend uses for the question.
+///
+/// Both walks are rooted at [`leek_hir::walk_file_bodies`] (through the
+/// expression- and statement-shaped conveniences over it), so a class method,
+/// a constructor, a field initialiser, a global initialiser and a parameter
+/// default all count. The hand-rolled walker this replaced re-derived the
+/// whole `ExprKind` descent and rooted it at the main block plus
+/// `Def::Function` bodies, so a builtin reassigned anywhere inside a class
+/// body was invisible (#253).
+///
+/// One gap is inherited from [`leek_hir::walk_file_stmts_deep`] and documented
+/// there: a `foreach` inside a lambda that is itself nested in *another
+/// lambda's* parameter default contributes no statements. The assignment walk
+/// has no such gap.
 pub(crate) fn collect_shadowed_builtins(
     hir: &leek_hir::HirFile,
     out: &mut std::collections::HashSet<String>,
 ) {
-    pub(crate) fn scan_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
-        if let ExprKind::Binary(op, lhs, rhs) = &e.kind {
-            if matches!(op, BinaryOp::Assign)
-                && let ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) =
-                    &lhs.kind
-            {
-                out.insert(name.clone());
-            }
-            scan_expr(lhs, out);
-            scan_expr(rhs, out);
-            return;
-        }
-        match &e.kind {
-            ExprKind::Literal(_) | ExprKind::Name(_) => {}
-            ExprKind::Unary(_, x)
-            | ExprKind::Postfix(_, x)
-            | ExprKind::Cast(x, _)
-            | ExprKind::Field(x, ..) => scan_expr(x, out),
-            ExprKind::Index(b, i) => {
-                scan_expr(b, out);
-                scan_expr(i, out);
-            }
-            ExprKind::Call(c) => {
-                if let leek_hir::Callee::Method { receiver, .. } = &c.callee {
-                    scan_expr(receiver, out);
-                }
-                if let leek_hir::Callee::Expr(ce) = &c.callee {
-                    scan_expr(ce, out);
-                }
-                for a in &c.args {
-                    scan_expr(a, out);
-                }
-            }
-            ExprKind::Array(items) => {
-                for e in items {
-                    scan_expr(e, out);
-                }
-            }
-            ExprKind::Set(items) => {
-                for i in items {
-                    scan_expr(&i.start, out);
-                    if let Some(end) = &i.end {
-                        scan_expr(end, out);
-                    }
-                }
-            }
-            ExprKind::Map(pairs) => {
-                for (k, v) in pairs {
-                    scan_expr(k, out);
-                    scan_expr(v, out);
-                }
-            }
-            ExprKind::Object(pairs) => {
-                for (_, v) in pairs {
-                    scan_expr(v, out);
-                }
-            }
-            ExprKind::Ternary(c, t, f) => {
-                scan_expr(c, out);
-                scan_expr(t, out);
-                scan_expr(f, out);
-            }
-            ExprKind::Slice(s) => {
-                scan_expr(&s.base, out);
-                for e in [&s.start, &s.end, &s.step].into_iter().flatten() {
-                    scan_expr(e, out);
-                }
-            }
-            ExprKind::Lambda(lam) => match &lam.body {
-                leek_hir::LambdaBody::Block(b) => scan_block(b, out),
-                leek_hir::LambdaBody::Expr(e) => scan_expr(e, out),
-            },
-            ExprKind::New(n) => {
-                for a in &n.args {
-                    scan_expr(a, out);
-                }
-            }
-            ExprKind::Interval(iv) => {
-                for e in [&iv.start, &iv.end, &iv.step].into_iter().flatten() {
-                    scan_expr(e, out);
-                }
-            }
-            ExprKind::Binary(_, _, _) => unreachable!("handled above"),
+    /// The builtin name a write to `target` shadows, when `target` is one of
+    /// the two name-keyed references — the exact pair `write_place_store` and
+    /// `write_name` test the set with.
+    fn shadowed_name(target: &Expr) -> Option<&str> {
+        match &target.kind {
+            ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) => Some(name),
+            _ => None,
         }
     }
-    pub(crate) fn scan_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
-        match s {
-            Stmt::Expr(e) => scan_expr(e, out),
-            Stmt::VarDecl(v) => {
-                if let Some(init) = &v.init {
-                    scan_expr(init, out);
-                }
-            }
-            Stmt::Return(Some(e)) => scan_expr(e, out),
-            Stmt::Return(None) => {}
-            Stmt::If(i) => {
-                scan_expr(&i.cond, out);
-                scan_stmt(&i.then_branch, out);
-                if let Some(el) = &i.else_branch {
-                    scan_stmt(el, out);
-                }
-            }
-            Stmt::While(w) => {
-                scan_expr(&w.cond, out);
-                scan_stmt(&w.body, out);
-            }
-            Stmt::DoWhile(dw) => {
-                scan_expr(&dw.cond, out);
-                scan_stmt(&dw.body, out);
-            }
-            Stmt::For(f) => {
-                if let Some(init) = &f.init {
-                    scan_stmt(init, out);
-                }
-                if let Some(c) = &f.cond {
-                    scan_expr(c, out);
-                }
-                if let Some(s) = &f.step {
-                    scan_expr(s, out);
-                }
-                scan_stmt(&f.body, out);
-            }
-            Stmt::Foreach(fe) => {
-                scan_expr(&fe.iter, out);
-                scan_stmt(&fe.body, out);
-            }
-            Stmt::Block(b) => scan_block(b, out),
-            Stmt::Switch(s) => {
-                scan_expr(&s.discriminant, out);
-                for arm in &s.arms {
-                    for stmt in &arm.body {
-                        scan_stmt(stmt, out);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    pub(crate) fn scan_block(b: &leek_hir::Block, out: &mut std::collections::HashSet<String>) {
-        for s in &b.stmts {
-            scan_stmt(s, out);
-        }
-    }
-    for s in &hir.main {
-        scan_stmt(s, out);
-    }
-    for def in &hir.defs {
-        if let Def::Function(f) = def
-            && let Some(b) = &f.body
+    leek_hir::walk_file_exprs(hir, &mut |e| {
+        if let ExprKind::Binary(op, lhs, _) = &e.kind
+            && op.is_assignment()
+            && let Some(name) = shadowed_name(lhs)
         {
-            scan_block(b, out);
+            out.insert(name.to_owned());
         }
-    }
+    });
+    leek_hir::walk_file_stmts_deep(hir, &mut |s| {
+        if let Stmt::Foreach(fe) = s {
+            out.extend(
+                lambda::foreach_bind_targets(fe)
+                    .filter_map(shadowed_name)
+                    .map(str::to_owned),
+            );
+        }
+    });
 }
+
 pub(crate) fn is_div_expr(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Binary(BinaryOp::Div, _, _))
 }
@@ -1383,122 +1282,62 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
         }
     }
 
-    let mut roots: Vec<&[Stmt]> = vec![&hir.main];
-    for d in &hir.defs {
-        match d {
-            Def::Function(f) => {
-                if let Some(b) = &f.body {
-                    roots.push(&b.stmts);
-                }
-            }
-            Def::Class(c) => {
-                for m in c.methods.iter().chain(&c.constructors) {
-                    if let Some(b) = &m.body {
-                        roots.push(&b.stmts);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    // `walk_stmts_deep`, not the shallow pair: by-ref propagation has to see
-    // recursive `aux(copy, …)` calls *inside* the lambda that defines `aux` —
-    // that's where the `@`-aliased locals are declared.
-    for stmts in &roots {
-        for s in *stmts {
-            leek_hir::walk_stmts_deep(s, &mut |s| collect_var_lambdas(s, &mut var_lambda_pos));
-        }
-    }
+    // `walk_file_stmts_deep`, not `walk_file_stmts`: by-ref propagation has to
+    // see recursive `aux(copy, …)` calls *inside* the lambda that defines
+    // `aux` — that's where the `@`-aliased locals are declared. What changed
+    // is only where the walk starts. This used to hand-list main + top-level
+    // functions + class methods and constructors, which left a `@`-ref call in
+    // a field initialiser, a global initialiser or a parameter default
+    // unanalysed; `walk_file_bodies` underneath answers that once, for every
+    // walk in this crate (#253).
+    leek_hir::walk_file_stmts_deep(hir, &mut |s| collect_var_lambdas(s, &mut var_lambda_pos));
 
     let mut foreach_binds: HashSet<leek_hir::DefId> = HashSet::new();
+    leek_hir::walk_file_stmts_deep(hir, &mut |s| collect_foreach_binds(s, &mut foreach_binds));
 
-    // Resolve a call's `@` positions, then mark local args there.
+    // Resolve each call's `@` positions, then mark the local args sitting in
+    // them. `walk_file_exprs` carries the same lambda-crossing contract the
+    // hand-rolled descent here had, and closes the two holes it left: a
+    // lambda's own parameter defaults, and the roots above.
     let mut out: HashSet<leek_hir::DefId> = HashSet::new();
-    let mark = |c: &leek_hir::Call, positions: &[bool], out: &mut HashSet<leek_hir::DefId>| {
-        for (i, arg) in c.args.iter().enumerate() {
-            if positions.get(i).copied().unwrap_or(false)
-                && let ExprKind::Name(NameRef::Local(id)) = &arg.kind
-            {
-                out.insert(*id);
-            }
-        }
-    };
-    fn walk_calls(
-        e: &Expr,
-        hir: &HirFile,
-        var_lambda_pos: &HashMap<u32, Vec<bool>>,
-        out: &mut HashSet<leek_hir::DefId>,
-        mark: &dyn Fn(&leek_hir::Call, &[bool], &mut HashSet<leek_hir::DefId>),
-    ) {
-        if let ExprKind::Call(c) = &e.kind {
-            let positions = match &c.callee {
-                Callee::Function(NameRef::Function(fid)) => match hir.defs.get(fid.0 as usize) {
-                    Some(Def::Function(f)) => Some(ref_positions(&f.params)),
-                    _ => None,
-                },
-                Callee::Function(NameRef::Local(fid)) => var_lambda_pos.get(&fid.0).cloned(),
+    leek_hir::walk_file_exprs(hir, &mut |e| {
+        let ExprKind::Call(c) = &e.kind else { return };
+        let positions = match &c.callee {
+            Callee::Function(NameRef::Function(fid)) => match hir.defs.get(fid.0 as usize) {
+                Some(Def::Function(f)) => Some(ref_positions(&f.params)),
                 _ => None,
-            };
-            if let Some(pos) = positions {
-                mark(c, &pos, out);
-            }
-            // `t[i](args)` — dynamically dispatched through
-            // `executeArrayAccess`, so the callee (and its `@` positions)
-            // is unknowable statically. Upstream passes every variable arg
-            // as its Box and the callee's `instanceof Box` binding decides
-            // aliasing (an `@` param aliases for free; a by-value param
-            // copies). Mark every local arg so the call site can hand over
-            // the box (charge-neutral for by-value callees — they copy the
-            // content either way).
-            if let Callee::Expr(inner) = &c.callee
-                && matches!(inner.kind, ExprKind::Index(..))
-            {
-                for arg in &c.args {
-                    if let ExprKind::Name(NameRef::Local(id)) = &arg.kind {
-                        out.insert(*id);
-                    }
+            },
+            Callee::Function(NameRef::Local(fid)) => var_lambda_pos.get(&fid.0).cloned(),
+            _ => None,
+        };
+        if let Some(positions) = positions {
+            for (i, arg) in c.args.iter().enumerate() {
+                if positions.get(i).copied().unwrap_or(false)
+                    && let ExprKind::Name(NameRef::Local(id)) = &arg.kind
+                {
+                    out.insert(*id);
                 }
             }
         }
-        // Descend into lambda bodies — recursive `aux(copy, …)` calls live
-        // inside the lambda assigned to `aux` (the visitor treats Lambda as
-        // a leaf, so we cross the boundary by hand).
-        if let ExprKind::Lambda(l) = &e.kind {
-            match &l.body {
-                leek_hir::LambdaBody::Block(b) => {
-                    for s in &b.stmts {
-                        walk_call_stmts(s, hir, var_lambda_pos, out, mark);
-                    }
-                }
-                leek_hir::LambdaBody::Expr(inner) => {
-                    walk_calls(inner, hir, var_lambda_pos, out, mark);
+        // `t[i](args)` — dynamically dispatched through
+        // `executeArrayAccess`, so the callee (and its `@` positions)
+        // is unknowable statically. Upstream passes every variable arg
+        // as its Box and the callee's `instanceof Box` binding decides
+        // aliasing (an `@` param aliases for free; a by-value param
+        // copies). Mark every local arg so the call site can hand over
+        // the box (charge-neutral for by-value callees — they copy the
+        // content either way).
+        if let Callee::Expr(inner) = &c.callee
+            && matches!(inner.kind, ExprKind::Index(..))
+        {
+            for arg in &c.args {
+                if let ExprKind::Name(NameRef::Local(id)) = &arg.kind {
+                    out.insert(*id);
                 }
             }
         }
-        leek_hir::visit::walk_expr_children(e, &mut |c| {
-            walk_calls(c, hir, var_lambda_pos, out, mark);
-        });
-    }
-    fn walk_call_stmts(
-        s: &Stmt,
-        hir: &HirFile,
-        var_lambda_pos: &HashMap<u32, Vec<bool>>,
-        out: &mut HashSet<leek_hir::DefId>,
-        mark: &dyn Fn(&leek_hir::Call, &[bool], &mut HashSet<leek_hir::DefId>),
-    ) {
-        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| {
-            walk_calls(e, hir, var_lambda_pos, out, mark);
-        });
-        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| {
-            walk_call_stmts(c, hir, var_lambda_pos, out, mark);
-        });
-    }
-    for stmts in &roots {
-        for s in *stmts {
-            leek_hir::walk_stmts_deep(s, &mut |s| collect_foreach_binds(s, &mut foreach_binds));
-            walk_call_stmts(s, hir, &var_lambda_pos, &mut out, &mark);
-        }
-    }
+    });
+
     for d in &foreach_binds {
         out.remove(d);
     }
@@ -1578,13 +1417,14 @@ pub(crate) fn v1_box_returners(
     let mut fn_ev: HashMap<u32, Ev> = HashMap::new();
     let mut var_ev: HashMap<u32, Ev> = HashMap::new();
 
-    let mut roots: Vec<&[Stmt]> = vec![&hir.main];
+    // The per-function evidence table is keyed by index into `hir.defs` —
+    // the id space `returns_box_fns` is consulted in — so it stays a `defs`
+    // scan: it is a table, not a walk over the file's code.
     for (i, d) in (0u32..).zip(hir.defs.iter()) {
         if let Def::Function(f) = d
             && let Some(b) = &f.body
         {
             fn_ev.insert(i, body_evidence(&b.stmts));
-            roots.push(&b.stmts);
         }
     }
     let mut collect_var_lambda = |s: &Stmt| match s {
@@ -1606,12 +1446,11 @@ pub(crate) fn v1_box_returners(
         _ => {}
     };
     // Deep walk (crosses lambda boundaries) for *finding* the candidates —
-    // `var aux = function(){…}` bindings can live inside other lambdas.
-    for stmts in &roots {
-        for s in *stmts {
-            leek_hir::walk_stmts_deep(s, &mut collect_var_lambda);
-        }
-    }
+    // `var aux = function(){…}` bindings can live inside other lambdas — now
+    // rooted at every body in the file through `walk_file_bodies`. The
+    // hand-listed main + top-level functions this replaced reached neither a
+    // class body nor a parameter default (#253).
+    leek_hir::walk_file_stmts_deep(hir, &mut collect_var_lambda);
 
     // Fixpoint over the call-forwarding deps (cycles settle at "no").
     let mut fns: HashSet<u32> = fn_ev
