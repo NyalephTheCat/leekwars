@@ -32,8 +32,6 @@ mod cost;
 mod opts;
 mod walk;
 
-pub mod pipeline;
-
 pub use opts::ChargeOpts;
 
 use leek_hir::HirFile;
