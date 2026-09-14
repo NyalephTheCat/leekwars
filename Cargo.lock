@@ -1467,6 +1467,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "leek-test-cases"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "leek-test-corpus"
 version = "0.0.1"
 dependencies = [
@@ -1481,6 +1490,7 @@ dependencies = [
  "leek-recipes",
  "leek-span",
  "leek-syntax",
+ "leek-test-cases",
  "leek-test-driver",
  "toml",
 ]
@@ -1502,6 +1512,7 @@ dependencies = [
  "leek-runtime",
  "leek-span",
  "leek-syntax",
+ "leek-test-cases",
  "rowan",
  "serde",
  "toml",

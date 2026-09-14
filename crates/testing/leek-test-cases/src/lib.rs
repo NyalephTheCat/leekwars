@@ -1,4 +1,12 @@
 //! Test-case data model and TOML/JSON serialization.
+//!
+//! Split out of `leek-test-driver` (#150) so `leek-test-corpus`'s build
+//! script can depend on the data model without the runner behind it.
+//! `leek-test-driver` re-exports this crate as its `cases` module, so
+//! `leek_test_driver::cases::TestCase` still resolves.
+//!
+//! Nothing here may grow a dependency on the compiler: serde, toml and
+//! anyhow are the whole budget.
 
 use std::path::Path;
 
@@ -49,7 +57,7 @@ pub struct TestCase {
     pub expected: Expectation,
 
     /// Optional pipeline snapshot (compile errors / hir built) attached
-    /// by [`crate::audit::audit_case`].
+    /// by `leek_test_driver::audit::audit_case`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<CaseAudit>,
 }
@@ -155,5 +163,50 @@ impl Manifest {
         }
         std::fs::write(path, toml::to_string_pretty(self)?)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The manifest is written by `leek-test-corpus`'s build script and
+    /// read back by the runner, so this TOML round-trip is the whole
+    /// contract of the crate the build script depends on.
+    #[test]
+    fn manifest_round_trips_through_toml() {
+        let dir = std::env::temp_dir().join(format!("leek-test-cases-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("upstream_cases.toml");
+
+        let mut manifest = Manifest::empty();
+        manifest.source_files.push("TestBoolean.java".to_string());
+        manifest.cases.push(TestCase {
+            id: "TestBoolean.java::t::0@v4".to_string(),
+            source_file: "TestBoolean.java".to_string(),
+            method_name: "t".to_string(),
+            line: 12,
+            call_index: 0,
+            helper: "code_v4_".to_string(),
+            java_line: "code_v4_(\"true\").equals(\"true\");".to_string(),
+            version: 4,
+            strict: false,
+            enabled: true,
+            code: "true".to_string(),
+            expected: Expectation::Equals {
+                value: "true".to_string(),
+            },
+            audit: None,
+        });
+
+        manifest.save(&path).expect("save manifest");
+        let loaded = Manifest::load(&path).expect("load manifest");
+
+        assert_eq!(loaded.schema_version, Manifest::SCHEMA_VERSION);
+        assert_eq!(loaded.source_files, manifest.source_files);
+        assert_eq!(loaded.cases.len(), 1);
+        assert_eq!(loaded.cases[0].id, manifest.cases[0].id);
+        assert_eq!(loaded.cases[0].expected, manifest.cases[0].expected);
+        std::fs::remove_file(&path).expect("clean up");
     }
 }

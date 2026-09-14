@@ -56,14 +56,41 @@ javac -d "$TEST_CLASSES" -cp "$CP_TEST" --release 25 @"$SOURCES"
 JUNIT_CP="$JUNIT_API:$JUNIT_ENGINE:$JUNIT_PLAT_COMM:$JUNIT_PLAT_ENG:$JUNIT_LAUNCHER:$OPENTEST:$APIGUARDIAN"
 javac -d "$RUNNER_OUT" -cp "$JUNIT_CP" --release 25 "$TOOL/GenerateReference.java"
 
+# What the dataset holds now: a refresh that produces far fewer rows than
+# this is a partial run, not an update (checked after the JVM run below).
+PREV_ROWS=0
+if [[ -f "$REFERENCE" ]]; then
+  PREV_ROWS=$(grep -cv '^#' "$REFERENCE" || true)
+fi
+
+# Per-run, per-user log: a fixed /tmp path is shared between users and
+# between concurrent runs.
+LOG="${TMPDIR:-/tmp}/reference-run.$$.log"
+echo "log: $LOG"
+
 # Run from a scratch directory (see `jvm_workdir`): the upstream compiler
 # writes its `ai/` output tree relative to the cwd. The file-based tests
 # (`ai/euler/*.leek`) live in the generator submodule and resolve from
 # neither location; their rows are skipped either way.
 cd "$(jvm_workdir "$TOOL")"
 RUN_CP="$RUNNER_OUT:$TEST_CLASSES:$MAIN_CLASSES:$JACKSON_DB:$JACKSON_CORE:$JACKSON_ANN:$JUNIT_CP"
-LEEK_REFERENCE="$REFERENCE" java -cp "$RUN_CP" GenerateReference > /tmp/reference-run.log 2>&1 || true
+# No `|| true` here: a crashed JVM used to leave a truncated dataset
+# behind and still exit 0, which read as a successful refresh (#148).
+LEEK_REFERENCE="$REFERENCE" java -cp "$RUN_CP" GenerateReference > "$LOG" 2>&1
 
 ROWS=$(grep -cv '^#' "$REFERENCE" 2>/dev/null || true)
+
+# Derived from the file being replaced rather than hard-coded, so the
+# floor cannot rot as the corpus grows. 90% leaves room for upstream
+# genuinely dropping a few cases; a real collapse fails here.
+FLOOR=${LEEK_REFERENCE_MIN_ROWS:-$(( PREV_ROWS * 9 / 10 ))}
+if (( FLOOR < 1 )); then
+  FLOOR=1
+fi
+if (( ROWS < FLOOR )); then
+  echo "error: $REFERENCE has $ROWS rows, expected at least $FLOOR (was $PREV_ROWS)" >&2
+  echo "       the run is incomplete — see $LOG; set LEEK_REFERENCE_MIN_ROWS to override" >&2
+  exit 1
+fi
+
 echo "wrote $REFERENCE ($ROWS rows)"
-echo "log: /tmp/reference-run.log"

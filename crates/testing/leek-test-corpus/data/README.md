@@ -14,10 +14,28 @@ on a plain assertion instead. See [Formatter ratchet](#formatter-ratchet)
 below.
 
 `reference.tsv` — the official-LeekScript reference dataset (value + ops +
-generated Java per case), refreshed with
-`cargo run -p leek-test-corpus -- extract-reference` (needs a JDK and the
-`official-generator` submodule). `build.rs` regenerates it only when it is
-stale and those are available; otherwise the committed copy is embedded.
+generated Java per case). **No build touches it** (#148): `build.rs` neither
+regenerates nor embeds it, and its readers (`leek-backend-java`'s parity
+tests) open this file directly. Refreshing it runs the upstream JVM suite for
+minutes, so it is one explicit command:
+
+```bash
+cargo run -p leek-test-corpus -- extract-reference   # needs JDK 25 + the submodule
+```
+
+That command records a provenance line as the file's first row — the upstream
+submodule commit and git's tree hash of `tools/java-emitter/overlay` that
+produced the data. `tests/reference_provenance.rs` reads it back and says so
+when the checkout has moved on; it stays quiet while the committed file
+predates the line, or where the submodule is absent. That replaces the old
+mtime comparison, which a fresh clone could resolve either way depending on
+checkout order.
+
+One thing a refresh always drags with it: `leek-backend-java`'s
+`tests/snapshots/SWITCH_ROWS.txt` identifies its rows by line number in this
+file, so any rewrite — the provenance line included — shifts them. Rerun that
+test with `UPDATE_SNAPSHOTS=1`, check that only the numbers moved, and commit
+the refreshed snapshot together with the dataset.
 
 Run all linked backends (pipeline, native, java-emit):
 

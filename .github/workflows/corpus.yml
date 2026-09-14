@@ -41,11 +41,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # `reference.rs` decides the committed 13 MB data/reference.tsv is stale by
-  # comparing mtimes, and a fresh checkout stamps every file "now" in arbitrary
-  # order. Without this, `cargo build` can shell out to a multi-minute JVM suite
-  # and then write into a tracked file.
-  LEEK_SKIP_REFERENCE_REGEN: "1"
+  # No LEEK_SKIP_REFERENCE_REGEN here any more: since #148 the build script
+  # cannot regenerate data/reference.tsv at all, so there is nothing to opt out
+  # of. `cargo run -p leek-test-corpus -- extract-reference` is the only path
+  # that runs the JVM suite.
 
 jobs:
   corpus:

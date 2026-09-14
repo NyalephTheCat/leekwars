@@ -42,6 +42,7 @@ members = [
     "crates/tools/leek-migrate",
     "crates/tools/leek-rewrite",
     "crates/testing/leek-builtin-suite",
+    "crates/testing/leek-test-cases",
     "crates/testing/leek-test-driver",
     "crates/testing/leek-test-corpus",
     "crates/testing/leek-bench",
@@ -100,6 +101,7 @@ leek-lint         = { path = "crates/tools/leek-lint" }
 leek-migrate      = { path = "crates/tools/leek-migrate" }
 leek-rewrite      = { path = "crates/tools/leek-rewrite" }
 leek-builtin-suite = { path = "crates/testing/leek-builtin-suite" }
+leek-test-cases   = { path = "crates/testing/leek-test-cases" }
 leek-test-driver  = { path = "crates/testing/leek-test-driver" }
 leek-test-corpus  = { path = "crates/testing/leek-test-corpus" }
 leek-bench        = { path = "crates/testing/leek-bench" }

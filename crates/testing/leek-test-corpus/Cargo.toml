@@ -7,11 +7,17 @@ license.workspace = true
 description = "Shared fixtures and parity-test infrastructure."
 build       = "build.rs"
 
+# Keep this list tiny (#150). `src/extract.rs` is compiled twice — here
+# as a module of `build.rs`, and as `pub mod extract` of the library — so
+# whatever it imports has to be both a build- and a normal dependency.
+# `leek-test-cases` exists so that crate is serde + toml rather than the
+# whole compiler; a build-dependency is codegen'd, not merely checked.
 [build-dependencies]
-leek-test-driver = { workspace = true }
-anyhow           = { workspace = true }
+leek-test-cases = { workspace = true }
+anyhow          = { workspace = true }
 
 [dependencies]
+leek-test-cases     = { workspace = true }
 leek-test-driver    = { workspace = true }
 leek-backends       = { workspace = true }
 leek-manifest       = { workspace = true }

@@ -2,6 +2,7 @@
 
 pub mod extract;
 pub mod fmt_ratchet;
+pub mod reference;
 
 pub use fmt_ratchet::{
     FmtFailure, FmtRatchet, FmtRatchetDiff, KIND_NOT_IDEMPOTENT, KIND_UNSAFE, KIND_UNSAFE_REFORMAT,
@@ -9,8 +10,8 @@ pub use fmt_ratchet::{
 };
 
 pub use leek_test_driver::{
-    CaseAudit, CasePlan, CheckKind, Expectation, Manifest, MultiReport, SuiteBackend, TestCase,
-    audit::audit_case, backends, cases, checks, run,
+    CaseAudit, CaseChecks, CasePlan, CheckKind, Expectation, Manifest, MultiReport, SuiteBackend,
+    TestCase, audit::audit_case, backends, cases, checks, run,
 };
 
 use std::path::{Path, PathBuf};
@@ -26,15 +27,6 @@ pub fn embedded_manifest() -> &'static Manifest {
         toml::from_str(std::str::from_utf8(BYTES).expect("upstream_cases.toml must be utf-8"))
             .expect("malformed embedded upstream_cases.toml")
     })
-}
-
-/// Official-LeekScript reference dataset embedded at build time (TSV:
-/// `version, strict, kind, value, jvm_ops, code, java`). Empty (header
-/// only) when no JDK / upstream submodule was available at build time —
-/// run `cargo run -p leek-test-corpus -- extract-reference` to populate.
-/// See `src/reference.rs` for the gated-regen policy.
-pub fn embedded_reference() -> &'static str {
-    include_str!(concat!(env!("OUT_DIR"), "/reference.tsv"))
 }
 
 pub fn upstream_fixtures_dir() -> PathBuf {

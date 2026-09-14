@@ -8,17 +8,17 @@
 //! code_v1_3("source").warning(Error.X);
 //! ```
 //!
-//! Each call expands into one [`TestCase`](super::cases::TestCase) per
+//! Each call expands into one [`TestCase`](leek_test_cases::TestCase) per
 //! language version in its range.
 //!
 //! The extractor is intentionally tolerant: anything it can't parse
-//! gets recorded in [`Manifest::skipped`](super::cases::Manifest::skipped)
+//! gets recorded in [`Manifest::skipped`](leek_test_cases::Manifest::skipped)
 //! rather than failing extraction. We aim for ~90%+ coverage of the
 //! upstream corpus on the first pass and iterate from there.
 
 use std::path::Path;
 
-use leek_test_driver::cases::{Expectation, Manifest, SkippedCall, TestCase};
+use leek_test_cases::{Expectation, Manifest, SkippedCall, TestCase};
 
 /// Latest version we recognize (mirrors `WordCompiler.LATEST_VERSION`).
 /// Used to expand open-ended ranges like `code_v2_` (v2..=LATEST).
