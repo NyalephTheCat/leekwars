@@ -1,8 +1,9 @@
 //! Small adapters between CLI flags and shared library types.
+//!
+//! The `Reporter` itself is built by [`leek_driver::reporter_for`], so
+//! every subcommand picks up the manifest's `[lint]` levels the same way.
 
-use anyhow::Result;
-use leek_diagnostics::{ColorWhen as DiagColor, LintLevels, MessageFormat as DiagFormat, Reporter};
-use leek_manifest::LintTable;
+use leek_diagnostics::{ColorWhen as DiagColor, MessageFormat as DiagFormat};
 
 use crate::cli::{ColorWhen, MessageFormat};
 
@@ -26,17 +27,4 @@ impl From<MessageFormat> for DiagFormat {
             MessageFormat::Junit => DiagFormat::Human,
         }
     }
-}
-
-pub fn reporter_from_cli(
-    color: ColorWhen,
-    format: MessageFormat,
-    lint: &LintTable,
-) -> Result<Reporter> {
-    let levels = LintLevels {
-        deny: &lint.deny,
-        warn: &lint.warn,
-        allow: &lint.allow,
-    };
-    Reporter::new(color.into(), format.into(), levels).map_err(|e| anyhow::anyhow!("{e}"))
 }

@@ -72,6 +72,15 @@ pub enum MessageFormat {
     Json,
 }
 
+impl From<MessageFormat> for leek_diagnostics::MessageFormat {
+    fn from(f: MessageFormat) -> Self {
+        match f {
+            MessageFormat::Human => Self::Human,
+            MessageFormat::Json => Self::Json,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about = "Leekscript compiler driver")]
 pub struct Cli {

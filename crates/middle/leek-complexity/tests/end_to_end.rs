@@ -41,6 +41,24 @@ fn find<'a>(results: &'a [Complexity], name: &str) -> &'a Complexity {
         .unwrap_or_else(|| panic!("no complexity result for `{name}`"))
 }
 
+// ─── declaration site ───────────────────────────────────────────────
+
+#[test]
+fn each_row_carries_the_span_of_its_declaration() {
+    // `miku analyze` / `miku doc` run include-resolved pipelines, where one
+    // report covers several files. `span.source` is how a caller tells the
+    // rows declared in the file it is reporting on from the ones spliced in
+    // from an included file.
+    let r = analyze("function twice(x) {\n    return x * 2\n}\nreturn twice(21)\n");
+    let twice = find(&r, "twice");
+    let span = twice.span.expect("a declared function has a span");
+    assert_eq!(span.source, SourceId::new(1).unwrap());
+    assert!(span.start > 0 || span.end > 0, "{span:?}");
+
+    // The top-level block is not a declaration, so it has no span.
+    assert!(find(&r, "<main>").span.is_none());
+}
+
 // ─── slice 1: constant cost ─────────────────────────────────────────
 
 #[test]

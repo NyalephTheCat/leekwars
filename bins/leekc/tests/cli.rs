@@ -202,6 +202,102 @@ fn denying_a_warning_code_turns_a_clean_run_into_a_failure() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ---- include-using inputs ----
+//
+// `leekc` plans the name-resolving emits through `leek_driver`, the same
+// entry point `miku` uses, so a single file's `include("helper")` is
+// resolved from disk instead of being inert (DRIVER-02).
+
+/// A two-file fixture: `main.leek` includes `helper.leek` and calls a
+/// function defined there.
+fn include_fixture(label: &str) -> PathBuf {
+    let dir = scratch_dir(label);
+    std::fs::write(
+        dir.join("main.leek"),
+        "// @version:4\ninclude(\"helper\");\nreturn twice(21);\n",
+    )
+    .expect("write entry");
+    std::fs::write(
+        dir.join("helper.leek"),
+        "// @version:4\nfunction twice(x) { return x * 2; }\n",
+    )
+    .expect("write helper");
+    dir
+}
+
+#[test]
+fn leekc_resolves_includes_for_the_emits_that_need_names() {
+    let dir = include_fixture("include-run");
+
+    let run = leekc(&["main.leek", "--emit", "run"], &dir);
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    // The included body was compiled, not merely accepted.
+    assert_eq!(run.stdout.trim(), "42", "stderr: {}", run.stderr);
+
+    let ls = leekc(&["main.leek", "--emit", "leekscript"], &dir);
+    assert_eq!(ls.status, 0, "stderr: {}", ls.stderr);
+    assert!(
+        ls.stdout.contains("function twice"),
+        "the included definition must be spliced into the one emitted \
+         file:\n{}",
+        ls.stdout
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn leekc_reports_a_missing_include_against_the_including_file() {
+    let dir = scratch_dir("include-missing");
+    std::fs::write(
+        dir.join("main.leek"),
+        "// @version:4\ninclude(\"nope\");\nreturn 1;\n",
+    )
+    .expect("write");
+
+    let out = leekc(&["main.leek"], &dir);
+    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("E0272"), "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("main.leek"), "stderr: {}", out.stderr);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn leekc_renders_a_diagnostic_raised_in_an_included_file_against_that_file() {
+    // The included file gets its own `SourceId` and its offsets index into
+    // its own text: rendering it against the entry would point at the
+    // wrong line, or past the end of the entry entirely.
+    let dir = scratch_dir("include-diag");
+    std::fs::write(
+        dir.join("main.leek"),
+        "// @version:4\ninclude(\"helper\");\nreturn 1;\n",
+    )
+    .expect("write entry");
+    std::fs::write(
+        dir.join("helper.leek"),
+        "// @version:4\n// padding so the offsets do not fit the entry\n\
+         var dup = 1;\nvar dup = 2;\n",
+    )
+    .expect("write helper");
+
+    let out = leekc(&["main.leek"], &dir);
+    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("E0202"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("helper.leek"),
+        "the redeclaration is in helper.leek: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("var dup = 2;"),
+        "the snippet must come from helper.leek's own text: {}",
+        out.stderr
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn an_unknown_severity_code_is_a_usage_error_not_a_compile_failure() {
     let (dir, _) = fixture("bad-code");

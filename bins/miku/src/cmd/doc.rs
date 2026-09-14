@@ -26,10 +26,12 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use leek_complexity::Complexity;
 use leek_complexity::pipeline::ComplexityArtifact;
+use leek_driver::DriverConfig;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
 use leek_ide::signature::signature_for;
 use leek_parser::pipeline::GreenTreeArtifact;
 use leek_pipeline::Input;
+use leek_recipes::Target;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 
@@ -52,17 +54,20 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         sources.push(project.entry_path());
     }
 
+    // The same driver entry point `check` uses, so a file's `include(...)`
+    // calls resolve and the complexity rows reflect the real callees.
+    let config = DriverConfig {
+        target: Target::Complexity,
+        ..DriverConfig::default()
+    };
+
     // Build the per-source page set.
     let mut pages: Vec<Page> = Vec::new();
     for (i, path) in sources.iter().enumerate() {
         let source_id = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let (src, text) = project.pipeline_input(source_id, path)?;
         let input = Input::from(src);
-        let pipeline = leek_recipes::pipeline(
-            leek_recipes::Target::Complexity,
-            &leek_recipes::driver_params(),
-        )
-        .expect("recipe");
+        let pipeline = leek_driver::file_pipeline(&project, path, source_id, &config)?;
         let result = pipeline.run(input);
         let Some(report) = result.get::<ComplexityArtifact>() else {
             if !quiet {
@@ -78,7 +83,7 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         };
         let root = SyntaxNode::new_root(parse.0.clone());
 
-        let items = collect_items(&root, &text, &report.0);
+        let items = collect_items(&root, source_id, &text, &report.0);
         let out_name = file_html_name(&rel(&project.root, path));
         pages.push(Page {
             rel_source: rel(&project.root, path),
@@ -148,7 +153,12 @@ enum ItemKind {
     Global,
 }
 
-fn collect_items(root: &SyntaxNode, source: &str, complexities: &[Complexity]) -> Vec<Item> {
+fn collect_items(
+    root: &SyntaxNode,
+    source_id: SourceId,
+    source: &str,
+    complexities: &[Complexity],
+) -> Vec<Item> {
     let mut out = Vec::new();
     // Walk only direct children of the source file so we pick up
     // top-level declarations and skip nested classes/methods.
@@ -181,8 +191,14 @@ fn collect_items(root: &SyntaxNode, source: &str, complexities: &[Complexity]) -
         } else {
             doc_comment_before(source, start)
         };
+        // The report also covers functions spliced in from included files;
+        // match on the declaring file as well as the name so a collision
+        // can't attach an included function's formula to this one.
         let complexity = if kind == ItemKind::Function {
-            complexities.iter().find(|c| c.name == name).cloned()
+            complexities
+                .iter()
+                .find(|c| c.name == name && c.span.is_some_and(|s| s.source == source_id))
+                .cloned()
         } else {
             None
         };

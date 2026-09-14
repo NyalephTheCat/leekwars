@@ -1626,6 +1626,136 @@ fn analyze_reports_a_complexity_row_per_function() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn analyze_does_not_double_count_included_functions() {
+    // `analyze` resolves includes like `check` does, so `src/main.leek`'s
+    // report now also covers everything `src/helper.leek` declares. Each
+    // file is still walked in its own right, so a function must appear
+    // exactly once — under the file that declares it.
+    let dir = include_project("analyze_dedup");
+    let out = miku(&["analyze"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stdout.matches("twice(x)").count(),
+        1,
+        "`twice` is declared in src/helper.leek only:\n{}",
+        out.stdout
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doc_documents_the_declarations_of_the_file_it_is_writing() {
+    // Same guard for `miku doc`: the entry's page must not sprout the
+    // included file's declarations now that includes resolve.
+    let dir = include_project("doc_include");
+    let out = miku(&["doc"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+
+    let entry_page =
+        std::fs::read_to_string(dir.join("build/doc/src--main.html")).expect("entry page");
+    assert!(
+        !entry_page.contains("twice"),
+        "`twice` is declared in src/helper.leek:\n{entry_page}"
+    );
+    let helper_page =
+        std::fs::read_to_string(dir.join("build/doc/src--helper.html")).expect("helper page");
+    assert!(helper_page.contains("twice"), "{helper_page}");
+    assert!(helper_page.contains("O("), "{helper_page}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A project whose `tests/` file is the one driving the front end.
+/// `manifest_extra` is appended to the `[project]` table.
+fn include_test_project(label: &str, manifest_extra: &str, test_body: &str) -> PathBuf {
+    let dir = scratch_dir(label);
+    write(
+        &dir,
+        "Miku.toml",
+        &format!("[project]\nname    = \"included\"\nversion = \"0.1.0\"\n{manifest_extra}"),
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 0;\n");
+    write(
+        &dir,
+        "src/helper.leek",
+        "// @version:4\nfunction twice(x) { return x * 2; }\n",
+    );
+    write(&dir, "tests/t.leek", test_body);
+    dir
+}
+
+#[test]
+fn test_runs_a_test_that_includes_a_helper() {
+    // A test file goes through the same driver pipeline as the entry, so
+    // its `include(...)` resolves and `twice` is a real call rather than an
+    // unbound name the native backend refuses to compile.
+    let dir = include_test_project(
+        "test_include",
+        "",
+        "// @version:4\n// miku-test: expect-output: 42\n\
+         include(\"../src/helper\");\nreturn twice(21);\n",
+    );
+    let out = miku(&["test"], &dir);
+    assert_eq!(
+        out.status, 0,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        out.stdout.contains("PASS tests/t.leek"),
+        "stdout: {}",
+        out.stdout
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn check_and_test_agree_on_a_missing_include() {
+    // E0272 is an error wherever it is raised. `check` sees it in the
+    // entry; `test` must see it in a test file too, instead of running a
+    // program whose `include` silently did nothing.
+    const MISSING: &str = "// @version:4\ninclude(\"nope\");\nreturn 1;\n";
+    let dir = include_test_project("missing_include", "", MISSING);
+    write(&dir, "src/main.leek", MISSING);
+
+    let check = miku(&["check"], &dir);
+    assert_ne!(check.status, 0, "stdout: {}", check.stdout);
+    assert!(check.stderr.contains("E0272"), "stderr: {}", check.stderr);
+
+    let test = miku(&["test"], &dir);
+    assert_ne!(test.status, 0, "stdout: {}", test.stdout);
+    assert!(test.stderr.contains("E0272"), "stderr: {}", test.stderr);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_honors_manifest_lint_groups_like_check() {
+    // L0028 is a pedantic lint this manifest switches on and denies. It
+    // has to fail a `tests/` file for the same reason it fails
+    // `src/main.leek`: both plan their pipeline through the driver, which
+    // merges the manifest's opt-in lint groups into the recipe params.
+    const COLLAPSIBLE: &str =
+        "// @version:4\nvar a = 1;\nif (a > 0) { if (a < 9) { a = 2; } }\nreturn a;\n";
+    let dir = include_test_project(
+        "manifest_lints",
+        "\n[lint]\npedantic = true\ndeny = [\"L0028\"]\n",
+        COLLAPSIBLE,
+    );
+    write(&dir, "src/main.leek", COLLAPSIBLE);
+
+    let check = miku(&["check"], &dir);
+    assert_ne!(check.status, 0, "stdout: {}", check.stdout);
+    assert!(check.stderr.contains("L0028"), "stderr: {}", check.stderr);
+
+    let test = miku(&["test"], &dir);
+    assert_ne!(test.status, 0, "stdout: {}", test.stdout);
+    assert!(test.stderr.contains("L0028"), "stderr: {}", test.stderr);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ---- manifest location ----
 
 #[test]
