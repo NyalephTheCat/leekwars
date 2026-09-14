@@ -90,7 +90,13 @@ fn parse_tsv(path: &Path) -> Vec<Builtin> {
 }
 
 fn write_java_catalog(builtins: &[Builtin], path: &Path) {
-    let java: Vec<_> = builtins.iter().filter(|b| b.java_class.is_some()).collect();
+    // Keyed by name so the emitted table comes out sorted: `lookup_java`
+    // binary-searches it.
+    let java: BTreeMap<&str, &Builtin> = builtins
+        .iter()
+        .filter(|b| b.java_class.is_some())
+        .map(|b| (b.name.as_str(), b))
+        .collect();
     let mut out = String::from(
         "#[derive(Debug, Clone, Copy)]\n\
          pub struct JavaBuiltin {\n\
@@ -100,17 +106,24 @@ fn write_java_catalog(builtins: &[Builtin], path: &Path) {
          }\n\n\
          pub static JAVA_BUILTINS: &[JavaBuiltin] = &[\n",
     );
-    for b in &java {
+    for (name, b) in &java {
         let class = b.java_class.as_deref().unwrap();
         let ret = b.return_type.as_deref().unwrap_or("double");
         let _ = writeln!(
             out,
-            "    JavaBuiltin {{ name: \"{}\", java_class: \"{class}\", return_type: \"{ret}\" }},",
-            b.name
+            "    JavaBuiltin {{ name: \"{name}\", java_class: \"{class}\", return_type: \"{ret}\" }},"
         );
     }
-    out.push_str("];\n\npub fn lookup_java(name: &str) -> Option<&'static JavaBuiltin> {\n");
-    out.push_str("    JAVA_BUILTINS.iter().find(|b| b.name == name)\n}\n");
+    out.push_str("];\n\n");
+    out.push_str(
+        "/// Binary search: `JAVA_BUILTINS` is emitted sorted by name.\n\
+         pub fn lookup_java(name: &str) -> Option<&'static JavaBuiltin> {\n\
+         \x20   JAVA_BUILTINS\n\
+         \x20       .binary_search_by_key(&name, |b| b.name)\n\
+         \x20       .ok()\n\
+         \x20       .and_then(|i| JAVA_BUILTINS.get(i))\n\
+         }\n",
+    );
     fs::write(path, out).expect("write catalog.rs");
 }
 
