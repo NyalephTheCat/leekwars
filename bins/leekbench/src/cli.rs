@@ -37,6 +37,21 @@ pub struct Cli {
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
 
+    /// Path to the tracked known-failures file for `--fast-java`. Defaults to
+    /// `crates/backends/leek-backend-java/tests/snapshots/CORPUS_FAST_JAVA.tsv`
+    /// relative to the workspace root.
+    #[arg(long = "known-failures")]
+    pub known_failures: Option<PathBuf>,
+
+    /// `--fast-java`: write the sweep's failures to the known-failures file.
+    #[arg(long = "write-known-failures")]
+    pub write_known_failures: bool,
+
+    /// `--fast-java`: diff the sweep against the known-failures file and exit
+    /// non-zero if any case is newly broken.
+    #[arg(long = "check-known-failures")]
+    pub check_known_failures: bool,
+
     /// Optional path to a corpus manifest JSON file.
     #[arg(long)]
     pub manifest: Option<PathBuf>,

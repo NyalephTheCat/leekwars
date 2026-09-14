@@ -39,6 +39,7 @@
 
 mod compile;
 mod corpus_fast;
+mod known_failures;
 mod runner_native;
 mod runner_rust_java;
 mod runner_upstream;
@@ -48,6 +49,10 @@ use std::time::Duration;
 
 pub use compile::{CompiledHir, compile_hir, compile_hir_file};
 pub use corpus_fast::{FastCase, FastOutcome, FastReport, run_fast_java_corpus};
+pub use known_failures::{
+    KnownFailure, KnownFailures, KnownFailuresDiff, describe, diff_known_failures, javac_signature,
+    kind_is_flaky, parse_known_failures,
+};
 
 pub use runner_native::RustNative;
 pub use runner_rust_java::RustJavaEmit;

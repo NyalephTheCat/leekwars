@@ -1,9 +1,9 @@
 //! `leekbench` — compare backend execution speed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Row, Table, presets};
 use leek_bench::{BenchOptions, BenchSummary, RustJavaEmit, RustNative, UpstreamJava, bench};
@@ -137,7 +137,7 @@ fn run_corpus_fast_java(cli: &Cli) -> Result<()> {
         embedded_manifest()
     };
     // Only `equals(...)` cases carry a comparable value.
-    let cases: Vec<leek_bench::FastCase> = manifest
+    let candidates: Vec<leek_bench::FastCase> = manifest
         .cases
         .iter()
         .filter(|c| cli.include_disabled || c.enabled)
@@ -153,11 +153,16 @@ fn run_corpus_fast_java(cli: &Cli) -> Result<()> {
             }),
             _ => None,
         })
-        .take(cli.limit.max(1))
         .collect();
 
+    // Before the sweep, not after: it takes minutes, and the answer does not
+    // depend on it.
+    check_ratchet_preconditions(cli, candidates.len())?;
+
+    let cases: &[leek_bench::FastCase] = &candidates[..candidates.len().min(cli.limit.max(1))];
+
     eprintln!("fast rust-java sweep: {} cases …", cases.len());
-    let report = leek_bench::run_fast_java_corpus(&cases, cli.corpus_lang_version)?;
+    let report = leek_bench::run_fast_java_corpus(cases, cli.corpus_lang_version)?;
 
     println!(
         "\n{} cases in {:.1}s ({} javac round(s))",
@@ -168,19 +173,153 @@ fn run_corpus_fast_java(cli: &Cli) -> Result<()> {
     println!("  agree:     {} / {}", report.agree, report.total);
     println!("  disagree:  {}", report.disagree());
     println!("  errors:    {}", report.errors());
+
+    // Unconditionally, not behind `--verbose`: "49 compile errors" is a number
+    // you cannot act on, and the grouped form is short enough to always print
+    // (one line per distinct defect, not per case).
+    let histogram = report.signature_histogram();
+    if !histogram.is_empty() {
+        println!("\nfailures by signature:");
+        for (sig, count) in &histogram {
+            println!("  {count:>5} × {sig}");
+        }
+    }
+
     if cli.verbose {
         for (id, outcome) in &report.failures {
             match outcome {
                 leek_bench::FastOutcome::Disagree { got, expected } => {
                     println!("  ✗ {id}\n      got      {got}\n      expected {expected}");
                 }
-                leek_bench::FastOutcome::CompileError => println!("  ⊗ {id}  (compile error)"),
+                leek_bench::FastOutcome::CompileError { javac } => {
+                    println!("  ⊗ {id}  (compile: {javac})");
+                }
                 leek_bench::FastOutcome::EmitError(e) => println!("  ⊘ {id}  (emit: {e})"),
                 leek_bench::FastOutcome::RuntimeError(e) => println!("  !  {id}  (runtime: {e})"),
                 leek_bench::FastOutcome::Timeout => println!("  ⏱ {id}  (timeout)"),
                 leek_bench::FastOutcome::NoResult => println!("  ?  {id}  (no result)"),
             }
         }
+    }
+
+    if cli.write_known_failures {
+        let path = known_failures_path(cli);
+        std::fs::write(&path, report.to_tsv())
+            .with_context(|| format!("write {}", path.display()))?;
+        println!(
+            "\nwrote {} failing case(s) to {}",
+            report.failures.len(),
+            path.display(),
+        );
+    }
+    if cli.check_known_failures {
+        check_known_failures(cli, &report)?;
+    }
+    Ok(())
+}
+
+/// Where the tracked known-failures file lives.
+///
+/// `tests/snapshots/` rather than the bare `tests/known_failures.tsv` the
+/// issue names: CI's "test run left the tracked snapshots alone" step and
+/// `parity.rs`'s `UPDATE_SNAPSHOTS=1` policy already cover that directory, so
+/// this reuses the repo's ratchet convention instead of inventing a second.
+fn known_failures_path(cli: &Cli) -> PathBuf {
+    cli.known_failures.clone().unwrap_or_else(|| {
+        // CARGO_MANIFEST_DIR is `…/bins/leekbench`.
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/backends/leek-backend-java/tests/snapshots/CORPUS_FAST_JAVA.tsv")
+    })
+}
+
+/// Refuse to write or check a ratchet from a sweep that did not cover the
+/// corpus.
+///
+/// This is the easiest way to make the ratchet lie, and it is the *default*:
+/// `--limit` is 20, so `--check-known-failures` on its own would compare 20
+/// cases against a 9 519-case file, report every unrun case as fixed, find no
+/// new ids and exit green. `--case-filter` and a non-`equals` expectation
+/// narrow the set the same way. A file written from such a run is worse than
+/// no file, because it looks authoritative.
+fn check_ratchet_preconditions(cli: &Cli, candidates: usize) -> Result<()> {
+    if !cli.write_known_failures && !cli.check_known_failures {
+        return Ok(());
+    }
+    let flag = if cli.write_known_failures {
+        "--write-known-failures"
+    } else {
+        "--check-known-failures"
+    };
+    if cli.limit < candidates {
+        bail!(
+            "{flag} needs the whole corpus, but --limit {} truncates {candidates} cases. \
+             Pass --limit {candidates} (or higher).",
+            cli.limit,
+        );
+    }
+    if cli.case_filter.is_some() {
+        bail!(
+            "{flag} cannot be combined with --case-filter: it would record a subset as the whole corpus"
+        );
+    }
+    if !matches!(cli.corpus_expectation, CorpusExpectation::Equals) {
+        bail!(
+            "{flag} needs --corpus-expectation equals: only `equals(...)` cases carry a value the sweep can check"
+        );
+    }
+    Ok(())
+}
+
+/// Diff this sweep against the tracked file and fail on newly broken cases.
+fn check_known_failures(cli: &Cli, report: &leek_bench::FastReport) -> Result<()> {
+    let path = known_failures_path(cli);
+    // Fail closed. A missing file must not read as "nothing is broken" — that
+    // is the exact shape of the bug this ratchet exists to prevent.
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "read {} — generate it with `--write-known-failures` on a machine \
+             with a JDK and the upstream classes built",
+            path.display(),
+        )
+    })?;
+    let committed = leek_bench::parse_known_failures(&text)
+        .with_context(|| format!("parse {}", path.display()))?;
+    committed.check_comparable(report.total)?;
+
+    let diff = leek_bench::diff_known_failures(&report.to_known_failures(), &committed);
+    println!("\nknown failures ({}):", path.display());
+    for (id, row) in &diff.new_ids {
+        println!("  + {id}\t{}", leek_bench::describe(row));
+    }
+    for (id, row) in &diff.flaky_new_ids {
+        println!(
+            "  ~ {id}\t{} (not gated, see #297)",
+            leek_bench::describe(row)
+        );
+    }
+    for id in &diff.fixed_ids {
+        println!("  - {id}");
+    }
+    for (id, was, now) in &diff.changed_detail {
+        println!("  ≠ {id}\n      was {was}\n      now {now}");
+    }
+    if diff.new_ids.is_empty() && diff.fixed_ids.is_empty() && diff.changed_detail.is_empty() {
+        println!("  (unchanged)");
+    }
+
+    if diff.is_regression() {
+        bail!(
+            "{} case(s) newly failing. Fix them, or — if the change is intended — \
+             re-run with --write-known-failures and commit {}.",
+            diff.new_ids.len(),
+            path.display(),
+        );
+    }
+    if !diff.fixed_ids.is_empty() {
+        println!(
+            "\n{} case(s) now pass; re-run with --write-known-failures to tighten the file.",
+            diff.fixed_ids.len(),
+        );
     }
     Ok(())
 }
@@ -611,5 +750,97 @@ impl NameStr for RustJavaEmit {
 impl NameStr for UpstreamJava {
     fn name_str(&self) -> String {
         leek_bench::Backend::name(self).to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, check_ratchet_preconditions, known_failures_path};
+    use clap::Parser;
+
+    fn cli(args: &[&str]) -> Cli {
+        let mut argv = vec!["leekbench", "--corpus", "--fast-java"];
+        argv.extend_from_slice(args);
+        Cli::parse_from(argv)
+    }
+
+    /// The whole corpus, un-narrowed: the ratchet is meaningful.
+    #[test]
+    fn a_full_sweep_may_write_and_check() {
+        assert!(
+            check_ratchet_preconditions(&cli(&["--limit", "9519", "--check-known-failures"]), 9519)
+                .is_ok()
+        );
+        assert!(
+            check_ratchet_preconditions(
+                &cli(&["--limit", "100000", "--write-known-failures"]),
+                9519
+            )
+            .is_ok()
+        );
+    }
+
+    /// `--limit` defaults to 20, so this is what you get by *forgetting* a
+    /// flag, not by trying to cheat: 20 cases compared against a 9 519-case
+    /// file finds no new ids and exits green. It has to be rejected before the
+    /// sweep runs.
+    #[test]
+    fn the_default_limit_cannot_produce_a_ratchet() {
+        let err = check_ratchet_preconditions(&cli(&["--check-known-failures"]), 9519)
+            .expect_err("--limit 20 must not be accepted");
+        assert!(err.to_string().contains("--limit 20"), "{err}");
+    }
+
+    /// Same hole through a different flag.
+    #[test]
+    fn a_narrowed_sweep_cannot_produce_a_ratchet() {
+        assert!(
+            check_ratchet_preconditions(
+                &cli(&[
+                    "--limit",
+                    "9519",
+                    "--case-filter",
+                    "string",
+                    "--write-known-failures"
+                ]),
+                9519,
+            )
+            .is_err()
+        );
+        assert!(
+            check_ratchet_preconditions(
+                &cli(&[
+                    "--limit",
+                    "9519",
+                    "--corpus-expectation",
+                    "all",
+                    "--check-known-failures"
+                ]),
+                9519,
+            )
+            .is_err()
+        );
+    }
+
+    /// A plain sweep is unaffected — the guard only applies to ratchet mode.
+    #[test]
+    fn a_plain_sweep_is_not_subject_to_the_guard() {
+        assert!(check_ratchet_preconditions(&cli(&["--case-filter", "string"]), 9519).is_ok());
+    }
+
+    /// The default lands in the snapshots directory CI already watches, and
+    /// `--known-failures` overrides it.
+    #[test]
+    fn the_default_path_is_the_tracked_snapshot() {
+        let path = known_failures_path(&cli(&[]));
+        assert!(
+            path.ends_with("leek-backend-java/tests/snapshots/CORPUS_FAST_JAVA.tsv"),
+            "{}",
+            path.display(),
+        );
+        assert_eq!(
+            known_failures_path(&cli(&["--known-failures", "/tmp/x.tsv"])),
+            std::path::Path::new("/tmp/x.tsv"),
+        );
     }
 }
