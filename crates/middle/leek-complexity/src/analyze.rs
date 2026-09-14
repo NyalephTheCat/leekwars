@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use leek_hir::{
     Block, Callee, Def, DefId, Expr, ExprKind, Function, HirFile, LambdaBody, NameRef, Param, Stmt,
 };
+use leek_span::Span;
 
 use crate::big_o::big_o;
 use crate::call_graph;
@@ -63,6 +64,14 @@ pub struct Complexity {
     pub params: Vec<ParamInfo>,
     pub formula: CostExpr,
     pub big_o: crate::big_o::BigO,
+    /// Where the function or method was declared. `None` for the
+    /// synthetic `<main>` row, which is the entry file's top-level
+    /// block rather than a declaration.
+    ///
+    /// Callers that analyse an *include-resolved* file use
+    /// `span.source` to tell the entry's own declarations from the
+    /// ones spliced in from included files.
+    pub span: Option<Span>,
 }
 
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
@@ -82,6 +91,9 @@ struct Unit<'a> {
     body: &'a Option<Block>,
     /// Enclosing class for a method; `None` for a free function.
     class: Option<&'a str>,
+    /// The declaration's span — carried through to
+    /// [`Complexity::span`].
+    span: Span,
 }
 
 /// Analyse every user function and class method in `hir`. See module
@@ -108,6 +120,7 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
                         params: &f.params,
                         body: &f.body,
                         class: None,
+                        span: f.span,
                     },
                 );
             }
@@ -124,6 +137,7 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
                             params: &m.params,
                             body: &m.body,
                             class: Some(c.name.as_str()),
+                            span: m.span,
                         },
                     );
                 }
@@ -194,6 +208,7 @@ pub fn analyze_file(hir: &HirFile) -> Vec<Complexity> {
         params: Vec::new(),
         formula: main_formula,
         big_o: main_big_o,
+        span: None,
     });
     // Emit functions and methods in declaration order.
     for def in &hir.defs {
@@ -231,6 +246,7 @@ pub fn analyze_function(f: &Function) -> Complexity {
         params: &f.params,
         body: &f.body,
         class: None,
+        span: f.span,
     };
     analyze_unit(&unit, &registry, &recursive, &def_to_name, &graph, &globals)
 }
@@ -286,6 +302,7 @@ fn analyze_unit(
         params,
         formula,
         big_o,
+        span: Some(u.span),
     }
 }
 

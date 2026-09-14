@@ -1553,6 +1553,7 @@ dependencies = [
  "leek-backend-leekscript",
  "leek-backend-native",
  "leek-diagnostics",
+ "leek-driver",
  "leek-environment",
  "leek-fmt",
  "leek-hir",
@@ -1568,7 +1569,6 @@ dependencies = [
  "leek-span",
  "leek-syntax",
  "leek-types",
- "serde_json",
 ]
 
 [[package]]

@@ -36,11 +36,12 @@ use leek_hir::pipeline::HirArtifact;
 use leek_span::SourceId;
 
 use leek_diagnostics::{Code, Reporter, Severity};
+use leek_driver::DriverConfig;
 use leek_pipeline::Input;
 use leek_project::Project;
+use leek_recipes::{RecipeParams, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Test};
-use crate::util::reporter_from_cli;
 
 /// The runtime error the native backend records when the op budget runs out.
 const BUDGET_EXHAUSTED: &str = "TOO_MUCH_OPERATIONS";
@@ -56,7 +57,16 @@ pub fn run(
     for w in &project.warnings {
         eprintln!("warning: {w}");
     }
-    let reporter = reporter_from_cli(color, format, &project.manifest.lint)?;
+    // Tests compile through the same driver entry points as `miku check`:
+    // the same manifest `[lint]` levels and groups, and the same include
+    // resolution, so a test file may `include(...)` its helpers.
+    let config = DriverConfig {
+        target: Target::Linted,
+        params: RecipeParams::default(),
+        color: color.into(),
+        format: format.into(),
+    };
+    let reporter = leek_driver::reporter_for(&project, config.color, config.format)?;
 
     let tests = project.walk_tests();
     if tests.is_empty() {
@@ -73,7 +83,7 @@ pub fn run(
     for (next_source, path) in (1_u32..).zip(&tests) {
         let source = SourceId::new(next_source).unwrap();
         let start = Instant::now();
-        let outcome = run_one(&project, &reporter, source, path)?;
+        let outcome = run_one(&project, &config, &reporter, source, path)?;
         let duration = start.elapsed();
 
         let rel = display_relative(&project.root, path);
@@ -148,6 +158,7 @@ struct TestRecord {
 
 fn run_one(
     project: &Project,
+    config: &DriverConfig,
     reporter: &Reporter,
     source: SourceId,
     path: &Path,
@@ -162,9 +173,7 @@ fn run_one(
         )));
     }
 
-    let pipeline =
-        leek_recipes::pipeline(leek_recipes::Target::Linted, &leek_recipes::driver_params())
-            .expect("recipe");
+    let pipeline = leek_driver::file_pipeline(project, path, source, config)?;
     let result = pipeline.run(input);
     let label = path.display().to_string();
 
@@ -179,7 +188,7 @@ fn run_one(
         if errors.contains(&code.as_str()) {
             return Ok(TestOutcome::Pass);
         }
-        reporter.emit_run(result.diagnostics(), &text, &label);
+        leek_driver::report(&result, &text, &label, reporter);
         return Ok(TestOutcome::Fail(if errors.is_empty() {
             format!("expected compile error {code} but the program compiled")
         } else {
@@ -187,7 +196,7 @@ fn run_one(
         }));
     }
 
-    let had_compile_error = reporter.emit_run(result.diagnostics(), &text, &label);
+    let had_compile_error = leek_driver::report(&result, &text, &label, reporter);
     if had_compile_error {
         return Ok(TestOutcome::Fail("compile error".into()));
     }

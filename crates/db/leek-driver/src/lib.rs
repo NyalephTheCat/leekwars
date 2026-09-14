@@ -105,17 +105,35 @@ pub fn reporter_for(
 /// The pipeline for one project file: `config`'s target and params merged
 /// with the manifest's opt-in lint groups, with the file's includes resolved
 /// from disk (included files get `SourceId`s following `source_id`).
+///
+/// Every `miku` subcommand that compiles a file plans it here, so `check`,
+/// `lint`, `run`, `build`, `fix`, `test`, `analyze` and `doc` all see the
+/// same include closure and the same lint groups.
 pub fn file_pipeline(
     project: &Project,
     path: &Path,
     source_id: leek_span::SourceId,
     config: &DriverConfig,
 ) -> Result<Pipeline> {
-    let merged = merge_manifest_lints(project, config);
+    standalone_pipeline(path, source_id, &merge_manifest_lints(project, config))
+}
+
+/// The pipeline for one file compiled outside any project — the
+/// manifest-less half of [`file_pipeline`], for front-ends that have a
+/// path but no `Miku.toml` (`leekc`).
+///
+/// There are no manifest lint groups to merge, but the file's includes
+/// still resolve from disk and its included files are numbered exactly
+/// the way the `miku` commands number theirs.
+pub fn standalone_pipeline(
+    path: &Path,
+    source_id: leek_span::SourceId,
+    config: &DriverConfig,
+) -> Result<Pipeline> {
     Ok(leek_recipes::pipeline_with_includes(
-        merged.target,
+        config.target,
         includes_step(path, source_id),
-        &merged.params,
+        &config.params,
     )?)
 }
 
@@ -416,6 +434,101 @@ mod tests {
         assert!(at("lex") < at("resolve_includes"), "{names:?}");
         assert!(at("resolve_includes") < at("parse"), "{names:?}");
         assert!(names.contains(&"lint"), "the default target is Linted");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_pipeline_resolves_includes_for_every_target_a_command_asks_for() {
+        // DRIVER-02: `analyze` and `doc` ask for `Complexity`, `test` and
+        // `fix` for `Linted`, `build` for `Mir`. Whichever a command wants,
+        // it gets the same include-resolving front end — otherwise one
+        // subcommand sees a symbol another one does not.
+        let dir = scratch("every-target");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        for target in [
+            Target::Resolved,
+            Target::TypeChecked,
+            Target::Hir,
+            Target::Linted,
+            Target::Mir,
+            Target::Complexity,
+        ] {
+            let config = DriverConfig {
+                target,
+                ..DriverConfig::default()
+            };
+            let names = file_pipeline(
+                &project,
+                &dir.join("src/main.leek"),
+                SourceId::new(1).unwrap(),
+                &config,
+            )
+            .expect("pipeline")
+            .step_names();
+            let at = |n: &str| {
+                names
+                    .iter()
+                    .position(|s| *s == n)
+                    .unwrap_or_else(|| panic!("no `{n}` step for {target:?} in {names:?}"))
+            };
+            assert!(at("lex") < at("resolve_includes"), "{target:?}: {names:?}");
+            assert!(
+                at("resolve_includes") < at("parse"),
+                "{target:?}: {names:?}"
+            );
+        }
+        assert!(
+            file_pipeline(
+                &project,
+                &dir.join("src/main.leek"),
+                SourceId::new(1).unwrap(),
+                &DriverConfig {
+                    target: Target::Complexity,
+                    ..DriverConfig::default()
+                },
+            )
+            .expect("pipeline")
+            .step_names()
+            .contains(&"complexity"),
+            "the Complexity target must still end at the complexity step"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_standalone_pipeline_differs_from_the_project_one_only_in_lint_groups() {
+        // `leekc` has no manifest, so it plans through `standalone_pipeline`.
+        // The pass sequence must be the one the `miku` commands get, or the
+        // two front ends disagree about what `include(...)` means.
+        let dir = scratch("standalone");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        let entry = dir.join("src/main.leek");
+        let id = SourceId::new(1).unwrap();
+
+        let project = project_at(dir.clone(), "");
+        let from_project = file_pipeline(&project, &entry, id, &DriverConfig::default())
+            .expect("project pipeline")
+            .step_names();
+        let standalone = standalone_pipeline(&entry, id, &DriverConfig::default())
+            .expect("standalone pipeline")
+            .step_names();
+        assert_eq!(standalone, from_project);
+
+        // The manifest's lint groups are the project-only half: they change
+        // what the lint step reports, never the pass sequence.
+        let loud = project_at(dir.clone(), "[lint]\npedantic = true\n");
+        assert_eq!(
+            file_pipeline(&loud, &entry, id, &DriverConfig::default())
+                .expect("pipeline")
+                .step_names(),
+            standalone
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

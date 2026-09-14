@@ -18,6 +18,7 @@ leek-hir         = { workspace = true }
 leek-mir         = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-recipes     = { workspace = true }
+leek-driver      = { workspace = true }
 leek-environment = { workspace = true }
 leek-prelude     = { workspace = true }
 leek-backend-java = { workspace = true }
@@ -28,7 +29,6 @@ leek-lint        = { workspace = true }
 leek-manifest    = { workspace = true }
 clap             = { workspace = true }
 anyhow           = { workspace = true }
-serde_json       = { workspace = true }
 
 [lints]
 workspace = true

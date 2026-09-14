@@ -10,6 +10,7 @@ description = "Static complexity / big-O analysis for Leekscript functions."
 leek-hir      = { workspace = true }
 leek-builtins = { workspace = true }
 leek-pipeline = { workspace = true }
+leek-span     = { workspace = true }
 salsa         = { version = "0.26", optional = true }
 
 [dev-dependencies]
@@ -19,7 +20,6 @@ leek-runtime        = { workspace = true }
 leek-lexer       = { workspace = true }
 leek-parser      = { workspace = true }
 leek-resolver    = { workspace = true }
-leek-span        = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-types       = { workspace = true }
 
@@ -31,6 +31,7 @@ salsa = [
   "dep:salsa",
   "leek-pipeline/salsa",
   "leek-hir/salsa",
+  "leek-span/salsa",
 ]
 
 [lints]

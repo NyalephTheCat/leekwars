@@ -1,26 +1,57 @@
 //! Pipeline assembly and diagnostic-code resolution.
 
+use std::path::Path;
+
 use anyhow::Result;
 use leek_diagnostics::Code;
+use leek_driver::DriverConfig;
 use leek_fmt::FormatOptions;
 use leek_pipeline::{LintGroups, Pipeline};
 use leek_recipes::{self, Target};
+use leek_span::SourceId;
 
 use crate::cli::Emit;
 
+/// The entry file's own `SourceId`; its includes get the ones after it.
+pub const ENTRY_SOURCE: u32 = 1;
+
 /// Pick the shortest pipeline that produces the artifact `emit` needs.
-pub fn pipeline_for(emit: Emit, fmt_opts: FormatOptions, lints: LintGroups) -> Pipeline {
+///
+/// The emits that resolve names go through
+/// [`leek_driver::standalone_pipeline`], the manifest-less half of the
+/// entry point `miku` plans every file with — so `leekc main.leek` and
+/// `miku check` agree on what `include("helper")` means. `input` is the
+/// entry file the include graph is walked from.
+///
+/// The purely textual views of a single file (`tokens`, `flat-cst`,
+/// `cst`, `fmt`) stay on the single-file path: they describe the bytes
+/// in front of them, and the formatter must stay byte-faithful.
+pub fn pipeline_for(
+    emit: Emit,
+    fmt_opts: FormatOptions,
+    lints: LintGroups,
+    input: &Path,
+) -> Pipeline {
     let params = leek_recipes::driver_params().with_lints(lints);
+    let with_includes = |target: Target| {
+        let config = DriverConfig {
+            target,
+            params: params.clone(),
+            ..DriverConfig::default()
+        };
+        leek_driver::standalone_pipeline(input, SourceId::new(ENTRY_SOURCE).unwrap(), &config)
+            .expect("recipe")
+    };
     match emit {
         Emit::Check | Emit::Hir | Emit::Java | Emit::LeekScript | Emit::Run | Emit::Native => {
-            leek_recipes::pipeline(Target::Linted, &params).expect("recipe")
+            with_includes(Target::Linted)
         }
         Emit::Tokens | Emit::FlatCst => {
             leek_recipes::pipeline(Target::Tokens, &params).expect("recipe")
         }
         Emit::Cst => leek_recipes::pipeline(Target::Parsed, &params).expect("recipe"),
         Emit::Fmt => leek_recipes::pipeline_formatted(fmt_opts, &params).expect("recipe"),
-        Emit::Mir => leek_recipes::pipeline(Target::Mir, &params).expect("recipe"),
+        Emit::Mir => with_includes(Target::Mir),
     }
 }
 
@@ -40,24 +71,19 @@ pub fn resolve_code(raw: &str) -> Result<Code> {
     })
 }
 
-/// True if stderr is attached to a terminal. Honors `NO_COLOR`.
-pub fn is_stderr_tty() -> bool {
-    use std::io::IsTerminal;
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    std::io::stderr().is_terminal()
-}
-
 #[cfg(test)]
 mod tests {
     use clap::ValueEnum;
 
     use super::*;
 
-    const FRONT_END: [&str; 6] = [
+    /// The front end an include-resolving emit drives. `resolve_includes`
+    /// sits between lexing and parsing: it only needs the entry's tokens,
+    /// and the parse consumes the include closure's class names.
+    const FRONT_END_WITH_INCLUDES: [&str; 7] = [
         "pragma",
         "lex",
+        "resolve_includes",
         "parse",
         "resolve",
         "type-check",
@@ -74,24 +100,36 @@ mod tests {
             // lint step rides along because `Target::Linted` is the check
             // recipe these emits share.
             Emit::Check | Emit::Hir | Emit::Java | Emit::LeekScript | Emit::Run | Emit::Native => {
-                steps.extend(FRONT_END);
+                steps.extend(FRONT_END_WITH_INCLUDES);
                 steps.push("lint");
             }
             Emit::Tokens | Emit::FlatCst => steps.extend(["pragma", "lex"]),
             Emit::Cst => steps.extend(["pragma", "lex", "parse"]),
             Emit::Fmt => steps.extend(["pragma", "lex", "parse", "fmt"]),
             Emit::Mir => {
-                steps.extend(FRONT_END);
+                steps.extend(FRONT_END_WITH_INCLUDES);
                 steps.push("lower-mir");
             }
         }
         steps
     }
 
+    /// A path that need not exist: `pipeline_for` only plans the steps,
+    /// and `includes_step` falls back to the path as given when
+    /// canonicalization fails.
+    fn entry() -> &'static Path {
+        Path::new("main.leek")
+    }
+
     #[test]
     fn every_emit_maps_to_the_shortest_pipeline_that_produces_its_artifact() {
         for emit in Emit::value_variants() {
-            let pipeline = pipeline_for(*emit, FormatOptions::default(), LintGroups::default());
+            let pipeline = pipeline_for(
+                *emit,
+                FormatOptions::default(),
+                LintGroups::default(),
+                entry(),
+            );
             assert_eq!(
                 pipeline.step_names(),
                 expected_steps(*emit),
@@ -101,11 +139,36 @@ mod tests {
     }
 
     #[test]
+    fn the_name_resolving_emits_plan_the_same_front_end_as_the_driver() {
+        // DRIVER-02: `leekc` and `miku` must not disagree about whether a
+        // file's `include(...)` calls are resolved. Both plan through
+        // `leek_driver`, so the step sequence is identical.
+        let driver = leek_driver::standalone_pipeline(
+            entry(),
+            SourceId::new(ENTRY_SOURCE).unwrap(),
+            &DriverConfig::default(),
+        )
+        .expect("driver pipeline");
+        let leekc = pipeline_for(
+            Emit::Check,
+            FormatOptions::default(),
+            LintGroups::default(),
+            entry(),
+        );
+        assert_eq!(leekc.step_names(), driver.step_names());
+    }
+
+    #[test]
     fn no_emit_builds_an_empty_pipeline() {
         // `pipeline_for` unwraps the recipe; an empty plan would mean the
         // emit silently produces nothing at all.
         for emit in Emit::value_variants() {
-            let pipeline = pipeline_for(*emit, FormatOptions::default(), LintGroups::default());
+            let pipeline = pipeline_for(
+                *emit,
+                FormatOptions::default(),
+                LintGroups::default(),
+                entry(),
+            );
             assert!(!pipeline.is_empty(), "--emit {emit:?} planned no steps");
         }
     }
@@ -114,7 +177,12 @@ mod tests {
     fn lint_groups_do_not_change_the_pass_sequence() {
         // `--pedantic` / `--nursery` widen what the lint step reports; they
         // must not add or drop a pass.
-        let plain = pipeline_for(Emit::Check, FormatOptions::default(), LintGroups::default());
+        let plain = pipeline_for(
+            Emit::Check,
+            FormatOptions::default(),
+            LintGroups::default(),
+            entry(),
+        );
         let loud = pipeline_for(
             Emit::Check,
             FormatOptions::default(),
@@ -122,6 +190,7 @@ mod tests {
                 pedantic: true,
                 nursery: true,
             },
+            entry(),
         );
         assert_eq!(plain.step_names(), loud.step_names());
     }

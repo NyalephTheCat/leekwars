@@ -21,7 +21,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use leek_complexity::Complexity;
 use leek_complexity::pipeline::ComplexityArtifact;
+use leek_driver::DriverConfig;
 use leek_pipeline::Input;
+use leek_recipes::Target;
 use leek_span::SourceId;
 
 use crate::cli::Analyze;
@@ -43,15 +45,18 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
         all
     };
 
+    // The same driver entry point `check` uses, so a file's `include(...)`
+    // calls resolve and the calls it makes into an included file are costed
+    // instead of falling through to `Unknown`.
+    let config = DriverConfig {
+        target: Target::Complexity,
+        ..DriverConfig::default()
+    };
     for (i, path) in files.iter().enumerate() {
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let (src, _text) = project.pipeline_input(source, path)?;
         let input = Input::from(src);
-        let pipeline = leek_recipes::pipeline(
-            leek_recipes::Target::Complexity,
-            &leek_recipes::driver_params(),
-        )
-        .expect("recipe");
+        let pipeline = leek_driver::file_pipeline(&project, path, source, &config)?;
         let result = pipeline.run(input);
         let Some(report) = result.get::<ComplexityArtifact>() else {
             eprintln!(
@@ -60,7 +65,17 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
             );
             continue;
         };
-        print_report(&project.root, path, &report.0, args.formula, quiet);
+        // Included files contribute their declarations to this file's HIR,
+        // so the report covers them too. Each source is walked in its own
+        // right, so keep only the rows declared here — otherwise an
+        // included function is printed once per file that includes it.
+        let own: Vec<Complexity> = report
+            .0
+            .iter()
+            .filter(|c| c.span.is_none_or(|s| s.source == source))
+            .cloned()
+            .collect();
+        print_report(&project.root, path, &own, args.formula, quiet);
     }
 
     Ok(ExitCode::SUCCESS)

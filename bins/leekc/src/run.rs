@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use leek_diagnostics::{Renderer, SeverityConfig};
+use leek_diagnostics::{ColorWhen, LintLevels, Reporter};
 use leek_fmt::FormatOptions;
 use leek_fmt::pipeline::FormattedArtifact;
 use leek_hir::pipeline::HirArtifact;
@@ -12,12 +12,12 @@ use leek_lexer::pipeline::TokensArtifact;
 use leek_mir::pipeline::MirArtifact;
 use leek_parser::pipeline::GreenTreeArtifact;
 use leek_pipeline::Input;
+use leek_span::SourceId;
 use leek_span::pragma::LanguageSettings;
-use leek_span::{LineTable, SourceId};
 use leek_syntax::{SyntaxNode, Version, build_flat_tree};
 
-use crate::cli::{Cli, Emit, MessageFormat};
-use crate::pipeline::{is_stderr_tty, pipeline_for, resolve_code};
+use crate::cli::{Cli, Emit};
+use crate::pipeline::{pipeline_for, resolve_code};
 use crate::print::{print_cst, print_hir, print_mir, print_tokens};
 
 pub fn run() -> Result<ExitCode> {
@@ -25,7 +25,7 @@ pub fn run() -> Result<ExitCode> {
     let text = std::fs::read_to_string(&cli.input)
         .with_context(|| format!("reading {}", cli.input.display()))?;
 
-    let source = SourceId::new(1).unwrap();
+    let source = SourceId::new(crate::pipeline::ENTRY_SOURCE).unwrap();
 
     // Settle the language settings once, here at the input boundary:
     // `--version-pragma` > the file's `@version` pragma > v4, and
@@ -89,47 +89,35 @@ pub fn run() -> Result<ExitCode> {
             pedantic: cli.pedantic,
             nursery: cli.nursery,
         },
+        &cli.input,
     );
     let result = pipeline.run(input);
 
-    let mut sev_cfg = SeverityConfig::new();
-    for code in &cli.deny {
-        sev_cfg.deny(resolve_code(code)?);
+    // Validate the severity flags before building the reporter, so an
+    // unknown code is a usage error (exit 2) with the catalog hint rather
+    // than a bare "unknown diagnostic code".
+    for code in cli.deny.iter().chain(&cli.warn).chain(&cli.allow) {
+        resolve_code(code)?;
     }
-    for code in &cli.warn {
-        sev_cfg.warn(resolve_code(code)?);
-    }
-    for code in &cli.allow {
-        sev_cfg.allow(resolve_code(code)?);
-    }
-
-    let line_table = LineTable::new(&text);
-    let renderer = if cli.no_color || cli.message_format == MessageFormat::Json {
-        Renderer::default()
-    } else if is_stderr_tty() {
-        Renderer::ansi()
-    } else {
-        Renderer::default()
-    };
+    // Diagnostics render through the same `Reporter` + `leek_driver::report`
+    // as every `miku` subcommand, so one raised inside an included file is
+    // shown against *that* file's text and path, not the entry's.
+    let reporter = Reporter::new(
+        if cli.no_color {
+            ColorWhen::Never
+        } else {
+            ColorWhen::Auto
+        },
+        cli.message_format.into(),
+        LintLevels {
+            deny: &cli.deny,
+            warn: &cli.warn,
+            allow: &cli.allow,
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let file_label = cli.input.display().to_string();
-    let mut had_error = false;
-    for diag in result.diagnostics() {
-        let mut adjusted = diag.clone();
-        if !sev_cfg.apply_mut(&mut adjusted) {
-            continue;
-        }
-        match cli.message_format {
-            MessageFormat::Human => {
-                let rendered = renderer.render(&adjusted, &text, &file_label, &line_table);
-                eprint!("{rendered}");
-            }
-            MessageFormat::Json => {
-                let json = serde_json::to_string(&adjusted).expect("diagnostic should serialize");
-                println!("{json}");
-            }
-        }
-        had_error |= matches!(adjusted.severity, leek_diagnostics::Severity::Error);
-    }
+    let had_error = leek_driver::report(&result, &text, &file_label, &reporter);
 
     match cli.emit {
         Emit::Check => {}
