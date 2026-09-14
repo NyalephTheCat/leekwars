@@ -177,9 +177,57 @@ pub struct FileCatalog {
     consts: Vec<(String, String)>,
 }
 
+/// A `.lib` catalog file this toolchain can't read.
+///
+/// Deliberately does *not* implement
+/// [`IntoDiagnostic`](leek_diagnostics::IntoDiagnostic): a `.lib` file is not
+/// a `.leek` source, never enters the project index, and so has no `SourceId`
+/// to hang a span on. The `line` field is the honest substitute — it is the
+/// number the parser already knew, kept as a number instead of being baked
+/// into a sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogError {
+    /// The file could not be read.
+    Io {
+        path: std::path::PathBuf,
+        message: String,
+    },
+    /// A row has fewer than the two mandatory columns.
+    Syntax { line: u32 },
+    /// A column that must be a number isn't one.
+    BadField {
+        line: u32,
+        field: usize,
+        raw: String,
+    },
+    /// A numeric column is out of the range its slot allows.
+    OutOfRange { line: u32, what: &'static str },
+}
+
+impl std::fmt::Display for CatalogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CatalogError::Io { path, message } => {
+                write!(f, "reading {}: {message}", path.display())
+            }
+            CatalogError::Syntax { line } => {
+                write!(f, "line {line}: expected `name<TAB>class[...]`")
+            }
+            CatalogError::BadField { line, field, raw } => {
+                write!(f, "line {line}: field {field} {raw:?} is not a number")
+            }
+            CatalogError::OutOfRange { line, what } => {
+                write!(f, "line {line}: {what} out of range")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CatalogError {}
+
 impl FileCatalog {
     /// Parse a library definition from text.
-    pub fn parse(text: &str) -> Result<Self, String> {
+    pub fn parse(text: &str) -> Result<Self, CatalogError> {
         let mut cat = FileCatalog::default();
         for (lineno, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("").trim();
@@ -207,26 +255,29 @@ impl FileCatalog {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .collect();
+            let line = u32::try_from(lineno + 1).unwrap_or(u32::MAX);
             if f.len() < 2 {
-                return Err(format!(
-                    "line {}: expected `name<TAB>class[...]`",
-                    lineno + 1
-                ));
+                return Err(CatalogError::Syntax { line });
             }
             let is_static = f.get(2).is_none_or(|s| *s != "receiver");
             // A *present but non-numeric* arity/cost field means a malformed
             // catalog, not "default to 0" — fail loud rather than silently
             // registering a 0-arity entry that rejects every call to it.
-            let field_u32 = |idx: usize| -> Result<Option<u32>, String> {
+            let field_u32 = |idx: usize| -> Result<Option<u32>, CatalogError> {
                 match f.get(idx) {
-                    Some(s) => s.parse::<u32>().map(Some).map_err(|_| {
-                        format!("line {}: field {idx} {s:?} is not a number", lineno + 1)
-                    }),
+                    Some(s) => s
+                        .parse::<u32>()
+                        .map(Some)
+                        .map_err(|_| CatalogError::BadField {
+                            line,
+                            field: idx,
+                            raw: (*s).to_string(),
+                        }),
                     None => Ok(None),
                 }
             };
-            let to_u8 = |v: u32, what: &str| {
-                u8::try_from(v).map_err(|_| format!("line {}: {what} out of range", lineno + 1))
+            let to_u8 = |v: u32, what: &'static str| {
+                u8::try_from(v).map_err(|_| CatalogError::OutOfRange { line, what })
             };
             let min_arity = to_u8(field_u32(3)?.unwrap_or(0), "min_arity")?;
             let max_arity = match field_u32(4)? {
@@ -249,9 +300,11 @@ impl FileCatalog {
     }
 
     /// Load a library from a file path.
-    pub fn from_path(path: &std::path::Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    pub fn from_path(path: &std::path::Path) -> Result<Self, CatalogError> {
+        let text = std::fs::read_to_string(path).map_err(|e| CatalogError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
         Self::parse(&text)
     }
 }
@@ -325,7 +378,7 @@ impl EnvironmentCatalog for CompositeCatalog {
 
 /// Load a library by *spec*: the built-in name `"leekwars"` (the official
 /// fight functions), or a path to a [`FileCatalog`] definition file.
-pub fn load(spec: &str) -> Result<Box<dyn EnvironmentCatalog>, String> {
+pub fn load(spec: &str) -> Result<Box<dyn EnvironmentCatalog>, CatalogError> {
     match spec {
         "leekwars" | "fight" | "fight.generator" => Ok(Box::new(LeekWarsCatalog)),
         path => FileCatalog::from_path(std::path::Path::new(path))
@@ -334,7 +387,7 @@ pub fn load(spec: &str) -> Result<Box<dyn EnvironmentCatalog>, String> {
 }
 
 /// Load and compose several library specs into one catalog.
-pub fn load_all<I, S>(specs: I) -> Result<CompositeCatalog, String>
+pub fn load_all<I, S>(specs: I) -> Result<CompositeCatalog, CatalogError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -349,6 +402,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_malformed_catalog_row_names_the_line_and_column_as_data() {
+        // Not "does the message contain 'line 3'" — the caller gets the line
+        // and field as numbers, which is the whole point of the typed error.
+        let src = "namespace = com.example.*\n\
+                   good\tDemoClass\tstatic\t0\t0\t1\n\
+                   broken\tDemoClass\tstatic\tnope\n";
+        let err = FileCatalog::parse(src).expect_err("non-numeric arity must fail");
+        assert_eq!(
+            err,
+            CatalogError::BadField {
+                line: 3,
+                field: 3,
+                raw: "nope".to_string(),
+            }
+        );
+        assert!(err.to_string().contains("line 3"), "{err}");
+    }
+
+    #[test]
+    fn a_row_with_too_few_columns_names_its_line() {
+        let err = FileCatalog::parse("lonely\n").expect_err("one column is not enough");
+        assert_eq!(err, CatalogError::Syntax { line: 1 });
+    }
 
     #[test]
     fn leekwars_catalog_exposes_no_functions() {

@@ -19,8 +19,12 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     let standalone = args.stdin || !args.paths.is_empty();
     let project = match Project::discover(manifest_path) {
         Ok(project) => {
-            for w in &project.warnings {
-                eprintln!("warning: {w}");
+            if leek_driver::report_manifest(
+                &project,
+                leek_diagnostics::ColorWhen::Auto,
+                leek_diagnostics::MessageFormat::Human,
+            ) {
+                return Ok(ExitCode::from(1));
             }
             Some(project)
         }
@@ -30,7 +34,7 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
             }
             None
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
     let opts = resolve_options(args, project.as_ref())?;
 

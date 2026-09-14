@@ -38,6 +38,9 @@ jobs:
         run: cargo xtask check-toolchain
       - name: layer check
         run: cargo xtask check-layers
+      # Library crates return typed errors; `anyhow` is for the front-ends.
+      - name: error-convention check
+        run: cargo xtask check-errors
       # Generated output (the upstream compiler's `ai/` tree) must stay out of
       # git; a stray `git add -A` once committed 387 files of it.
       - name: generated-artifact check

@@ -31,8 +31,12 @@ use leek_project::Project;
 
 pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    for w in &project.warnings {
-        eprintln!("warning: {w}");
+    if leek_driver::report_manifest(
+        &project,
+        leek_diagnostics::ColorWhen::Auto,
+        leek_diagnostics::MessageFormat::Human,
+    ) {
+        return Ok(ExitCode::from(1));
     }
 
     let files = if let Some(p) = args.path {

@@ -4,6 +4,9 @@
 //! single owner of the manifest schema and `leek-fmt` can stay a pure
 //! pretty-printer with no TOML dependency of its own.
 //! Defaults match `doc/manifest.md` §3.
+use crate::error::{ManifestError, ManifestErrorKind, span_of};
+use crate::parse::{bool_val, string_val, table_val, wrong_type};
+use toml_edit::{Item, TableLike};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatOptions {
@@ -238,45 +241,58 @@ impl FormatOptions {
     /// This is a convenience for callers that only want formatter
     /// options (e.g. `leekc --fmt-config`). For the full manifest,
     /// use [`super::load_str`] / [`super::load_from`].
-    pub fn from_toml_str(s: &str) -> Result<Self, String> {
-        let doc: toml::Value = toml::from_str(s).map_err(|e| format!("Miku.toml: {e}"))?;
-        let Some(fmt) = doc.get("format") else {
+    pub fn from_toml_str(s: &str) -> Result<Self, ManifestError> {
+        let doc = toml_edit::ImDocument::parse(s).map_err(|e| {
+            ManifestError::at(
+                span_of(e.span()),
+                ManifestErrorKind::Toml {
+                    message: e.to_string(),
+                },
+            )
+        })?;
+        let Some(fmt) = doc.as_table().get("format") else {
             return Ok(Self::default());
         };
-        let tbl = fmt.as_table().ok_or("Miku.toml: `format` is not a table")?;
-        Self::from_toml_table(tbl)
+        Self::from_toml_table(table_val(fmt, "format")?)
     }
 
     /// Parse a `[format]` table given the already-extracted TOML
     /// table. Used by both [`from_toml_str`] and the full manifest
     /// loader.
-    pub(crate) fn from_toml_table(tbl: &toml::value::Table) -> Result<Self, String> {
+    ///
+    /// These are [`ManifestError`]s, not [`FormatOptionError`]s: the key came
+    /// out of a `Miku.toml`, so it has a span there and belongs with the rest
+    /// of the manifest's diagnostics. `FormatOptionError` is for the other
+    /// caller — [`set`](Self::set), where the text is a `// fmt:` pragma in a
+    /// `.leek` file and the span belongs to that comment.
+    pub(crate) fn from_toml_table(tbl: &dyn TableLike) -> Result<Self, ManifestError> {
         let mut opts = Self::default();
-        for (key, val) in tbl {
-            match key.as_str() {
+        for (key, val) in tbl.iter() {
+            match key {
                 "indent" => opts.indent = expect_u(val, "indent")?,
                 "max_line_length" => {
                     opts.max_line_length = expect_u(val, "max_line_length")?;
                 }
-                "indent_style" => match expect_str(val, "indent_style")? {
-                    "spaces" => opts.indent_style = IndentStyle::Spaces,
-                    "tabs" => opts.indent_style = IndentStyle::Tabs,
-                    other => {
-                        return Err(format!(
-                            "Miku.toml: indent_style must be \"spaces\" or \"tabs\", got {other:?}"
-                        ));
-                    }
-                },
-                "trailing_comma" => match expect_str(val, "trailing_comma")? {
-                    "preserve" => opts.trailing_comma = TrailingComma::Preserve,
-                    "always" => opts.trailing_comma = TrailingComma::Always,
-                    "never" => opts.trailing_comma = TrailingComma::Never,
-                    other => {
-                        return Err(format!(
-                            "Miku.toml: trailing_comma must be \"preserve\"/\"always\"/\"never\", got {other:?}"
-                        ));
-                    }
-                },
+                "indent_style" => {
+                    opts.indent_style = one_of(
+                        val,
+                        "indent_style",
+                        "\"spaces\" or \"tabs\"",
+                        &[("spaces", IndentStyle::Spaces), ("tabs", IndentStyle::Tabs)],
+                    )?;
+                }
+                "trailing_comma" => {
+                    opts.trailing_comma = one_of(
+                        val,
+                        "trailing_comma",
+                        "\"preserve\"/\"always\"/\"never\"",
+                        &[
+                            ("preserve", TrailingComma::Preserve),
+                            ("always", TrailingComma::Always),
+                            ("never", TrailingComma::Never),
+                        ],
+                    )?;
+                }
                 "max_blank_lines" => {
                     opts.max_blank_lines = expect_u(val, "max_blank_lines")?;
                 }
@@ -289,15 +305,17 @@ impl FormatOptions {
                 "space_inside_parens" => {
                     opts.space_inside_parens = expect_bool(val, "space_inside_parens")?;
                 }
-                "brace_style" => match expect_str(val, "brace_style")? {
-                    "same_line" => opts.brace_style = BraceStyle::SameLine,
-                    "next_line" => opts.brace_style = BraceStyle::NextLine,
-                    other => {
-                        return Err(format!(
-                            "Miku.toml: brace_style must be \"same_line\" or \"next_line\", got {other:?}"
-                        ));
-                    }
-                },
+                "brace_style" => {
+                    opts.brace_style = one_of(
+                        val,
+                        "brace_style",
+                        "\"same_line\" or \"next_line\"",
+                        &[
+                            ("same_line", BraceStyle::SameLine),
+                            ("next_line", BraceStyle::NextLine),
+                        ],
+                    )?;
+                }
                 "space_after_comma" => {
                     opts.space_after_comma = expect_bool(val, "space_after_comma")?;
                 }
@@ -318,17 +336,18 @@ impl FormatOptions {
                     opts.pad_line_comments = expect_bool(val, "pad_line_comments")?;
                 }
                 "quote_style" => {
-                    opts.quote_style = parse_quote_style(expect_str(val, "quote_style")?)
-                        .map_err(|e| format!("Miku.toml: {e}"))?;
+                    opts.quote_style = one_of(val, "quote_style", QUOTE_STYLE, QUOTE_STYLES)?;
                 }
                 "line_ending" => {
-                    opts.line_ending = parse_line_ending(expect_str(val, "line_ending")?)
-                        .map_err(|e| format!("Miku.toml: {e}"))?;
+                    opts.line_ending = one_of(val, "line_ending", LINE_ENDING, LINE_ENDINGS)?;
                 }
                 "operator_position" => {
-                    opts.operator_position =
-                        parse_operator_position(expect_str(val, "operator_position")?)
-                            .map_err(|e| format!("Miku.toml: {e}"))?;
+                    opts.operator_position = one_of(
+                        val,
+                        "operator_position",
+                        OPERATOR_POSITION,
+                        OPERATOR_POSITIONS,
+                    )?;
                 }
                 "method_chain_threshold" => {
                     opts.method_chain_threshold = expect_u(val, "method_chain_threshold")?;
@@ -338,15 +357,14 @@ impl FormatOptions {
                         expect_bool(val, "blank_line_between_functions")?;
                 }
                 "control_braces" => {
-                    opts.control_braces = parse_control_braces(expect_str(val, "control_braces")?)
-                        .map_err(|e| format!("Miku.toml: {e}"))?;
+                    opts.control_braces =
+                        one_of(val, "control_braces", CONTROL_BRACES, CONTROL_BRACES_VALUES)?;
                 }
                 "remove_redundant_parens" => {
                     opts.remove_redundant_parens = expect_bool(val, "remove_redundant_parens")?;
                 }
                 "semicolons" => {
-                    opts.semicolons = parse_semicolons(expect_str(val, "semicolons")?)
-                        .map_err(|e| format!("Miku.toml: {e}"))?;
+                    opts.semicolons = one_of(val, "semicolons", SEMICOLONS, SEMICOLONS_VALUES)?;
                 }
                 "collapse_else_if" => {
                     opts.collapse_else_if = expect_bool(val, "collapse_else_if")?;
@@ -360,7 +378,7 @@ impl FormatOptions {
     /// Mutate one option in place, parsing `value` as the right type
     /// for `key`. Returns `Err` for unknown keys or unparseable values.
     /// Used by `leek-fmt`'s `// fmt: <key> = <value>` pragma.
-    pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), FormatOptionError> {
         match key {
             "indent" => self.indent = parse_uint(key, value)?,
             "max_line_length" => self.max_line_length = parse_uint(key, value)?,
@@ -371,11 +389,15 @@ impl FormatOptions {
             }
             "remove_redundant_parens" => self.remove_redundant_parens = parse_bool(key, value)?,
             "collapse_else_if" => self.collapse_else_if = parse_bool(key, value)?,
-            "quote_style" => self.quote_style = parse_quote_style(value)?,
-            "line_ending" => self.line_ending = parse_line_ending(value)?,
-            "operator_position" => self.operator_position = parse_operator_position(value)?,
-            "control_braces" => self.control_braces = parse_control_braces(value)?,
-            "semicolons" => self.semicolons = parse_semicolons(value)?,
+            "quote_style" => self.quote_style = pick(key, value, QUOTE_STYLE, QUOTE_STYLES)?,
+            "line_ending" => self.line_ending = pick(key, value, LINE_ENDING, LINE_ENDINGS)?,
+            "operator_position" => {
+                self.operator_position = pick(key, value, OPERATOR_POSITION, OPERATOR_POSITIONS)?;
+            }
+            "control_braces" => {
+                self.control_braces = pick(key, value, CONTROL_BRACES, CONTROL_BRACES_VALUES)?;
+            }
+            "semicolons" => self.semicolons = pick(key, value, SEMICOLONS, SEMICOLONS_VALUES)?,
             "space_before_call_paren" => {
                 self.space_before_call_paren = parse_bool(key, value)?;
             }
@@ -390,124 +412,181 @@ impl FormatOptions {
             "space_after_colon" => self.space_after_colon = parse_bool(key, value)?,
             "pad_line_comments" => self.pad_line_comments = parse_bool(key, value)?,
             "brace_style" => {
-                self.brace_style = match value {
-                    "same_line" => BraceStyle::SameLine,
-                    "next_line" => BraceStyle::NextLine,
-                    other => {
-                        return Err(format!(
-                            "brace_style: expected \"same_line\" or \"next_line\", got {other:?}"
-                        ));
-                    }
-                };
+                self.brace_style = pick(
+                    key,
+                    value,
+                    "\"same_line\" or \"next_line\"",
+                    &[
+                        ("same_line", BraceStyle::SameLine),
+                        ("next_line", BraceStyle::NextLine),
+                    ],
+                )?;
             }
             "indent_style" => {
-                self.indent_style = match value {
-                    "spaces" => IndentStyle::Spaces,
-                    "tabs" => IndentStyle::Tabs,
-                    other => {
-                        return Err(format!(
-                            "indent_style: expected \"spaces\" or \"tabs\", got {other:?}"
-                        ));
-                    }
-                };
+                self.indent_style = pick(
+                    key,
+                    value,
+                    "\"spaces\" or \"tabs\"",
+                    &[("spaces", IndentStyle::Spaces), ("tabs", IndentStyle::Tabs)],
+                )?;
             }
             "trailing_comma" => {
-                self.trailing_comma = match value {
-                    "preserve" => TrailingComma::Preserve,
-                    "always" => TrailingComma::Always,
-                    "never" => TrailingComma::Never,
-                    other => {
-                        return Err(format!(
-                            "trailing_comma: expected \"preserve\"/\"always\"/\"never\", got {other:?}"
-                        ));
-                    }
-                };
+                self.trailing_comma = pick(
+                    key,
+                    value,
+                    "\"preserve\"/\"always\"/\"never\"",
+                    &[
+                        ("preserve", TrailingComma::Preserve),
+                        ("always", TrailingComma::Always),
+                        ("never", TrailingComma::Never),
+                    ],
+                )?;
             }
-            other => return Err(format!("unknown option {other:?}")),
+            other => {
+                return Err(FormatOptionError::UnknownOption {
+                    key: other.to_string(),
+                });
+            }
         }
         Ok(())
     }
 }
 
-fn parse_quote_style(raw: &str) -> Result<QuoteStyle, String> {
-    match raw {
-        "preserve" => Ok(QuoteStyle::Preserve),
-        "double" => Ok(QuoteStyle::Double),
-        "single" => Ok(QuoteStyle::Single),
-        other => Err(format!(
-            "quote_style: expected \"preserve\"/\"double\"/\"single\", got {other:?}"
-        )),
+/// A `// fmt: <key> = <value>` pragma this formatter can't act on.
+///
+/// Deliberately carries no [`Span`](leek_span::Span): the text it failed on
+/// lives in a `.leek` comment, and only `leek-fmt` — which owns that comment's
+/// range — can say where. The error names the key and the accepted values so
+/// the caller can build the diagnostic with its own span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormatOptionError {
+    /// No formatter option by that name.
+    UnknownOption { key: String },
+    /// The option exists, but the text isn't a value it accepts.
+    BadValue {
+        key: String,
+        /// The accepted values, spelled as the message wants them.
+        expected: &'static str,
+        got: String,
+    },
+}
+
+impl std::fmt::Display for FormatOptionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FormatOptionError::UnknownOption { key } => write!(f, "unknown option {key:?}"),
+            FormatOptionError::BadValue { key, expected, got } => {
+                write!(f, "{key}: expected {expected}, got {got:?}")
+            }
+        }
     }
 }
 
-fn parse_line_ending(raw: &str) -> Result<LineEnding, String> {
-    match raw {
-        "lf" => Ok(LineEnding::Lf),
-        "crlf" => Ok(LineEnding::Crlf),
-        other => Err(format!(
-            "line_ending: expected \"lf\" or \"crlf\", got {other:?}"
-        )),
-    }
+impl std::error::Error for FormatOptionError {}
+
+// The accepted spellings of each enum-valued option, shared by the TOML
+// walker and the pragma setter so the two can never drift.
+const QUOTE_STYLE: &str = "\"preserve\"/\"double\"/\"single\"";
+const QUOTE_STYLES: &[(&str, QuoteStyle)] = &[
+    ("preserve", QuoteStyle::Preserve),
+    ("double", QuoteStyle::Double),
+    ("single", QuoteStyle::Single),
+];
+
+const LINE_ENDING: &str = "\"lf\" or \"crlf\"";
+const LINE_ENDINGS: &[(&str, LineEnding)] = &[("lf", LineEnding::Lf), ("crlf", LineEnding::Crlf)];
+
+const OPERATOR_POSITION: &str = "\"trailing\" or \"leading\"";
+const OPERATOR_POSITIONS: &[(&str, OperatorPosition)] = &[
+    ("trailing", OperatorPosition::Trailing),
+    ("leading", OperatorPosition::Leading),
+];
+
+const CONTROL_BRACES: &str = "\"preserve\"/\"always\"/\"never\"";
+const CONTROL_BRACES_VALUES: &[(&str, ControlBraces)] = &[
+    ("preserve", ControlBraces::Preserve),
+    ("always", ControlBraces::Always),
+    ("never", ControlBraces::Never),
+];
+
+const SEMICOLONS: &str = "\"preserve\" or \"always\"";
+const SEMICOLONS_VALUES: &[(&str, Semicolons)] = &[
+    ("preserve", Semicolons::Preserve),
+    ("always", Semicolons::Always),
+];
+
+/// Look `raw` up in an option's accepted spellings — the pragma path.
+fn pick<T: Copy>(
+    key: &str,
+    raw: &str,
+    expected: &'static str,
+    accepted: &[(&str, T)],
+) -> Result<T, FormatOptionError> {
+    accepted
+        .iter()
+        .find(|(name, _)| *name == raw)
+        .map(|(_, v)| *v)
+        .ok_or_else(|| FormatOptionError::BadValue {
+            key: key.to_string(),
+            expected,
+            got: raw.to_string(),
+        })
 }
 
-fn parse_operator_position(raw: &str) -> Result<OperatorPosition, String> {
-    match raw {
-        "trailing" => Ok(OperatorPosition::Trailing),
-        "leading" => Ok(OperatorPosition::Leading),
-        other => Err(format!(
-            "operator_position: expected \"trailing\" or \"leading\", got {other:?}"
-        )),
-    }
+/// Look a TOML string value up in an option's accepted spellings — the
+/// manifest path, which has a span to point at.
+fn one_of<T: Copy>(
+    item: &Item,
+    key: &str,
+    expected: &str,
+    accepted: &[(&str, T)],
+) -> Result<T, ManifestError> {
+    let raw = string_val(item, key)?;
+    accepted
+        .iter()
+        .find(|(name, _)| *name == raw)
+        .map(|(_, v)| *v)
+        .ok_or_else(|| {
+            ManifestError::at(
+                span_of(item.span()),
+                ManifestErrorKind::BadValue {
+                    key: key.to_string(),
+                    expected: expected.to_string(),
+                    got: Some(format!("{raw:?}")),
+                },
+            )
+        })
 }
 
-fn parse_control_braces(raw: &str) -> Result<ControlBraces, String> {
-    match raw {
-        "preserve" => Ok(ControlBraces::Preserve),
-        "always" => Ok(ControlBraces::Always),
-        "never" => Ok(ControlBraces::Never),
-        other => Err(format!(
-            "control_braces: expected \"preserve\"/\"always\"/\"never\", got {other:?}"
-        )),
-    }
-}
-
-fn parse_semicolons(raw: &str) -> Result<Semicolons, String> {
-    match raw {
-        "preserve" => Ok(Semicolons::Preserve),
-        "always" => Ok(Semicolons::Always),
-        other => Err(format!(
-            "semicolons: expected \"preserve\" or \"always\", got {other:?}"
-        )),
-    }
-}
-
-fn parse_uint(key: &str, raw: &str) -> Result<usize, String> {
+fn parse_uint(key: &str, raw: &str) -> Result<usize, FormatOptionError> {
     raw.parse::<usize>()
-        .map_err(|_| format!("{key}: expected non-negative integer, got {raw:?}"))
+        .map_err(|_| FormatOptionError::BadValue {
+            key: key.to_string(),
+            expected: "non-negative integer",
+            got: raw.to_string(),
+        })
 }
 
-fn parse_bool(key: &str, raw: &str) -> Result<bool, String> {
+fn parse_bool(key: &str, raw: &str) -> Result<bool, FormatOptionError> {
     match raw {
         "true" | "yes" | "on" | "1" => Ok(true),
         "false" | "no" | "off" | "0" => Ok(false),
-        other => Err(format!("{key}: expected boolean, got {other:?}")),
+        other => Err(FormatOptionError::BadValue {
+            key: key.to_string(),
+            expected: "boolean",
+            got: other.to_string(),
+        }),
     }
 }
 
-fn expect_u(v: &toml::Value, key: &str) -> Result<usize, String> {
-    v.as_integer()
+fn expect_u(item: &Item, key: &str) -> Result<usize, ManifestError> {
+    item.as_integer()
         .and_then(|n| usize::try_from(n).ok())
-        .ok_or_else(|| format!("Miku.toml: {key} must be a non-negative integer"))
+        .ok_or_else(|| wrong_type(item, key, "a non-negative integer"))
 }
 
-fn expect_str<'a>(v: &'a toml::Value, key: &str) -> Result<&'a str, String> {
-    v.as_str()
-        .ok_or_else(|| format!("Miku.toml: {key} must be a string"))
-}
-
-fn expect_bool(v: &toml::Value, key: &str) -> Result<bool, String> {
-    v.as_bool()
-        .ok_or_else(|| format!("Miku.toml: {key} must be a boolean"))
+fn expect_bool(item: &Item, key: &str) -> Result<bool, ManifestError> {
+    bool_val(item, key)
 }
 
 #[cfg(test)]

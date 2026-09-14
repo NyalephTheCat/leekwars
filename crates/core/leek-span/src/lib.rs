@@ -99,6 +99,19 @@ impl Span {
         None => unreachable!(),
     };
 
+    /// The reserved `SourceId` for spans inside the project manifest
+    /// (`Miku.toml`). The manifest is not a `.leek` file and never enters the
+    /// `ProjectIndex`, but its diagnostics still need a source to point at, so
+    /// they get their own sentinel rather than borrowing the entry file's id —
+    /// which is what made a manifest error render a caret at byte 0 of
+    /// `main.leek`. Sits next to [`SYNTHETIC_SOURCE`](Self::SYNTHETIC_SOURCE)
+    /// at the top of the range, out of reach of the ids `ProjectIndex` hands
+    /// out from 1 upward.
+    pub const MANIFEST_SOURCE: SourceId = match SourceId::new(u32::MAX - 1) {
+        Some(id) => id,
+        None => unreachable!(),
+    };
+
     pub fn len(self) -> u32 {
         self.end - self.start
     }
@@ -305,6 +318,15 @@ impl FeatureFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_source_differs_from_synthetic_and_from_any_real_id() {
+        assert_ne!(Span::MANIFEST_SOURCE, Span::SYNTHETIC_SOURCE);
+        // `ProjectIndex` hands out ids from 1 upward, so a real file would have
+        // to open u32::MAX - 1 sources before it could collide.
+        assert!(Span::MANIFEST_SOURCE.get() > 1);
+        assert_eq!(Span::MANIFEST_SOURCE.get(), u32::MAX - 1);
+    }
 
     #[test]
     fn feature_flags_bits_round_trip() {

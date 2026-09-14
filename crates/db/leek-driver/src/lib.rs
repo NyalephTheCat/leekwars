@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use anyhow::Result;
-use leek_diagnostics::LintLevels;
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter};
+use leek_diagnostics::{LintLevelError, LintLevels};
 use leek_pipeline::{Input, Pipeline, Run, TimingSink};
 use leek_project::{Project, SourceInput};
 use leek_recipes::{RecipeParams, Target};
@@ -93,13 +93,70 @@ pub fn reporter_for(
     project: &Project,
     color: ColorWhen,
     format: MessageFormat,
-) -> Result<Reporter> {
+) -> std::result::Result<Reporter, LintLevelError> {
     let lint = LintLevels {
         deny: &project.manifest.lint.deny,
         warn: &project.manifest.lint.warn,
         allow: &project.manifest.lint.allow,
     };
-    Reporter::new(color, format, lint).map_err(|e| anyhow::anyhow!("{e}"))
+    Reporter::new(color, format, lint)
+}
+
+/// Render the manifest's own diagnostics — the warnings `leek-manifest`
+/// raised while parsing `Miku.toml`, and a `[lint]` entry the catalog does not
+/// know — and report whether any of them was error-level.
+///
+/// This is the one place `Miku.toml` problems reach the user, so they get
+/// everything a `.leek` diagnostic gets: a caret under the offending key, the
+/// manifest's own `[lint]` allow/deny levels (a project may silence `W0400`
+/// or promote it to an error), and `--message-format json` for free.
+///
+/// Infallible by construction: when the `[lint]` table is itself broken there
+/// are no levels to apply, so the bad entry renders at catalog defaults.
+pub fn report_manifest(project: &Project, color: ColorWhen, format: MessageFormat) -> bool {
+    let label = project.manifest_path.display().to_string();
+    match reporter_for(project, color, format) {
+        Ok(reporter) => {
+            let diagnostics: Vec<leek_diagnostics::Diagnostic> = project
+                .warnings
+                .iter()
+                .cloned()
+                .map(leek_diagnostics::IntoDiagnostic::into_diagnostic)
+                .collect();
+            reporter.emit_run(&diagnostics, &project.manifest_text, &label)
+        }
+        Err(err) => {
+            let plain = Reporter::new(color, format, NO_LINT_LEVELS)
+                .expect("the empty lint table resolves no codes");
+            plain.emit_run(
+                &[lint_level_diagnostic(project, &err)],
+                &project.manifest_text,
+                &label,
+            )
+        }
+    }
+}
+
+/// Severity overrides for a manifest whose `[lint]` table can't be trusted.
+const NO_LINT_LEVELS: LintLevels<'static> = LintLevels {
+    deny: &[],
+    warn: &[],
+    allow: &[],
+};
+
+/// The unresolvable `[lint]` entry as a diagnostic, pointing at the array
+/// element that named it when the manifest recorded a span for it.
+fn lint_level_diagnostic(project: &Project, err: &LintLevelError) -> leek_diagnostics::Diagnostic {
+    let span = project
+        .manifest
+        .lint
+        .span_for(err.raw())
+        .unwrap_or_else(|| leek_span::Span::new(leek_span::Span::MANIFEST_SOURCE, 0, 0));
+    leek_diagnostics::Diagnostic::at(
+        leek_diagnostics::codes::MANIFEST_UNKNOWN_LINT_CODE,
+        span,
+        err.to_string(),
+    )
 }
 
 /// The pipeline for one project file: `config`'s target and params merged
@@ -272,9 +329,12 @@ mod tests {
     fn project_at(root: std::path::PathBuf, extra: &str) -> Project {
         let toml = format!("{BASE_MANIFEST}{extra}");
         let (manifest, warnings) = leek_manifest::load_str(&toml).expect("parse manifest");
+        let path = root.join("Miku.toml");
         Project::from_load(ManifestLoad {
             manifest,
             root,
+            path,
+            text: toml,
             warnings,
         })
     }
@@ -397,6 +457,67 @@ mod tests {
             panic!("an unknown lint code must fail the reporter build");
         };
         assert!(err.to_string().contains("NOPE9999"), "{err}");
+        assert!(matches!(
+            err,
+            leek_diagnostics::LintLevelError::UnknownCode { .. }
+        ));
+
+        // …and it renders as a diagnostic pointing at the array element that
+        // named it, rather than a bare line of prose.
+        let diag = lint_level_diagnostic(&project, &err);
+        assert_eq!(diag.code, codes::MANIFEST_UNKNOWN_LINT_CODE);
+        assert_eq!(diag.severity, Severity::Error);
+        assert_eq!(diag.span.source, Span::MANIFEST_SOURCE);
+        let text = &project.manifest_text;
+        assert_eq!(
+            &text[diag.span.start as usize..diag.span.end as usize],
+            "\"NOPE9999\""
+        );
+        // `report_manifest` reports it as an error even though no reporter
+        // could be built from the broken `[lint]` table.
+        assert!(report_manifest(
+            &project,
+            ColorWhen::Never,
+            MessageFormat::Human
+        ));
+    }
+
+    #[test]
+    fn report_manifest_honours_the_manifest_lint_levels() {
+        // `[fight] worker_count` is an unknown field: a W0400 warning.
+        let unknown_field = "[fight]\nworker_count = 4\n";
+
+        let plain = project(unknown_field);
+        assert_eq!(plain.warnings.len(), 1, "{:?}", plain.warnings);
+        assert!(
+            !report_manifest(&plain, ColorWhen::Never, MessageFormat::Human),
+            "a warning is not an error"
+        );
+
+        let allowed = project(&format!("{unknown_field}[lint]\nallow = [\"W0400\"]\n"));
+        assert!(!report_manifest(
+            &allowed,
+            ColorWhen::Never,
+            MessageFormat::Human
+        ));
+        let reporter =
+            reporter_for(&allowed, ColorWhen::Never, MessageFormat::Human).expect("reporter");
+        let diagnostics: Vec<Diagnostic> = allowed
+            .warnings
+            .iter()
+            .cloned()
+            .map(leek_diagnostics::IntoDiagnostic::into_diagnostic)
+            .collect();
+        assert!(
+            reporter.apply_levels(&diagnostics).is_empty(),
+            "`allow` must silence the manifest warning"
+        );
+
+        let denied = project(&format!("{unknown_field}[lint]\ndeny = [\"W0400\"]\n"));
+        assert!(
+            report_manifest(&denied, ColorWhen::Never, MessageFormat::Human),
+            "`deny` must promote the manifest warning to an error"
+        );
     }
 
     #[test]

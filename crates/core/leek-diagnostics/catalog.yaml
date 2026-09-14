@@ -67,7 +67,16 @@ lowering:
   - { id: E0301, name: BackendDirectiveNotAllowed, severity: warning }
 
 manifest:
+  # E0400 stays the raw-TOML syntax failure; the rest name *which* part of the
+  # schema the manifest broke, so `[lint]` can allow/deny them individually.
   - { id: E0400, name: ManifestParseError, severity: error }
+  - { id: E0401, name: ManifestUnknownKey, severity: error }
+  - { id: E0402, name: ManifestWrongType, severity: error }
+  - { id: E0403, name: ManifestBadValue, severity: error }
+  - { id: E0404, name: ManifestMissingEntry, severity: error }
+  - { id: E0405, name: ManifestUnknownLintCode, severity: error }
+  - { id: W0400, name: ManifestUnknownField, severity: warning }
+  - { id: W0401, name: ManifestDeferredTable, severity: warning }
 
 rewrite:
   - { id: E0500, name: EditOverlap, severity: error }

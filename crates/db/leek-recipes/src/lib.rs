@@ -203,7 +203,7 @@ pub fn register_environment(catalog: &dyn leek_environment::EnvironmentCatalog) 
 /// the catalog's env-dispatch path.
 pub fn load_and_register_libraries<I, S>(
     specs: I,
-) -> Result<leek_environment::CompositeCatalog, String>
+) -> Result<leek_environment::CompositeCatalog, LibraryLoadError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -214,7 +214,10 @@ where
         if is_builtin_leekwars_spec(spec) {
             register_leekwars();
         } else {
-            let lib = leek_environment::load(spec)?;
+            let lib = leek_environment::load(spec).map_err(|cause| LibraryLoadError {
+                spec: spec.to_string(),
+                cause,
+            })?;
             register_environment(lib.as_ref());
             composite.push(lib);
         }
@@ -338,8 +341,33 @@ pub struct LibraryStats {
     pub sample_constants: Vec<String>,
 }
 
+/// One library spec that failed to load, and why.
+///
+/// Keeps the spec alongside the underlying
+/// [`CatalogError`](leek_environment::CatalogError) so a caller reporting
+/// several specs at once can say which one broke without parsing the message
+/// back apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryLoadError {
+    /// The spec as the caller wrote it — a path, or a built-in name.
+    pub spec: String,
+    pub cause: leek_environment::CatalogError,
+}
+
+impl std::fmt::Display for LibraryLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.spec, self.cause)
+    }
+}
+
+impl std::error::Error for LibraryLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
 /// Outcome of loading one library spec.
-pub type LibraryLoadResult = Result<LibraryStats, String>;
+pub type LibraryLoadResult = Result<LibraryStats, LibraryLoadError>;
 
 /// Describe what the built-in leek-wars library contributed, given the
 /// arity rows [`register_leekwars`] registered.
@@ -414,7 +442,10 @@ where
                     sample_constants: const_names,
                 }));
             }
-            Err(e) => out.push(Err(format!("{spec}: {e}"))),
+            Err(cause) => out.push(Err(LibraryLoadError {
+                spec: spec.to_string(),
+                cause,
+            })),
         }
     }
     out
@@ -540,7 +571,11 @@ mod tests {
     fn a_missing_library_file_is_an_error_in_both_loaders() {
         let missing = "/definitely/not/a/library/file.lib";
         let err = load_and_register_libraries([missing]).expect_err("missing file");
-        assert!(err.contains(missing), "{err}");
+        assert_eq!(err.spec, missing);
+        assert!(
+            matches!(err.cause, leek_environment::CatalogError::Io { .. }),
+            "{err:?}"
+        );
 
         // The reporting loader keeps going past a failure and records it in
         // that spec's slot — the documented difference between the two.
@@ -548,7 +583,7 @@ mod tests {
         assert_eq!(reports.len(), 2);
         assert!(reports[0].is_ok());
         let err = reports[1].as_ref().expect_err("missing file");
-        assert!(err.starts_with(missing), "{err}");
+        assert_eq!(err.spec, missing);
     }
 
     #[test]
@@ -605,7 +640,14 @@ mod tests {
         std::fs::write(&path, "brokenFn\tDemoClass\tstatic\tnope\n").expect("write");
         let err = load_and_register_libraries([path.to_str().expect("utf-8 path")])
             .expect_err("malformed");
-        assert!(err.contains("line 1"), "{err}");
+        assert_eq!(
+            err.cause,
+            leek_environment::CatalogError::BadField {
+                line: 1,
+                field: 3,
+                raw: "nope".to_string(),
+            }
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

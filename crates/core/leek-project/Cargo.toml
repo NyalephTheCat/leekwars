@@ -10,7 +10,6 @@ description = "Leekscript project discovery, file index, and pipeline input help
 leek-manifest = { workspace = true }
 leek-span       = { workspace = true }
 ignore          = "0.4"
-anyhow          = { workspace = true }
 
 [lints]
 workspace = true

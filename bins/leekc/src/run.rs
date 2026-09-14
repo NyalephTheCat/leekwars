@@ -50,9 +50,11 @@ pub fn run() -> Result<ExitCode> {
     // flag points at a `Miku.toml`-style file; absent, defaults.
     let fmt_opts = match &cli.fmt_config {
         None => FormatOptions::default(),
-        Some(path) => leek_manifest::load_from(path)
-            .map(|load| load.manifest.format)
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        // `ManifestError` is a `std::error::Error`, so `?` keeps the typed
+        // value inside the `anyhow::Error` instead of flattening it to prose.
+        // `leekc` has no reporter for a manifest, so it renders as one line —
+        // but a caller that wants the span can still downcast for it.
+        Some(path) => leek_manifest::load_from(path).map(|load| load.manifest.format)?,
     };
 
     // Load + register any host-environment libraries (`--library leekwars`,
@@ -64,7 +66,7 @@ pub fn run() -> Result<ExitCode> {
             None
         } else {
             let cat = leek_recipes::load_and_register_libraries(&cli.libraries)
-                .map_err(|e| anyhow::anyhow!("loading library: {e}"))?;
+                .context("loading library")?;
             Some(std::sync::Arc::new(cat))
         };
 

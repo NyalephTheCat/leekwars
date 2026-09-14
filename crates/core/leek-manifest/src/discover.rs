@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::parse::{ManifestError, ManifestWarning};
+use crate::error::{ManifestError, ManifestErrorKind, ManifestWarning};
 use crate::types::Manifest;
 
 /// A loaded manifest plus the project root and any non-fatal warnings.
@@ -12,6 +12,13 @@ pub struct ManifestLoad {
     /// The directory containing `Miku.toml`. All manifest-relative
     /// paths resolve against this.
     pub root: PathBuf,
+    /// The `Miku.toml` itself — the label a reporter prints above a manifest
+    /// diagnostic's snippet.
+    pub path: PathBuf,
+    /// The manifest's text, kept so a diagnostic's span can be rendered
+    /// against it. Without it the spans are inert: a caret needs the line it
+    /// points into. Manifests are a few kilobytes.
+    pub text: String,
     pub warnings: Vec<ManifestWarning>,
 }
 
@@ -22,8 +29,10 @@ pub fn discover(start: &Path) -> Result<ManifestLoad, ManifestError> {
         start.to_path_buf()
     } else {
         std::env::current_dir()
-            .map_err(|e| ManifestError {
-                message: format!("cwd: {e}"),
+            .map_err(|e| {
+                ManifestError::detached(ManifestErrorKind::Cwd {
+                    message: e.to_string(),
+                })
             })?
             .join(start)
     };
@@ -38,19 +47,19 @@ pub fn discover(start: &Path) -> Result<ManifestLoad, ManifestError> {
             break;
         }
     }
-    Err(ManifestError {
-        message: format!(
-            "no `Miku.toml` found in {} or any parent directory",
-            start.display()
-        ),
-    })
+    Err(ManifestError::detached(ManifestErrorKind::NotFound {
+        start: start.to_path_buf(),
+    }))
 }
 
 /// Load a specific `Miku.toml` file. The project root is the file's
 /// parent directory.
 pub fn load_from(path: &Path) -> Result<ManifestLoad, ManifestError> {
-    let text = std::fs::read_to_string(path).map_err(|e| ManifestError {
-        message: format!("reading {}: {e}", path.display()),
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        ManifestError::detached(ManifestErrorKind::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })
     })?;
     let root = path
         .parent()
@@ -59,6 +68,8 @@ pub fn load_from(path: &Path) -> Result<ManifestLoad, ManifestError> {
     Ok(ManifestLoad {
         manifest,
         root,
+        path: path.to_path_buf(),
+        text,
         warnings,
     })
 }
@@ -130,7 +141,8 @@ version = "0.1.0"
     fn discover_fails_when_absent() {
         let root = tempdir();
         let err = discover(&root).unwrap_err();
-        assert!(err.message.contains("no `Miku.toml`"));
+        assert!(matches!(err.kind, ManifestErrorKind::NotFound { .. }));
+        assert!(err.to_string().contains("no `Miku.toml`"));
         std::fs::remove_dir_all(&root).ok();
     }
 

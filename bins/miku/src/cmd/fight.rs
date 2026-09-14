@@ -29,10 +29,14 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
         Some(path) => Some(Project::discover(Some(path))?),
         None => Project::discover(None).ok(),
     };
-    if let Some(project) = &project {
-        for w in &project.warnings {
-            eprintln!("warning: {w}");
-        }
+    if let Some(project) = &project
+        && leek_driver::report_manifest(
+            project,
+            leek_diagnostics::ColorWhen::Auto,
+            leek_diagnostics::MessageFormat::Human,
+        )
+    {
+        return Ok(ExitCode::from(1));
     }
 
     let scenario_path = resolve_scenario(args, project.as_ref())?;

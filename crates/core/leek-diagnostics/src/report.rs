@@ -29,10 +29,51 @@ pub struct LintLevels<'a> {
     pub allow: &'a [String],
 }
 
+/// A `[lint]` entry the catalog can't resolve.
+///
+/// Carries the raw text and the nearest catalog code so the caller can render
+/// it wherever it has a span for — the manifest key it came from, or a bare
+/// message when there is none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LintLevelError {
+    UnknownCode {
+        /// The `deny`/`warn`/`allow` entry exactly as the manifest spelled it.
+        raw: String,
+        /// Nearest catalog id or name, when one is close enough to suggest.
+        suggestion: Option<String>,
+    },
+}
+
+impl LintLevelError {
+    /// The raw entry that failed to resolve — what a caller matches against
+    /// the manifest text to find the span to point at.
+    pub fn raw(&self) -> &str {
+        match self {
+            LintLevelError::UnknownCode { raw, .. } => raw,
+        }
+    }
+}
+
+impl std::fmt::Display for LintLevelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LintLevelError::UnknownCode { raw, suggestion } => {
+                write!(f, "unknown diagnostic code `{raw}`")?;
+                if let Some(hint) = suggestion {
+                    write!(f, " (did you mean `{hint}`?)")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LintLevelError {}
+
 impl SeverityConfig {
     /// Build the overrides for a manifest `[lint]` table. Errors on a
     /// code the catalog doesn't know.
-    pub fn from_levels(lint: LintLevels<'_>) -> Result<Self, String> {
+    pub fn from_levels(lint: LintLevels<'_>) -> Result<Self, LintLevelError> {
         let mut severity = SeverityConfig::new();
         for raw in lint.deny {
             severity.deny(resolve_code(raw)?);
@@ -68,7 +109,7 @@ impl Reporter {
         color_when: ColorWhen,
         format: MessageFormat,
         lint: LintLevels<'_>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, LintLevelError> {
         let severity = SeverityConfig::from_levels(lint)?;
         let want_color = matches!(format, MessageFormat::Human) && should_color(color_when);
         let renderer = if want_color {
@@ -173,6 +214,14 @@ fn should_color(when: ColorWhen) -> bool {
     }
 }
 
-fn resolve_code(raw: &str) -> Result<Code, String> {
-    Code::resolve(raw).ok_or_else(|| format!("unknown diagnostic code `{raw}`"))
+fn resolve_code(raw: &str) -> Result<Code, LintLevelError> {
+    Code::resolve(raw).ok_or_else(|| LintLevelError::UnknownCode {
+        raw: raw.to_string(),
+        // Match against ids *and* names — a manifest may spell either.
+        suggestion: crate::best_match(
+            raw,
+            crate::codes::CATALOG.iter().flat_map(|m| [m.id, m.name]),
+        )
+        .map(str::to_string),
+    })
 }
