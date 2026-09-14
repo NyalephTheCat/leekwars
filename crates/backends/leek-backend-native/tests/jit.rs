@@ -389,6 +389,108 @@ fn foreach_over_existing_bindings() {
     );
 }
 
+/// Every source kind a `foreach` snapshot can hold, read through the key form
+/// so both halves of each element are checked (#111).
+#[test]
+fn foreach_over_every_source_kind() {
+    // A map yields its own keys, in insertion order.
+    assert_eq!(
+        jit("var r = '' for (var k : var v in ['b': 2, 'a': 1]) { r = r + k + v } return r"),
+        "\"b2a1\""
+    );
+    // A set yields its elements, keyed by position.
+    assert_eq!(
+        jit("var r = '' for (var k : var v in <7, 8>) { r = r + k + ':' + v + ' ' } return r"),
+        "\"0:7 1:8 \""
+    );
+    // An object yields its fields, keyed by name.
+    assert_eq!(
+        jit("var r = '' for (var k : var v in {x: 1, y: 2}) { r = r + k + v } return r"),
+        "\"x1y2\""
+    );
+    // So does a class instance.
+    assert_eq!(
+        jit("class A { x = 1 y = 2 } var r = '' \
+             for (var k : var v in new A()) { r = r + k + v } return r"),
+        "\"x1y2\""
+    );
+    // A string's key is its position.
+    assert_eq!(
+        jit("var r = '' for (var i : var c in 'abc') { r = r + i + c } return r"),
+        "\"0a1b2c\""
+    );
+    // As is an interval's.
+    assert_eq!(
+        jit("var r = '' for (var i : var x in [4..6]) { r = r + i + ':' + x + ' ' } return r"),
+        "\"0:4 1:5 2:6 \""
+    );
+    // An array's too — the positional default, spelled out.
+    assert_eq!(
+        jit("var r = '' for (var i : var x in [10, 20]) { r = r + i + ':' + x + ' ' } return r"),
+        "\"0:10 1:20 \""
+    );
+    // A non-iterable runs zero iterations.
+    assert_eq!(
+        jit("var n = 0 for (var x in 5) { n = n + 1 } return n"),
+        "0"
+    );
+    assert_eq!(
+        jit("var n = 0 for (var x in null) { n = n + 1 } return n"),
+        "0"
+    );
+}
+
+/// `foreach` walks a snapshot taken once, and binds its elements with the
+/// version's value semantics.
+#[test]
+fn foreach_iterates_a_snapshot() {
+    // Growing the source inside the loop neither extends the iteration nor
+    // loops forever.
+    assert_eq!(
+        jit("var a = [1, 2, 3] var s = 0 \
+             for (var x in a) { push(a, 9) s = s + x } return [s, count(a)]"),
+        "[6, 6]"
+    );
+    // Shrinking it still visits every element the snapshot captured.
+    assert_eq!(
+        jit("var a = [1, 2, 3] var n = 0 \
+             for (var x in a) { removeElement(a, x) n = n + 1 } return [n, count(a)]"),
+        "[3, 0]"
+    );
+    // v4 binds composites by reference: mutating the loop variable reaches
+    // the element it came from.
+    assert_eq!(
+        jit("var a = [[1], [2]] for (var x in a) { push(x, 9) } return count(a[0])"),
+        "2"
+    );
+    // v1 binds them by value, so the same program must not.
+    assert_eq!(
+        jit_v(
+            "var a = [[1], [2]] for (var x in a) { push(x, 9) } return count(a[0])",
+            1
+        ),
+        "1"
+    );
+}
+
+/// A `foreach` whose iterable is a parameter: the snapshot base keeps the
+/// parameter boxed even when nothing else in the function uses it as a
+/// composite (#111).
+#[test]
+fn foreach_over_a_parameter() {
+    assert_eq!(
+        jit(
+            "function f(a) { var s = 0 for (var x in a) { s = s + x } return s } return f([1, 2, 3])"
+        ),
+        "6"
+    );
+    assert_eq!(
+        jit("function f(m) { var r = '' \
+             for (var k : var v in m) { r = r + k + v } return r } return f(['p': 1])"),
+        "\"p1\""
+    );
+}
+
 /// A global a function body writes must never be constant-folded at O1,
 /// whichever side of the `global` statement the writer sits on, and whether
 /// it writes by assignment or by re-declaring the global (#53).

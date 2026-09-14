@@ -447,6 +447,8 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_value_binop_crl", leek_value_binop_crl as *const u8),
         ("leek_foreach_iter", leek_foreach_iter as *const u8),
         ("leek_foreach_len", leek_foreach_len as *const u8),
+        ("leek_iter_value", leek_iter_value as *const u8),
+        ("leek_iter_key", leek_iter_key as *const u8),
         ("leek_class_of", leek_class_of as *const u8),
         ("leek_class_super", leek_class_super as *const u8),
         (

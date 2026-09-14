@@ -815,7 +815,9 @@ pub(super) fn rvalue_mentions(r: &Rvalue, l: LocalId) -> bool {
         | Rvalue::MakeForeachIter(o) => op_mentions(o, l),
         Rvalue::Binary(_, a, b) => op_mentions(a, l) || op_mentions(b, l),
         Rvalue::Field(x, _) | Rvalue::ForeachLen(x) => *x == l,
-        Rvalue::Index(x, o) => *x == l || op_mentions(o, l),
+        Rvalue::Index(x, o) | Rvalue::ForeachValueAt(x, o) | Rvalue::ForeachKeyAt(x, o) => {
+            *x == l || op_mentions(o, l)
+        }
         Rvalue::Synthetic(inner) => rvalue_mentions(inner, l),
         Rvalue::Slice(x, b) => *x == l || slice_bounds_mentions(b, l),
         Rvalue::Array(ops) => ops.iter().any(|o| op_mentions(o, l)),

@@ -618,12 +618,14 @@ pub enum Rvalue {
     },
     /// `[a..b]` interval literal.
     Interval(IntervalRvalue),
-    /// Snapshot an iterable into a foreach-iteration state — an
-    /// `Array<[key, value]>` the lowering then walks with a normal
-    /// index loop. Materialising the iteration as a snapshot makes
-    /// mutation during iteration safe and lets the rest of MIR
-    /// stay generic over the source type (array / map / set /
-    /// string / interval / object).
+    /// Snapshot an iterable into a foreach-iteration state the
+    /// lowering then walks with a normal index loop. Materialising
+    /// the iteration as a snapshot makes mutation during iteration
+    /// safe and lets the rest of MIR stay generic over the source
+    /// type (array / map / set / string / interval / object). The
+    /// state's shape is the runtime's business — MIR only ever reads
+    /// it back through [`Rvalue::ForeachLen`],
+    /// [`Rvalue::ForeachValueAt`] and [`Rvalue::ForeachKeyAt`].
     MakeForeachIter(Operand),
     /// Length of a foreach snapshot (a [`Rvalue::MakeForeachIter`]
     /// result) — the synthesized loop bound. Uncharged: walking the
@@ -631,6 +633,15 @@ pub enum Rvalue {
     /// equivalents (`iterator()` / `hasNext()`) never tick the
     /// budget.
     ForeachLen(LocalId),
+    /// Value at position `.1` of the foreach snapshot in `.0`.
+    /// Uncharged, like [`Rvalue::ForeachLen`]: upstream's `next()` /
+    /// `getValue()` are free.
+    ForeachValueAt(LocalId, Operand),
+    /// Key at position `.1` of the foreach snapshot in `.0` — the
+    /// stored key of a keyed source (map / object / instance), the
+    /// position itself otherwise. Uncharged: upstream's `getKey()` is
+    /// free.
+    ForeachKeyAt(LocalId, Operand),
     /// A compiler-synthesized rvalue: evaluates exactly like the
     /// inner rvalue but charges no ops. Wraps the foreach loop
     /// machinery (the `pos < len` test, the `pos + 1` step, the
