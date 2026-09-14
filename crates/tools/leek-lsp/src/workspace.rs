@@ -269,9 +269,13 @@ impl Workspace {
             match ProjectIndex::discover(start) {
                 Ok(index) => index,
                 Err(error) => {
-                    eprintln!(
-                        "leek-lsp: failed to index project at {}: {error}",
-                        start.display()
+                    // The whole project stays unindexed, so cross-file
+                    // resolution and diagnostics quietly go missing. The user
+                    // needs to see this one.
+                    tracing::warn!(
+                        root = %start.display(),
+                        %error,
+                        "failed to index project"
                     );
                     return;
                 }
@@ -726,15 +730,24 @@ fn manifest_exists_at_or_above(start: &Path) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root() -> PathBuf {
+        // The timestamp alone is not unique. Tests run on parallel threads and
+        // `SystemTime::now()` is coarser on macOS than on Linux, so two calls
+        // in the same tick produced the SAME directory — whichever test
+        // finished first then `remove_dir_all`'d the other's project out from
+        // under it. The counter makes the name unique regardless of clock
+        // resolution; the timestamp stays so leftovers are still sortable.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after the Unix epoch")
             .as_nanos();
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "leek-lsp-workspace-fallback-{}-{suffix}",
+            "leek-lsp-workspace-fallback-{}-{suffix}-{seq}",
             std::process::id()
         ))
     }

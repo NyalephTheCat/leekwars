@@ -265,6 +265,10 @@ pub fn compile_to_executable(
     )?;
     let lib_dir = locate_static_runtime(quiet)?;
 
+    // Caller-controlled build progress (`!quiet`), on the same stderr the
+    // `cc` / `cargo` child below inherits. It is terminal output, not a log
+    // record — and no binary that calls this installs a `tracing` subscriber.
+    #[allow(clippy::print_stderr)]
     if !quiet {
         eprintln!("leek: linking standalone native executable (cc)…");
     }
@@ -295,11 +299,20 @@ pub fn compile_to_executable(
     // Echoed whether or not the link succeeded, so `cc`'s warnings on the
     // generated C reach the user exactly as they did when stderr was inherited.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprint!("{stderr}");
+    // `cc`'s own diagnostics, passed through verbatim on the stream the child
+    // would have inherited. Terminal output, not a log record.
+    #[allow(clippy::print_stderr)]
+    {
+        eprint!("{stderr}");
+    }
     if !output.status.success() {
         return Err(link_failure(&stderr, &lib_dir));
     }
 
+    // Caller-controlled build progress, on the same stderr the `cc` /
+    // `cargo` child inherits. Terminal output, not a log record — and no
+    // binary that calls this installs a `tracing` subscriber.
+    #[allow(clippy::print_stderr)]
     if !quiet {
         eprintln!("leek: wrote executable to {}", out.display());
     }
@@ -379,6 +392,10 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
+        // Caller-controlled build progress, on the same stderr the `cc` /
+        // `cargo` child inherits. Terminal output, not a log record — and no
+        // binary that calls this installs a `tracing` subscriber.
+        #[allow(clippy::print_stderr)]
         if self.keep {
             eprintln!(
                 "leek: {KEEP_TEMP_ENV} is set — keeping the AOT scratch directory at {}",
@@ -614,6 +631,10 @@ fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
              build one from; point {RUNTIME_DIR_ENV} at a directory holding it"
         )));
     };
+    // Caller-controlled build progress, on the same stderr the `cc` /
+    // `cargo` child inherits. Terminal output, not a log record — and no
+    // binary that calls this installs a `tracing` subscriber.
+    #[allow(clippy::print_stderr)]
     if !quiet {
         eprintln!("leek: building the AOT static runtime (one-time; cargo)…");
     }

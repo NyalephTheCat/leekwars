@@ -191,6 +191,14 @@ impl Reporter {
             if !self.severity.apply_mut(&mut adjusted) {
                 continue;
             }
+            // Emitting is this type's whole job, and the streams it writes to
+            // are part of its contract: rendered diagnostics on stderr,
+            // `--message-format=json` records on stdout so a caller can pipe
+            // them. The two `eprintln!`s below report a failure *to emit*,
+            // which has nowhere better to go — `emit` answers `bool`, not a
+            // `Result`. Giving it a `&mut dyn Write` sink instead is the
+            // right fix and reaches every caller; see #178.
+            #[allow(clippy::print_stdout, clippy::print_stderr)]
             match self.format {
                 MessageFormat::Human => {
                     eprint!("{}", self.renderer.render(&adjusted, sources));

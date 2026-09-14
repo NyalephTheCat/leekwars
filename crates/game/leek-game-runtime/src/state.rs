@@ -706,6 +706,7 @@ pub struct BulbTemplate {
 /// formula: `(int) ((min + Math.floor((max - min) * coeff)) * multiplier)`.
 /// The cast truncates toward zero like Java's `(int)`.
 #[must_use]
+// `(int)` on a computed bulb stat, exactly as `Bulbs.java` narrows it.
 #[allow(clippy::cast_possible_truncation)]
 fn bulb_base((min, max): (i32, i32), coeff: f64, multiplier: f64) -> i32 {
     ((f64::from(min) + (f64::from(max - min) * coeff).floor()) * multiplier) as i32
@@ -993,6 +994,8 @@ impl State {
                     .collect()
             })
             .collect();
+        // `compute_start_order` is handed our own fids and gives them back in
+        // turn order, so each `i64` is the `usize` index it started as.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         for fid in crate::order::compute_start_order(&start_teams, &mut self.rng) {
             let fid = fid as usize;
@@ -1025,6 +1028,8 @@ impl State {
 
     /// `State.recordInitialState()` — capture the `fight.leeks` snapshots and
     /// the map JSON, then log `ActionStartFight`.
+    // Team sizes, as the `int` counts the initial-state record carries. A
+    // team holds at most a handful of entities.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn record_initial_state(&mut self) {
         self.leek_snapshots = self
@@ -1041,6 +1046,9 @@ impl State {
 
     /// `Fight.startTurn` up to the AI run: log `ActionEntityTurn` and run the
     /// entity's turn start, reporting what the orchestrator should do next.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_wrap)]
     pub fn begin_turn(&mut self) -> BeginTurn {
         let Some(fid) = self.order.current() else {
@@ -1093,6 +1101,9 @@ impl State {
 
     /// The post-AI half of `Fight.startTurn`: `current.endTurn()` +
     /// `ActionEndTurn` (logged with the freshly reset TP/MP totals).
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_wrap)]
     pub fn end_entity_turn(&mut self, fid: usize) {
         self.fighters[fid].end_turn();
@@ -1140,6 +1151,8 @@ impl State {
     /// `-1` for a draw. With `draw_check_life`, a draw is tie-broken by
     /// strictly-highest team life.
     #[must_use]
+    // A team index: 0 or 1 in every official fight, and bounded by
+    // `teams.len()` in any case.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn compute_winner(&self, draw_check_life: bool) -> i32 {
         let mut win_team = -1;
@@ -1292,6 +1305,8 @@ impl State {
 
     /// `State.moveEntity(entity, path)` — log the move, consume MP, update
     /// the position. Returns the cells moved.
+    // A path length and the cell ids along it, all bounded by the board
+    // (613 cells), plus the usual `fid as i64` for the action record.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn move_entity(&mut self, fid: usize, path: &[usize]) -> i64 {
         // A STATIC entity cannot move (checked before the size/MP gates —
@@ -1317,6 +1332,12 @@ impl State {
     /// `State.moveToward(entity, leek_id, pm_to_use)` — path to a living
     /// entity's cell, truncated to the MP budget. `pm_to_use == -1` means
     /// "all remaining MP".
+    // `pm_to_use as i32` is Java's `(int)` narrowing of the AI-supplied
+    // budget, and it happens *before* the `pm > mp` clamp below — so
+    // `moveToward(e, 4294967296)` narrows to 0 and spends no MP. That is
+    // the reference behaviour and it is pinned by
+    // `official_builtins::tests::a_movement_budget_narrows_like_a_java_int_cast`;
+    // saturating instead would read better but would move fight outcomes.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn move_toward(&mut self, fid: usize, leek_id: i64, pm_to_use: i64) -> i64 {
         let mp = self.fighters[fid].mp();
@@ -1354,6 +1375,8 @@ impl State {
     /// `State.moveTowardCell(entity, cell_id, pm_to_use)` — path to a cell;
     /// an unwalkable target paths to the valid cells around its obstacle
     /// cluster instead (`getValidCellsAroundObstacle`).
+    // Same `(int)` narrowing of the AI-supplied budget as `move_toward`;
+    // see the note there.
     #[allow(clippy::cast_possible_truncation)]
     pub fn move_toward_cell(&mut self, fid: usize, cell_id: i64, pm_to_use: i64) -> i64 {
         let mp = self.fighters[fid].mp();
@@ -1481,6 +1504,9 @@ impl State {
     /// `State.onPlayerDie(entity, killer, item)` — pull the entity out of
     /// the order and off the map, log `ActionEntityDie`. (BR power transfer,
     /// chest loot and the ally-killed / kill passives are out of scope.)
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_wrap)]
     pub fn on_player_die(&mut self, fid: usize, killer: Option<usize>) {
         self.order.remove_entity(fid);
@@ -1531,6 +1557,9 @@ impl State {
 
     /// `State.useWeapon(launcher, target)` — the exact check ladder, crit
     /// roll, logging, attack application, TP cost and use accounting.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn use_weapon(&mut self, fid: usize, target_cell: usize) -> i32 {
         if self.order.current() != Some(fid) {
@@ -1627,6 +1656,9 @@ impl State {
     /// (note the cost check is `cost > 0 && cost > TP`, unlike the weapon's),
     /// crit roll, logging, attack application, cooldown, TP cost and use
     /// accounting.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn use_chip(&mut self, fid: usize, target_cell: usize, chip_id: i32) -> i32 {
         let Some(spec) = self.chip_specs.get(&chip_id).cloned() else {
@@ -1710,6 +1742,12 @@ impl State {
     /// and TP cost. Returns the new bulb's fid alongside the result so the
     /// orchestrator can attach the AI function (`Fight.summonEntity` does
     /// this through `getLastEntity()`).
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
+    // `(f64 …) as i32` is the reference engine's `(int)` cast on a computed
+    // effect value — truncation toward zero is the behaviour being ported, not
+    // an accident.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn summon_entity(
         &mut self,
@@ -1802,6 +1840,8 @@ impl State {
     /// order, place it, and append its `fight.leeks` entry. The birth turn is
     /// what `Fight.summonEntity` pins right after (`setBirthTurn(getTurn())`).
     /// Unknown templates panic — coverage is corpus-driven.
+    // A summon's public id is the negation of its fid (`-(fid as i64)`),
+    // and a fid is a small index — nothing to wrap.
     #[allow(clippy::cast_possible_wrap)]
     pub fn create_summon(
         &mut self,
@@ -1882,6 +1922,9 @@ impl State {
     /// `canUseAttack` (-4) comes **before** `hasCooldown` (-3), the reverse
     /// of `useChip`'s ladder. Like `summonEntity` there is no max-uses check
     /// and no `addItemUse`.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn resurrect_entity(
         &mut self,
@@ -1961,6 +2004,9 @@ impl State {
     /// entity that followed it in the initial order (appending when none is
     /// left), restore its life (`Entity.resurrect`), put it back on the map
     /// and log `ActionResurrect`.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn resurrect(
         &mut self,

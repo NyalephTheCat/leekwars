@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 leek-lsp = { workspace = true }
+tracing  = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

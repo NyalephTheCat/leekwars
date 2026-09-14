@@ -52,6 +52,7 @@ impl LeekLanguageServer {
     /// Construct with an externally-owned exit signal so the stdio driver
     /// can await the same notification it raises on `shutdown`.
     pub fn new_with_exit(client: Client, exit_signal: Arc<Notify>) -> Self {
+        spawn_client_log_mirror(&client);
         Self {
             client,
             state: Arc::new(Mutex::new(Workspace::default())),
@@ -60,17 +61,46 @@ impl LeekLanguageServer {
     }
 }
 
+/// Start the task that forwards `WARN`-and-above [`tracing`] events to the
+/// editor as `window/logMessage`.
+///
+/// The handlers this reports on are synchronous — `formatting::handle` can't
+/// await `client.log_message` — so [`crate::log`] hands records to an
+/// unbounded channel and this one task does the awaiting. Without a tokio
+/// runtime (a unit test constructing a server directly) there is nothing to
+/// spawn onto and the records simply stay on stderr.
+fn spawn_client_log_mirror(client: &Client) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let mut rx = crate::log::attach_client_sink();
+    let client = client.clone();
+    handle.spawn(async move {
+        // `showMessage` is a modal-ish popup in most editors. Raise it for
+        // the first failure that asks for one and log the rest: the point is
+        // that the user learns to look at the output channel, not that we
+        // nag on every keystroke.
+        let mut notified = false;
+        while let Some(msg) = rx.recv().await {
+            client.log_message(msg.kind, &msg.text).await;
+            if msg.notify && !notified {
+                notified = true;
+                client.show_message(msg.kind, &msg.text).await;
+            }
+        }
+    });
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for LeekLanguageServer {
     async fn initialize(&self, params: lsp::InitializeParams) -> Result<lsp::InitializeResult> {
-        eprintln!(
-            "leek-lsp: initialize from client {:?} pid {:?}",
-            params.client_info.as_ref().map(|c| format!(
-                "{} {}",
-                c.name,
-                c.version.as_deref().unwrap_or("?")
-            )),
-            params.process_id
+        tracing::info!(
+            client = params.client_info.as_ref().map_or_else(
+                || "?".to_string(),
+                |c| format!("{} {}", c.name, c.version.as_deref().unwrap_or("?"))
+            ),
+            pid = params.process_id,
+            "initialize"
         );
         {
             let mut ws = self.state.lock().await;
@@ -176,9 +206,15 @@ impl LanguageServer for LeekLanguageServer {
                         leek_resolver::builtins::dynamic_builtin_constants().len(),
                     ),
                 ));
-                // Mirror to stderr immediately for terminal/log-file launches.
-                for (_is_err, line) in &log {
-                    eprintln!("{line}");
+                // Mirror to the log now, for terminal / log-file launches.
+                // The client half stays buffered until `initialized`: a
+                // `window/logMessage` sent before then can be dropped.
+                for (is_err, line) in &log {
+                    if *is_err {
+                        tracing::warn!("{line}");
+                    } else {
+                        tracing::info!("{line}");
+                    }
                 }
                 self.state.lock().await.pending_library_log = log;
             }
@@ -323,7 +359,7 @@ impl LanguageServer for LeekLanguageServer {
     }
 
     async fn initialized(&self, _: lsp::InitializedParams) {
-        eprintln!("leek-lsp: initialized, ready");
+        tracing::info!("initialized, ready");
         let library_log = {
             let mut ws = self.state.lock().await;
             ws.index_pending_projects();
@@ -360,7 +396,9 @@ impl LanguageServer for LeekLanguageServer {
             .ok(),
         };
         if let Err(e) = self.client.register_capability(vec![registration]).await {
-            eprintln!("leek-lsp: file-watcher registration declined: {e}");
+            // Not fatal — the client simply won't report on-disk edits — but
+            // it explains a stale index, so the user should be able to see it.
+            tracing::warn!(error = %e, "file-watcher registration declined");
         }
 
         // Pull the initial `leek` settings so formatter / inlay-hint
@@ -376,15 +414,13 @@ impl LanguageServer for LeekLanguageServer {
             && let Some(value) = values.into_iter().next()
         {
             let settings = crate::settings::Settings::from_value(&value);
-            if crate::trace_enabled() {
-                eprintln!("leek-lsp: initial configuration -> {settings:?}");
-            }
+            tracing::debug!(?settings, "initial configuration");
             self.state.lock().await.settings = settings;
         }
     }
 
     async fn shutdown(&self) -> Result<()> {
-        eprintln!("leek-lsp: shutdown requested");
+        tracing::info!("shutdown requested");
         // Tell the stdio driver to terminate the process once this
         // response is flushed. The client sends `exit` right after a
         // successful `shutdown`, but tower-lsp 0.20 doesn't end its serve
@@ -398,9 +434,7 @@ impl LanguageServer for LeekLanguageServer {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         let version = params.text_document.version;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: didOpen {} ({} bytes)", uri, text.len());
-        }
+        tracing::trace!(%uri, bytes = text.len(), "didOpen");
         {
             let mut ws = self.state.lock().await;
             ws.open(uri.clone(), text);
@@ -414,13 +448,7 @@ impl LanguageServer for LeekLanguageServer {
         if params.content_changes.is_empty() {
             return;
         }
-        if crate::trace_enabled() {
-            eprintln!(
-                "leek-lsp: didChange {} ({} change(s))",
-                uri,
-                params.content_changes.len()
-            );
-        }
+        tracing::trace!(%uri, changes = params.content_changes.len(), "didChange");
         let version = params.text_document.version;
         {
             let mut ws = self.state.lock().await;
@@ -441,9 +469,7 @@ impl LanguageServer for LeekLanguageServer {
 
     async fn did_close(&self, params: lsp::DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: didClose {uri}");
-        }
+        tracing::trace!(%uri, "didClose");
         {
             let mut ws = self.state.lock().await;
             ws.close(&uri);
@@ -454,9 +480,7 @@ impl LanguageServer for LeekLanguageServer {
     async fn hover(&self, params: lsp::HoverParams) -> Result<Option<lsp::Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: hover {} {}:{}", uri, pos.line, pos.character);
-        }
+        tracing::trace!(%uri, line = pos.line, col = pos.character, "hover");
         let ws = self.state.lock().await;
         Ok(guard("hover", || hover::handle(&ws, &uri, pos)))
     }
@@ -467,12 +491,7 @@ impl LanguageServer for LeekLanguageServer {
     ) -> Result<Option<lsp::GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        if crate::trace_enabled() {
-            eprintln!(
-                "leek-lsp: definition {} {}:{}",
-                uri, pos.line, pos.character
-            );
-        }
+        tracing::trace!(%uri, line = pos.line, col = pos.character, "definition");
         let ws = self.state.lock().await;
         Ok(guard("definition", || definition::handle(&ws, &uri, pos)))
     }
@@ -505,12 +524,7 @@ impl LanguageServer for LeekLanguageServer {
     ) -> Result<Option<lsp::SignatureHelp>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        if crate::trace_enabled() {
-            eprintln!(
-                "leek-lsp: signatureHelp {} {}:{}",
-                uri, pos.line, pos.character
-            );
-        }
+        tracing::trace!(%uri, line = pos.line, col = pos.character, "signatureHelp");
         let ws = self.state.lock().await;
         Ok(guard("signature_help", || {
             signature_help::handle(&ws, &uri, pos)
@@ -522,9 +536,7 @@ impl LanguageServer for LeekLanguageServer {
         params: lsp::DocumentSymbolParams,
     ) -> Result<Option<lsp::DocumentSymbolResponse>> {
         let uri = params.text_document.uri;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: documentSymbol {uri}");
-        }
+        tracing::trace!(%uri, "documentSymbol");
         let ws = self.state.lock().await;
         Ok(guard("document_symbol", || symbols::handle(&ws, &uri)))
     }
@@ -618,9 +630,7 @@ impl LanguageServer for LeekLanguageServer {
         // into the workspace so the formatter and inlay-hint handlers
         // pick up the new options.
         let settings = crate::settings::Settings::from_value(&params.settings);
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: didChangeConfiguration -> {settings:?}");
-        }
+        tracing::debug!(?settings, "didChangeConfiguration");
         self.state.lock().await.settings = settings;
         // Inlay hints are computed on demand, so a toggle only takes
         // effect once the editor re-requests them. Nudge it to do so.
@@ -805,9 +815,7 @@ impl LanguageServer for LeekLanguageServer {
         params: lsp::DocumentFormattingParams,
     ) -> Result<Option<Vec<lsp::TextEdit>>> {
         let uri = params.text_document.uri;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: formatting {uri}");
-        }
+        tracing::trace!(%uri, "formatting");
         let ws = self.state.lock().await;
         Ok(guard("formatting", || formatting::handle(&ws, &uri)))
     }
@@ -817,9 +825,7 @@ impl LanguageServer for LeekLanguageServer {
         params: lsp::DocumentRangeFormattingParams,
     ) -> Result<Option<Vec<lsp::TextEdit>>> {
         let uri = params.text_document.uri;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: rangeFormatting {uri}");
-        }
+        tracing::trace!(%uri, "rangeFormatting");
         let ws = self.state.lock().await;
         Ok(guard("range_formatting", || {
             range_formatting::handle(&ws, &uri, params.range)
@@ -831,9 +837,7 @@ impl LanguageServer for LeekLanguageServer {
         params: lsp::CodeActionParams,
     ) -> Result<Option<lsp::CodeActionResponse>> {
         let uri = params.text_document.uri;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: codeAction {uri}");
-        }
+        tracing::trace!(%uri, "codeAction");
         let ws = self.state.lock().await;
         Ok(guard("code_action", || {
             code_action::handle(&ws, &uri, params.range, &params.context)
@@ -867,9 +871,7 @@ impl LanguageServer for LeekLanguageServer {
         params: lsp::SemanticTokensParams,
     ) -> Result<Option<lsp::SemanticTokensResult>> {
         let uri = params.text_document.uri;
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: semanticTokens/full {uri}");
-        }
+        tracing::trace!(%uri, "semanticTokens/full");
         let mut ws = self.state.lock().await;
         Ok(guard("semantic_tokens_full", || {
             semantic_tokens::handle(&mut ws, &uri)
@@ -966,7 +968,7 @@ impl LanguageServer for LeekLanguageServer {
                 if let (Ok(old), Ok(new)) =
                     (lsp::Url::parse(&f.old_uri), lsp::Url::parse(&f.new_uri))
                 {
-                    eprintln!("leek-lsp: didRename {old} -> {new}");
+                    tracing::info!(%old, %new, "didRename");
                     ws.rename_file(&old, &new);
                 }
             }
@@ -981,7 +983,7 @@ impl LanguageServer for LeekLanguageServer {
             for change in params.changes {
                 match change.typ {
                     lsp::FileChangeType::DELETED => {
-                        eprintln!("leek-lsp: watched delete {}", change.uri);
+                        tracing::info!(uri = %change.uri, "watched delete");
                         // Drops the project's copy of the file and keeps
                         // any open buffer for it editable.
                         ws.remove_from_disk(&change.uri);
@@ -1064,14 +1066,12 @@ impl LeekLanguageServer {
             drop(ws);
             (diags, Some(doc_version))
         };
-        if crate::trace_enabled() {
-            eprintln!(
-                "leek-lsp: publishDiagnostics {} ({} items, v{})",
-                uri,
-                diags.len(),
-                version.unwrap_or(-1),
-            );
-        }
+        tracing::trace!(
+            %uri,
+            items = diags.len(),
+            version = version.unwrap_or(-1),
+            "publishDiagnostics"
+        );
         self.client.publish_diagnostics(uri, diags, version).await;
     }
 }

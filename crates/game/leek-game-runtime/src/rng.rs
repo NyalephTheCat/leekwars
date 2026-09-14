@@ -31,6 +31,8 @@ impl OfficialRng {
     }
 
     /// `RandomGenerator.getDouble()`: advance the LCG and map to `(0, 1)`.
+    // `r` is a 16-bit draw, so `as f64` is exact; the division is the
+    // `nextDouble` shape documented above.
     #[allow(clippy::cast_precision_loss)]
     pub fn get_double(&mut self) -> f64 {
         self.n = self.n.wrapping_mul(1_103_515_245).wrapping_add(12_345);
@@ -40,6 +42,9 @@ impl OfficialRng {
 
     /// `RandomGenerator.getInt(min, max)`: uniform over `min..=max`
     /// (0 when the range is empty or overflows an `i32`, as in Java).
+    // `(double * span) as i32` is Java's `(int)` cast on the scaled draw —
+    // the truncation is the reference behaviour, and `wrapping_add` below
+    // keeps the overflow behaviour too.
     #[allow(clippy::cast_possible_truncation)]
     pub fn get_int(&mut self, min: i32, max: i32) -> i32 {
         if max.wrapping_sub(min).wrapping_add(1) <= 0 {
@@ -50,6 +55,9 @@ impl OfficialRng {
     }
 
     /// `RandomGenerator.getLong(min, max)`.
+    // As `get_int`, one width up: the span widens to `f64` (a span this
+    // wide is already approximate in Java) and the scaled draw narrows
+    // back through the same `(long)` truncation.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     pub fn get_long(&mut self, min: i64, max: i64) -> i64 {
         if max.wrapping_sub(min).wrapping_add(1) <= 0 {

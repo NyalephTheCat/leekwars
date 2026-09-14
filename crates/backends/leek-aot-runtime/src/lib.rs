@@ -11,6 +11,11 @@
 //! glue depends on `leek-backend-native`/`leek-runtime`) and force-retained by
 //! [`leek_aot_force_link`].
 
+// Printing is an API decision in a library, not a convenience: a crate that
+// writes to the terminal behind its caller's back is unusable from a language
+// server or a test harness. Every print below is either the tool's *output*
+// or a justified exception, and says which.
+#![warn(clippy::print_stdout, clippy::print_stderr)]
 // `#[unsafe(no_mangle)]` is unsafe code; the workspace denies it by default.
 #![allow(unsafe_code)]
 #![deny(
@@ -53,7 +58,13 @@ pub extern "C" fn leek_aot_error() -> *mut c_char {
 fn print_value(v: &Value, version: i32) {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     leek_runtime::DISPLAY_VERSION.with(|c| c.set(version as u8));
-    println!("{v}");
+    // This IS the compiled Leekscript program's own `debug()` output, on the
+    // process's stdout where the program's user expects it. Routing it
+    // through a logger would change what every AOT execution test observes.
+    #[allow(clippy::print_stdout)]
+    {
+        println!("{v}");
+    }
 }
 
 #[unsafe(no_mangle)]

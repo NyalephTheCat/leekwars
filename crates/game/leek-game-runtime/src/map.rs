@@ -25,14 +25,17 @@
 //!   4. For team 1 entity: `get_int(0, height-1)`, `get_int(0, width/4)`.
 //!   5. One `get_int(0, 4)` — map type (at the end of `generateMap`).
 
-// This file is a direct port of Java source.  Several clippy lints fire on
-// style choices that are intentional (coordinate / cast arithmetic that matches
-// the Java types exactly, single-char variable names from the Java source, etc.)
+// This file is a direct transliteration of Java source, and the lints below
+// fire on *shape*: single-char names lifted from the Java, the `if` structure
+// of the original, index loops that must visit cells in the original order.
+// Rewriting any of them would make the port harder to diff against its source,
+// which is the only way it stays correct — so the exemption is file-wide and
+// deliberate. It covers style only.
+//
+// The cast lints are NOT here. A silenced cast lint hides an arithmetic
+// question, and those are answered one at a time, at the site, naming the Java
+// construct being mirrored.
 #![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_lossless,
     clippy::many_single_char_names,
     clippy::bool_to_int_with_if,
     clippy::collapsible_if,
@@ -139,6 +142,10 @@ impl Cell {
     /// this.x = (id - (width - 1) * this.y) / width;
     /// ```
     #[must_use]
+    // `id` is a cell index, so it is `< nb_cells` (613 on every official
+    // board) and the `i32` it becomes is the `int` the Java `Cell(int id)`
+    // constructor takes.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn new(id: usize, width: i32, height: i32) -> Self {
         let row_len = width * 2 - 1;
         let x_raw = (id as i32) % row_len;
@@ -257,6 +264,11 @@ impl Map {
 
     /// `new Map(int width, int height)` — allocate cells and the coord grid.
     #[must_use]
+    // Every cast here loses a sign that cannot be set: the cell count
+    // `(width*2-1)*height - (width-1)` is positive for any board (613 at
+    // 18×18), an extent `max - min + 1` is positive by definition, and an
+    // offset `c.x - min_x` is non-negative because `min_x` is the minimum.
+    #[allow(clippy::cast_sign_loss)]
     pub fn new(width: i32, height: i32) -> Self {
         let nb_cells = ((width * 2 - 1) * height - (width - 1)) as usize;
         let mut cells: Vec<Cell> = (0..nb_cells).map(|i| Cell::new(i, width, height)).collect();
@@ -312,8 +324,14 @@ impl Map {
     // ── Cell accessors ───────────────────────────────────────────────────────
 
     /// `Map.getCell(int id)` — returns `None` for out-of-range ids.
+    ///
+    /// This is the range check that every `as i32`-narrowed cell id from AI
+    /// code ends up in front of; see `official_builtins::call_official_builtin`.
     #[inline]
     #[must_use]
+    // `id as usize` is reached only on the `else` of `id < 0`, so there is no
+    // sign left to lose.
+    #[allow(clippy::cast_sign_loss)]
     pub fn get_cell(&self, id: i32) -> Option<usize> {
         if id < 0 || id as usize >= self.nb_cells {
             None
@@ -325,6 +343,9 @@ impl Map {
     /// `Map.getCell(int x, int y)` — coordinate lookup.
     #[inline]
     #[must_use]
+    // The `x < min_x || x > max_x || y < min_y || y > max_y` guard runs
+    // first, so both offsets are already known to be in `0..=max-min`.
+    #[allow(clippy::cast_sign_loss)]
     pub fn get_cell_xy(&self, x: i32, y: i32) -> Option<usize> {
         if x < self.min_x || x > self.max_x || y < self.min_y || y > self.max_y {
             return None;
@@ -343,6 +364,14 @@ impl Map {
     ///
     /// Returns `None` at map boundaries.
     #[must_use]
+    // `cell_id` is an index, so `< 613`; `self.width` is 18. The sums are
+    // the Java `id ± width` arithmetic and each one goes straight into
+    // `get_cell`, which range-checks it.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
     pub fn get_cell_by_dir(&self, cell_id: usize, dir: u8) -> Option<usize> {
         let c = &self.cells[cell_id];
         let w = self.width as usize;
@@ -394,6 +423,9 @@ impl Map {
     /// Port is a verbatim translation of the Java nested-loop union-find.
     /// The resulting `cell.composante` values are used to check whether two
     /// entities can reach each other.
+    // Same extents and offsets as `Map::new`: `max - min + 1` is positive
+    // and `c.x - min_x` is non-negative because `min_x` is the minimum.
+    #[allow(clippy::cast_sign_loss)]
     pub fn compute_composantes(&mut self) {
         let sx = (self.max_x - self.min_x + 1) as usize;
         let sy = (self.max_y - self.min_y + 1) as usize;
@@ -467,6 +499,8 @@ impl Map {
 
     /// `Map.getRandomCell(State state)` — any available cell, up to 64 tries.
     #[must_use]
+    // `nb_cells` is 613; the `i32` is the `int` bound `getInt` takes.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn get_random_cell(&self, rng: &mut OfficialRng) -> Option<usize> {
         let mut result = None;
         let mut nb = 0;
@@ -527,6 +561,10 @@ impl Map {
     /// Returns the generated `Map` and the two entity cell ids `(team0_cell,
     /// team1_cell)`.
     #[allow(clippy::too_many_lines)]
+    // `nb_cells` is 613; the `i32` is the `int` bound `getInt` takes, and the
+    // draw order this reproduces is part of the RNG contract at the top of
+    // the file.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     #[must_use]
     pub fn generate_map(
         rng: &mut OfficialRng,
@@ -744,8 +782,10 @@ impl Map {
     pub fn get_euclidean_distance(&self, a: usize, b: usize) -> f64 {
         let ca = &self.cells[a];
         let cb = &self.cells[b];
-        let dx = (ca.x - cb.x) as f64;
-        let dy = (ca.y - cb.y) as f64;
+        // `f64::from`, not `as`: an `i32` is exactly representable, so the
+        // conversion is infallible and says so.
+        let dx = f64::from(ca.x - cb.x);
+        let dy = f64::from(ca.y - cb.y);
         (dx * dx + dy * dy).sqrt()
     }
 
@@ -780,7 +820,15 @@ impl Map {
     /// when checking LOS (the start cell should normally be included).
     ///
     /// Returns `true` when there is a clear line of sight.
-    #[allow(clippy::cast_precision_loss)]
+    // `(int) Math.ceil(..)` / `(int) Math.floor(..)`, called out at each
+    // site below: the Bresenham column bounds are small integers that a
+    // `f64` holds exactly, and the truncation is the Java cast. `p / 2 - 1`
+    // is a column index into a path array of at most a board's width.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
     #[must_use]
     pub fn verify_los(
         &self,
@@ -808,10 +856,10 @@ impl Map {
             path.push(0);
             path.push(a + 1);
         } else {
-            let d = (a as f64) / (b as f64) / 2.0;
+            let d = f64::from(a) / f64::from(b) / 2.0;
             let mut h: i32 = 0;
             for i in 0..b {
-                let y = 0.5 + (i * 2 + 1) as f64 * d;
+                let y = 0.5 + f64::from(i * 2 + 1) * d;
                 path.push(h);
                 // Java: (int) Math.ceil(y - 0.00001) - h
                 let ceil_y = (y - 0.000_01).ceil() as i32;
@@ -899,6 +947,9 @@ impl Map {
     /// instead of decrease-key), matching the Java `Map.java` implementation.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     #[must_use]
+    // `cost` is an A* path length in cells, so `0 ..= 613`; the cast only
+    // sizes the result vector.
+    #[allow(clippy::cast_sign_loss)]
     pub fn get_astar_path(
         &mut self,
         start: usize,
@@ -1375,8 +1426,12 @@ fn float_cmp(a: f32, b: f32) -> i32 {
         Some(std::cmp::Ordering::Equal) => 0,
         Some(std::cmp::Ordering::Greater) => 1,
         None => {
-            let ai = a.to_bits() as i32;
-            let bi = b.to_bits() as i32;
+            // `cast_signed`, not `as i32`: this is a deliberate bit
+            // reinterpretation — it *is* `Float.floatToIntBits`, whose result
+            // Java then compares as a signed `int` — not a numeric conversion
+            // that might lose something.
+            let ai = a.to_bits().cast_signed();
+            let bi = b.to_bits().cast_signed();
             if ai < bi {
                 -1
             } else if ai > bi {
@@ -1397,6 +1452,9 @@ fn float_cmp(a: f32, b: f32) -> i32 {
 /// Returns `None` when `min > max`.  The order is: center first (if min=0),
 /// then rings from inside out, counter-clockwise within each ring.
 #[must_use]
+// The cell count is derived from a radius the `min > max` guard above has
+// already made non-negative, so the sign it loses cannot be set.
+#[allow(clippy::cast_sign_loss)]
 pub fn generate_circle_mask(min: i32, max: i32) -> Option<Vec<[i32; 2]>> {
     if min > max {
         return None;
@@ -1465,6 +1523,8 @@ pub fn generate_mask(launch_type: i32, min: i32, max: i32) -> Vec<[i32; 2]> {
 
 /// `MaskAreaCell.generatePlusMask(int radius)`.
 #[must_use]
+// `1 + radius * 4` is positive for any non-negative radius.
+#[allow(clippy::cast_sign_loss)]
 pub fn generate_plus_mask(radius: i32) -> Vec<[i32; 2]> {
     let nb_cells = (1 + radius * 4) as usize;
     let mut result = Vec::with_capacity(nb_cells);
@@ -1480,6 +1540,8 @@ pub fn generate_plus_mask(radius: i32) -> Vec<[i32; 2]> {
 
 /// `MaskAreaCell.generateXMask(int radius)`.
 #[must_use]
+// `1 + radius * 4` is positive for any non-negative radius.
+#[allow(clippy::cast_sign_loss)]
 pub fn generate_x_mask(radius: i32) -> Vec<[i32; 2]> {
     let nb_cells = (1 + radius * 4) as usize;
     let mut result = Vec::with_capacity(nb_cells);
@@ -1495,6 +1557,8 @@ pub fn generate_x_mask(radius: i32) -> Vec<[i32; 2]> {
 
 /// `MaskAreaCell.generateSquareMask(int radius)`.
 #[must_use]
+// `(1 + 2 * radius)²` is positive for any non-negative radius.
+#[allow(clippy::cast_sign_loss)]
 pub fn generate_square_mask(radius: i32) -> Vec<[i32; 2]> {
     let nb_cells = ((1 + 2 * radius) * (1 + 2 * radius)) as usize;
     let mut result = Vec::with_capacity(nb_cells);
