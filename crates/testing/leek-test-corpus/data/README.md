@@ -77,7 +77,7 @@ output and that the second run is a no-op. Its first run found **289 of 11005
 corpus cases and 16 of 101 AI files broken** — the safety net's first contact
 with real code, and several of those are the formatter changing what a program
 means (`not true` printed as `nottrue`, `(x -> e)(a)` printed as
-`(x) -> e(a)`).
+`(x) -> e(a)` — the latter fixed in #416).
 
 `fmt-known-failures-corpus.tsv` and `fmt-known-failures-ai.tsv` hold those
 failures, one `id<TAB>kind<TAB>detail` row each, and the test gates on the
@@ -92,16 +92,22 @@ inserts a separator wherever two adjacent tokens would otherwise re-lex as one
 (#413), and `format_class_body` emits a stray modifier instead of dropping it
 (#414). That took the files to **141 corpus rows and 6 AI rows**.
 
+Two more are fixed on top of that, both cases of a construct formatter
+re-deriving its delimiters instead of printing the ones the parser consumed:
+`format_lambda` keeps the parentheses that wrap a whole `(x -> e)` lambda
+rather than peeling them off its callee (#416), and the bracketed-list
+printers fall back to verbatim output instead of synthesizing a closer the
+node never had, so the mis-parsed `|x|` no longer grows a `>` (#418). That
+takes the files to **23 corpus rows and 3 AI rows**.
+
 **Every row is an open bug.** Fixing one means deleting its row; nothing here
 is accepted behaviour, and nothing here is a reason to weaken the check that
-found it. The remaining rows group into six defect classes:
+found it. The remaining rows group into four defect classes:
 
 | Row detail looks like | Defect | Issue |
 |---|---|---|
 | `` `:` becomes `]` ``, `` `..` becomes `]` `` | `a[i:j]` / `[a..b]` shredded into separate statements | #415 |
-| `enter CallExpr becomes enter LambdaExpr` | the paren making a lambda the callee is peeled (114 rows) | #416 |
 | `` `<end of file>` becomes … ``, `` `"` becomes `"\n` `` | tokens invented past the end of the file | #417 |
-| `` `KwVar` becomes `>` `` (`euler/pe025.leek`) | the `\|x\|` length operator | #418 |
 | `would drop 1 comment(s): /*…` | unterminated block comment grows a line per pass | #419 |
 | `not-idempotent … @pure  @unused` | annotations gain a space per pass | #420 |
 

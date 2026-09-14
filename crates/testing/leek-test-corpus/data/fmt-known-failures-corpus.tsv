@@ -13,54 +13,6 @@ TestAnnotations.java::testPure::3@v4	not-idempotent	line 1: @pure  @unused funct
 TestArray.java::testRange_access::0@v1	unsafe	formatting would change token #13: `:` becomes `]`
 TestArray.java::testRange_access::0@v2	unsafe	formatting would change token #13: `:` becomes `]`
 TestArray.java::testRange_access::0@v3	unsafe	formatting would change token #13: `:` becomes `]`
-TestFunction.java::testFunctions_Divide_Lambdas::12@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::13@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::13@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::13@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::14@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::15@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::15@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::15@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::20@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::20@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::20@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::20@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::21@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::21@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::21@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::21@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::22@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::22@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::22@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::22@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::23@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::23@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::23@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::23@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::38@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::38@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::38@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::38@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::5@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::5@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::5@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::5@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::6@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::6@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::6@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::6@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::7@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::7@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::7@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::7@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::8@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::8@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::8@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testFunctions_Divide_Lambdas::8@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testWrong_number_of_arguments::0@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testWrong_number_of_arguments::0@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testWrong_number_of_arguments::0@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testWrong_number_of_arguments::0@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestNumber.java::testLexicalErrors::7@v1	unsafe	formatting would change token #1: `'` becomes `'\n`
 TestNumber.java::testLexicalErrors::7@v2	unsafe	formatting would change token #1: `'` becomes `'\n`
 TestNumber.java::testLexicalErrors::7@v3	unsafe	formatting would change token #1: `'` becomes `'\n`
@@ -69,76 +21,6 @@ TestNumber.java::testLexicalErrors::8@v1	unsafe	formatting would change token #1
 TestNumber.java::testLexicalErrors::8@v2	unsafe	formatting would change token #1: `"` becomes `"\n`
 TestNumber.java::testLexicalErrors::8@v3	unsafe	formatting would change token #1: `"` becomes `"\n`
 TestNumber.java::testLexicalErrors::8@v4	unsafe	formatting would change token #1: `"` becomes `"\n`
-TestObject.java::run::460@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::460@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::460@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::461@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::461@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::461@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::462@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::462@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::462@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::473@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::473@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::473@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::474@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::474@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::474@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::475@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::475@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::475@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::476@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::476@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::476@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::477@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::477@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::477@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::478@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::478@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::478@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::479@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::479@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::479@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::480@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::480@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::480@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::481@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::481@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::481@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::482@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::482@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::482@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::483@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::483@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::483@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::484@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::484@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::484@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::485@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::485@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::485@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::486@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::486@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::486@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::487@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::487@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::487@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::488@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::488@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::488@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::489@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::489@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::489@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::490@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::490@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::490@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::491@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::491@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::491@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestSet.java::testSet_operator_EqualsEquals::4@v1	unsafe	formatting would change token #14: `<end of file>` becomes `>`
-TestSet.java::testSet_operator_EqualsEquals::4@v2	unsafe	formatting would change token #14: `<end of file>` becomes `>`
-TestSet.java::testSet_operator_EqualsEquals::4@v3	unsafe	formatting would change token #14: `<end of file>` becomes `>`
-TestSet.java::testSet_operator_EqualsEquals::4@v4	unsafe	formatting would change token #14: `<end of file>` becomes `>`
 TestString.java::testString_lexerEdgeCases::3@v1	unsafe	formatting would change token #1: `'unclosed` becomes `'unclosed\n`
 TestString.java::testString_lexerEdgeCases::3@v2	unsafe	formatting would change token #1: `'unclosed` becomes `'unclosed\n`
 TestString.java::testString_lexerEdgeCases::3@v3	unsafe	formatting would change token #1: `'unclosed` becomes `'unclosed\n`
