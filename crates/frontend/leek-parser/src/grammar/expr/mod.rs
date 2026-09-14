@@ -18,7 +18,6 @@
 //! - [`interval`] — bracket-delimited interval literals.
 
 use leek_syntax::SyntaxKind as S;
-use rowan::Checkpoint;
 
 use crate::parser::Parser;
 
@@ -441,11 +440,4 @@ fn binary_bp(kind: S) -> Option<(u8, u8)> {
 
         _ => return None,
     })
-}
-
-/// Wrap a binary expression starting at a checkpoint. Not used yet
-/// — kept here as the explicit form for documentation purposes.
-#[allow(dead_code)]
-fn wrap_binary(p: &mut Parser, cp: Checkpoint) {
-    p.start_node_at(cp, S::BinaryExpr);
 }

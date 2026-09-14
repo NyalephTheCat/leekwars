@@ -44,7 +44,6 @@ pub(crate) static BUILTIN_FN_META: LazyLock<HashMap<&'static str, FnMeta>> = Laz
 /// `CANNOT_REDEFINE_FUNCTION`, on a `Local` it's fine).
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)] // some variants unused until later slices
 pub enum SymbolKind {
     Global,
     Function,

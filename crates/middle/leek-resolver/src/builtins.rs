@@ -31,8 +31,6 @@ pub struct BuiltinLibrary {
     pub symbols: &'static [&'static str],
 }
 
-const ANY: u8 = u8::MAX;
-
 /// Builtins with known arity and/or version constraints. Conservative
 /// — only entries we're confident about. Functions missing from this
 /// table are not arity- or version-checked.
@@ -344,11 +342,6 @@ pub const FINAL_BUILTIN_FIELDS: &[&str] = &[
     "Real.EPSILON",
     "String.EMPTY",
 ];
-
-// Variadic upper bound — kept as a constant for future use even
-// though no current entries reach it.
-#[allow(dead_code)]
-const _ANY: u8 = ANY;
 
 /// Names visible at every scope.
 pub const BUILTINS: &[&str] = &[
