@@ -14,6 +14,29 @@ use crate::workspace::Workspace;
 /// client hands some back (see `code_action`).
 pub const SOURCE: &str = "leek";
 
+/// This repository's web address, read from the manifest rather than written
+/// out here.
+///
+/// `leek-lsp`'s `[package]` inherits `repository` from `[workspace.package]`
+/// precisely so this is non-empty. A literal is what made every "explain"
+/// link in the Problems panel 404: it named a repository this code has not
+/// lived in for a long time, and nothing could notice.
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// Directory, relative to the repository root, holding the extended
+/// write-ups. `miku explain` prints the same files from the copy
+/// `leek-diagnostics` embeds at build time.
+const EXPLAIN_DIR: &str = "crates/core/leek-diagnostics/explain";
+
+/// Web address of the extended write-up for diagnostic `code`.
+///
+/// Only meaningful for a code that has one ([`leek_diagnostics::Code::explain`]
+/// returns `Some`); nothing here checks, and a code without a write-up would
+/// get a link to a file that does not exist.
+fn explain_href(code: &str) -> String {
+    format!("{REPOSITORY}/blob/main/{EXPLAIN_DIR}/{code}.md")
+}
+
 /// The diagnostic set for one file — the single source of truth behind
 /// push (`publishDiagnostics`), pull (`textDocument/diagnostic`) and
 /// `textDocument/codeAction`.
@@ -116,13 +139,7 @@ pub fn to_lsp(
     let code_description = diag
         .code
         .explain()
-        .and_then(|_| {
-            lsp::Url::parse(&format!(
-                "https://github.com/chloe/leekscript-rs/blob/main/crates/core/leek-diagnostics/explain/{}.md",
-                diag.code.id()
-            ))
-            .ok()
-        })
+        .and_then(|_| lsp::Url::parse(&explain_href(diag.code.id())).ok())
         .map(|href| lsp::CodeDescription { href });
 
     let related_information = uri.and_then(|doc_uri| {
@@ -177,7 +194,7 @@ pub fn to_lsp(
 
 #[cfg(test)]
 mod tests {
-    use super::{LabelSources, to_lsp};
+    use super::{EXPLAIN_DIR, LabelSources, explain_href, to_lsp};
     use crate::util::position::PosMap;
     use leek_diagnostics::{Code, Diagnostic};
     use leek_span::{LineTable, SourceId, Span};
@@ -238,5 +255,67 @@ mod tests {
             &labels,
         );
         assert!(out.related_information.is_none());
+    }
+
+    /// The "explain" link an editor opens has to be a real address on the
+    /// real forge. It used to name `chloe/leekscript-rs`, so every link in
+    /// the Problems panel 404'd and nothing said so.
+    #[test]
+    fn the_explain_link_points_at_this_repository_on_github() {
+        let url = lsp::Url::parse(&explain_href("E0001")).expect("a parseable URL");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("github.com"));
+        assert_eq!(
+            url.path(),
+            format!("/NyalephTheCat/leekwars/blob/main/{EXPLAIN_DIR}/E0001.md"),
+        );
+    }
+
+    /// The other half of the link, which the URL shape alone cannot pin:
+    /// [`EXPLAIN_DIR`] must still be where the write-ups live. Moving them
+    /// without editing the constant would leave a URL that parses and 404s.
+    #[test]
+    fn the_explain_dir_is_where_the_write_ups_actually_live() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("the workspace root is three levels above this crate");
+        let file = root.join(EXPLAIN_DIR).join("E0001.md");
+        assert!(
+            file.is_file(),
+            "{} does not exist; EXPLAIN_DIR is stale",
+            file.display(),
+        );
+    }
+
+    /// A code with a write-up gets the link; one without gets none, so the
+    /// editor never offers an "explain" that leads nowhere.
+    #[test]
+    fn only_codes_with_a_write_up_carry_a_code_description() {
+        let text = "var x = 1\n";
+        let lt = LineTable::new(text);
+        let id = SourceId::new(1).unwrap();
+        let uri = url("main.leek");
+        let convert = |code: Code| {
+            to_lsp(
+                &Diagnostic::error(code, Span::new(id, 0, 3), "boom"),
+                PosMap::new(&lt, text),
+                Some(&uri),
+                &LabelSources::default(),
+            )
+            .code_description
+        };
+
+        let explained = Code("E0001");
+        assert!(explained.explain().is_some(), "E0001 has a write-up");
+        let href = convert(explained)
+            .expect("E0001 links to its write-up")
+            .href;
+        assert!(href.as_str().ends_with("/E0001.md"), "got {href}");
+
+        // Not in the catalog at all, so certainly no write-up.
+        let unexplained = Code("E9999");
+        assert!(unexplained.explain().is_none());
+        assert!(convert(unexplained).is_none());
     }
 }

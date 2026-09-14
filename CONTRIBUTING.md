@@ -49,8 +49,10 @@ cargo install --path bins/miku    # likewise leekc, leek-lsp, leek-dap, leekbenc
 
 ## The quality gate
 
-[`tools/check.sh`](tools/check.sh) is the canonical, repo-wide gate, and it is
-exactly what CI runs. **Run it before opening a pull request:**
+[`tools/check.sh`](tools/check.sh) is the canonical, repo-wide gate — the one
+command that has to be green before you open a pull request. CI runs the same
+checks and several more besides (listed below), so a green `check.sh` is
+necessary but not quite sufficient. **Run it before opening a pull request:**
 
 ```sh
 tools/check.sh          # fmt + pin/layer/artifact checks + catalog drift + clippy + tests
@@ -67,13 +69,39 @@ cargo xtask check-layers                 # enforce the crate-layering rule
 cargo xtask check-errors                 # keep `anyhow` out of the library layers
 cargo xtask check-fmt-idiom              # one spelling for `write!` into a `String`
 cargo xtask check-artifacts              # generated output stays untracked
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --exclude leek-test-corpus   # fast tests
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --exclude leek-test-corpus --locked   # fast tests
 ```
 
-CI mirrors this across `fmt`, `clippy`, `test`, plus a `cargo-deny`
-supply-chain audit and a VS Code extension build — see
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+`--locked` is there so a dependency that has moved fails the gate instead of
+quietly rewriting `Cargo.lock`. If you see *"the lock file needs to be
+updated"*, update it deliberately and commit it with the change that needed it.
+
+### What CI runs that `check.sh` does not
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) mirrors the gate across
+`fmt`, `clippy` and `test` jobs, and adds:
+
+- **macOS**, alongside Linux, in the `test` matrix. It is `continue-on-error`
+  — the Cranelift JIT hits an upstream AArch64 relocation assertion on Apple
+  Silicon — so it is visibility, not a block. `check.sh` is Linux-only.
+- **`cargo test -p leek-dap -- --ignored`**, in a process of its own: the debug
+  adapter's fight test plays a whole duel and registers the leek-wars library
+  process-wide.
+- **`cargo-deny`** — the supply-chain and license audit driven by
+  [`deny.toml`](deny.toml).
+- **The VS Code extension** — install, typecheck and compile
+  ([`editors/vscode/`](editors/vscode/)).
+- **Two `git diff --exit-code` guards** on the tracked tree: that building left
+  `crates/testing/leek-test-corpus/data` alone, and that the test run left the
+  Java-backend snapshots byte-identical. (`check.sh` checks the second itself,
+  by fingerprint.)
+
+Two further workflows run outside `ci.yml`:
+[`corpus.yml`](.github/workflows/corpus.yml) runs the upstream corpus suite
+(what `check.sh --full` adds) nightly and on pull requests touching the
+compiler, and [`miri.yml`](.github/workflows/miri.yml) runs Miri over the
+native runtime's pointer handling — also non-blocking for now.
 
 ## Code style & standards
 

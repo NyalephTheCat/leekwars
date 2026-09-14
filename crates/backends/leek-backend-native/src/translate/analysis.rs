@@ -138,9 +138,10 @@ pub(super) fn lambda_passed_to_hof(program: &MirProgram, lambda_fi: usize) -> bo
 /// because their `@x` has no observable by-reference effect there. This holds
 /// for a **lambda** or a **method**: in v2+ neither propagates a `@x`
 /// reassignment to the caller (only a plain top-level *named function* does, via
-/// `byref_cells_threadable`) — interpreter-confirmed (`o.m(@x){x=9}` leaves the
-/// caller's argument unchanged). A named top-level function is NOT no-op (it
-/// threads). The param must be pure-local ([`byref_param_pure_local`]) — an
+/// `byref_cells_threadable`) — confirmed against upstream (`o.m(@x){x=9}`
+/// leaves the caller's argument unchanged). A named top-level function is NOT
+/// no-op (it threads). The param must be pure-local
+/// ([`byref_param_pure_local`]) — an
 /// in-place mutation still propagates through the shared `Rc`, and an escaping
 /// one needs a real cell — and a lambda must not be a writeback-HOF callback
 /// (the runtime writes those back). Empty for v1.
@@ -240,7 +241,7 @@ pub(super) fn virtual_method_targets(
 }
 
 /// Methods of `f` that are read as *values* via index syntax — `obj['m']`
-/// (which the interpreter turns into a bound method). Each entry is
+/// (which upstream turns into a bound method). Each entry is
 /// `(function_idx, class_name, method_name)`. A literal key naming a *field*
 /// is a plain field read and excluded; a dynamic key could name any method,
 /// so every method of the (statically known) class is included. These edges
@@ -610,7 +611,7 @@ pub(super) fn byref_param_returned(f: &MirFunction, p: LocalId) -> bool {
 /// reassigned in `f`'s own body, not aliased onward to another user fn / method
 /// / indirect call, not used as a method/super receiver, and not promoted. Such
 /// a param is cell-threaded end-to-end — the caller passes its shared
-/// `Value::Cell` (directly via [`Tx::byref_cell_arg`], indirectly via the
+/// `Value::Cell` (directly via `Tx::byref_cell_arg`, indirectly via the
 /// runtime `thread_args`), the param reuses it (`leek_make_cell`), and the
 /// escaped value (the capturing lambda, or the returned reference the caller
 /// binds) shares it; a non-local argument simply gets a fresh cell (no aliasing
@@ -1123,7 +1124,7 @@ pub fn needs_cell_semantics(
     // Lambdas whose by-ref params are *entirely* handled by a writeback HOF
     // builtin at runtime (`arrayFilter`/…). Their by-ref-param reassignments are
     // exempt from the by-ref gates **in every version** — the HOF machinery
-    // lives in the shared runtime (`higher_order_array`), which the interpreter
+    // lives in the shared runtime (`higher_order_array`), which upstream
     // already handles at v1, so native matches it. Captured (non-param) shared
     // reassignments stay gated (those are the genuine v1 deep-clone conflict).
     // Includes both lambdas constructed-and-passed to a writeback HOF and

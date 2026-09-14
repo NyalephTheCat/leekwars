@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Inherited so `env!("CARGO_PKG_REPOSITORY")` is non-empty here: the diagnostic
+# `codeDescription` links are built from it (see `diagnostics::explain_href`).
+repository.workspace = true
 description = "Language Server Protocol implementation for Leekscript."
 
 [dependencies]

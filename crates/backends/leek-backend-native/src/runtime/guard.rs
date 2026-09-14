@@ -3,7 +3,7 @@
 //! JIT'd code calls the `leek_*` shims through `extern "C"` functions. A Rust
 //! panic may not unwind across that boundary — it aborts the whole host
 //! process (generator, LSP, DAP, test runner). Every shim is therefore declared
-//! through [`shim!`], which runs the body under [`shim_guard`]: a panic is
+//! through `shim!`, which runs the body under [`shim_guard`]: a panic is
 //! caught, recorded as the `INTERNAL_PANIC` runtime error (surfaced by `run()`
 //! as `NativeError::Runtime`), and the shim returns an inert default so the
 //! JIT'd caller keeps a valid value and winds down.

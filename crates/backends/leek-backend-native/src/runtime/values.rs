@@ -1,6 +1,6 @@
 //! Scalar boxing/unboxing, cells, casts/promotions, and the
 //! unary / binary operator shims (delegating to shared `leek_runtime`
-//! semantics so native matches the interpreter exactly).
+//! semantics so native matches upstream exactly).
 //!
 //! Every shim here that takes a handle is an `unsafe extern "C" fn` whose
 //! `# Safety` section defers to the
@@ -17,7 +17,7 @@ shim! {
     /// Coerce a boxed value to a declared scalar kind (`0`=int, `1`=real,
     /// `2`=bool), preserving `null` (for nullable declared types). Used to make
     /// a typed static field's stored value match its declaration (`real? a = 12`
-    /// reads back `12.0`), mirroring the interpreter's `coerce_to_type`.
+    /// reads back `12.0`), mirroring upstream's typed-slot coercion.
     ///
     /// # Safety
     /// `h` must satisfy the [handle contract](super#handle-safety-contract).
@@ -252,7 +252,7 @@ shim! {
 shim! {
     /// Apply a unary operator to a boxed value, returning a new handle.
     /// `code`: 0 = negate (`-x`), 1 = bitwise-not (`~x`). Delegates to the
-    /// shared `leek_runtime` ops so the result matches the interpreter.
+    /// shared `leek_runtime` ops so the result matches upstream.
     ///
     /// # Safety
     /// `p` must satisfy the [handle contract](super#handle-safety-contract).
@@ -288,9 +288,9 @@ shim! {
 
 shim! {
     /// Apply a binary operator to two boxed values, returning a new handle.
-    /// Delegates to the interpreter's shared `apply_binary`, so the result
-    /// matches the interpreter exactly (string concat, array `+`, version-
-    /// specific division, etc.). `code` is a [`BinOp`] encoded via
+    /// Delegates to the shared `leek_runtime` operators via [`apply_binop`],
+    /// so the result matches upstream exactly (string concat, array `+`,
+    /// version-specific division, etc.). `code` is a [`BinOp`] encoded via
     /// [`binop_code`].
     ///
     /// # Safety
@@ -417,8 +417,8 @@ shim! {
 
 /// Pure dispatch of a [`BinOp`] onto the shared `leek_runtime` operators —
 /// the single source of truth shared by the JIT `leek_value_binop` shim and
-/// the compile-time const-evaluator (`const_eval_default`). Matches the
-/// interpreter exactly (string concat, array `+`, version-specific division).
+/// the compile-time const-evaluator (`const_eval_default`). Matches
+/// upstream exactly (string concat, array `+`, version-specific division).
 pub fn apply_binop(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
     use BinOp::{
         Add, BitAnd, BitOr, BitXor, CompoundXor, Div, Eq, Ge, Gt, IdentityEq, IdentityNe, In,

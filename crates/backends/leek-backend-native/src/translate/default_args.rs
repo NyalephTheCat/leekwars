@@ -123,10 +123,10 @@ pub(super) enum DefaultArg {
 /// composite literals (`[1, [2, 3]]`, `['x': (1+2)*3]`, sets, objects), and
 /// constant arithmetic. Returns `None` when it references a param/`this`/
 /// global, indexes/fields, calls a function, or uses any other rvalue (the
-/// call site then skips). Composite construction mirrors the interpreter's
+/// call site then skips). Composite construction mirrors upstream's
 /// `Rvalue::{Array,Map,Set,Object}` exactly (same `MapKey` canonicalization),
 /// so the folded value matches. The caller boxes it once and deep-clones per
-/// call, matching the interpreter's fresh-per-call default re-evaluation.
+/// call, matching upstream's fresh-per-call default re-evaluation.
 pub(super) fn const_eval_default(
     f: &MirFunction,
     param: LocalId,

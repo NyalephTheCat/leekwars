@@ -19,7 +19,7 @@ use std::cell::RefCell;
 /// Apply a class's `string()` override to the *top-level* program result: if
 /// `v` is an instance whose class declares a 0-arg `string()`, invoke it and
 /// return its value, setting `DISPLAY_TOP_LEVEL_BARE` so a returned string
-/// renders without quotes. Mirrors the interpreter's
+/// renders without quotes. Mirrors upstream's
 /// `invoke_instance_string_method`. Any other value passes through unchanged.
 pub fn invoke_top_level_string(v: Value) -> Value {
     let Value::Instance(inst) = &v else {
@@ -131,7 +131,7 @@ pub(super) fn dispatch_call_value(
             // user-params…]`). An under-arity call (`(x => x)()`) would
             // otherwise leave `argv` short and the body would read past it —
             // an out-of-bounds load that hard-faults. Pad missing user params
-            // with null and drop any surplus, matching the interpreter's lax
+            // with null and drop any surplus, matching upstream's lax
             // arity (the missing `x` binds to null).
             argv.resize_with(nparams, || handle(Value::Null));
             unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
@@ -144,7 +144,7 @@ pub(super) fn dispatch_call_value(
             // Indirect builtin calls (`[cos][0]()`) don't get the
             // compile-time default-arg injection direct calls do. If the
             // builtin needs at least one arg and none was passed, return
-            // null — matching the interpreter's `call_value`.
+            // null — matching upstream's indirect-call semantics.
             if args.is_empty() && leek_runtime::needs_at_least_one_arg(name) {
                 return Value::Null;
             }
@@ -170,7 +170,7 @@ pub(super) fn dispatch_call_value(
                 return Value::Null;
             };
             // A method read as a value (`var f = A.m`) requires the EXACT
-            // parameter count including the implicit `this` — the interpreter
+            // parameter count including the implicit `this` — upstream
             // returns null on a mismatch rather than binding missing params to
             // null. Free-function refs keep null-padding (and surplus drop).
             if exact && args.len() != nparams {
@@ -192,7 +192,7 @@ pub(super) fn dispatch_call_value(
             unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
         }
         // A bound method (`obj['m']` / `obj.m` as a value). Mirrors the
-        // interpreter: prepend the stored receiver, unless the caller passed
+        // upstream: prepend the stored receiver, unless the caller passed
         // one extra arg over the method's user-arity (`[a['m']][0](a, 5)`),
         // in which case that first arg is the receiver. The method body is
         // compiled with the uniform ABI and registered in `LAMBDA_FNS`.
@@ -226,7 +226,7 @@ pub(super) fn dispatch_call_value(
         }
         // A builtin class invoked as a value (`var c = Array; c(1, 2)`, or a
         // field/object slot holding `Array`/`Map`/…) is constructor sugar —
-        // mirrors the interpreter's `call_value` `BuiltinClass` arm.
+        // mirrors upstream's builtin-class construction.
         Value::BuiltinClass(name) => leek_runtime::construct_builtin_class(name, args),
         // A *user* class reference invoked as a value (`arrayMap(a, A)`, or an
         // object slot holding `A` that's called) constructs an instance via the
@@ -275,11 +275,9 @@ shim! {
 }
 
 shim! {
-    /// Indirect call (`f(args)` where `f` is a value): dispatch `callee` with the
-    /// `argc` boxed args in `argv`. Returns a boxed result.
     /// Dynamic method dispatch on an unknown-class receiver: `receiver.method(args)`
-    /// where the static class isn't known. Mirrors the interpreter's
-    /// `dispatch_method_call`: if the receiver is a class instance whose runtime
+    /// where the static class isn't known. Mirrors upstream's method
+    /// dispatch: if the receiver is a class instance whose runtime
     /// class declares `method` (looked up in `METHOD_RESOLVE`), invoke that user
     /// method with `receiver` prepended (padded to its arity); otherwise fall back
     /// to a builtin method (`run_builtin(method, [receiver, …args])`). This lets a
@@ -322,7 +320,7 @@ shim! {
             }
         }
         // Builtin method fallback (an unknown name / non-number receiver yields null,
-        // exactly as the interpreter's `run_builtin` does) — needs owned `Value`s.
+        // exactly as upstream's builtin dispatch does) — needs owned `Value`s.
         // Skipped once the run has errored, like every other builtin dispatch.
         if aborting() {
             return handle(Value::Null);
@@ -342,6 +340,11 @@ shim! {
 }
 
 shim! {
+    /// Indirect call — `f(args)` where `f` is a *value* rather than a name:
+    /// dispatch `callee` with the `argc` boxed args in `argv`, returning a
+    /// boxed result. `callee` may be a lambda, a reference to a user function,
+    /// a builtin used as a value, or a builtin class being constructed; see
+    /// [`dispatch_call_value`].
     pub extern "C" fn leek_call_value(
         callee: *mut Value,
         argv: *const *mut Value,
@@ -366,7 +369,7 @@ shim! {
 /// the language version, and — once the lambda table is installed — invokes
 /// JIT-compiled lambda callbacks for higher-order builtins. RNG draws go
 /// through the per-run persistent [`NATIVE_RNG`], so the sequence advances
-/// across calls (and matches the interpreter's).
+/// across calls (and matches upstream's).
 pub(super) struct NativeHost {
     version: u8,
 }
@@ -507,7 +510,7 @@ shim! {
 shim! {
     /// Read a name that is a builtin shadowed by a same-named global
     /// (`abs = 2; return abs`, or `var _c = count; count = …`). Mirrors the
-    /// interpreter's dynamic resolution: the global's value if one has been
+    /// upstream's dynamic resolution: the global's value if one has been
     /// assigned, otherwise the builtin handle (constant or `Function::Builtin`).
     pub extern "C" fn leek_ref_or_builtin(name: *mut Value) -> *mut Value {
         let Some(n) = (unsafe { builtin_name(name) }) else {
@@ -638,7 +641,22 @@ shim! {
     }
 }
 
+// `leek_builtin0` … `leek_builtin4`: call a stdlib builtin by name with a
+// fixed number of boxed arguments. One shim per arity rather than a single
+// `(argv, argc)` pair, because the common case — `abs(x)`, `push(a, v)` — then
+// lowers to a plain call with the arguments already in registers, and builds
+// no argument array on the stack.
+//
+// All five do the same four things: resolve `name` (a handle to a string
+// constant) without allocating, charge the builtin's op cost and bail if that
+// exhausts the budget, call `leek_runtime::call_builtin`, and route a reported
+// builtin error into the run's error slot via `finish_builtin`. A `name` that
+// is not a string handle yields null rather than failing.
+//
+// Four is the ceiling: `Tx::generic_builtin` rejects a higher arity as
+// unsupported, so adding a five-argument builtin means adding a shim here.
 shim! {
+    /// Call a zero-argument stdlib builtin by name.
     pub extern "C" fn leek_builtin0(name: *mut Value, version: i64) -> *mut Value {
         let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
@@ -654,6 +672,7 @@ shim! {
 }
 
 shim! {
+    /// Call a one-argument stdlib builtin by name (`abs(x)`).
     pub extern "C" fn leek_builtin1(name: *mut Value, a0: *mut Value, version: i64) -> *mut Value {
         let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
@@ -670,6 +689,7 @@ shim! {
 }
 
 shim! {
+    /// Call a two-argument stdlib builtin by name (`push(a, v)`).
     pub extern "C" fn leek_builtin2(
         name: *mut Value,
         a0: *mut Value,
@@ -691,6 +711,7 @@ shim! {
 }
 
 shim! {
+    /// Call a three-argument stdlib builtin by name.
     pub extern "C" fn leek_builtin3(
         name: *mut Value,
         a0: *mut Value,
@@ -717,6 +738,8 @@ shim! {
 }
 
 shim! {
+    /// Call a four-argument stdlib builtin by name — the highest arity the
+    /// per-arity shims cover.
     pub extern "C" fn leek_builtin4(
         name: *mut Value,
         a0: *mut Value,

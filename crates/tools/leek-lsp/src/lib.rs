@@ -3,15 +3,51 @@
 //!
 //! Wraps [`tower-lsp`] with a single workspace per server, backed by
 //! a salsa [`LeekDb`](leek_pipeline::salsa::LeekDb) so per-keystroke
-//! re-runs hit cache. The MVP supports:
+//! re-runs hit cache.
 //!
-//! - `textDocument/publishDiagnostics` — on open / change
-//! - `textDocument/hover` — types from `leek-types`'s `TypeTable`
-//! - `textDocument/definition` — symbols from `leek-resolver`'s
-//!   `ResolveTable`
-//! - `textDocument/documentSymbol` — CST-only outline
+//! # What the server answers
 //!
-//! See `doc/lsp.md` for the broader v0.1 plan.
+//! The authoritative list is the `ServerCapabilities` block in
+//! [`server`]; this is the map of which module answers what.
+//!
+//! **Diagnostics** — [`diagnostics`] builds one set per file and both
+//! transports serve it: push (`publishDiagnostics`, on open/change) and
+//! pull ([`handlers::pull_diagnostics`]).
+//!
+//! **Navigation** — [`handlers::definition`] (definition + declaration),
+//! [`handlers::type_definition`], [`handlers::implementation`],
+//! [`handlers::references`], [`handlers::document_highlight`],
+//! [`handlers::call_hierarchy`], [`handlers::type_hierarchy`].
+//! Cross-file answers are scoped by [`handlers::program_scope`].
+//!
+//! **Information** — [`handlers::hover`], [`handlers::signature_help`],
+//! [`handlers::inlay_hints`], [`handlers::inline_values`],
+//! [`handlers::code_lens`] (references and complexity, resolved lazily
+//! and clickable via `workspace/executeCommand`),
+//! [`handlers::document_link`], [`handlers::document_color`].
+//!
+//! **Structure** — [`handlers::symbols`] (document outline),
+//! [`handlers::workspace_symbols`], [`handlers::folding`],
+//! [`handlers::selection_range`], [`handlers::semantic_tokens`].
+//!
+//! **Editing** — [`handlers::completion`] (identifiers, builtins, and
+//! member completion after `.`), [`handlers::code_action`] (quick fixes
+//! and `source.fixAll`), [`handlers::rename`] +
+//! [`handlers::prepare_rename`], [`handlers::linked_editing`],
+//! [`handlers::formatting`] / [`handlers::range_formatting`] /
+//! [`handlers::on_type_formatting`], [`handlers::file_operations`].
+//!
+//! A handler whose only alternative would be a wrong edit answers with a
+//! [`Refusal`](handlers::refusal::Refusal) the editor shows the user,
+//! rather than a silent no-op.
+//!
+//! # Where the rest is written down
+//!
+//! [`log`] owns the single logging seam and the `LEEK_LSP_LOG` contract,
+//! [`settings`] the editor-pushed configuration, [`workspace`] the salsa
+//! DB and document registry, and [`handlers::program_scope`] the
+//! per-program symbol scoping Leekscript's flat namespace forces.
+//! `docs/lsp.md` in the repository root ties those together.
 
 // A language server has no terminal. Everything it says must go through
 // [`log`] so it reaches both stderr and — for warnings and errors — the

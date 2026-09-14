@@ -33,17 +33,77 @@ pub fn embedded_manifest() -> &'static Manifest {
 }
 
 pub fn upstream_fixtures_dir() -> PathBuf {
+    try_upstream_fixtures_dir()
+        .expect("upstream fixtures dir missing; vendored submodule not checked out")
+}
+
+/// [`upstream_fixtures_dir`], or `None` when the submodule is not checked out.
+fn try_upstream_fixtures_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .join("official-generator/leek-wars-generator/leekscript/src/test/resources/ai")
         .canonicalize()
-        .expect("upstream fixtures dir missing; vendored submodule not checked out")
+        .ok()
 }
 
 pub fn upstream_fixture(rel: &str) -> String {
     let path = upstream_fixtures_dir().join(rel);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read fixture {}: {}", path.display(), e))
+}
+
+/// Whether the vendored upstream fixture files are on disk.
+///
+/// Every fixture suite has to ask: a non-recursive clone has no fixtures, and
+/// a suite that panicked on the missing directory would report a checkout
+/// choice as a test failure. [`upstream_fixture`] and [`upstream_fixtures_dir`]
+/// both panic when this is `false`, so guard with it and skip.
+///
+/// This asks the filesystem, deliberately. `embedded_manifest().cases` is not
+/// the same question and is not a safe proxy for it: the manifest is baked
+/// into `OUT_DIR` at build time, so a target directory shared with a checkout
+/// that *does* have the submodule hands this crate a populated manifest while
+/// the fixture files are still missing here.
+#[must_use]
+pub fn upstream_fixtures_available() -> bool {
+    try_upstream_fixtures_dir().is_some()
+}
+
+/// Every `.leek` file under `dir`, recursively, in a stable order.
+///
+/// Shared by the suites that sweep the upstream fixtures whole
+/// (`tests/parser_fixtures.rs`, `tests/fmt_roundtrip.rs`) so they cannot
+/// disagree about what "every fixture" means.
+pub fn leek_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = std::fs::read_dir(&current)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", current.display()));
+        for entry in entries {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "leek") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Path of `path` relative to the upstream fixtures directory, with
+/// forward slashes — the stable id for a fixture.
+///
+/// The absolute path carries the checkout root, which differs between a
+/// developer's machine and the CI runner, so anything tracked (or merely
+/// reported) has to be keyed on this instead.
+pub fn fixture_id(path: &Path) -> String {
+    path.strip_prefix(upstream_fixtures_dir())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 pub fn upstream_tests_dir() -> PathBuf {

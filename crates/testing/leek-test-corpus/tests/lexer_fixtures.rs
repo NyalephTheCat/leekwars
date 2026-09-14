@@ -5,7 +5,18 @@
 use leek_lexer::lex;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, SyntaxNode, Version, build_flat_tree, parse_pragmas};
-use leek_test_corpus::upstream_fixture;
+use leek_test_corpus::{upstream_fixture, upstream_fixtures_available};
+
+/// Whether to run at all. Every test here reads a vendored fixture, and
+/// a non-recursive clone has none — so skip rather than report a checkout
+/// choice as nine test failures. `corpus.yml` checks the submodule out.
+fn skip() -> bool {
+    if upstream_fixtures_available() {
+        return false;
+    }
+    eprintln!("skipping: the upstream submodule is not checked out");
+    true
+}
 
 fn lex_upstream(rel: &str) -> Vec<SyntaxKind> {
     let text = upstream_fixture(rel);
@@ -22,6 +33,9 @@ fn lex_upstream(rel: &str) -> Vec<SyntaxKind> {
 
 #[test]
 fn library_leek_lexes_cleanly() {
+    if skip() {
+        return;
+    }
     let kinds = lex_upstream("library.leek");
     let last = *kinds.last().expect("non-empty token stream");
     assert_eq!(last, SyntaxKind::Eof);
@@ -35,6 +49,9 @@ fn library_leek_lexes_cleanly() {
 
 #[test]
 fn multiple_includes_leek_lexes_cleanly() {
+    if skip() {
+        return;
+    }
     let kinds = lex_upstream("multiple_includes.leek");
     assert_eq!(*kinds.last().unwrap(), SyntaxKind::Eof);
     // Three include statements in source → three `KwInclude` tokens.
@@ -47,6 +64,9 @@ fn multiple_includes_leek_lexes_cleanly() {
 
 #[test]
 fn bonjour_leek_lexes_cleanly() {
+    if skip() {
+        return;
+    }
     let kinds = lex_upstream("bonjour.leek");
     assert_eq!(*kinds.last().unwrap(), SyntaxKind::Eof);
 }
@@ -77,30 +97,48 @@ fn assert_round_trips(rel: &str) {
 
 #[test]
 fn round_trip_library() {
+    if skip() {
+        return;
+    }
     assert_round_trips("library.leek");
 }
 
 #[test]
 fn round_trip_bonjour() {
+    if skip() {
+        return;
+    }
     assert_round_trips("bonjour.leek");
 }
 
 #[test]
 fn round_trip_multiple_includes() {
+    if skip() {
+        return;
+    }
     assert_round_trips("multiple_includes.leek");
 }
 
 #[test]
 fn round_trip_array_keys() {
+    if skip() {
+        return;
+    }
     assert_round_trips("array_keys.leek");
 }
 
 #[test]
 fn round_trip_include_sub() {
+    if skip() {
+        return;
+    }
     assert_round_trips("include_sub.leek");
 }
 
 #[test]
 fn round_trip_include_multiple() {
+    if skip() {
+        return;
+    }
     assert_round_trips("include_multiple.leek");
 }

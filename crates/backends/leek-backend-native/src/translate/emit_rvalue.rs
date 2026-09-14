@@ -93,7 +93,7 @@ impl Tx<'_, '_> {
                 } else {
                     // An unresolved bare name (not a constant/class/builtin) —
                     // a global declared elsewhere (`global x`) or an undefined
-                    // reference. The interpreter reads the name-keyed global
+                    // reference. Upstream reads the name-keyed global
                     // store, falling back to null; `leek_global_get` does
                     // exactly that.
                     let name_h = self.const_string(name)?;
@@ -287,7 +287,7 @@ impl Tx<'_, '_> {
             }
             // Reflective members (`C.fields`, `C.methods`, …) are known at
             // compile time — materialise the array once and hand out a fresh
-            // copy per read. The interpreter rebuilds the array on every
+            // copy per read. Upstream rebuilds the array on every
             // evaluation, so a `C.fields.push(x)` must not be visible to the
             // next read (nor, once the module is reused across turns, to the
             // next run).
@@ -344,7 +344,7 @@ impl Tx<'_, '_> {
 
     /// Build an interval `[start..end]`. Endpoints are boxed (a null
     /// handle marks an unbounded end); inclusivity / forces-real bits are
-    /// packed into `flags`. `step` is ignored (as in the interpreter).
+    /// packed into `flags`. `step` is ignored (as upstream does).
     pub(super) fn interval(
         &mut self,
         iv: &leek_mir::ir::IntervalRvalue,
@@ -580,7 +580,7 @@ impl Tx<'_, '_> {
         idx: &Operand,
     ) -> Result<(Value, ValTy), NativeError> {
         // `C['member']` indexes a class reference — resolved like `C.member`
-        // (the interpreter treats index and field member access identically).
+        // (upstream treats index and field member access identically).
         if let Some(cls) = self.classref_locals.get(&base).cloned() {
             if let Operand::Const(Const::String(name)) = idx {
                 // `C['name']` — the class name.

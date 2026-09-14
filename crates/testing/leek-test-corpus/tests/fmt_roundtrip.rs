@@ -32,12 +32,13 @@
 //! upstream submodule; `cargo test --workspace` in ci.yml excludes this
 //! crate.
 
-use std::path::{Path, PathBuf};
-
 use leek_fmt::{FormatOptions, format_source_checked};
 use leek_span::SourceId;
 use leek_syntax::Version;
-use leek_test_corpus::{embedded_manifest, first_difference, upstream_fixtures_dir};
+use leek_test_corpus::{
+    embedded_manifest, first_difference, fixture_id, leek_files, upstream_fixtures_available,
+    upstream_fixtures_dir,
+};
 
 /// How many ids to name per bucket before summarizing.
 const REPORTED: usize = 20;
@@ -135,50 +136,20 @@ fn formatting_every_corpus_case_is_safe_and_idempotent() {
 
 #[test]
 fn formatting_every_upstream_ai_file_is_safe_and_idempotent() {
-    if embedded_manifest().cases.is_empty() {
+    if !upstream_fixtures_available() {
         eprintln!("skipping: the upstream submodule is not checked out");
         return;
     }
-    let dir = upstream_fixtures_dir();
-    let inputs: Vec<(String, String, Version)> = leek_files(&dir)
+    let inputs: Vec<(String, String, Version)> = leek_files(&upstream_fixtures_dir())
         .iter()
         .map(|path| {
             let src = std::fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-            // Ids are relative to the fixtures dir: the absolute path
-            // carries the checkout root, which differs between a developer's
-            // machine and the CI runner, so a tracked file keyed on it would
-            // match nothing in CI.
-            let id = path
-                .strip_prefix(&dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
             // The upstream AI files carry no `@version` pragma; they are
             // written for the latest language version.
-            (id, src, Version::LATEST)
+            (fixture_id(path), src, Version::LATEST)
         })
         .collect();
     // Likewise for the AI suite: its last three rows went with those fixes.
     assert_all_clean("ai", "upstream AI file(s)", &inputs);
-}
-
-/// Every `.leek` file under `dir`, recursively, in a stable order.
-fn leek_files(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let entries = std::fs::read_dir(&current)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", current.display()));
-        for entry in entries {
-            let path = entry.expect("directory entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "leek") {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    out
 }

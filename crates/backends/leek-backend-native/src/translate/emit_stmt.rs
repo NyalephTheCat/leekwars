@@ -8,7 +8,7 @@ use super::{
 
 impl Tx<'_, '_> {
     /// Accumulate `n` operations into the current block's pending charge, at
-    /// the same MIR sites the interpreter's `charge_ops` fires. The charge is
+    /// the same MIR sites upstream charges. The charge is
     /// *coalesced*: nothing is emitted here — [`flush_charge`](Self::flush_charge)
     /// emits a single `leek_charge_ops(pending)` at the block boundary. Since a
     /// MIR block is straight-line, the summed-then-charged total equals the
@@ -259,7 +259,7 @@ impl Tx<'_, '_> {
             Statement::Assign(p, _) => Err(self.unsupported(format!("assign to {p:?}"))),
             // Static op charge inserted by the `leek-charge` HIR pass (statement
             // costs — assignments, returns, … — that aren't charged dynamically
-            // by the binary/branch/builtin sites). The interpreter executes
+            // by the binary/branch/builtin sites). Upstream executes
             // these; native must too, or its op count comes up short.
             Statement::Charge(n) => self.charge(*n),
             // Version-split charge (foreach per-iteration tick): the
@@ -414,7 +414,7 @@ impl Tx<'_, '_> {
                 return Err(self.unsupported("class reference member assignment"));
             };
             // A `final` static field, or one inaccessible from here, ignores
-            // the write (matching the interpreter).
+            // the write (matching upstream).
             if field.is_final || !self.method_visible(owner, field.visibility) {
                 return Ok(());
             }
@@ -434,7 +434,7 @@ impl Tx<'_, '_> {
         let (ptr, lenv) = self.const_str_bytes(name);
         let (mut v, mut vt) = self.rvalue(rv)?;
         // Coerce a scalar write to the declared field type (`real? x = 5`
-        // stores `5.0`), matching the interpreter's `coerce_to_type`.
+        // stores `5.0`), matching upstream's typed-slot coercion.
         if vt != ValTy::Ref
             && let Some(ft) = self.field_coerce_ty(base, name)
         {
@@ -575,7 +575,7 @@ impl Tx<'_, '_> {
             }
             Terminator::Return(Some(op)) => {
                 // `return @x` (v1): hand back the *raw* shared cell so the
-                // caller aliases the same storage (matches the interpreter).
+                // caller aliases the same storage (matches upstream).
                 // The `@` marks the returned cell local `is_by_ref`; a plain
                 // `return x` of a cell local peels as usual. Guarded to v1 + a
                 // boxed (`Ref`) return type — a scalar `@x` return has no

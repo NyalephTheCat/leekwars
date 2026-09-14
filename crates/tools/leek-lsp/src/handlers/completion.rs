@@ -32,6 +32,12 @@
 //! - `Integer.` / `Real.` / `String.` / `Array.` / `Map.` / `Set.`
 //!   — list every entry of [`FINAL_BUILTIN_FIELDS`] under that
 //!   prefix.
+//! - a receiver the type table says is a `ClassInstance` (`var c =
+//!   new Cat(); c.` …) — we take the class name from its inferred
+//!   type, find that class's declaration in the CST, and list its
+//!   members as for `this.`.
+//! - a receiver that *names* a declared class — likewise, from the
+//!   CST alone.
 //!
 //! Receiver-typed member completion (e.g. `myCat.` where `myCat`
 //! is `ClassInstance("Cat")`) would need to consult the type

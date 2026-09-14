@@ -1,6 +1,17 @@
-//! MIR → Cranelift IR translation for the scalar (integer / real /
-//! boolean) + control-flow subset. Anything outside that subset returns
-//! [`NativeError::Unsupported`] so callers can fall back / skip.
+//! MIR → Cranelift IR translation.
+//!
+//! Every MIR local is assigned a [`ValTy`]: `Int`, `Bool` and `Real` are
+//! unboxed machine values, and `Ref` — a handle to a
+//! `leek_runtime::Value` — is the fallback that can represent anything
+//! else. Translation stays unboxed for as long as the static types allow
+//! and coerces to `Ref` at the boundary, so numeric code lowers to
+//! arithmetic instructions while composites go through the `leek_*`
+//! runtime shims.
+//!
+//! A construct this module cannot lower returns
+//! [`NativeErrorKind::Unsupported`](crate::NativeErrorKind::Unsupported),
+//! naming the construct, so a caller can report or skip it rather than
+//! silently compile something else.
 
 use std::collections::{HashMap, HashSet};
 
@@ -153,7 +164,7 @@ pub fn compute_fn_rets(program: &MirProgram, lang: Lang) -> FnRets {
 /// instead of allocating shims.
 ///
 /// Mutates `program` in place — the native backend owns its freshly-lowered MIR,
-/// so the interpreter/Java backends (which lower separately) are unaffected.
+/// so the other backends (which lower separately) are unaffected.
 ///
 /// Soundness: pinning an `Any` param to `integer`/`real` makes it coerce its
 /// argument to that kind. The coercion is a no-op precisely when the argument
@@ -838,7 +849,7 @@ pub fn reflect_name_tables(program: &MirProgram) -> HashMap<u32, HashMap<String,
 /// reachable body, or a class-ref constructor thunk) AND declare a 0-arg
 /// `string()` method — returned as `(class DefId raw, string() function idx)`.
 /// Their instances can be the top-level program result, where `string()` is
-/// applied (mirroring the interpreter), so `string()` must be force-compiled
+/// applied (mirroring upstream), so `string()` must be force-compiled
 /// and registered.
 pub fn string_display_classes(
     program: &MirProgram,
@@ -1064,11 +1075,6 @@ fn join(a: ValTy, b: ValTy) -> ValTy {
     }
 }
 
-/// Translate `mir_fn` into `func` (whose signature already matches `sig`).
-/// `callees` maps each user function's `DefId` to its declared `FuncId`
-/// and signature, so calls can be lowered. `module` is `None` only for the
-/// text-dump emit modes (Clif / Disasm), where calls aren't lowered.
-#[allow(clippy::too_many_arguments)]
 /// Box a scalar value (`from` kind) into a `Ref` handle, or pass a handle
 /// through unchanged. A free function (mirrors `Tx::coerce`'s box path) for
 /// use during entry var-init, before a `Tx` exists.
@@ -1142,6 +1148,16 @@ fn emit_dbg_safepoint(
     Ok(())
 }
 
+/// Translate `mir_fn` into `func` (whose signature already matches `sig`).
+///
+/// `callees` maps each user function's `DefId` to its declared `FuncId` and
+/// signature, so calls can be lowered. `module` is `None` only for the
+/// text-dump emit modes (Clif / Disasm), where calls aren't lowered.
+// Kept even though the workspace allows this lint (see the root Cargo.toml's
+// `[workspace.lints]`): if that allowance is ever narrowed, this signature —
+// the one place every piece of translation context has to arrive at once —
+// would be the first to fire.
+#[allow(clippy::too_many_arguments)]
 pub fn translate_function(
     func: &mut codegen::ir::Function,
     fb_ctx: &mut FunctionBuilderContext,
@@ -1195,7 +1211,7 @@ pub fn translate_function(
     }
 
     // Cell locals: every `is_shared` local (a lambda-captured variable) gets
-    // shared `Value::Cell` storage — exactly like the interpreter — so a
+    // shared `Value::Cell` storage — exactly like upstream — so a
     // closure and its enclosing scope observe each other's reassignments.
     // The var holds the cell handle; `local_value` peels it (`cell_get`) at
     // every *value* read (operand / field / index / receiver / callee),
@@ -1625,7 +1641,7 @@ struct Tx<'a, 'b> {
     imports: &'a Imports,
     /// Per-local declared array element kind, if the local is a typed
     /// numeric array (`Array<integer>` / `Array<real>`). Drives element
-    /// coercion on `a[i] = x` writes, matching the interpreter.
+    /// coercion on `a[i] = x` writes, matching upstream.
     elem_tys: &'a [Option<ValTy>],
     /// Declared scalar kind per typed global, for write coercion.
     global_tys: &'a HashMap<String, ValTy>,

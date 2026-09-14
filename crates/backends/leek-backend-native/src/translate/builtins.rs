@@ -11,7 +11,7 @@
 /// `name` as a builtin it can lower (so it won't hit the `unsupported` else).
 /// Mirrors that method's recognition chain exactly. Used to decide, in the
 /// method-call form, whether an unknown method (`null.toto()`) should fall
-/// through to the generic runtime dispatch (→ null, matching the interpreter)
+/// through to the generic runtime dispatch (→ null, matching upstream)
 /// rather than refuse to compile. With `link_game`, the game runtime is the
 /// catch-all, so everything is dispatchable.
 pub(super) fn is_dispatchable_builtin(name: &str, link_game: bool) -> bool {
@@ -220,16 +220,16 @@ pub(super) fn is_generic_builtin(name: &str) -> bool {
             | "print"
             | "println"
             // RNG: drawn from the per-run persistent `NATIVE_RNG`, the same
-            // seeded xorshift sequence the interpreter uses — so native
-            // reproduces the interpreter's RNG-dependent results (the corpus
-            // expectations the interpreter already satisfies).
+            // seeded xorshift sequence upstream uses — so native
+            // reproduces upstream's RNG-dependent results (the corpus
+            // expectations upstream already satisfies).
             | "rand"
             | "randInt"
             | "randFloat"
             | "randReal"
             | "arrayRandom"
             // `shuffle` is deterministic in the runtime (1-arg identity,
-            // 2-arg seeded) — no divergence from the interpreter.
+            // 2-arg seeded) — no divergence from upstream.
             | "shuffle"
             // Pure builtins implemented by `leek_runtime` but previously
             // skipped — siblings of ops already routed here.
