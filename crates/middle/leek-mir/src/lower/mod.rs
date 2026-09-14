@@ -213,7 +213,12 @@ mod verify_tests {
 
     fn hir(src: &str) -> leek_hir::HirFile {
         let source = SourceId::new(1).unwrap();
-        let parsed = leek_parser::parse(src, source, Version::V4);
+        let parsed = leek_parser::parse_with_features(
+            src,
+            source,
+            Version::V4,
+            leek_parser::ParseFeatures::default(),
+        );
         let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("source file root");
         let (hir, _) = leek_hir::lower_file_versioned(&ast, source, 4);
         hir

@@ -26,18 +26,30 @@ fn main() {
         let mut sum_hir = Duration::ZERO;
         let n = 200;
         // warm up
-        let _ = leek_parser::parse(text, src, v);
+        let _ =
+            leek_parser::parse_with_features(text, src, v, leek_parser::ParseFeatures::default());
         for _ in 0..n {
             let t = Instant::now();
             let lex = leek_lexer::lex(text, src, v);
             sum_lex += t.elapsed();
 
             let t = Instant::now();
-            let _ = leek_parser::parse(text, src, v);
+            let _ = leek_parser::parse_with_features(
+                text,
+                src,
+                v,
+                leek_parser::ParseFeatures::default(),
+            );
             sum_parse_relex += t.elapsed();
 
             let t = Instant::now();
-            let result = leek_parser::parse_tokens(text, src, &lex.tokens, v);
+            let result = leek_parser::parse_tokens_with(
+                text,
+                src,
+                &lex.tokens,
+                v,
+                leek_parser::ParseFeatures::default(),
+            );
             sum_parse_tokens += t.elapsed();
 
             let root = leek_syntax::SyntaxNode::new_root(result.green.clone());

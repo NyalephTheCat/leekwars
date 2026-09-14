@@ -11,14 +11,14 @@
 use leek_backend_native::ids::fn_id;
 use leek_backend_native::{NativeOptions, ops_used, run, run_call};
 use leek_hir::{Def, DefId, HirFile};
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_runtime::{Function, Value};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn hir_v4(src: &str) -> HirFile {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
     leek_hir::lower_file_versioned(&sf, source, 4).0
 }

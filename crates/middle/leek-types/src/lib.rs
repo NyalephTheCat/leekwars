@@ -282,7 +282,7 @@ fn finish_checker(c: checker::Checker) -> TypeCheckResult {
 mod index_tests {
     use leek_lexer::lex;
     use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
-    use leek_parser::parse_tokens;
+    use leek_parser::{ParseFeatures, parse_tokens_with};
     use leek_span::SourceId;
     use leek_syntax::SyntaxNode;
 
@@ -291,7 +291,13 @@ mod index_tests {
     fn run(text: &str) -> TypeCheckResult {
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(text, src, Version::LATEST);
-        let parse = parse_tokens(text, src, &lex_out.tokens, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures::default(),
+        );
         let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green))
             .expect("parse produced a SourceFile");
         check_collecting(&ast, src, Version::LATEST, Options::default())
@@ -300,7 +306,13 @@ mod index_tests {
     fn run_seeded(text: &str) -> TypeCheckResult {
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(text, src, Version::LATEST);
-        let parse = parse_tokens(text, src, &lex_out.tokens, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures::default(),
+        );
         let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
         check_collecting(
             &ast,
@@ -371,7 +383,13 @@ mod index_tests {
     fn run_strict(text: &str) -> TypeCheckResult {
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(text, src, Version::LATEST);
-        let parse = parse_tokens(text, src, &lex_out.tokens, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures::default(),
+        );
         let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
         check_collecting(
             &ast,
@@ -428,7 +446,13 @@ mod index_tests {
     fn run_generics(text: &str) -> TypeCheckResult {
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(text, src, Version::LATEST);
-        let parse = parse_tokens(text, src, &lex_out.tokens, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures::default(),
+        );
         let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
         check_collecting(
             &ast,
@@ -490,7 +514,13 @@ mod index_tests {
     fn run_with_library(text: &str, experimental_generics: bool) -> TypeCheckResult {
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(text, src, Version::LATEST);
-        let parse = parse_tokens(text, src, &lex_out.tokens, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures::default(),
+        );
         let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green)).expect("ast");
         let mut c = crate::checker::Checker::new(
             src,
@@ -1001,7 +1031,13 @@ mod index_tests {
         let text = format!("function f({form} a) {{ }}\n");
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(&text, src, Version::LATEST);
-        let parse = parse_tokens(&text, src, &lex_out.tokens, Version::LATEST);
+        let parse = parse_tokens_with(
+            &text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures::default(),
+        );
         let node = SyntaxNode::new_root(parse.green);
         let tref = node
             .descendants()

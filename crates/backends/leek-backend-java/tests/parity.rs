@@ -54,7 +54,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use leek_backend_java::{Options, emit};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 use similar::{ChangeTag, TextDiff};
@@ -278,7 +278,7 @@ fn fixtures_missing_golden(inputs: &[PathBuf], golden_dir: &std::path::Path) -> 
 
 fn rust_emit(src: &str, ai_id: u64, path: &str) -> String {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let root = SyntaxNode::new_root(parsed.green);
     let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
     let (hir, _diags) = leek_hir::lower_file(&sf, source);
@@ -623,7 +623,7 @@ fn exact_switch_skeleton_matches_reference() {
         let code = unescape(cols[5]);
         let reference = unescape(cols[6]);
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(&code, source, version);
+        let parsed = parse_with_features(&code, source, version, ParseFeatures::default());
         let sf =
             leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
         let version_byte = cols[0].parse().unwrap_or(4);
@@ -712,7 +712,7 @@ fn exact_switch_body_matches_reference() {
         let ai_id = reference_ai_id(&reference)
             .unwrap_or_else(|| panic!("row {}: no `public class AI_<id>`", row + 1));
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(&code, source, version);
+        let parsed = parse_with_features(&code, source, version, ParseFeatures::default());
         let sf =
             leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
         let version_byte = cols[0].parse().unwrap_or(4);
@@ -1013,7 +1013,7 @@ fn run_via_interp(code: &str, version_byte: u8) -> InterpOutcome {
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(code, source, version);
+        let parsed = parse_with_features(code, source, version, ParseFeatures::default());
         let root = SyntaxNode::new_root(parsed.green);
         let Some(sf) = leek_parser::ast::SourceFile::cast(root) else {
             return Err("parse failed".to_string());
@@ -1355,7 +1355,7 @@ fn lambda_captured_writes_run_correctly_on_jvm() {
             ("exact", Options::exact(Version::V4, 2 * i as u64 + 2)),
         ] {
             let source = SourceId::new(1).unwrap();
-            let parsed = parse(&src, source, Version::V4);
+            let parsed = parse_with_features(&src, source, Version::V4, ParseFeatures::default());
             let root = SyntaxNode::new_root(parsed.green);
             let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
             let (hir, _diags) = leek_hir::lower_file(&sf, source);
@@ -1507,7 +1507,7 @@ fn emit_via_rust(code: &str, version_byte: u8, lineno: usize) -> Option<String> 
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(code, source, version);
+        let parsed = parse_with_features(code, source, version, ParseFeatures::default());
         let root = SyntaxNode::new_root(parsed.green);
         let sf = leek_parser::ast::SourceFile::cast(root)?;
         let (hir, _diags) = leek_hir::lower_file_versioned(&sf, source, version_byte);
@@ -1590,7 +1590,7 @@ fn capture_clean_vs_exact_diff() {
         let stem = input.file_stem().unwrap().to_string_lossy().into_owned();
         let src = fs::read_to_string(&input).expect("read input");
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(&src, source, Version::V4);
+        let parsed = parse_with_features(&src, source, Version::V4, ParseFeatures::default());
         let root = SyntaxNode::new_root(parsed.green);
         let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
         let (hir, _diags) = leek_hir::lower_file(&sf, source);

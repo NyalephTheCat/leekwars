@@ -18,7 +18,7 @@ use leek_diagnostics::Diagnostic;
 use leek_hir::lower_file_versioned;
 use leek_parser::{
     ast::{AstNode, SourceFile},
-    parse,
+    parse_with_features,
 };
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
@@ -28,7 +28,12 @@ fn source() -> SourceId {
 }
 
 fn hir(src: &str) -> leek_hir::HirFile {
-    let parsed = parse(src, source(), Version::V4);
+    let parsed = parse_with_features(
+        src,
+        source(),
+        Version::V4,
+        leek_parser::ParseFeatures::default(),
+    );
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green.clone())).expect("parse");
     lower_file_versioned(&file, source(), 4).0
 }
@@ -128,7 +133,12 @@ return first(2) + second(3)
 #[test]
 fn the_whole_program_gate_is_reported_once() {
     let src = "function p(@x) { q(x) }\nfunction q(y) { return y }\nvar n = 5\np(n)\nreturn n\n";
-    let parsed = parse(src, source(), Version::V1);
+    let parsed = parse_with_features(
+        src,
+        source(),
+        Version::V1,
+        leek_parser::ParseFeatures::default(),
+    );
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green.clone())).expect("parse");
     let hir = lower_file_versioned(&file, source(), 1).0;
     let diags = check_native_compat(&hir, &NativeOptions::debug().with_lang(1, false));

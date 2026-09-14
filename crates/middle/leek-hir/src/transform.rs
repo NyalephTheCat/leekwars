@@ -1452,7 +1452,12 @@ mod tests {
         use leek_span::SourceId;
         use leek_syntax::{SyntaxNode, Version};
         let source = SourceId::new(1).unwrap();
-        let parsed = leek_parser::parse(src, source, Version::V4);
+        let parsed = leek_parser::parse_with_features(
+            src,
+            source,
+            Version::V4,
+            leek_parser::ParseFeatures::default(),
+        );
         let file = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parses");
         crate::lower_file(&file, source).0
     }
@@ -1789,7 +1794,12 @@ mod tests {
         use std::path::{Path, PathBuf};
         let parse = |src: &str, id: u32| {
             let source = SourceId::new(id).unwrap();
-            let parsed = leek_parser::parse(src, source, Version::V4);
+            let parsed = leek_parser::parse_with_features(
+                src,
+                source,
+                Version::V4,
+                leek_parser::ParseFeatures::default(),
+            );
             (
                 SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parses"),
                 source,

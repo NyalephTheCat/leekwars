@@ -1,7 +1,6 @@
 //! Parser driver: token cursor + green-tree builder + error sink.
 
 use leek_diagnostics::Diagnostic;
-use leek_lexer::lex;
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, Token, Version};
 use rowan::{Checkpoint, GreenNode, GreenNodeBuilder, Language as _};
@@ -17,9 +16,10 @@ pub struct ParseResult {
 }
 
 /// **Experimental.** Opt-in grammar relaxations, intended for parsing
-/// *signature files* that declare builtins. Off by default; the
-/// pipeline reads them from environment variables so they never affect
-/// normal code or the corpus baseline.
+/// *signature files* that declare builtins. Off by default, and carried
+/// as data in [`ParseOptions`](crate::ParseOptions) rather than read from
+/// the environment here, so they never affect normal code or the corpus
+/// baseline unless a driver deliberately turns them on.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ParseFeatures {
     /// Allow bodiless function declarations — `function name(params) -> T;`
@@ -39,9 +39,11 @@ pub struct ParseFeatures {
 }
 
 impl ParseFeatures {
-    /// Read the experimental toggles from the environment. Prefer
-    /// [`From<FeatureFlags>`] with flags threaded through the pipeline; this
-    /// remains for direct callers (tests, ad-hoc tools) without a flag source.
+    /// Read the experimental toggles from the environment. Call this *at an
+    /// entry boundary only* — a `main`, a driver's config assembly — and
+    /// thread the result into [`ParseOptions`](crate::ParseOptions); inside
+    /// library code prefer [`From<FeatureFlags>`] on flags the caller
+    /// already passed in.
     pub fn from_env() -> Self {
         leek_span::FeatureFlags::from_env().into()
     }
@@ -64,34 +66,45 @@ impl From<leek_span::FeatureFlags> for ParseFeatures {
 /// [`parse_pragmas`](leek_syntax::parse_pragmas) first.
 ///
 /// When a caller already has a lexed `Vec<Token>` (e.g. the
-/// pipeline's `Lex` step produced one), prefer [`parse_tokens`] to
+/// pipeline's `Lex` step produced one), prefer [`parse_tokens_with`] to
 /// avoid re-lexing.
+#[deprecated(note = "reads LEEK_EXPERIMENTAL_* from the process environment; call \
+            parse_with_features(text, source, version, ParseFeatures::default()) \
+            or pass the flags your entry boundary already read")]
 pub fn parse(text: &str, source: SourceId, version: Version) -> ParseResult {
     parse_with_features(text, source, version, ParseFeatures::from_env())
 }
 
 /// Like [`parse`] but with explicit experimental [`ParseFeatures`]
 /// (lexes internally, then parses with the given features).
+///
+/// A thin `ParseResult`-shaped view of
+/// [`parse_file_with`](crate::parse_file_with), which owns the lex →
+/// parse → prepend-lex-diagnostics sequence; see the [entry module
+/// docs](crate::entry) for where lex diagnostics are reported.
 pub fn parse_with_features(
     text: &str,
     source: SourceId,
     version: Version,
     features: ParseFeatures,
 ) -> ParseResult {
-    let lex_result = lex(text, source, version);
-    let mut result = parse_tokens_with(text, source, &lex_result.tokens, version, features);
-    // `parse_tokens` doesn't know about lex diagnostics; prepend
-    // them so callers that go through `parse()` see the same
-    // ordering as before.
-    let mut diags = lex_result.diagnostics;
-    diags.extend(result.diagnostics);
-    result.diagnostics = diags;
-    result
+    let parsed = crate::parse_file_with(
+        text,
+        source,
+        &crate::ParseOptions::new(version).with_features(features),
+    );
+    ParseResult {
+        green: parsed.green,
+        diagnostics: parsed.diagnostics,
+    }
 }
 
 /// Parse a pre-lexed token stream. The caller is responsible for
 /// any lex diagnostics — they're not folded in here. Matches
 /// [`parse`]'s output otherwise.
+#[deprecated(note = "reads LEEK_EXPERIMENTAL_* from the process environment; call \
+            parse_tokens_with(text, source, tokens, version, ParseFeatures::default()) \
+            or pass the flags your entry boundary already read")]
 pub fn parse_tokens(
     text: &str,
     source: SourceId,

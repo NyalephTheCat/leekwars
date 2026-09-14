@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use leek_hir::{Def, ExprKind, Literal, LowerUnit, Stmt, lower_files};
 use leek_parser::ast::{AstNode, SourceFile};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_resolver::folder::MemFolder;
 use leek_resolver::include_graph::{ResolvedFile, build_include_graph};
 use leek_span::{FeatureFlags, SourceId};
@@ -54,7 +54,8 @@ fn compile_at(entry: &str, version: Version, entry_text: &str, folder: &MemFolde
         .files
         .iter()
         .map(|f: &ResolvedFile| {
-            let parsed = parse(&f.text, f.source, f.version);
+            let parsed =
+                parse_with_features(&f.text, f.source, f.version, ParseFeatures::default());
             let root = SyntaxNode::new_root(parsed.green);
             ParsedFile {
                 path: f.path.clone(),

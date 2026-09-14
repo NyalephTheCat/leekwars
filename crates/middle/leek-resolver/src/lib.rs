@@ -652,7 +652,7 @@ impl Resolver {
 mod index_tests {
     use leek_lexer::lex;
     use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
-    use leek_parser::parse_tokens;
+    use leek_parser::{ParseFeatures, parse_tokens_with};
     use leek_span::SourceId;
     use leek_syntax::SyntaxNode;
 
@@ -665,7 +665,13 @@ mod index_tests {
     fn run_with_options(text: &str, opts: Options) -> ResolveResult {
         let src = SourceId::new(1).unwrap();
         let lex_out = lex(text, src, Version::LATEST);
-        let parse = parse_tokens(text, src, &lex_out.tokens, Version::LATEST);
+        let parse = parse_tokens_with(
+            text,
+            src,
+            &lex_out.tokens,
+            Version::LATEST,
+            ParseFeatures::default(),
+        );
         let ast = AstSourceFile::cast(SyntaxNode::new_root(parse.green))
             .expect("parse produced a SourceFile");
         resolve_collecting(&ast, src, Version::LATEST, opts)

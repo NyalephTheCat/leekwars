@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxElement, SyntaxNode, Version};
 
@@ -39,7 +39,7 @@ fn dump(node: &SyntaxNode) -> String {
 }
 
 fn snapshot_tree(name: &str, text: &str) {
-    let result = parse(text, src(), Version::V4);
+    let result = parse_with_features(text, src(), Version::V4, ParseFeatures::default());
     let node = SyntaxNode::new_root(result.green);
     insta::assert_snapshot!(name, dump(&node));
 }

@@ -3,13 +3,13 @@
 //! `Synthetic` store (#49, #79).
 
 use leek_mir::{MirProgram, Place, Rvalue, Statement, lower_file};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn lower(src: &str) -> MirProgram {
     let s = SourceId::new(1).unwrap();
-    let p = parse(src, s, Version::V4);
+    let p = parse_with_features(src, s, Version::V4, ParseFeatures::default());
     let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).expect("parse");
     let (h, _) = leek_hir::lower_file_versioned(&sf, s, 4);
     let (program, errs) = lower_file(&h);

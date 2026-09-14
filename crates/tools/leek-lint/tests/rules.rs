@@ -5,13 +5,13 @@ use leek_diagnostics::codes;
 use leek_hir::lower::lower_file;
 use leek_lint::lint;
 use leek_parser::ast::{AstNode, SourceFile};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn lint_src(src: &str) -> Vec<leek_diagnostics::Diagnostic> {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let root = SyntaxNode::new_root(parsed.green);
     let ast = SourceFile::cast(root).expect("source file root");
     let (hir, _diags) = lower_file(&ast, source);
@@ -326,7 +326,7 @@ fn unnecessary_else_fires_end_to_end() {
 
 fn lint_src_with(src: &str, opts: leek_lint::LintOptions) -> Vec<leek_diagnostics::Diagnostic> {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let root = SyntaxNode::new_root(parsed.green);
     let ast = SourceFile::cast(root).expect("source file root");
     let (hir, _diags) = lower_file(&ast, source);

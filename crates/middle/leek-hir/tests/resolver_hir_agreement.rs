@@ -19,7 +19,7 @@
 use leek_hir::visit::{walk_expr_children, walk_stmt_child_exprs, walk_stmt_child_stmts};
 use leek_hir::{Block, Def, Expr, ExprKind, LambdaBody, NameRef, Stmt, lower_file};
 use leek_parser::ast::{AstNode, SourceFile};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_resolver::{Options, resolve_collecting};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
@@ -90,7 +90,7 @@ fn collect_expr(expr: &Expr, out: &mut Vec<(u32, NameRef)>) {
 /// bare name.
 fn assert_agreement(text: &str) {
     let ast = SourceFile::cast(SyntaxNode::new_root(
-        parse(text, source_id(), Version::V4).green,
+        parse_with_features(text, source_id(), Version::V4, ParseFeatures::default()).green,
     ))
     .expect("source file parses");
 
@@ -160,7 +160,7 @@ fn globals_read_after_their_declaration_agree() {
 fn a_global_read_before_its_declaration_still_disagrees() {
     let text = "function f() { return g }\nglobal g = 3\nreturn f()\n";
     let ast = SourceFile::cast(SyntaxNode::new_root(
-        parse(text, source_id(), Version::V4).green,
+        parse_with_features(text, source_id(), Version::V4, ParseFeatures::default()).green,
     ))
     .expect("source file parses");
     let (hir, _) = lower_file(&ast, source_id());

@@ -81,7 +81,7 @@ fn run_format(cx: &Context<'_>, opts: &FormatOptions) -> String {
     }
 
     // Direct path: prefer the green tree the Parse step already
-    // produced; otherwise re-run `parse()` from raw text.
+    // produced; otherwise re-parse from raw text.
     let green = parse_or_reuse(cx);
     crate::format(&green, version_from_byte(cx.version_byte()), opts)
 }
@@ -91,7 +91,13 @@ fn parse_or_reuse(cx: &Context<'_>) -> GreenNode {
         return g.0.clone();
     }
     let version = version_from_byte(cx.version_byte());
-    leek_parser::parse(cx.text(), cx.source(), version).green
+    leek_parser::parse_with_features(
+        cx.text(),
+        cx.source(),
+        version,
+        leek_parser::ParseFeatures::from(cx.flags()),
+    )
+    .green
 }
 
 // ---- Salsa-tracked entry point ----

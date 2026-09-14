@@ -19,7 +19,7 @@ use leek_hir::HirFile;
 use leek_hir::lower::lower_file_versioned_with_flags;
 use leek_hir::pipeline::HirArtifact;
 use leek_hir::{LowerUnit, lower_files};
-use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse, parse_with_features};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_project::Input;
 use leek_resolver::folder::MemFolder;
 use leek_resolver::interner::PathInterner;
@@ -312,7 +312,7 @@ struct Unit {
 }
 
 fn parse_unit(path: &str, source: SourceId, text: &str) -> Unit {
-    let parsed = parse(text, source, Version::V4);
+    let parsed = parse_with_features(text, source, Version::V4, ParseFeatures::default());
     assert!(
         parsed
             .diagnostics

@@ -3,7 +3,7 @@
 //! inner `f` as a reference to the outer var.
 
 use leek_diagnostics::Severity;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_resolver::resolve_collecting;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
@@ -12,7 +12,7 @@ use leek_syntax::{SyntaxNode, Version};
 fn recursive_var_lambda_resolves_self_ref() {
     let src = "var fact = function(x) { if (x == 1) { return 1 } else { return fact(x - 1) * x } } return fact(8)";
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     assert!(
         !parsed
             .diagnostics

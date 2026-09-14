@@ -10,14 +10,14 @@
 //! `match` is variant-complete.
 
 use leek_backend_java::{Options, emit};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn java_for(src: &str) -> String {
     let source = SourceId::new(1).unwrap();
     let opts = Options::exact(Version::V4, 7);
-    let parsed = parse(src, source, opts.version);
+    let parsed = parse_with_features(src, source, opts.version, ParseFeatures::default());
     let root = SyntaxNode::new_root(parsed.green);
     let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
     let (hir, _diags) = leek_hir::lower_file(&sf, source);

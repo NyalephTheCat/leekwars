@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use leek_backend_native::{DebugHook, NativeOptions, frame_name, render_frame_vars, run};
 use leek_hir::lower_file_versioned;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::{LineTable, SourceId};
 use leek_syntax::{SyntaxNode, Version};
 
@@ -44,7 +44,7 @@ fn safepoints_fire_and_render_locals() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let src = "var x = 40\nvar y = 2\nreturn x + y\n";
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
     let hir = lower_file_versioned(&sf, source, 4).0;
 
@@ -102,7 +102,7 @@ fn renders_reference_locals() {
     // via the runtime's `Display`, not crash.
     let src = "var s = \"hi\"\nvar n = 7\nreturn count(s) + n\n";
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
     let hir = lower_file_versioned(&sf, source, 4).0;
 
@@ -146,7 +146,7 @@ fn safepoint_on_bare_return_line() {
     // per-terminator safepoint must still let a debugger stop there.
     let src = "var a = 5\nreturn a\n";
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
     let hir = lower_file_versioned(&sf, source, 4).0;
 
@@ -205,7 +205,7 @@ fn shadow_stack_tracks_call_depth() {
     // depth 2, the top-level ones at depth 1.
     let src = "function inc(x) { return x + 1 }\nvar r = inc(41)\nreturn r\n";
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
     let hir = lower_file_versioned(&sf, source, 4).0;
 

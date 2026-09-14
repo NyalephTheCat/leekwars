@@ -10,7 +10,12 @@ fn opts() -> FormatOptions {
 }
 
 fn fmt_range(src: &str, start: u32, end: u32) -> Option<(std::ops::Range<u32>, String)> {
-    let parsed = leek_parser::parse(src, SourceId::new(1).unwrap(), Version::V4);
+    let parsed = leek_parser::parse_with_features(
+        src,
+        SourceId::new(1).unwrap(),
+        Version::V4,
+        leek_parser::ParseFeatures::default(),
+    );
     format_range(&parsed.green, Version::V4, &opts(), start..end)
 }
 
