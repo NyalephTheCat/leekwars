@@ -170,6 +170,207 @@ impl Manifest {
 mod tests {
     use super::*;
 
+    /// Every variant, built once so the tables below cannot quietly stop
+    /// covering one. The exhaustive `match` is the guard: a new
+    /// [`Expectation`] variant fails to compile here until it is added,
+    /// which is what keeps the two predicates and the TOML round-trip from
+    /// drifting apart from the enum.
+    fn all_expectations() -> Vec<Expectation> {
+        let all = vec![
+            Expectation::Equals { value: "1".into() },
+            Expectation::Error {
+                code: "UNKNOWN_VARIABLE".into(),
+            },
+            Expectation::Error {
+                code: "NONE".into(),
+            },
+            Expectation::Warning {
+                code: "UNUSED_VARIABLE".into(),
+            },
+            Expectation::NoWarning,
+            Expectation::AnyError,
+            Expectation::Almost {
+                value: "0.5".into(),
+            },
+            Expectation::Ops { count: 12 },
+            Expectation::EqualsOps {
+                value: "1".into(),
+                count: 12,
+            },
+            Expectation::Unknown {
+                detail: "code_v4_(x).thing()".into(),
+            },
+        ];
+        for e in &all {
+            match e {
+                Expectation::Equals { .. }
+                | Expectation::Error { .. }
+                | Expectation::Warning { .. }
+                | Expectation::NoWarning
+                | Expectation::AnyError
+                | Expectation::Almost { .. }
+                | Expectation::Ops { .. }
+                | Expectation::EqualsOps { .. }
+                | Expectation::Unknown { .. } => {}
+            }
+        }
+        all
+    }
+
+    /// `implies_clean_parse` gates what `leekbench --corpus-expectation clean`
+    /// selects and what `leek-test-driver` treats as "must compile". Getting
+    /// it wrong doesn't fail a test — it silently changes which cases the
+    /// corpus sweep runs.
+    #[test]
+    fn clean_parse_is_pinned_for_every_variant() {
+        let expected: Vec<(Expectation, bool)> = vec![
+            (Expectation::Equals { value: "1".into() }, true),
+            (
+                Expectation::Almost {
+                    value: "0.5".into(),
+                },
+                true,
+            ),
+            (Expectation::Ops { count: 1 }, true),
+            (
+                Expectation::EqualsOps {
+                    value: "1".into(),
+                    count: 1,
+                },
+                true,
+            ),
+            (Expectation::NoWarning, true),
+            // A warning is still a successful compile.
+            (
+                Expectation::Warning {
+                    code: "UNUSED_VARIABLE".into(),
+                },
+                true,
+            ),
+            // The inversion: upstream spells "this must NOT error" as an
+            // `Error` expectation whose code is the literal `NONE`.
+            (
+                Expectation::Error {
+                    code: "NONE".into(),
+                },
+                true,
+            ),
+            (
+                Expectation::Error {
+                    code: "UNKNOWN_VARIABLE".into(),
+                },
+                false,
+            ),
+            (Expectation::AnyError, false),
+            (Expectation::Unknown { detail: "?".into() }, false),
+        ];
+        for (e, want) in &expected {
+            assert_eq!(e.implies_clean_parse(), *want, "{e:?}");
+        }
+        assert_eq!(expected.len(), all_expectations().len());
+    }
+
+    /// `implies_error` decides whether the driver expects a diagnostic at
+    /// all, so the `NONE` inversion has to go the *other* way here.
+    #[test]
+    fn implies_error_is_pinned_for_every_variant() {
+        for e in all_expectations() {
+            let want = match &e {
+                Expectation::Error { code } => code != "NONE",
+                Expectation::AnyError => true,
+                _ => false,
+            };
+            assert_eq!(e.implies_error(), want, "{e:?}");
+        }
+        // Spelled out, because the two `Error` arms are the whole point.
+        assert!(
+            !Expectation::Error {
+                code: "NONE".into()
+            }
+            .implies_error()
+        );
+        assert!(
+            Expectation::Error {
+                code: "NONE_OF_THE_ABOVE".into()
+            }
+            .implies_error(),
+            "only the exact code NONE is the inversion"
+        );
+    }
+
+    /// The two predicates are near-complements, but not exactly: `Unknown`
+    /// is neither a clean parse nor an error, and nothing may quietly make
+    /// them total.
+    #[test]
+    fn the_two_predicates_are_never_both_true() {
+        for e in all_expectations() {
+            assert!(
+                !(e.implies_clean_parse() && e.implies_error()),
+                "{e:?} claims to both parse cleanly and error"
+            );
+        }
+        let unknown = Expectation::Unknown { detail: "?".into() };
+        assert!(!unknown.implies_clean_parse() && !unknown.implies_error());
+    }
+
+    /// `#[serde(tag = "kind", rename_all = "snake_case")]` means a renamed or
+    /// reordered variant changes the on-disk manifest the corpus build script
+    /// writes and the runner reads. Round-trip every variant through TOML so a
+    /// rename is caught here rather than as a corpus that mysteriously
+    /// extracts zero cases.
+    #[test]
+    fn every_expectation_variant_round_trips_through_toml() {
+        for e in all_expectations() {
+            let mut m = Manifest::empty();
+            m.cases.push(TestCase {
+                id: "T.java::t::0@v4".into(),
+                source_file: "T.java".into(),
+                method_name: "t".into(),
+                line: 1,
+                call_index: 0,
+                helper: "code_v4_".into(),
+                java_line: String::new(),
+                version: 4,
+                strict: false,
+                enabled: true,
+                code: "1".into(),
+                expected: e.clone(),
+                audit: None,
+            });
+            let text = toml::to_string_pretty(&m).expect("serialize");
+            let back: Manifest = toml::from_str(&text).expect("deserialize");
+            assert_eq!(back.cases[0].expected, e, "round-trip failed:\n{text}");
+        }
+    }
+
+    /// The tag is what upstream extraction writes; pin the exact snake_case
+    /// spellings so a variant rename is a visible, deliberate schema change.
+    #[test]
+    fn the_serialized_tag_names_are_stable() {
+        let tag = |e: &Expectation| {
+            let text = toml::to_string(e).expect("serialize");
+            text.lines()
+                .find_map(|l| l.strip_prefix("kind = "))
+                .map(|v| v.trim().trim_matches('"').to_string())
+                .expect("a kind tag")
+        };
+        assert_eq!(
+            all_expectations().iter().map(tag).collect::<Vec<_>>(),
+            [
+                "equals",
+                "error",
+                "error",
+                "warning",
+                "no_warning",
+                "any_error",
+                "almost",
+                "ops",
+                "equals_ops",
+                "unknown",
+            ]
+        );
+    }
+
     /// The manifest is written by `leek-test-corpus`'s build script and
     /// read back by the runner, so this TOML round-trip is the whole
     /// contract of the crate the build script depends on.

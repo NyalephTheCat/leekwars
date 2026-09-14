@@ -268,3 +268,155 @@ fn collect_jars(root: &Path, out: &mut Vec<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The out-of-process Java runner's three pure helpers.
+    //!
+    //! None of them needs a JVM or the upstream submodule, and each fails
+    //! *silently or misleadingly* in production: a `parse_inner_ns_all`
+    //! regression turns every Java benchmark into "Runner printed 0 INNER_NS
+    //! lines", and a `build_classpath` ordering regression produces wrong
+    //! values with no error at all (see the comment on that function).
+
+    use std::path::{Path, PathBuf};
+
+    use super::{build_classpath, collect_jars, parse_inner_ns_all};
+
+    /// One scratch directory per test. The test name keeps parallel threads
+    /// apart without depending on the clock — `SystemTime::now()` is coarse
+    /// enough on macOS that two calls in one tick collide.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("leek-bench-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        std::fs::write(path, b"").expect("create file");
+    }
+
+    #[test]
+    fn inner_ns_lines_are_parsed_in_order() {
+        // `bench_runs` zips these positionally onto the run results, so the
+        // order is part of the contract, not an accident of iteration.
+        let stderr = "INNER_NS=300\nINNER_NS=100\nINNER_NS=200\n";
+        assert_eq!(parse_inner_ns_all(stderr), vec![300, 100, 200]);
+    }
+
+    #[test]
+    fn unrelated_stderr_lines_are_ignored() {
+        // A JVM that prints warnings (`-Xshare`, agent notices, the
+        // `sun.misc.Unsafe` deprecation on 21+) must not shift the count —
+        // the caller hard-fails when it doesn't match `runs`.
+        let stderr = concat!(
+            "OpenJDK 64-Bit Server VM warning: Options -Xverify:none…\n",
+            "INNER_NS=42\n",
+            "WARNING: A terminally deprecated method in sun.misc.Unsafe\n",
+            "INNER_NS=43\n",
+        );
+        assert_eq!(parse_inner_ns_all(stderr), vec![42, 43]);
+    }
+
+    #[test]
+    fn a_trailing_carriage_return_still_parses() {
+        // The value is `trim`med, so CRLF-terminated output still yields a
+        // number rather than being dropped as malformed.
+        assert_eq!(parse_inner_ns_all("INNER_NS=7\r\n"), vec![7]);
+        assert_eq!(parse_inner_ns_all("INNER_NS= 7 \n"), vec![7]);
+    }
+
+    #[test]
+    fn malformed_and_empty_input_yield_nothing_rather_than_panicking() {
+        assert!(parse_inner_ns_all("").is_empty());
+        assert!(parse_inner_ns_all("INNER_NS=\n").is_empty());
+        assert!(parse_inner_ns_all("INNER_NS=not-a-number\n").is_empty());
+        assert!(parse_inner_ns_all("INNER_NS=-1\n").is_empty());
+        // The prefix must match at the start of the line, not anywhere in it.
+        assert!(parse_inner_ns_all("total INNER_NS=5\n").is_empty());
+    }
+
+    /// The jar must come first. `build/classes` holds a stale partial tree
+    /// that shadows the fresh `build/classes/java/main` classes, so a
+    /// reordering here silently renders every map literal wrong instead of
+    /// failing — the exact failure the function's comment describes.
+    #[test]
+    fn the_reference_jar_wins_over_both_class_trees() {
+        let root = scratch("classpath-jar-first");
+        let upstream = root.join("leekscript/build/classes");
+        let jar = root.join("leekscript/leekscript.jar");
+        let fresh = upstream.join("java/main");
+        touch(&jar);
+        std::fs::create_dir_all(&fresh).expect("create fresh class tree");
+
+        let cp = build_classpath(&upstream);
+        let parts: Vec<&str> = cp.split(':').collect();
+        assert_eq!(
+            &parts[..3],
+            &[
+                jar.display().to_string().as_str(),
+                fresh.display().to_string().as_str(),
+                upstream.display().to_string().as_str(),
+            ],
+            "jar, then the fresh tree, then the legacy root: {cp}"
+        );
+        // Anything after that comes from the developer's ~/.gradle cache,
+        // which this test deliberately does not constrain.
+    }
+
+    #[test]
+    fn a_missing_jar_or_fresh_tree_is_skipped_without_reordering_the_rest() {
+        let root = scratch("classpath-fallbacks");
+
+        // No jar, but a fresh tree: fresh tree first, legacy root second.
+        let a = root.join("a/build/classes");
+        std::fs::create_dir_all(a.join("java/main")).expect("create fresh tree");
+        let parts: Vec<String> = build_classpath(&a).split(':').map(str::to_string).collect();
+        assert_eq!(parts[0], a.join("java/main").display().to_string());
+        assert_eq!(parts[1], a.display().to_string());
+
+        // Neither: the legacy root is the only entry we contribute, and it is
+        // pushed unconditionally even though it may not exist yet.
+        let b = root.join("b/build/classes");
+        let parts: Vec<String> = build_classpath(&b).split(':').map(str::to_string).collect();
+        assert_eq!(parts[0], b.display().to_string());
+    }
+
+    #[test]
+    fn collect_jars_takes_real_jars_at_any_depth_and_skips_the_decorations() {
+        let root = scratch("collect-jars");
+        touch(&root.join("a.jar"));
+        touch(&root.join("b-sources.jar"));
+        touch(&root.join("c-javadoc.jar"));
+        // The extension check is case-insensitive; the `-sources` /
+        // `-javadoc` suffix check is not, and that asymmetry is worth
+        // pinning so nobody "tidies" one to match the other.
+        touch(&root.join("nested/deep/d.JAR"));
+        touch(&root.join("nested/notes.txt"));
+        touch(&root.join("nested/e.jar.bak"));
+
+        let mut out = Vec::new();
+        collect_jars(&root, &mut out);
+        out.sort();
+
+        let mut expected = vec![
+            root.join("a.jar").display().to_string(),
+            root.join("nested/deep/d.JAR").display().to_string(),
+        ];
+        expected.sort();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn collect_jars_on_a_missing_directory_is_a_no_op() {
+        // The caller guards with `is_dir()`, but a cache directory can vanish
+        // between the check and the read; that must not panic mid-benchmark.
+        let mut out = vec!["kept".to_string()];
+        collect_jars(Path::new("/definitely/not/a/real/gradle/cache"), &mut out);
+        assert_eq!(out, vec!["kept".to_string()]);
+    }
+}

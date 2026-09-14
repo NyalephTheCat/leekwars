@@ -724,11 +724,15 @@ fn fmt_pct(pct: f64) -> String {
     }
 }
 
+/// Shorten `s` to at most `n` characters, spending the last one on an
+/// ellipsis. `n` is a column width, so `n == 0` is meaningless; the
+/// `saturating_sub` is a guard against underflowing there, not a defined
+/// behaviour to rely on.
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
-        let mut out: String = s.chars().take(n - 1).collect();
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
         out.push('…');
         out
     }
@@ -755,7 +759,11 @@ impl NameStr for UpstreamJava {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, check_ratchet_preconditions, known_failures_path};
+    use super::{
+        BenchSummary, Cli, Duration, agreement_marker, case_matches_filter,
+        check_ratchet_preconditions, fmt, fmt_pct, known_failures_path, median, pctile,
+        pctile_unsorted, truncate,
+    };
     use clap::Parser;
 
     fn cli(args: &[&str]) -> Cli {
@@ -842,5 +850,171 @@ mod tests {
             known_failures_path(&cli(&["--known-failures", "/tmp/x.tsv"])),
             std::path::Path::new("/tmp/x.tsv"),
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Reporting helpers. These produce the numbers and markers a human
+    // reads off the table; a regression here is a wrong report, not a
+    // crash, so it has to be pinned by value.
+    // -----------------------------------------------------------------
+
+    // The `Result` is the point: `agreement_marker` takes `&Result<_>`
+    // because a backend that failed to run has to be told apart from one
+    // that produced a different value.
+    #[allow(clippy::unnecessary_wraps)]
+    fn summary(stdout: &str) -> super::Result<BenchSummary> {
+        Ok(BenchSummary {
+            backend: "test",
+            cold: Duration::from_millis(1),
+            warm_median: Duration::from_millis(1),
+            warm_runs: vec![Duration::from_millis(1)],
+            stdout_sample: stdout.to_string(),
+            prepare_steps: Vec::new(),
+        })
+    }
+
+    fn failed() -> super::Result<BenchSummary> {
+        Err(anyhow::anyhow!("backend unavailable"))
+    }
+
+    /// The ✓/✗ column is the only thing telling a reader whether the
+    /// backends actually agreed, so every degenerate case has to be
+    /// distinguishable from "they agreed".
+    #[test]
+    fn the_agreement_marker_reports_what_it_can_actually_compare() {
+        let a = summary("42");
+        let b = summary("42");
+        let c = summary("43");
+
+        assert_eq!(agreement_marker(&a, Some(&b), Some(&summary("42"))), "✓");
+        assert_eq!(agreement_marker(&a, Some(&b), None), "✓");
+        assert_eq!(agreement_marker(&a, Some(&c), None), "✗");
+        assert_eq!(agreement_marker(&a, Some(&b), Some(&c)), "✗");
+
+        // Fewer than two values to compare: blank, never a ✓. A ✓ here would
+        // claim agreement that was never checked.
+        assert_eq!(agreement_marker(&a, None, None), " ");
+        assert_eq!(agreement_marker(&a, Some(&failed()), None), " ");
+        assert_eq!(agreement_marker(&failed(), Some(&failed()), None), " ");
+
+        // A backend that errored drops out of the comparison entirely rather
+        // than counting as a disagreement.
+        assert_eq!(agreement_marker(&a, Some(&failed()), Some(&b)), "✓");
+    }
+
+    #[test]
+    fn percentiles_index_the_sorted_samples() {
+        let ms = |n| Duration::from_millis(n);
+        let sorted = vec![ms(10), ms(20), ms(30), ms(40)];
+        assert_eq!(pctile(&sorted, 0), Some(ms(10)));
+        assert_eq!(pctile(&sorted, 50), Some(ms(30))); // 4 * 50 / 100 = 2
+        assert_eq!(pctile(&sorted, 95), Some(ms(40))); // 4 * 95 / 100 = 3
+        // 100 would index one past the end; it clamps to the last sample.
+        assert_eq!(pctile(&sorted, 100), Some(ms(40)));
+        assert_eq!(pctile(&[ms(7)], 95), Some(ms(7)));
+        assert_eq!(pctile(&[], 50), None);
+    }
+
+    #[test]
+    fn the_unsorted_percentile_sorts_first_and_leaves_the_input_alone() {
+        let ms = |n| Duration::from_millis(n);
+        let samples = vec![ms(40), ms(10), ms(30), ms(20)];
+        assert_eq!(pctile_unsorted(&samples, 0), Some(ms(10)));
+        assert_eq!(pctile_unsorted(&samples, 95), Some(ms(40)));
+        assert_eq!(
+            samples[0],
+            ms(40),
+            "the caller's slice must not be reordered"
+        );
+        assert_eq!(pctile_unsorted(&[], 50), None);
+    }
+
+    #[test]
+    fn the_median_is_the_upper_middle_of_an_even_run() {
+        let ms = |n| Duration::from_millis(n);
+        assert_eq!(median(&[]), None);
+        assert_eq!(median(&[ms(5)]), Some(ms(5)));
+        assert_eq!(median(&[ms(30), ms(10), ms(20)]), Some(ms(20)));
+        // Even length takes `len / 2`, i.e. the upper of the two middles —
+        // not their average.
+        assert_eq!(median(&[ms(40), ms(10), ms(30), ms(20)]), Some(ms(30)));
+    }
+
+    #[test]
+    fn durations_switch_units_at_one_millisecond() {
+        assert_eq!(fmt(Duration::from_micros(999)), "999.00µs");
+        assert_eq!(fmt(Duration::from_micros(1000)), "1.00ms");
+        assert_eq!(fmt(Duration::from_micros(1500)), "1.50ms");
+        assert_eq!(fmt(Duration::ZERO), "0.00µs");
+    }
+
+    /// Four precision bands, so a small-but-nonzero share never prints as a
+    /// flat `0%` and gets mistaken for "nothing there".
+    #[test]
+    fn percentages_keep_precision_as_they_shrink() {
+        assert_eq!(fmt_pct(12.345), "12.3%");
+        assert_eq!(fmt_pct(10.0), "10.0%");
+        assert_eq!(fmt_pct(9.876), "9.88%");
+        assert_eq!(fmt_pct(0.1), "0.10%");
+        assert_eq!(fmt_pct(0.01234), "0.0123%");
+        assert_eq!(fmt_pct(0.0), "0%");
+    }
+
+    #[test]
+    fn truncation_counts_characters_not_bytes() {
+        assert_eq!(truncate("abcde", 5), "abcde");
+        assert_eq!(truncate("abcdef", 5), "abcd…");
+        // Multi-byte input must not be cut mid-character.
+        assert_eq!(truncate("héllo wörld", 6), "héllo…");
+        // `n == 0` is not a width the callers ever pass; it must still not
+        // underflow.
+        assert_eq!(truncate("", 0), "");
+        assert_eq!(truncate("x", 0), "…");
+    }
+
+    fn case(id: &str, source_file: &str, method_name: &str) -> super::TestCase {
+        super::TestCase {
+            id: id.into(),
+            source_file: source_file.into(),
+            method_name: method_name.into(),
+            line: 1,
+            call_index: 0,
+            helper: "code_v4_".into(),
+            java_line: String::new(),
+            version: 4,
+            strict: false,
+            enabled: true,
+            code: "1".into(),
+            expected: super::Expectation::Equals { value: "1".into() },
+            audit: None,
+        }
+    }
+
+    /// `--case-filter` narrows a sweep, and `check_ratchet_preconditions`
+    /// refuses a ratchet whenever it is set — so a filter that silently
+    /// matched everything would be the more dangerous failure.
+    #[test]
+    fn the_case_filter_matches_id_source_or_method() {
+        let c = case(
+            "TestString.java::substrings::3@v4",
+            "TestString.java",
+            "substrings",
+        );
+        assert!(case_matches_filter(&c, None));
+        assert!(case_matches_filter(&c, Some("")));
+        assert!(
+            case_matches_filter(&c, Some("   ")),
+            "whitespace is trimmed away"
+        );
+        assert!(case_matches_filter(&c, Some("substrings")));
+        assert!(case_matches_filter(&c, Some("TestString")));
+        assert!(case_matches_filter(&c, Some("@v4")));
+        assert!(
+            case_matches_filter(&c, Some(" substrings ")),
+            "the needle is trimmed"
+        );
+        assert!(!case_matches_filter(&c, Some("TestArray")));
+        // Substring, not fuzzy: the match is case-sensitive.
+        assert!(!case_matches_filter(&c, Some("SUBSTRINGS")));
     }
 }
