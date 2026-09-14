@@ -123,11 +123,14 @@ A `.leek` program flows down the layers:
      the backends consume.
    - `leek-charge` models LeekWars' per-operation "ops" budget; `leek-complexity`
      derives per-function big-O / cost estimates (`miku analyze`).
-3. **db** (`leek-pipeline`, `leek-session`) is the orchestration layer — a
-   query/recipe system that wires the stages together, caches artifacts, and
-   is what the binaries call into. `leek-pipeline` is the generic engine;
-   `leek-session` defines the concrete steps (its `recipes` module) and ties
-   them to a project/manifest (its `driver` module).
+3. **db** (`leek-pipeline`, `leek-db`, `leek-session`) is the orchestration
+   layer — a query/recipe system that wires the stages together, caches
+   artifacts, and is what the binaries call into. `leek-pipeline` is the
+   generic engine; `leek-db` is the query façade, re-exporting the one salsa
+   database and every tracked query under a single import path so a consumer
+   needs neither the pass crates nor their `salsa` features; `leek-session`
+   defines the concrete steps (its `recipes` module) and ties them to a
+   project/manifest (its `driver` module).
 4. **Backends** consume MIR:
    - `leek-backend-native` is a Cranelift JIT/AOT backend (`miku run`, and
      `leekc --emit` for a standalone executable, linked via `cc`). Scalars

@@ -1142,6 +1142,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "leek-db"
+version = "0.0.1"
+dependencies = [
+ "leek-complexity",
+ "leek-hir",
+ "leek-lexer",
+ "leek-mir",
+ "leek-parser",
+ "leek-pipeline",
+ "leek-resolver",
+ "leek-syntax",
+ "leek-types",
+]
+
+[[package]]
 name = "leek-diagnostics"
 version = "0.0.1"
 dependencies = [
