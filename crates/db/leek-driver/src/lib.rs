@@ -1,6 +1,7 @@
 //! Run recipe pipelines over project sources with shared diagnostic reporting.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter, Sources};
@@ -8,6 +9,11 @@ use leek_diagnostics::{LintLevelError, LintLevels};
 use leek_pipeline::{Input, Pipeline, Run, TimingSink};
 use leek_project::{Project, SourceInput};
 use leek_recipes::{RecipeParams, Target};
+
+/// The include-id interner, re-exported so front-ends that own one for
+/// a whole run (`miku test`) do not need a direct `leek-resolver`
+/// dependency just to name its type.
+pub use leek_resolver::interner::{PathInterner, SourceInterner};
 
 /// Configuration for one driver invocation.
 #[derive(Debug, Clone)]
@@ -175,9 +181,11 @@ fn lint_level_diagnostic(project: &Project, err: &LintLevelError) -> leek_diagno
 /// with the manifest's opt-in lint groups, with the file's includes resolved
 /// from disk (included files get `SourceId`s following `source_id`).
 ///
-/// Every `miku` subcommand that compiles a file plans it here, so `check`,
-/// `lint`, `run`, `build`, `fix`, `test`, `analyze` and `doc` all see the
-/// same include closure and the same lint groups.
+/// Every `miku` subcommand that compiles one file per invocation plans it
+/// here, so `check`, `lint`, `run`, `build`, `fix`, `analyze` and `doc` all
+/// see the same include closure and the same lint groups. `test` compiles a
+/// whole directory in one process and plans through
+/// [`file_pipeline_shared`] instead, for one id space across the run.
 pub fn file_pipeline(
     project: &Project,
     path: &Path,
@@ -187,13 +195,34 @@ pub fn file_pipeline(
     standalone_pipeline(path, source_id, &merge_manifest_lints(project, config))
 }
 
+/// [`file_pipeline`] for a command that compiles many files in one run:
+/// the entry and its includes are numbered out of the caller's shared
+/// `interner` rather than counting up from a per-file id, and the
+/// entry's id comes back so the caller builds its `Input` with it.
+///
+/// `miku test` needs this — numbering each test file `1, 2, 3, …` while
+/// its includes take the ids just above the entry's hands file 2 the id
+/// file 1's first include already has (#191).
+pub fn file_pipeline_shared(
+    project: &Project,
+    path: &Path,
+    config: &DriverConfig,
+    interner: &Arc<dyn SourceInterner>,
+) -> Result<(Pipeline, leek_span::SourceId)> {
+    let merged = merge_manifest_lints(project, config);
+    let step = includes_step(path, interner);
+    let pipeline = leek_recipes::pipeline_with_includes(merged.target, step, &merged.params)?;
+    Ok((pipeline, interner.intern(path)))
+}
+
 /// The pipeline for one file compiled outside any project — the
 /// manifest-less half of [`file_pipeline`], for front-ends that have a
 /// path but no `Miku.toml` (`leekc`).
 ///
 /// There are no manifest lint groups to merge, but the file's includes
 /// still resolve from disk and its included files are numbered exactly
-/// the way the `miku` commands number theirs.
+/// the way the one-file-per-invocation `miku` commands number theirs:
+/// from a fresh interner seeded at the entry's own `source_id`.
 pub fn standalone_pipeline(
     path: &Path,
     source_id: leek_span::SourceId,
@@ -201,7 +230,7 @@ pub fn standalone_pipeline(
 ) -> Result<Pipeline> {
     Ok(leek_recipes::pipeline_with_includes(
         config.target,
-        includes_step(path, source_id),
+        includes_step_standalone(path, source_id),
         &config.params,
     )?)
 }
@@ -216,24 +245,45 @@ fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfi
     config
 }
 
-/// Build the `ResolveIncludes` step for a file: disk-folder I/O,
-/// `SourceId`s allocated sequentially from the entry's own id (the
-/// graph walker seeds the entry first, so it keeps `source_id` and
-/// each included file gets the next id).
+/// Build the `ResolveIncludes` step for a file: disk-folder I/O, with
+/// the entry and every file it includes numbered out of `interner`.
+///
+/// Front-ends that compile several files in one process pass one
+/// interner to every call, so a helper included by two entries keeps a
+/// single `SourceId` instead of colliding with the next entry's
+/// (#191). The entry is interned first, so `interner.intern(path)` is
+/// the id the caller should build its `Input` with.
 ///
 /// Public so other front-ends that drive the pipeline themselves (the debug
 /// adapter, which reports diagnostics over DAP rather than rendering them)
 /// resolve includes and number sources exactly as the `miku` commands here
 /// do.
-pub fn includes_step(path: &Path, source_id: leek_span::SourceId) -> Box<dyn leek_pipeline::Step> {
+pub fn includes_step(
+    path: &Path,
+    interner: &Arc<dyn SourceInterner>,
+) -> Box<dyn leek_pipeline::Step> {
     // The same key rule the include graph itself uses, so the entry
     // and its includes cannot land in the graph under two shapes (#181).
     let canonical = leek_span::paths::canonical_or_normalized(path);
-    Box::new(leek_resolver::pipeline::ResolveIncludes::with_counter(
-        std::sync::Arc::new(leek_resolver::folder::DiskFolder),
+    Box::new(leek_resolver::pipeline::ResolveIncludes::new(
+        Arc::new(leek_resolver::folder::DiskFolder),
         canonical,
-        source_id.get(),
+        Arc::clone(interner),
     ))
+}
+
+/// [`includes_step`] for a front-end that compiles exactly one entry:
+/// a fresh interner whose first path — the entry — gets `source_id`,
+/// so its includes follow on from the id the caller already put in its
+/// `Input`.
+pub fn includes_step_standalone(
+    path: &Path,
+    source_id: leek_span::SourceId,
+) -> Box<dyn leek_pipeline::Step> {
+    let interner: Arc<dyn SourceInterner> = Arc::new(
+        leek_resolver::interner::PathInterner::starting_at(source_id.get()),
+    );
+    includes_step(path, &interner)
 }
 
 /// Convenience: discover project, build reporter, run one file.
@@ -280,7 +330,7 @@ pub fn run_file_timed(
     let merged = merge_manifest_lints(project, config);
     let pipeline = leek_recipes::pipeline_with_includes_timed(
         merged.target,
-        includes_step(path, source_id),
+        includes_step_standalone(path, source_id),
         &merged.params,
         sink,
     )?;
@@ -599,11 +649,30 @@ mod tests {
     fn includes_step_survives_a_path_that_cannot_be_canonicalized() {
         // `canonicalize` fails for a file that does not exist; the step must
         // fall back to the path as given rather than panic.
-        let step = includes_step(
+        let step = includes_step_standalone(
             std::path::Path::new("/no/such/entry.leek"),
             SourceId::new(7).unwrap(),
         );
         assert_eq!(step.name(), "resolve_includes");
+    }
+
+    /// The reason `file_pipeline_shared` exists: two entry files planned
+    /// from one interner get two ids, and a helper both of them include
+    /// keeps a third — where the per-file numbering handed entry 2 the id
+    /// entry 1's include already owned (#191).
+    #[test]
+    fn one_interner_numbers_several_entries_without_collisions() {
+        let interner: Arc<dyn SourceInterner> = Arc::new(PathInterner::new());
+        let first = interner.intern(std::path::Path::new("/tests/first.leek"));
+        let helper = interner.intern(std::path::Path::new("/tests/helper.leek"));
+        let second = interner.intern(std::path::Path::new("/tests/second.leek"));
+
+        assert_eq!([first.get(), helper.get(), second.get()], [1, 2, 3]);
+        assert_eq!(
+            interner.intern(std::path::Path::new("/tests/helper.leek")),
+            helper,
+            "the second entry's include is the same file, so the same id"
+        );
     }
 
     #[test]

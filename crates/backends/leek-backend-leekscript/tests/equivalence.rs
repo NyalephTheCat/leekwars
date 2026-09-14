@@ -23,6 +23,7 @@ use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse, parse_wit
 use leek_pipeline::Input;
 use leek_recipes::{RecipeParams, pipeline_hir_with_includes};
 use leek_resolver::folder::MemFolder;
+use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::ResolveIncludes;
 use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::{SyntaxNode, Version};
@@ -462,10 +463,10 @@ fn lower_project(entry_path: &str, files: &[(&str, &str)], ff: FeatureFlags) -> 
         strict: false,
         flags: ff,
     };
-    let resolve = ResolveIncludes::with_counter(
+    let resolve = ResolveIncludes::new(
         Arc::new(folder),
         PathBuf::from(entry_path),
-        /* start = */ 2,
+        Arc::new(PathInterner::starting_at(2)),
     );
     let pipeline = pipeline_hir_with_includes(Box::new(resolve), &RecipeParams::permissive())
         .expect("recipe builds");

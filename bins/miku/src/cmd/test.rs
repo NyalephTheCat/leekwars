@@ -28,15 +28,15 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use leek_backend_native::{NativeArtifact, NativeError};
 use leek_hir::pipeline::HirArtifact;
-use leek_span::SourceId;
 
 use leek_diagnostics::{Code, Reporter, Severity};
-use leek_driver::DriverConfig;
+use leek_driver::{DriverConfig, PathInterner, SourceInterner};
 use leek_pipeline::Input;
 use leek_project::Project;
 use leek_recipes::{RecipeParams, Target};
@@ -79,11 +79,16 @@ pub fn run(
         return Ok(ExitCode::SUCCESS);
     }
 
+    // One id space for the whole run: every test file and every helper
+    // any of them includes gets its own `SourceId`. Numbering each test
+    // file `1, 2, 3, …` and letting its includes count up from there gave
+    // file 2 the id file 1's first include already held (#191).
+    let interner: Arc<dyn SourceInterner> = Arc::new(PathInterner::new());
+
     let mut records: Vec<TestRecord> = Vec::new();
-    for (next_source, path) in (1_u32..).zip(&tests) {
-        let source = SourceId::new(next_source).unwrap();
+    for path in &tests {
         let start = Instant::now();
-        let outcome = run_one(&project, &config, &reporter, source, path)?;
+        let outcome = run_one(&project, &config, &reporter, &interner, path)?;
         let duration = start.elapsed();
 
         let rel = display_relative(&project.root, path);
@@ -160,9 +165,12 @@ fn run_one(
     project: &Project,
     config: &DriverConfig,
     reporter: &Reporter,
-    source: SourceId,
+    interner: &Arc<dyn SourceInterner>,
     path: &Path,
 ) -> Result<TestOutcome> {
+    // Plan first: the pipeline interns the entry, and its id is what this
+    // file's `Input` — and so every span it raises — has to carry.
+    let (pipeline, source) = leek_driver::file_pipeline_shared(project, path, config, interner)?;
     let (src, text) = project.pipeline_input(source, path)?;
     let input = Input::from(src);
     let annotations = parse_annotations(&text);
@@ -173,7 +181,6 @@ fn run_one(
         )));
     }
 
-    let pipeline = leek_driver::file_pipeline(project, path, source, config)?;
     let result = pipeline.run(input);
     let label = path.display().to_string();
 

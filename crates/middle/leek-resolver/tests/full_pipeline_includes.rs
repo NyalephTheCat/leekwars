@@ -16,6 +16,7 @@ use leek_diagnostics::{Diagnostic, codes};
 use leek_pipeline::Input;
 use leek_recipes::{RecipeParams, Target, pipeline_with_includes, plan_with_includes};
 use leek_resolver::folder::MemFolder;
+use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::{IncludeGraphArtifact, ResolveIncludes};
 use leek_span::SourceId;
 use leek_types::pipeline::TypeCheckArtifact;
@@ -68,14 +69,14 @@ fn run_to_typecheck(entry_path: &str, files: &[(&str, &str)]) -> Run {
         strict: true,
         flags: leek_pipeline::FeatureFlags::none(),
     };
-    // The walker seeds the entry first, so the counter starts at the
+    // The walker interns the entry first, so the counter starts at the
     // entry's own id — exactly what `leek_driver::includes_step` does.
     // Seeding it past the entry would hand the entry a second `SourceId`
     // and make any span-source assertion here meaningless.
-    let includes = ResolveIncludes::with_counter(
+    let includes = ResolveIncludes::new(
         Arc::new(folder),
         PathBuf::from(entry_path),
-        /* start = */ 1,
+        Arc::new(PathInterner::starting_at(1)),
     );
     let params = RecipeParams::permissive();
     let pipeline =
@@ -107,10 +108,10 @@ fn the_typechecked_target_plans_both_resolve_and_type_check_with_includes() {
     // The guarantee the rest of this file relies on: a no-op `Tap`
     // recipe-shape test can't tell whether these steps really execute,
     // but if they were not even planned nothing below would run.
-    let includes = ResolveIncludes::with_counter(
+    let includes = ResolveIncludes::new(
         Arc::new(MemFolder::new()),
         PathBuf::from("/main.leek"),
-        /* start = */ 2,
+        Arc::new(PathInterner::starting_at(2)),
     );
     let names = plan_with_includes(
         Target::TypeChecked,

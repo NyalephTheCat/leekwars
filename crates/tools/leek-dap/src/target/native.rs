@@ -170,7 +170,7 @@ impl NativeTarget {
 
         let pipeline = match leek_recipes::pipeline_with_includes(
             Target::Hir,
-            leek_driver::includes_step(path, src_id),
+            leek_driver::includes_step_standalone(path, src_id),
             &leek_recipes::driver_params(),
         ) {
             Ok(pipeline) => pipeline,

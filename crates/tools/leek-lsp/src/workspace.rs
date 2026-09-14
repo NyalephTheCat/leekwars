@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use leek_pipeline::ProjectIndex;
 use leek_pipeline::salsa::{LeekDb, ProjectFile, SourceFile};
+use leek_resolver::interner::PathInterner;
 use leek_span::LineTable;
 use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
 use salsa::Setter;
@@ -62,9 +63,14 @@ pub struct Workspace {
     roots: Vec<ProjectIndex>,
     /// On-disk `.leek` files from the project index (not open).
     pub indexed: HashMap<PathBuf, IndexedFile>,
-    /// Monotonic counter for [`leek_span::SourceId`] allocation.
-    /// Starts at 1 because `SourceId::new(0)` is rejected.
-    next_source_id: u32,
+    /// The server's one source of [`leek_span::SourceId`]s: the ids
+    /// this workspace mints for its salsa inputs, and the ids the
+    /// include walker gives files that are neither open nor indexed,
+    /// come out of the same counter, so the two can never name two
+    /// different files the same (#191). Shared with
+    /// [`crate::pipeline`], which seeds it with the ids already bound
+    /// to analysis targets before each include-aware run.
+    pub interner: Arc<PathInterner>,
     /// Project roots received during `initialize`, indexed in
     /// `initialized`.
     pending_project_roots: Vec<PathBuf>,
@@ -108,7 +114,7 @@ impl Default for Workspace {
             docs: HashMap::new(),
             roots: Vec::new(),
             indexed: HashMap::new(),
-            next_source_id: 1,
+            interner: Arc::new(PathInterner::new()),
             pending_project_roots: Vec::new(),
             pending_library_log: Vec::new(),
             semantic_tokens_cache: HashMap::new(),
@@ -489,10 +495,13 @@ impl Workspace {
         }
     }
 
+    /// A [`leek_span::SourceId`] for a new salsa input.
+    ///
+    /// Reserved rather than interned by path: a buffer may have no path
+    /// at all (`untitled:`), and the ids this hands out are what
+    /// [`crate::pipeline`] later binds to the paths that do have one.
     fn alloc_source_id(&mut self) -> u32 {
-        let id = self.next_source_id;
-        self.next_source_id += 1;
-        id
+        self.interner.reserve().get()
     }
 
     /// Scan one file's `class IDENT` declarations (version-aware:
