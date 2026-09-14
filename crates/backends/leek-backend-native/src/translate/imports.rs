@@ -477,7 +477,7 @@ pub(super) fn declare_imports(
             ("leek_coerce_scalar", &[i, i], Some(i)),
             ("leek_slice", &[i, i, i, i], Some(i)),
             ("leek_interval", &[i, i, i], Some(i)),
-            ("leek_count", &[i, i], Some(i)),
+            ("leek_count", &[i], Some(i)),
             ("leek_truthy", &[i], Some(i)),
             ("leek_value_unary", &[i, i], Some(i)),
             ("leek_apply_cast", &[i, i], Some(i)),

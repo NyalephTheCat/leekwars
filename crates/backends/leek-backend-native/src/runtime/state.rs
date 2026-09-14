@@ -127,10 +127,10 @@ pub(super) fn charge_concat(l: &Value, r: &Value) {
         _ => 0,
     };
     let len = |v: &Value| match v {
-        Value::String(s) => s.encode_utf16().count() as i64,
-        other => leek_runtime::value_as_concat_string(other)
-            .encode_utf16()
-            .count() as i64,
+        Value::String(s) => leek_runtime::len_as_int(leek_runtime::jstr::len16(s)),
+        other => leek_runtime::len_as_int(leek_runtime::jstr::len16(
+            &leek_runtime::value_as_concat_string(other),
+        )),
     };
     leek_charge_ops(conv(l) + conv(r) + len(l) + len(r));
 }
@@ -143,7 +143,7 @@ pub(super) fn charge_concat(l: &Value, r: &Value) {
 /// UTF-16 code units (Java `String.length()`). Every other operand mix
 /// (bools, arrays, functions) charges nothing at this level.
 pub(super) fn charge_eq(l: &Value, r: &Value) {
-    let utf16 = |s: &str| s.encode_utf16().count() as i64;
+    let utf16 = |s: &str| leek_runtime::len_as_int(leek_runtime::jstr::len16(s));
     match (l, r) {
         (Value::String(a), Value::String(b)) => {
             leek_charge_ops(utf16(a).min(utf16(b)));

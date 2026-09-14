@@ -10,6 +10,13 @@
 //!   upstream), so the same emoji is *two* positions, and so does `slice`
 //!   (`eval.rs`, which documents itself as matching `stringSlice`).
 //!
+//! `length` used to sit on the `char` side of that split. It no longer does:
+//! it is `String.length()` (`StringClass.java:29-32`), measured by
+//! `leek_runtime::jstr::len16`, so it counts UTF-16 code units like
+//! `codePointAt` and `slice` (#268 RT-03, #336 RT-M3). That makes the
+//! remaining divergence smaller and sharper — three `char`-indexed builtins
+//! against a UTF-16 length that no longer agrees with them.
+//!
 //! On any string that stays inside the BMP the two agree and nothing shows.
 //! On a string with an astral character — an emoji in a chat message, say —
 //! `charAt(s, i)` and `codePointAt(s, i)` are talking about different
@@ -160,13 +167,20 @@ fn substring_counts_in_scalars_while_slice_counts_in_code_units() {
 }
 
 /// `length` decides which of the two an author's own index arithmetic will
-/// be based on, so which convention it follows is the one that matters most.
+/// be based on, so which convention it follows is the one that matters most
+/// — and it follows the UTF-16 one, because upstream's `StringClass.length`
+/// is `return string.length()` and Java counts code units. The emoji is two
+/// positions here, exactly as it is for `codePointAt` and `slice`, and one
+/// more than `charAt` will address.
 #[test]
-fn length_counts_scalars_like_char_at() {
-    assert_eq!(call("length", &[s(MIXED)]).as_int(), Some(3));
+fn length_counts_code_units_like_code_point_at() {
+    assert_eq!(call("length", &[s(MIXED)]).as_int(), Some(4));
     assert_eq!(
         s(MIXED).to_string().encode_utf16().count(),
         6,
         "for reference: 4 units plus the two quotes Display adds",
     );
+    // The three `char`-indexed builtins still disagree with it: `charAt`
+    // runs out of positions one short of what `length` promises.
+    assert_eq!(text(&call("charAt", &[s(MIXED), Value::Int(3)])), "");
 }

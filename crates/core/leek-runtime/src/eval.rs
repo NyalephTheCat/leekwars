@@ -474,23 +474,19 @@ pub fn read_index(base: &Value, idx: &Value) -> Value {
         Value::String(s) => {
             // Upstream `getString` indexes by UTF-16 code unit
             // (`String.charAt`): negative wraps once, out-of-bounds → null.
-            // ASCII fast path avoids the UTF-16 re-encode.
-            let len = if s.is_ascii() {
-                crate::len_as_int(s.len())
-            } else {
-                crate::len_as_int(s.encode_utf16().count())
-            };
+            // Both the length and the lookup come from `jstr`, which keeps
+            // the ASCII fast path in one place.
+            let len = crate::len_as_int(crate::jstr::len16(s));
             let raw = idx.as_int().unwrap_or(0);
             let i = if raw < 0 { raw + len } else { raw };
-            if i < 0 || i >= len {
-                Value::Null
-            } else if s.is_ascii() {
-                Value::String(Rc::new(
-                    (s.as_bytes()[crate::clamp_index(i)] as char).to_string(),
-                ))
+            let unit = if i < 0 {
+                None
             } else {
-                let unit = s.encode_utf16().nth(crate::clamp_index(i)).unwrap_or(0);
-                Value::String(Rc::new(String::from_utf16_lossy(&[unit])))
+                crate::jstr::unit_at(s, crate::clamp_index(i))
+            };
+            match unit {
+                Some(u) => Value::String(Rc::new(String::from_utf16_lossy(&[u]))),
+                None => Value::Null,
             }
         }
         Value::Object(_) | Value::Instance(_) | Value::BuiltinClass(_) | Value::ClassRef(_, _) => {

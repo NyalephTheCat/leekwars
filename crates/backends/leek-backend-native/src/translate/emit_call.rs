@@ -647,7 +647,8 @@ impl Tx<'_, '_> {
         }
     }
 
-    /// `count(x)` — element count of an array/map/set/string handle.
+    /// `count(x)` — element count of an array/map/set handle (0 for anything
+    /// else, strings included, at every version — see `leek_count`).
     pub(super) fn count_call(&mut self, args: &[Operand]) -> Result<(Value, ValTy), NativeError> {
         // Catalog cost (`count` → 1), as the Java emitter charges statically.
         self.charge(leek_runtime::builtin_cost("count"))?;
@@ -657,11 +658,7 @@ impl Tx<'_, '_> {
             None => return Err(self.unsupported("count: missing argument")),
         };
         let h = self.coerce(v, t, ValTy::Ref)?;
-        let ver = self
-            .b
-            .ins()
-            .iconst(types::I64, i64::from(self.lang.version));
-        let inst = self.b.ins().call(count, &[h, ver]);
+        let inst = self.b.ins().call(count, &[h]);
         Ok((self.b.inst_results(inst)[0], ValTy::Int))
     }
 

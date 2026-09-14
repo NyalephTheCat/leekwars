@@ -18,7 +18,7 @@ pub(crate) fn dispatch_array(
     args: &[Value],
 ) -> BuiltinResult<Option<Value>> {
     Ok(Some(match (name, args.len()) {
-        ("count", 1) => count(&args[0], host.version()),
+        ("count", 1) => count(&args[0]),
         ("isEmpty", 1) => Value::Bool(match &args[0] {
             Value::Array(a) => a.borrow().is_empty(),
             Value::Map(m) => m.borrow().is_empty(),
@@ -1392,24 +1392,23 @@ pub(crate) fn contains_in(haystack: &Value, needle: &Value) -> bool {
     }
 }
 
-pub(crate) fn count(v: &Value, version: u8) -> Value {
+/// `count(x)` — the element count of an array / map / set, and **0 for
+/// everything else at every version**, strings included.
+///
+/// `count` is declared over `Type.ARRAY` (`LeekFunctions.java:140`) with no
+/// `setMinVersion` widening, so upstream's generic helper converts its
+/// receiver with `toLegacyArray` (v1–v3) or `toArray` (v4) first. Neither
+/// takes a `String`: v4's `toArray` throws `ClassCastException` and the
+/// helper answers `0`, v1–v3's `toLegacyArray` yields the empty fallback
+/// array. The corpus records the same — `count('hello')` is `0` at v1, v2
+/// and v3, and `count(unknown(12))` is `0` at all four versions
+/// (`reference.tsv`). `count(12)` and `count(null)` are 0 for the same
+/// reason, which keeps `count(unknown(...))` total.
+pub(crate) fn count(v: &Value) -> Value {
     match v {
         Value::Array(a) => Value::Int(crate::len_as_int(a.borrow().len())),
         Value::Map(m) => Value::Int(crate::len_as_int(m.borrow().len())),
         Value::Set(s) => Value::Int(crate::len_as_int(s.borrow().len())),
-        // v1-3 `count(string)` returns 0 (it's a Java-collection
-        // sibling that only counts container length). v4 widened
-        // it to return the character count.
-        Value::String(s) => {
-            if version >= 4 {
-                Value::Int(crate::len_as_int(s.chars().count()))
-            } else {
-                Value::Int(0)
-            }
-        }
-        // Anything non-container counts as 0 — `count(12)` and
-        // `count(null)` both return `0` in upstream rather than
-        // raising. Keeps `count(unknown(...))` total.
         _ => Value::Int(0),
     }
 }

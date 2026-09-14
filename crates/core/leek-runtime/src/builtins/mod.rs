@@ -66,7 +66,7 @@ pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
     // catalog cost (e.g. `length` is catalogued at 15 and its impl ticks 1
     // more, so a call costs 16 total).
     if let Some(Value::String(s)) = args.first() {
-        let len = s.encode_utf16().count() as u64;
+        let len = crate::jstr::len16(s) as u64;
         let extra = match name {
             "length" => Some(1),
             // Haystack scans: `1 + len/10`.
@@ -74,7 +74,7 @@ pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
             // Worst-case output bound: every char replaced by `replace`.
             "replace" => {
                 let rep = match args.get(2) {
-                    Some(Value::String(r)) => r.encode_utf16().count() as u64,
+                    Some(Value::String(r)) => crate::jstr::len16(r) as u64,
                     _ => 0,
                 };
                 Some((len.saturating_mul(rep.max(1))).max(1))
@@ -126,7 +126,9 @@ pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
         let first_n = args.first().map_or(0, |v| match v {
             Value::Array(a) => a.borrow().len() as u64,
             Value::Map(m) => m.borrow().len() as u64,
-            Value::String(s) => s.len() as u64,
+            // UTF-16 code units — the size upstream's batch loops walk
+            // (Java `String.length()`), not UTF-8 bytes.
+            Value::String(s) => crate::jstr::len16(s) as u64,
             Value::Interval(iv) => {
                 match (iv.start, iv.end) {
                     (Some(s), Some(e)) if !iv.is_empty() => {
