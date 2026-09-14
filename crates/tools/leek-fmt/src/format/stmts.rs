@@ -168,14 +168,13 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
                 between_newlines += count_newlines(t.text());
             }
             NodeOrToken::Token(t) if is_trivia(&t) => {
+                // Like the block walker: pragmas drive the formatter's
+                // state and still reach the output (#367).
                 let pragma = crate::parse_fmt_pragma(t.text());
-                if let crate::FmtPragma::Next(k, v) = &pragma {
-                    pending_next.push((k.clone(), v.clone()));
-                    continue;
-                }
-                if pragma != crate::FmtPragma::None {
-                    super::apply_pragma_to_ctx(&pragma);
-                    continue;
+                match &pragma {
+                    crate::FmtPragma::None => {}
+                    crate::FmtPragma::Next(k, v) => pending_next.push((k.clone(), v.clone())),
+                    p => super::apply_pragma_to_ctx(p),
                 }
                 gap_before_leading.get_or_insert(between_newlines);
                 between_newlines = 0;

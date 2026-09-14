@@ -24,6 +24,8 @@ on:
       - "crates/db/**"
       - "crates/testing/leek-test-driver/**"
       - "crates/testing/leek-test-corpus/**"
+      # tests/fmt_roundtrip.rs runs the formatter over every corpus case.
+      - "crates/tools/leek-fmt/**"
       - ".github/workflows/corpus.yml"
 
 # Deliberately *not* ci.yml's `ci-…` group: a scheduled run happens on

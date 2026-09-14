@@ -205,6 +205,12 @@ type NodeFormatter = fn(&SyntaxNode) -> Doc;
 /// Generic node dispatch — pick the right formatter for a node by
 /// its [`SyntaxKind`].
 pub(crate) fn fmt_node(node: &SyntaxNode) -> Doc {
+    // Tests can install a deliberately broken rule here; see
+    // [`Sabotage`]. Compiled out of every non-test build.
+    #[cfg(test)]
+    if let Some(doc) = sabotage::rendering_of(node) {
+        return doc;
+    }
     // `// fmt: off` regions and `// fmt-skip`-marked nodes are
     // emitted verbatim. Nothing inside an off region gets
     // reformatted; nothing whose immediately-preceding sibling
@@ -593,6 +599,10 @@ pub(crate) fn is_doc_comment(comment_text: &str) -> bool {
 /// under the `*` of the opening `/**`. This matches rustfmt /
 /// clang-format / Prettier.
 pub(crate) fn comment_doc(t: &SyntaxToken) -> Doc {
+    #[cfg(test)]
+    if sabotage::active() == sabotage::Sabotage::DropComments {
+        return crate::doc::nil();
+    }
     let raw = t.text();
     if !raw.contains('\n') {
         if with_ctx(|cx| cx.opts.pad_line_comments) {
@@ -630,6 +640,128 @@ pub(crate) fn comment_doc(t: &SyntaxToken) -> Doc {
         }
     }
     concat(parts)
+}
+
+/// Fault injection: run the formatter with one rule deliberately
+/// broken, so the tests can prove [`crate::check_equivalence`] catches
+/// a formatter that changes what the program means.
+///
+/// The hooks live in `src/` because an integration test can't reach a
+/// `#[cfg(test)]` thread-local; they compile out of every other build.
+#[cfg(test)]
+mod sabotage {
+    use std::cell::Cell;
+
+    use leek_syntax::{SyntaxKind as S, SyntaxNode};
+
+    use crate::doc::{Doc, concat, hardline};
+
+    /// Which rule is currently broken.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Sabotage {
+        /// Nothing broken — the real formatter.
+        None,
+        /// Emit a `{ … }` block's statements without the braces, so a
+        /// control body swallows (or releases) its siblings.
+        DropBraces,
+        /// Emit a parenthesised expression without its parentheses, so
+        /// operator precedence changes.
+        DropParens,
+        /// Emit nothing for a comment.
+        DropComments,
+    }
+
+    thread_local! {
+        static ACTIVE: Cell<Sabotage> = const { Cell::new(Sabotage::None) };
+    }
+
+    /// The broken rule in effect on this thread.
+    pub(super) fn active() -> Sabotage {
+        ACTIVE.with(Cell::get)
+    }
+
+    /// Run `body` with `mode` broken, restoring the real formatter
+    /// afterwards (panic included).
+    pub(super) fn with<R>(mode: Sabotage, body: impl FnOnce() -> R) -> R {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ACTIVE.with(|a| a.set(Sabotage::None));
+            }
+        }
+        ACTIVE.with(|a| a.set(mode));
+        let _restore = Restore;
+        body()
+    }
+
+    /// The sabotaged rendering of `node`, or `None` when the active
+    /// mode leaves this node kind alone.
+    pub(super) fn rendering_of(node: &SyntaxNode) -> Option<Doc> {
+        match (active(), node.kind()) {
+            (Sabotage::DropBraces, S::Block) => Some(concat(
+                node.children()
+                    .flat_map(|child| [super::fmt_node(&child), hardline()]),
+            )),
+            (Sabotage::DropParens, S::ParenExpr) => {
+                node.children().next().map(|inner| super::fmt_node(&inner))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod sabotage_tests {
+    use leek_span::SourceId;
+    use leek_syntax::Version;
+
+    use super::sabotage::{Sabotage, with as with_sabotage};
+    use crate::{EquivalenceError, FormatOptions, format_source_checked};
+
+    fn fmt(mode: Sabotage, src: &str) -> Result<String, EquivalenceError> {
+        with_sabotage(mode, || {
+            format_source_checked(
+                src,
+                SourceId::new(1).expect("1 is a valid source id"),
+                Version::V4,
+                &FormatOptions::default(),
+            )
+        })
+    }
+
+    #[test]
+    fn a_rule_that_drops_braces_is_caught() {
+        let src = "if (x) {\n    a();\n    b();\n}\nc();\n";
+        fmt(Sabotage::None, src).expect("the real formatter is safe");
+        let err = fmt(Sabotage::DropBraces, src).unwrap_err();
+        assert!(
+            // Same tokens, different program: only the shape layer sees it.
+            matches!(err, EquivalenceError::ShapeMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_drops_parens_is_caught() {
+        let src = "var x = (a + b) * c;\n";
+        fmt(Sabotage::None, src).expect("the real formatter is safe");
+        let err = fmt(Sabotage::DropParens, src).unwrap_err();
+        assert!(
+            matches!(err, EquivalenceError::ShapeMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_drops_comments_is_caught() {
+        let src = "// keep me\nvar x = 1;\n";
+        fmt(Sabotage::None, src).expect("the real formatter is safe");
+        let err = fmt(Sabotage::DropComments, src).unwrap_err();
+        assert!(
+            matches!(err, EquivalenceError::CommentMismatch { .. }),
+            "{err:?}"
+        );
+    }
 }
 
 #[cfg(test)]

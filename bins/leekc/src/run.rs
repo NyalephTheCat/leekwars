@@ -218,6 +218,15 @@ pub fn run() -> Result<ExitCode> {
         }
         Emit::Fmt => {
             if let Some(artifact) = result.get::<FormattedArtifact>() {
+                // The pipeline artifact is unverified. Print nothing
+                // rather than corrupt LeekScript when the formatter
+                // would change the program — same policy as `miku fmt`.
+                if let Err(err) = leek_fmt::check_equivalence(&text, &artifact.0, version) {
+                    eprintln!(
+                        "error: refusing to emit formatted source: {err} (please report this)"
+                    );
+                    return Ok(ExitCode::from(1));
+                }
                 print!("{}", artifact.0);
             } else {
                 eprintln!("leekc: parse failed; no formatted output");

@@ -291,6 +291,44 @@ version = "0.1.0"
 }
 
 #[test]
+fn fmt_keeps_fmt_off_regions_across_runs() {
+    let dir = scratch_dir("fmt_off");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "fmtoff"
+version = "0.1.0"
+"#,
+    );
+    let protected = "var    table  =  [1,  2,\n         3];";
+    write(
+        &dir,
+        "src/main.leek",
+        &format!("// @version:4\n// fmt: off\n{protected}\n// fmt: on\nvar    y=2;\nreturn y;\n"),
+    );
+
+    let out = miku(&["fmt"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    let formatted = std::fs::read_to_string(dir.join("src/main.leek")).expect("read back");
+    // The markers are how the next run knows the region is off; if
+    // they are dropped, `fmt --check` below reformats it (#367).
+    assert!(formatted.contains("// fmt: off"), "{formatted:?}");
+    assert!(formatted.contains("// fmt: on"), "{formatted:?}");
+    assert!(formatted.contains(protected), "{formatted:?}");
+    assert!(formatted.contains("var y = 2;"), "{formatted:?}");
+
+    let out = miku(&["fmt", "--check"], &dir);
+    assert_eq!(
+        out.status, 0,
+        "fmt is not idempotent over a `fmt: off` region (stderr: {})",
+        out.stderr
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn lint_honors_allow_list() {
     let dir = scratch_dir("lint_allow");
     // Unused variable triggers L0001.
