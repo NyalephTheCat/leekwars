@@ -89,6 +89,33 @@ pub struct Options {
     pub experimental_overloads: bool,
 }
 
+impl Options {
+    /// Build the options from the settings that decide them: the file's
+    /// pragmas (`None` when no pragma scan ran), the run's feature flags
+    /// and strict mode. The single place the experimental opt-ins are
+    /// spelled out, so every driver — the pipeline step, the salsa query —
+    /// agrees on what a pragma or a flag turns on.
+    #[must_use]
+    pub fn from_settings(
+        pragmas: Option<&leek_syntax::Pragmas>,
+        flags: leek_span::FeatureFlags,
+        strict: bool,
+    ) -> Self {
+        Self {
+            strict,
+            experimental_imports: pragmas
+                .is_some_and(|p| p.experimental.iter().any(|f| f == "imports")),
+            experimental_overloads: pragmas.is_some_and(pragma_overloads) || flags.overloads,
+        }
+    }
+}
+
+/// True when the file opts into experimental function overloads via a
+/// `// @experimental: overloads` pragma.
+fn pragma_overloads(pragmas: &leek_syntax::Pragmas) -> bool {
+    pragmas.experimental.iter().any(|f| f == "overloads")
+}
+
 pub fn resolve_with_options(
     file: &SourceFile,
     source: SourceId,

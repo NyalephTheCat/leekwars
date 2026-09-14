@@ -106,25 +106,11 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
 }
 
 fn resolve_options(cx: &Context<'_>) -> Options {
-    let experimental_imports = cx
-        .get::<PragmasArtifact>()
-        .is_some_and(|p| p.0.experimental.iter().any(|f| f == "imports"));
-    let experimental_overloads = cx
-        .get::<PragmasArtifact>()
-        .map(|p| &p.0)
-        .is_some_and(pragma_overloads)
-        || cx.flags().overloads;
-    Options {
-        strict: cx.strict(),
-        experimental_imports,
-        experimental_overloads,
-    }
-}
-
-/// True when the file opts into experimental function overloads via a
-/// `// @experimental: overloads` pragma.
-fn pragma_overloads(pragmas: &leek_syntax::Pragmas) -> bool {
-    pragmas.experimental.iter().any(|f| f == "overloads")
+    Options::from_settings(
+        cx.get::<PragmasArtifact>().map(|p| &p.0),
+        cx.flags(),
+        cx.strict(),
+    )
 }
 
 /// One included file's parsed view, ready for the HIR lowerer to
@@ -329,12 +315,11 @@ pub fn resolve_query(
     // strict mode come from the salsa input (the settled `Input`). Reuse the
     // memoized pragma query instead of re-scanning the text.
     let pragmas = leek_syntax::pipeline::pragma_query(db, file).pragmas;
-    let opts = Options {
-        strict: file.strict(db),
-        experimental_imports: pragmas.experimental.iter().any(|f| f == "imports"),
-        experimental_overloads: pragma_overloads(&pragmas)
-            || leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db)).overloads,
-    };
+    let opts = Options::from_settings(
+        Some(&pragmas),
+        leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db)),
+        file.strict(db),
+    );
     let ResolveResult { diagnostics, table } = resolve_collecting(
         &ast,
         file.source(db),
