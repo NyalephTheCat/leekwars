@@ -10,6 +10,14 @@
 //! reported at the op that caused it. The sequence comes from a 20-line
 //! xorshift rather than a proptest dependency — it is reproducible by seed,
 //! which is what matters for a regression.
+//!
+//! The second half pins what the index means for `==` (#331): map and set
+//! structural equality is *one probe per element* through that same index,
+//! so it is linear and its key matching is the index's canonical notion
+//! rather than the loose `==` used on values.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use leek_runtime::{MapData, MapKey, SetData, Value};
 
@@ -219,4 +227,156 @@ fn set_insert_reports_novelty_and_keeps_first_occurrence_order() {
         "removing twice must report false"
     );
     check_set(&s, "double remove");
+}
+
+fn str_value(s: &str) -> Value {
+    Value::String(Rc::new(s.to_owned()))
+}
+
+/// A `Value::Map` over the given entries, in the given order.
+fn map_of(pairs: &[(Value, Value)]) -> Value {
+    Value::Map(Rc::new(RefCell::new(MapData::from_pairs(pairs.to_vec()))))
+}
+
+/// A `Value::Set` over the given elements, in the given order.
+fn set_of(items: &[Value]) -> Value {
+    Value::Set(Rc::new(RefCell::new(
+        items.iter().cloned().collect::<SetData>(),
+    )))
+}
+
+#[test]
+fn map_equality_matches_keys_canonically_and_values_loosely() {
+    // `MapLeekValue.eq` looks each left key up with `map.get(key)`, i.e. the
+    // `LinkedHashMap`'s own `hashCode`/`equals`, where a `Long` key never
+    // matches a `Double` one. So the keys `1` and `1.0` are different
+    // entries even though `1 == 1.0` is true as a *value* comparison.
+    let int_key = map_of(&[(Value::Int(1), str_value("a"))]);
+    let real_key = map_of(&[(Value::Real(1.0), str_value("a"))]);
+    assert!(
+        !int_key.loose_eq(&real_key),
+        "`[1 : 'a'] == [1.0 : 'a']` must be false: distinct canonical keys"
+    );
+    // The values, by contrast, do go through the loose `ai.eq`.
+    assert!(
+        map_of(&[(Value::Int(1), Value::Int(2))])
+            .loose_eq(&map_of(&[(Value::Int(1), Value::Real(2.0))])),
+        "`[1 : 2] == [1 : 2.0]` must be true: values compare loosely"
+    );
+    // Same for sets, whose membership test is a `LinkedHashSet.contains`.
+    assert!(
+        !set_of(&[Value::Int(1)]).loose_eq(&set_of(&[Value::Real(1.0)])),
+        "`<1> == <1.0>` must be false: distinct canonical elements"
+    );
+}
+
+#[test]
+fn map_equality_ignores_insertion_order() {
+    // The index is keyed by the canonical key, not by position, so two maps
+    // holding the same entries agree however they were built.
+    let forward = map_of(&[
+        (Value::Int(1), str_value("a")),
+        (Value::Int(2), str_value("b")),
+        (str_value("k"), Value::Int(3)),
+    ]);
+    let shuffled = map_of(&[
+        (str_value("k"), Value::Int(3)),
+        (Value::Int(2), str_value("b")),
+        (Value::Int(1), str_value("a")),
+    ]);
+    assert!(forward.loose_eq(&shuffled));
+    assert!(shuffled.loose_eq(&forward), "equality must be symmetric");
+    // One value changed is still a mismatch, whatever the order.
+    let changed = map_of(&[
+        (str_value("k"), Value::Int(3)),
+        (Value::Int(2), str_value("B")),
+        (Value::Int(1), str_value("a")),
+    ]);
+    assert!(!forward.loose_eq(&changed));
+}
+
+#[test]
+fn set_equality_ignores_insertion_order() {
+    let forward = set_of(&[Value::Int(1), str_value("b"), Value::Real(2.5)]);
+    let shuffled = set_of(&[Value::Real(2.5), Value::Int(1), str_value("b")]);
+    assert!(forward.loose_eq(&shuffled));
+    assert!(shuffled.loose_eq(&forward), "equality must be symmetric");
+    assert!(
+        !forward.loose_eq(&set_of(&[Value::Int(1), str_value("b"), Value::Real(2.6)])),
+        "one differing element must break it"
+    );
+}
+
+#[test]
+fn a_null_valued_entry_is_not_a_missing_entry() {
+    // Upstream has to spell this out — `map.get(key)` returning Java `null`
+    // is ambiguous, so `MapLeekValue.eq` re-checks `containsKey`. Probing the
+    // index answers it directly: the key is present or it is not.
+    let with_null = map_of(&[(Value::Int(1), Value::Int(1)), (Value::Int(2), Value::Null)]);
+    let without = map_of(&[(Value::Int(1), Value::Int(1)), (Value::Int(3), Value::Null)]);
+    assert!(
+        !with_null.loose_eq(&without),
+        "key 2 holding null must not match a map that has no key 2"
+    );
+    assert!(
+        with_null.loose_eq(&map_of(&[
+            (Value::Int(2), Value::Null),
+            (Value::Int(1), Value::Int(1)),
+        ])),
+        "two maps that both hold null under key 2 are equal"
+    );
+    assert!(
+        !with_null.loose_eq(&map_of(&[
+            (Value::Int(1), Value::Int(1)),
+            (Value::Int(2), Value::Int(0)),
+        ])),
+        "null must not compare equal to 0 as an entry value"
+    );
+}
+
+#[test]
+fn identical_references_short_circuit_before_the_index() {
+    // The pointer-identity fast path at the top of the comparison still
+    // wins, ahead of any index probe: a map is equal to itself, and to a
+    // second handle on the same storage, even when it holds itself.
+    let m = map_of(&[(Value::Int(1), Value::Int(1))]);
+    let Value::Map(inner) = &m else {
+        unreachable!()
+    };
+    inner
+        .borrow_mut()
+        .insert(str_value("self"), Value::Map(Rc::clone(inner)));
+    assert!(m.loose_eq(&m));
+    assert!(m.loose_eq(&Value::Map(Rc::clone(inner))));
+}
+
+#[test]
+fn large_map_equality_is_one_probe_per_entry() {
+    // Shape test for the nested `all`/`any` this replaced, where matching
+    // each left key meant scanning the whole right collection: on two equal
+    // 2000-entry maps that is ~2 million recursive comparisons, and with
+    // composite keys each one also inserts into the visited set. One index
+    // probe per entry replaces the scan. The assertions are on the *result*
+    // — a wall clock is not a fact about this machine — but a regression to
+    // the old shape shows up as this test slowing to a crawl.
+    const N: i64 = 2000;
+    let base: Vec<(Value, Value)> = (0..N).map(|i| (Value::Int(i), Value::Int(i * 2))).collect();
+    let mut other = base.clone();
+    other[0].0 = Value::Int(-1);
+
+    let a = map_of(&base);
+    assert!(
+        !a.loose_eq(&map_of(&other)),
+        "the first key differs, so the maps are not equal"
+    );
+    assert!(
+        a.loose_eq(&map_of(&base)),
+        "two maps built from the same entries are equal"
+    );
+    // The same for sets, whose old arm had the same shape.
+    let items: Vec<Value> = (0..N).map(Value::Int).collect();
+    let mut missing = items.clone();
+    missing[0] = Value::Int(-1);
+    assert!(!set_of(&items).loose_eq(&set_of(&missing)));
+    assert!(set_of(&items).loose_eq(&set_of(&items)));
 }

@@ -15,6 +15,7 @@
 use std::fmt::Write as _;
 use std::rc::Rc;
 
+use super::key::MapKey;
 use super::types::{Function, Value};
 
 impl std::fmt::Display for Value {
@@ -93,26 +94,43 @@ pub(super) fn loose_eq_inner(
                     .zip(bb.iter())
                     .all(|(x, y)| loose_eq_inner(x, y, visited))
         }
+        // `MapLeekValue.eq`: size check, then for each entry of the
+        // LEFT map a single `map.get(key)` on the right one. Key
+        // matching is therefore CANONICAL, not loose — the lookup runs
+        // through `LinkedHashMap`'s `hashCode`/`equals`, where a `Long`
+        // never matches a `Double` and a composite matches only itself
+        // (`ArrayLeekValue.equals` is `object == this`). So
+        // `[1 : 'a'] == [1.0 : 'a']` is false even though `1 == 1.0`.
+        // Only the VALUES go through the loose `ai.eq`. Our `index` is
+        // keyed by exactly that canonical notion ([`MapKey`]), so one
+        // probe per entry replaces the quadratic scan.
         (Value::Map(a), Value::Map(b)) => {
             let aa = a.borrow();
             let bb = b.borrow();
             if aa.len() != bb.len() {
                 return false;
             }
+            // A missing key and a present key holding `null` are
+            // distinct: upstream spells that out (`otherValue == null`
+            // is ambiguous in Java, so it re-checks `containsKey`),
+            // and here the index answers it directly.
             aa.entries.iter().all(|(k, v)| {
-                bb.entries.iter().any(|(k2, v2)| {
-                    loose_eq_inner(k, k2, visited) && loose_eq_inner(v, v2, visited)
-                })
+                bb.index
+                    .get(&MapKey::of(k))
+                    .is_some_and(|&i| loose_eq_inner(v, &bb.entries[i].1, visited))
             })
         }
+        // `SetLeekValue.eq`: size check, then `set.contains(value)` per
+        // element of the left set — again the canonical `HashSet`
+        // membership test, never a loose comparison, so `<1> == <1.0>`
+        // is false. `SetData::keys` holds the same canonical keys.
         (Value::Set(a), Value::Set(b)) => {
             let aa = a.borrow();
             let bb = b.borrow();
             if aa.len() != bb.len() {
                 return false;
             }
-            aa.iter()
-                .all(|x| bb.iter().any(|y| loose_eq_inner(x, y, visited)))
+            aa.iter().all(|x| bb.keys.contains(&MapKey::of(x)))
         }
         // Objects and class instances compare by reference
         // identity — `new A == new A` is false, `{a: 1} == {a: 1}`
