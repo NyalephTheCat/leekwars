@@ -1639,6 +1639,51 @@ jobs = 2
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `-j/--jobs` and `[fight].jobs` (#134) pick how many threads the multi-fight
+/// modes spread their fights over. The count is a speed knob and nothing else,
+/// so the reports have to come out byte-identical — including the order of the
+/// `cells` array, which is what every downstream comparison reads.
+#[test]
+fn fight_jobs_selects_workers_without_changing_the_report() {
+    let dir = scratch_dir("fight_jobs");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name = "jobs"
+version = "0.1.0"
+
+[fight]
+jobs = 3
+"#,
+    );
+    write(&dir, "duel.toml", IDLE_DUEL);
+    write(&dir, "a.leek", "return 0;\n");
+    write(&dir, "b.leek", "return 1;\n");
+
+    let sweep = |extra: &[&str], report: &str| -> String {
+        let mut args = vec!["fight", "duel.toml", "--mode", "matrix"];
+        args.extend(["--seeds", "1,2,3,4,5,6", "--vs", "a.leek", "--vs", "b.leek"]);
+        args.extend_from_slice(extra);
+        args.push(report);
+        let out = miku(&args, &dir);
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        std::fs::read_to_string(dir.join(report.trim_start_matches("--report=")))
+            .expect("the report was written")
+    };
+
+    let serial = sweep(&["-j", "1"], "--report=j1.json");
+    let parallel = sweep(&["--jobs", "8"], "--report=j8.json");
+    // No flag: the manifest's `[fight].jobs = 3` is what is left to decide it.
+    let from_manifest = sweep(&[], "--report=manifest.json");
+
+    assert!(serial.contains("\"cells\""), "report body: {serial}");
+    assert_eq!(serial, parallel, "-j changed the report");
+    assert_eq!(serial, from_manifest, "[fight].jobs changed the report");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Regression (#66): a tournament has no hero, so the run no longer claims
 /// one — the summary drops the win rate, the JSON leaves the hero totals null,
 /// and the exit status gates on the games having run rather than always

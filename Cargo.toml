@@ -13,6 +13,7 @@ members = [
     "crates/core/leek-project",
     "crates/core/leek-runtime",
     "crates/core/leek-visit",
+    "crates/core/leek-workpool",
     "crates/core/leek-text",
     "crates/frontend/leek-syntax",
     "crates/frontend/leek-lexer",
@@ -72,6 +73,7 @@ leek-prelude      = { path = "crates/core/leek-prelude" }
 leek-project      = { path = "crates/core/leek-project" }
 leek-runtime      = { path = "crates/core/leek-runtime" }
 leek-visit        = { path = "crates/core/leek-visit" }
+leek-workpool     = { path = "crates/core/leek-workpool" }
 leek-text         = { path = "crates/core/leek-text" }
 leek-syntax       = { path = "crates/frontend/leek-syntax" }
 leek-lexer        = { path = "crates/frontend/leek-lexer" }

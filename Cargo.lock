@@ -1462,6 +1462,7 @@ dependencies = [
  "leek-pipeline",
  "leek-recipes",
  "leek-span",
+ "leek-workpool",
  "serde",
  "serde_json",
  "toml",
@@ -1534,6 +1535,7 @@ dependencies = [
  "leek-span",
  "leek-syntax",
  "leek-test-cases",
+ "leek-workpool",
  "rowan",
  "serde",
  "toml",
@@ -1562,6 +1564,10 @@ dependencies = [
 
 [[package]]
 name = "leek-visit"
+version = "0.0.1"
+
+[[package]]
+name = "leek-workpool"
 version = "0.0.1"
 
 [[package]]

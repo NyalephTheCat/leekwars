@@ -1,0 +1,10 @@
+[package]
+name        = "leek-workpool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Scoped-thread work pool for index-addressed work: workers steal batches from an atomic cursor and results merge by index, never by completion order."
+
+[lints]
+workspace = true

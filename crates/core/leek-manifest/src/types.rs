@@ -308,9 +308,11 @@ pub struct FightTable {
     /// Where `--report` writes when it is given no path.
     /// Default `build/fight-reports`.
     pub reports_dir: PathBuf,
-    /// Worker count for the parallel sweep drivers. `None` means "let the
-    /// driver decide". Parsed and exposed today; the matrix/tournament/
-    /// random drivers still run sequentially.
+    /// Worker threads the multi-fight drivers (matrix, tournament, random)
+    /// run their fights on. `None` means "let the driver decide":
+    /// `LEEK_FIGHT_JOBS`, else this machine's parallelism capped at 8.
+    /// `miku fight -j N` overrides it. A report does not depend on the count
+    /// (leekwars#134) — only on how long it takes to produce.
     pub jobs: Option<u32>,
 }
 
