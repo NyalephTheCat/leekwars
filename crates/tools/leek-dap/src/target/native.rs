@@ -203,7 +203,7 @@ impl NativeTarget {
             sources.extend(graph.includes.iter().map(|file| CompiledSource {
                 source: file.source,
                 path: file.path.clone(),
-                text: file.text.clone(),
+                text: file.text.to_string(),
             }));
         }
         Ok(Compiled {

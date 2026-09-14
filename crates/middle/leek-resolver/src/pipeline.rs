@@ -4,18 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use leek_diagnostics::Diagnostic;
-use leek_parser::ast::SourceFile;
-use leek_parser::pipeline::{AstArtifact, KnownClassesArtifact, parse_file_with_classes};
+use leek_parser::ast::{AstNode, SourceFile};
+use leek_parser::pipeline::{AstArtifact, KnownClassesArtifact};
 use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
-use leek_span::Span;
-use leek_span::paths::canonical_or_normalized;
-use leek_syntax::Version;
 use leek_syntax::pipeline::PragmasArtifact;
 use leek_syntax::version::version_from_byte;
+use leek_syntax::{SyntaxNode, Version};
 
+use crate::closure::{ClosureFile, IncludeClosure, resolve_include_closure};
 use crate::folder::Folder;
-use crate::include_graph::{ResolvedFile, build_include_graph};
 use crate::index::ResolveTable;
 use crate::interner::SourceInterner;
 use crate::{FileUnit, Options, ResolveResult, resolve_collecting, resolve_collecting_files};
@@ -121,7 +119,7 @@ fn resolve_options(cx: &Context<'_>) -> Options {
 pub struct ParsedIncludedFile {
     pub source: leek_span::SourceId,
     pub path: PathBuf,
-    pub text: String,
+    pub text: Arc<str>,
     pub version: Version,
     pub ast: SourceFile,
 }
@@ -150,6 +148,50 @@ pub struct IncludeGraphArtifact {
 }
 
 impl Artifact for IncludeGraphArtifact {}
+
+/// The red-tree view of an [`IncludeClosure`].
+///
+/// The closure is the value — green trees, safe to memoize and to move
+/// between threads — and this artifact is the cursor over it that the
+/// AST-walking passes (HIR lowering, resolution, type checking) need.
+/// Casting here rather than inside the closure keeps every `SyntaxNode`
+/// on the side of the boundary a tracked query can never cross.
+impl From<IncludeClosure> for IncludeGraphArtifact {
+    fn from(closure: IncludeClosure) -> Self {
+        let IncludeClosure {
+            entry_path,
+            files,
+            resolved,
+            forward,
+            ..
+        } = closure;
+        Self {
+            includes: files
+                .into_iter()
+                .map(|file| {
+                    let ClosureFile {
+                        source,
+                        path,
+                        text,
+                        version,
+                        green,
+                    } = file;
+                    ParsedIncludedFile {
+                        source,
+                        path,
+                        text,
+                        version,
+                        ast: SourceFile::cast(SyntaxNode::new_root(green))
+                            .expect("grammar::source_file always opens a SourceFile root"),
+                    }
+                })
+                .collect(),
+            resolved,
+            forward,
+            entry_path,
+        }
+    }
+}
 
 /// Pipeline step that walks `include("…")` calls transitively
 /// using the provided [`Folder`].
@@ -194,95 +236,22 @@ impl Step for ResolveIncludes {
         "resolve_includes"
     }
     fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
-        let entry_path = canonical_or_normalized(&self.entry_path);
-        let graph = build_include_graph(
-            &entry_path,
+        let (closure, diagnostics) = resolve_include_closure(
+            &self.entry_path,
             cx.text(),
             version_from_byte(cx.version_byte()),
             &*self.folder,
-            |p| self.interner.intern(p),
+            &*self.interner,
+            cx.flags(),
         );
-
-        cx.emit_all(graph.diagnostics.iter().cloned());
-
-        // Collect every `class IDENT` name across the include closure
-        // (entry included) and publish it for the `Parse` step, which
-        // runs *after* this one when the pipeline is include-aware.
-        // Upstream resolves potential type words against the
-        // program-wide defined-class set, so the entry must parse
-        // `lowercaseClassFromInclude x = …` as a typed declaration.
-        let mut known_classes: Vec<String> = Vec::new();
-        for f in &graph.files {
-            let lexed = leek_lexer::lex(&f.text, f.source, f.version);
-            known_classes.extend(leek_parser::scan_class_names(&f.text, &lexed.tokens));
-        }
-        known_classes.sort();
-        known_classes.dedup();
-        cx.insert(KnownClassesArtifact(known_classes.clone()));
-
-        // The walker returns every file in topological order, with
-        // the entry last. Re-parse each included file so the lower
-        // step has ready-to-use ASTs. The entry's own AST stays
-        // owned by the existing `Parse` step's artifact.
-        let mut includes: Vec<ParsedIncludedFile> = Vec::new();
-        for ResolvedFile {
-            source,
-            path,
-            text,
-            version,
-        } in graph.files
-        {
-            if path == entry_path {
-                continue;
-            }
-            let parsed = parse_file_with_classes(&text, source, version, &known_classes);
-            // The parse always yields a tree — error recovery builds
-            // `ErrorNode`s inside the `SourceFile` root rather than failing
-            // the root cast — so a broken include is only visible in the
-            // diagnostics. Report the chain at the `include(...)` site too,
-            // otherwise the entry file's author sees errors pointing only
-            // into a file they may not have open. Errors only: a lint in an
-            // included file must not mark the include site.
-            if parsed
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == leek_diagnostics::Severity::Error)
-            {
-                match graph.include_sites.get(&path) {
-                    Some(sites) => {
-                        for site in sites {
-                            cx.emit(leek_diagnostics::diag!(
-                                leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
-                                site.span,
-                                "included file `{}` failed to parse",
-                                path.display(),
-                            ));
-                        }
-                    }
-                    None => cx.emit(leek_diagnostics::diag!(
-                        leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
-                        Span::new(source, 0, 0),
-                        "included file `{}` failed to parse",
-                        path.display(),
-                    )),
-                }
-            }
-            cx.emit_all(parsed.diagnostics);
-            includes.push(ParsedIncludedFile {
-                source,
-                path,
-                text,
-                version,
-                ast: parsed.ast,
-            });
-        }
-
-        cx.insert(IncludeGraphArtifact {
-            includes,
-            resolved: graph.resolved,
-            forward: graph.forward,
-            entry_path,
-        });
+        cx.emit_all(diagnostics);
+        // Published for the `Parse` step, which runs *after* this one
+        // when the pipeline is include-aware: upstream resolves potential
+        // type words against the program-wide defined-class set, so the
+        // entry must parse `lowercaseClassFromInclude x = …` as a typed
+        // declaration.
+        cx.insert(KnownClassesArtifact(closure.class_names.clone()));
+        cx.insert(IncludeGraphArtifact::from(closure));
         Ok(())
     }
 }

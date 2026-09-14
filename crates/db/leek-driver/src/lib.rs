@@ -85,7 +85,7 @@ pub fn run_sources(run: &Run<'_>, source_text: &str, file_label: &str) -> Source
     let mut sources = Sources::single(run.input().source, file_label, source_text);
     if let Some(graph) = run.get::<leek_resolver::pipeline::IncludeGraphArtifact>() {
         for inc in &graph.includes {
-            sources.push(inc.source, inc.path.display().to_string(), inc.text.clone());
+            sources.push(inc.source, inc.path.display().to_string(), &*inc.text);
         }
     }
     sources

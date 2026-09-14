@@ -23,6 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use leek_span::paths::{canonical_or_normalized, normalize_lexical};
 
@@ -35,8 +36,11 @@ pub struct LoadedFile {
     /// (`./util`, `util`, `../src/util`) must produce the same
     /// canonical form, otherwise the graph deduplicates wrongly.
     pub path: PathBuf,
-    /// The file's contents.
-    pub text: String,
+    /// The file's contents. Shared rather than owned: the include
+    /// walker, the closure it builds and every downstream consumer keep
+    /// the same bytes, so passing them on costs a refcount bump instead
+    /// of a copy per hop.
+    pub text: Arc<str>,
 }
 
 /// Errors that may surface during `Folder::load`. Resolver lifts
@@ -140,7 +144,7 @@ impl Folder for DiskFolder {
             .map_err(|e| LoadError::Unreadable(e.to_string()))?;
         Ok(LoadedFile {
             path: canonical,
-            text,
+            text: text.into(),
         })
     }
 }
@@ -150,7 +154,7 @@ impl Folder for DiskFolder {
 /// names are looked up by direct lookup or via a sibling-resolved
 /// path (`<dirname-of-includer>/<name>` and `<…>/<name>.leek`).
 pub struct MemFolder {
-    files: BTreeMap<PathBuf, String>,
+    files: BTreeMap<PathBuf, Arc<str>>,
 }
 
 impl MemFolder {
@@ -163,13 +167,13 @@ impl MemFolder {
     /// Insert a file. `path` is treated as the canonical name —
     /// callers should pass the same form they'd pass as the
     /// `includer` to `load`.
-    pub fn insert(&mut self, path: impl Into<PathBuf>, text: impl Into<String>) {
+    pub fn insert(&mut self, path: impl Into<PathBuf>, text: impl Into<Arc<str>>) {
         self.files
             .insert(normalize_lexical(&path.into()), text.into());
     }
 
     /// Build with a single entry shortcut.
-    pub fn with_file(path: impl Into<PathBuf>, text: impl Into<String>) -> Self {
+    pub fn with_file(path: impl Into<PathBuf>, text: impl Into<Arc<str>>) -> Self {
         let mut f = Self::new();
         f.insert(path, text);
         f

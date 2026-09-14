@@ -23,6 +23,8 @@
 //! - [`checks`] — assignment / l-value / privacy / final-field checks
 //! - [`util`] — pure AST helpers and constants
 //! - [`interner`] — path → [`SourceId`] interning for include ids
+//! - [`closure`] — the include closure as a value: walk, parse and
+//!   class-collect an entry file's transitive includes
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -37,6 +39,7 @@ use crate::include_graph::{ExpandUnit, IncludeExpander};
 pub mod builtins;
 mod checks;
 mod classes;
+pub mod closure;
 mod expressions;
 pub mod folder;
 pub mod include_graph;
