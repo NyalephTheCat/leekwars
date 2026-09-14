@@ -123,6 +123,46 @@ jobs:
       - name: test run left the tracked snapshots alone
         run: git diff --exit-code -- crates/backends/leek-backend-java/tests/snapshots
 
+  # Coverage REPORT, never a gate (#151). The point is visibility: this repo
+  # accumulated eight crates with literally zero `#[test]` before anyone
+  # noticed, and the only reason it was noticed was a hand-run grep. A number
+  # per crate in the job log makes that kind of rot visible on the PR that
+  # causes it.
+  #
+  # Deliberately not a threshold and deliberately not in any required-check
+  # set: several crates legitimately report ~0 (`leek-aot-runtime` is a
+  # `staticlib` exercised from another crate's test binary, `bins/leek-dap` is
+  # a five-line stdio shim), so a gate would fail forever or force
+  # exclusions that hide the real signal.
+  coverage:
+    name: coverage report (not a gate)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust (exact version pinned by rust-toolchain.toml)
+        run: rustup show
+      # cargo-llvm-cov needs the profdata/profraw tooling, which the pin does
+      # not request for everyone else's `rustup show`.
+      - name: Install llvm-tools-preview
+        run: rustup component add llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # Mirrors the fast test gate's exclusion: the upstream corpus suite is
+      # a multi-minute JVM run that lives in .github/workflows/corpus.yml.
+      - name: cargo llvm-cov
+        run: |
+          cargo llvm-cov --workspace --exclude leek-test-corpus --locked \
+            --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov.info
+          path: lcov.info
+          if-no-files-found: warn
+
   # Supply-chain / license audit driven by deny.toml.
   deny:
     name: cargo-deny
