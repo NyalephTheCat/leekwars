@@ -35,6 +35,12 @@ anyhow              = { workspace = true }
 # real programs (`tests/fmt_roundtrip.rs`), but nothing here builds on it.
 [dev-dependencies]
 leek-fmt = { workspace = true }
+# `tests/native_compat_agreement.rs` only: the compat check is worth having
+# only if it agrees with a real compile, and the corpus is where the two meet
+# thousands of real programs. Dev-only — nothing this crate ships links the
+# backend, which it already reaches transitively through `leek-test-driver`.
+leek-backend-native = { workspace = true }
+leek-hir            = { workspace = true }
 
 # Single binary (`src/main.rs`, auto-detected by Cargo); subcommands
 # replace the former one-binary-per-task layout. See `src/main.rs`.

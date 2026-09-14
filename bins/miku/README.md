@@ -35,7 +35,8 @@ miku test               # run everything under tests/
 miku new|init        create / initialize a project
 miku build           compile via the manifest's backend (Java by default)
 miku run             JIT-compile and execute
-miku check           diagnostics only
+miku check           diagnostics only (--native-compat: also warn about
+                     constructs the native backend cannot compile)
 miku test            run tests under tests/
 miku fmt | lint      format / lint .leek sources
 miku fix             apply machine-applicable diagnostic suggestions

@@ -81,6 +81,7 @@ use cranelift::prelude::{AbiParam, Configurable, types};
 use cranelift_frontend::FunctionBuilderContext;
 use cranelift_module::{Linkage, Module, default_libcall_names};
 
+use leek_diagnostics::Diagnostic;
 use leek_hir::HirFile;
 use leek_runtime::Value;
 
@@ -330,6 +331,7 @@ fn compile_entry(
                 opts.link_game,
                 false,
                 &opts.hook_roots,
+                DefineMode::Emit,
             )?;
             let bytes = module
                 .finish()
@@ -646,6 +648,7 @@ fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProg
         opts.link_game,
         false,
         &opts.hook_roots,
+        DefineMode::Emit,
     )?;
     module
         .finalize_definitions()
@@ -829,6 +832,7 @@ pub fn compile_object_with_meta(
         opts.link_game,
         /* external_uniform */ true,
         &opts.hook_roots,
+        DefineMode::Emit,
     )?;
     let bytes = module
         .finish()
@@ -860,6 +864,26 @@ fn uniform_symbol(external: bool, jit_prefix: &str, idx: usize) -> (String, Link
     }
 }
 
+/// Whether [`define_program`] emits machine code or only translates.
+///
+/// One walk, one branch. The check path is the emit path minus
+/// `Module::define_function`, so a construct [`check_native_compat`] reports
+/// is one a real compile would have reported too, and one it stays silent
+/// about really does translate. A second, "cheaper" walk would be a second
+/// definition of "the native subset", and the two would drift.
+enum DefineMode<'e> {
+    /// Define every body; the first failure aborts the walk.
+    Emit,
+    /// Define nothing; push each function's failure and keep walking.
+    CheckOnly(&'e mut Vec<NativeError>),
+}
+
+impl DefineMode<'_> {
+    fn is_check_only(&self) -> bool {
+        matches!(self, Self::CheckOnly(_))
+    }
+}
+
 fn define_program<M: Module>(
     module: &mut M,
     program: &leek_mir::ir::MirProgram,
@@ -886,6 +910,9 @@ fn define_program<M: Module>(
     // indirect invocation (the fight `beforeFight`/`afterFight` hooks). Matched
     // by name; never referenced from `main`, so they need explicit seeding.
     hook_roots: &[String],
+    // Emit machine code, or translate every body and define none — see
+    // [`DefineMode`].
+    mode: DefineMode<'_>,
 ) -> Result<
     (
         cranelift_module::FuncId,
@@ -1124,6 +1151,12 @@ fn define_program<M: Module>(
         .map_err(|e| NativeError::compile(e.to_string()))?;
 
     // Phase 2: translate + define each function body.
+    //
+    // `CheckOnly` runs this same translation and stops one line short of
+    // `Module::define_function`: the compat check has to see exactly the
+    // errors a compile sees, from exactly this code path, without paying
+    // Cranelift's instruction selection.
+    let check_only = mode.is_check_only();
     let define_one = |module: &mut M,
                       f: &leek_mir::ir::MirFunction,
                       fid,
@@ -1168,11 +1201,38 @@ fn define_program<M: Module>(
         // Function-level attribution: a site that had no statement span
         // still gets the function's name and its declaration to point at.
         .map_err(|e| e.in_fn(&f.name).or_span(f.span))?;
+        if check_only {
+            return Ok(());
+        }
         module.define_function(fid, &mut ctx).map_err(|e| {
             NativeError::compile(e.to_string())
                 .in_fn(&f.name)
                 .at(f.span)
         })
+    };
+
+    // `Emit` stops at the first failure, as it always has. `CheckOnly` records
+    // it and walks on, so one unsupported construct doesn't hide the other
+    // four. Per *function* is the honest granularity: once a `Tx` errors
+    // mid-body its `FunctionBuilder`'s block and value state is unusable, so a
+    // walk can only restart at a function boundary.
+    let mut mode = mode;
+    let mut define_or_record = |module: &mut M,
+                                f: &leek_mir::ir::MirFunction,
+                                fid,
+                                sig: &translate::FnSig,
+                                uniform: bool|
+     -> Result<(), NativeError> {
+        match define_one(module, f, fid, sig, uniform) {
+            Ok(()) => Ok(()),
+            Err(e) => match &mut mode {
+                DefineMode::Emit => Err(e),
+                DefineMode::CheckOnly(errors) => {
+                    errors.push(e);
+                    Ok(())
+                }
+            },
+        }
     };
 
     let dummy_sig = translate::FnSig {
@@ -1183,29 +1243,29 @@ fn define_program<M: Module>(
     for def_id in &reachable.defs {
         let f = by_id[def_id];
         let (fid, sig) = callees[def_id].clone();
-        define_one(module, f, fid, &sig, false)?;
+        define_or_record(module, f, fid, &sig, false)?;
     }
     for &idx in &field_init_idxs {
         let f = &program.functions[idx];
         let (fid, sig) = field_init_callees[&idx].clone();
-        define_one(module, f, fid, &sig, false)?;
+        define_or_record(module, f, fid, &sig, false)?;
     }
     for &idx in &lambda_idxs {
         let f = &program.functions[idx];
         let (fid, _) = lambda_funcs[&idx];
-        define_one(module, f, fid, &dummy_sig, true)?;
+        define_or_record(module, f, fid, &dummy_sig, true)?;
     }
     for &idx in &thunk_idxs {
         let f = &program.functions[idx];
         let (fid, _) = lambda_funcs[&idx];
-        define_one(module, f, fid, &dummy_sig, true)?;
+        define_or_record(module, f, fid, &dummy_sig, true)?;
     }
     for &idx in &value_methods {
         let f = &program.functions[idx];
         let (fid, _) = method_funcs[&idx];
-        define_one(module, f, fid, &dummy_sig, true)?;
+        define_or_record(module, f, fid, &dummy_sig, true)?;
     }
-    define_one(module, main, main_id, &main_sig, false)?;
+    define_or_record(module, main, main_id, &main_sig, false)?;
 
     // Bound-method + static-init bodies join the lambda table — all are
     // uniform-ABI functions invoked dynamically (via `dispatch_call_value`
@@ -1228,6 +1288,158 @@ fn define_program<M: Module>(
         exact_arity,
         class_string_method,
     ))
+}
+
+/// Every way `hir` falls outside the native backend's subset, as diagnostics.
+///
+/// The same walk a compile does — MIR lowering, the prepare passes,
+/// reachability, the whole-program cell-semantics gate, and a full
+/// translation of every reachable body — minus the codegen: not one function
+/// is defined or finished, so it costs Cranelift's IR construction and none
+/// of its instruction selection, register allocation or relocation. That is
+/// structural rather than careful; see [`CheckModule`].
+///
+/// An empty result means a native compile of `hir` would get past codegen; a
+/// non-empty one carries one diagnostic per function that would fail, each
+/// pointing at the construct (`E0600`) or the failure (`E0601`). The two
+/// agree on the corpus by test, which is the whole point of reusing the walk:
+/// a check that reports a construct a compile accepts is worse than no check,
+/// because it puts a caret under working code.
+///
+/// This does not run the program, so it says nothing about runtime traps.
+#[must_use]
+pub fn check_native_compat(hir: &HirFile, opts: &NativeOptions) -> Vec<Diagnostic> {
+    let lw = match lower(hir, opts) {
+        Ok(lw) => lw,
+        // A lowering failure is the frontend's diagnostics, each with its own
+        // code and span — `diagnostics()` hands them over unflattened.
+        Err(e) => return e.diagnostics(),
+    };
+    let main = &lw.program.functions[lw.main_idx];
+    // `build_isa` is host feature detection, not compilation, and
+    // `ObjectBuilder` only prepares a symbol table — the object is never
+    // emitted, because `CheckModule` does not expose `finish()`.
+    let built = build_isa(opts).and_then(|isa| {
+        cranelift_object::ObjectBuilder::new(isa, "leek", default_libcall_names())
+            .map_err(|e| NativeError::compile(e.to_string()))
+    });
+    let mut module = match built {
+        Ok(ob) => CheckModule(cranelift_object::ObjectModule::new(ob)),
+        Err(e) => return e.diagnostics(),
+    };
+    let mut errors: Vec<NativeError> = Vec::new();
+    let walked = define_program(
+        &mut module,
+        &lw.program,
+        main,
+        lw.lang,
+        &lw.fn_rets,
+        &lw.global_tys,
+        &lw.native_directives,
+        &lw.class_thunks,
+        opts.debug_hooks,
+        opts.link_game,
+        false,
+        &opts.hook_roots,
+        DefineMode::CheckOnly(&mut errors),
+    );
+    if let Err(gate) = walked {
+        // A whole-program gate (`needs_cell_semantics`) or a failure in the
+        // declaration phase, which has no per-function granularity to
+        // collect at: one diagnostic, honestly, rather than a list of one.
+        return gate.diagnostics();
+    }
+    errors.into_iter().flat_map(|e| e.diagnostics()).collect()
+}
+
+/// An [`ObjectModule`](cranelift_object::ObjectModule) that cannot define a
+/// function.
+///
+/// [`check_native_compat`] needs a *real* module: `declare_function` and
+/// `declare_func_in_func` are the bookkeeping every runtime-shim and
+/// user-call lookup goes through, and the `module: None` path
+/// (`NativeEmit::Clif`) turns each of those ~100 lookups into a fabricated
+/// `unsupported` error — "call in text-dump emit mode", "runtime shim
+/// leek_… not declared" — for a program that compiles fine.
+///
+/// What it must not do is pay for codegen. Rather than documenting that, this
+/// newtype makes it structural: the two trait methods that compile a body
+/// panic, and the inherent `finish()` that emits the object is not exposed at
+/// all. An edit that reintroduces codegen into the check fails a test instead
+/// of quietly costing a compile per invocation.
+struct CheckModule(cranelift_object::ObjectModule);
+
+impl Module for CheckModule {
+    fn isa(&self) -> &dyn codegen::isa::TargetIsa {
+        self.0.isa()
+    }
+
+    fn declarations(&self) -> &cranelift_module::ModuleDeclarations {
+        self.0.declarations()
+    }
+
+    fn declare_function(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        signature: &codegen::ir::Signature,
+    ) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
+        self.0.declare_function(name, linkage, signature)
+    }
+
+    fn declare_anonymous_function(
+        &mut self,
+        signature: &codegen::ir::Signature,
+    ) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
+        self.0.declare_anonymous_function(signature)
+    }
+
+    fn declare_data(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        writable: bool,
+        tls: bool,
+    ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+        self.0.declare_data(name, linkage, writable, tls)
+    }
+
+    fn declare_anonymous_data(
+        &mut self,
+        writable: bool,
+        tls: bool,
+    ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+        self.0.declare_anonymous_data(writable, tls)
+    }
+
+    fn define_function_with_control_plane(
+        &mut self,
+        _func: cranelift_module::FuncId,
+        _ctx: &mut Context,
+        _ctrl_plane: &mut codegen::control::ControlPlane,
+    ) -> cranelift_module::ModuleResult<()> {
+        unreachable!("check_native_compat must never define a function")
+    }
+
+    fn define_function_bytes(
+        &mut self,
+        _func_id: cranelift_module::FuncId,
+        _alignment: u64,
+        _bytes: &[u8],
+        _relocs: &[cranelift_module::ModuleReloc],
+    ) -> cranelift_module::ModuleResult<()> {
+        unreachable!("check_native_compat must never define a function")
+    }
+
+    fn define_data(
+        &mut self,
+        data_id: cranelift_module::DataId,
+        data: &cranelift_module::DataDescription,
+    ) -> cranelift_module::ModuleResult<()> {
+        // Data is not a function body: declaring and defining a constant costs
+        // no codegen, and the translator does neither today.
+        self.0.define_data(data_id, data)
+    }
 }
 
 fn make_func(ret_ty: ValTy) -> codegen::ir::Function {

@@ -4,8 +4,9 @@
 //! every subcommand picks up the manifest's `[lint]` levels the same way.
 
 use leek_backend_native::{NativeOptions, OptLevel};
-use leek_diagnostics::{ColorWhen as DiagColor, MessageFormat as DiagFormat};
+use leek_diagnostics::{ColorWhen as DiagColor, Diagnostic, MessageFormat as DiagFormat, Sources};
 use leek_manifest::{Manifest, NativeOptLevel};
+use leek_project::Project;
 
 use crate::cli::{ColorWhen, MessageFormat};
 
@@ -32,6 +33,30 @@ pub fn apply_native_settings(opts: &mut NativeOptions, manifest: &Manifest) {
             NativeOptLevel::Speed => OptLevel::Speed,
             NativeOptLevel::SpeedAndSize => OptLevel::SpeedAndSize,
         };
+    }
+}
+
+/// Render `diagnostics` through the project's `Reporter`, so a backend
+/// finding gets the same `-->` header, source line and caret a frontend
+/// diagnostic gets — and the same `[lint]` levels applied to it.
+///
+/// Returns `false` when the reporter could not be built (a broken `[lint]`
+/// table, which `report_manifest` has already complained about) and nothing
+/// was printed, leaving the caller to say what it wants in that case.
+#[must_use]
+pub fn report_diagnostics(
+    project: &Project,
+    diagnostics: &[Diagnostic],
+    sources: &Sources,
+    color: ColorWhen,
+    format: MessageFormat,
+) -> bool {
+    match leek_driver::reporter_for(project, color.into(), format.into()) {
+        Ok(reporter) => {
+            reporter.emit(diagnostics, sources);
+            true
+        }
+        Err(_) => false,
     }
 }
 

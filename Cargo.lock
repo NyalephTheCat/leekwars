@@ -1499,9 +1499,11 @@ name = "leek-test-corpus"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "leek-backend-native",
  "leek-backends",
  "leek-diagnostics",
  "leek-fmt",
+ "leek-hir",
  "leek-lexer",
  "leek-manifest",
  "leek-parser",

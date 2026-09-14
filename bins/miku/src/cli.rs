@@ -75,7 +75,7 @@ pub enum Command {
     /// settings (matrix sweep, tournament, randomized builds).
     Fight(Fight),
     /// Run diagnostics across the project without producing output.
-    Check,
+    Check(Check),
     /// Run every `.leek` file under `tests/` via the native JIT.
     ///
     /// Each test states what it expects with `// miku-test:` directives in
@@ -311,6 +311,22 @@ pub struct Run {
     /// `miku build`.
     #[arg(long, value_name = "KIND")]
     pub backend: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Check {
+    /// Also report constructs the native backend cannot compile.
+    ///
+    /// On by default when the manifest's default backend is `native`. The
+    /// findings are warnings, never errors: they say what `miku run` would
+    /// refuse, and a project that ships to Java or LeekScript should not fail
+    /// its check over them.
+    #[arg(long)]
+    pub native_compat: bool,
+
+    /// Skip the native-compat pass even when the default backend is `native`.
+    #[arg(long, conflicts_with = "native_compat")]
+    pub no_native_compat: bool,
 }
 
 #[derive(Debug, clap::Args)]

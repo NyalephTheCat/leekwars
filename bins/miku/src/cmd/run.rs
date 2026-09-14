@@ -79,10 +79,7 @@ fn report_native_error(
     color: ColorWhen,
     format: MessageFormat,
 ) {
-    match leek_driver::reporter_for(project, color.into(), format.into()) {
-        Ok(reporter) => {
-            reporter.emit(&err.diagnostics(), sources);
-        }
-        Err(_) => eprintln!("error: {err}"),
+    if !crate::util::report_diagnostics(project, &err.diagnostics(), sources, color, format) {
+        eprintln!("error: {err}");
     }
 }
