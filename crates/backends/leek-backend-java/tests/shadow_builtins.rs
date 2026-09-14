@@ -123,3 +123,98 @@ fn shadowed_name_read_falls_back_to_the_builtin_reference() {
         "the fallback is the builtin function reference: {java}"
     );
 }
+
+/// A builtin reassigned inside a **class method** shadows the name for the
+/// whole file: the write is a `__shadows.put`, and every later read or call of
+/// the name has to test the map. The collector used to root itself at the main
+/// block and top-level `function` bodies only, so this write was invisible —
+/// the method emitted a bare `u_cos = …` (no such Java variable) and the call
+/// below dispatched to the real builtin (#253).
+#[test]
+fn builtin_reassigned_in_a_class_method_shadows_the_name() {
+    let java = java_for(
+        "// @version:4\n\
+         class A { static m() { cos = function(x) { return 1 } } }\n\
+         A.m()\n\
+         return cos(0)\n",
+        &Options::exact(Version::V4, 1),
+    );
+    assert!(
+        java.contains("private final HashMap<String, Object> __shadows"),
+        "the file declares the shadow map: {java}"
+    );
+    assert!(
+        java.contains("__shadows.put(\"cos\""),
+        "the method's assignment writes the shadow map: {java}"
+    );
+    assert!(
+        java.contains("__shadows.containsKey(\"cos\") ? execute(__shadows.get(\"cos\")"),
+        "the later call routes through the shadow map: {java}"
+    );
+}
+
+/// Same hole on the other class-body roots: a constructor, an instance-field
+/// initialiser and a method's parameter default are all executable code that
+/// can reassign a builtin name.
+#[test]
+fn builtin_reassigned_in_other_class_bodies_shadows_the_name() {
+    for src in [
+        "class A { A() { cos = 1 } }\nreturn cos\n",
+        "class A { f = (cos = 1); }\nreturn cos\n",
+        "class A { m(p = (cos = 1)) { return p } }\nreturn cos\n",
+    ] {
+        let java = java_for(
+            &format!("// @version:4\n{src}"),
+            &Options::exact(Version::V4, 1),
+        );
+        assert!(
+            java.contains("__shadows.put(\"cos\""),
+            "the write goes to the shadow map for {src:?}: {java}"
+        );
+        assert!(
+            java.contains("__shadows.containsKey(\"cos\")"),
+            "the later read tests the shadow map for {src:?}: {java}"
+        );
+    }
+}
+
+/// A **compound** assignment to a builtin name is a write to that name just
+/// like a plain one: `cos += 1` reads the shadow (or the builtin reference)
+/// and stores back through `__shadows`. Matching only `BinaryOp::Assign`
+/// missed it, and the store fell through to a bare `u_cos = …`.
+#[test]
+fn compound_assign_to_a_builtin_name_shadows_it() {
+    let java = java_for(
+        "// @version:4\ncos += 1\nreturn cos\n",
+        &Options::exact(Version::V4, 1),
+    );
+    assert!(
+        java.contains("__shadows.put(\"cos\""),
+        "the compound assignment writes the shadow map: {java}"
+    );
+    assert!(
+        !java.contains("u_cos ="),
+        "the store must not invent a local for the shadowed name: {java}"
+    );
+}
+
+/// A bare `foreach` header binds an l-value, so `for (push in …)` writes the
+/// name `push` with no assignment anywhere in the file. #504 taught the store
+/// to route a shadowed name through `__shadows`, but the collector never saw
+/// the binding, so `push` was not in the set and the store emitted a bare
+/// `u_push = …` — a Java local that is never declared.
+#[test]
+fn foreach_binding_a_builtin_name_shadows_it() {
+    let java = java_for(
+        "// @version:4\nfor (push in [1,2]) {}\nreturn push\n",
+        &Options::exact(Version::V4, 1),
+    );
+    assert!(
+        java.contains("__shadows.put(\"push\""),
+        "the loop header writes the shadow map: {java}"
+    );
+    assert!(
+        !java.contains("u_push ="),
+        "the store must not invent a local for the bound name: {java}"
+    );
+}

@@ -338,7 +338,7 @@ impl super::Emitter<'_> {
 /// names the targets explicitly through this helper instead — as does
 /// `leek_hir::captures`, which answers the same question for the two
 /// consumers that decide whether a *parameter* binding gets its runtime `Box`.
-fn foreach_bind_targets(fe: &leek_hir::ForeachStmt) -> impl Iterator<Item = &Expr> {
+pub(crate) fn foreach_bind_targets(fe: &leek_hir::ForeachStmt) -> impl Iterator<Item = &Expr> {
     fe.key
         .iter()
         .chain([&fe.value])
@@ -368,85 +368,14 @@ pub(crate) fn lambda_outer_captures(
         seen: &mut std::collections::HashSet<leek_hir::DefId>,
     ) {
         match &e.kind {
+            // The two reads that *are* the answer: a bare local reference, and
+            // a local used as a callee (`f(1)` where `f` holds a lambda). A
+            // `Call`'s callee is not a sub-expression when it is a name, so
+            // the shared child walk below never offers it.
             ExprKind::Name(NameRef::Local(id)) => note(*id, params, out, seen),
-            ExprKind::Literal(_) | ExprKind::Name(_) => {}
-            ExprKind::Binary(_, l, r) => {
-                expr(l, params, out, seen);
-                expr(r, params, out, seen);
-            }
-            ExprKind::Unary(_, x) | ExprKind::Postfix(_, x) => expr(x, params, out, seen),
             ExprKind::Call(c) => {
-                match &c.callee {
-                    leek_hir::Callee::Method { receiver, .. } => expr(receiver, params, out, seen),
-                    leek_hir::Callee::Expr(e) => expr(e, params, out, seen),
-                    leek_hir::Callee::Function(NameRef::Local(id)) => note(*id, params, out, seen),
-                    leek_hir::Callee::Function(_) => {}
-                }
-                for a in &c.args {
-                    expr(a, params, out, seen);
-                }
-            }
-            ExprKind::Field(b, ..) => expr(b, params, out, seen),
-            ExprKind::Index(b, i) => {
-                expr(b, params, out, seen);
-                expr(i, params, out, seen);
-            }
-            ExprKind::Slice(s) => {
-                expr(&s.base, params, out, seen);
-                if let Some(x) = &s.start {
-                    expr(x, params, out, seen);
-                }
-                if let Some(x) = &s.end {
-                    expr(x, params, out, seen);
-                }
-                if let Some(x) = &s.step {
-                    expr(x, params, out, seen);
-                }
-            }
-            ExprKind::Array(items) => {
-                for i in items {
-                    expr(i, params, out, seen);
-                }
-            }
-            ExprKind::Set(items) => {
-                for i in items {
-                    expr(&i.start, params, out, seen);
-                    if let Some(end) = &i.end {
-                        expr(end, params, out, seen);
-                    }
-                }
-            }
-            ExprKind::Map(pairs) => {
-                for (k, v) in pairs {
-                    expr(k, params, out, seen);
-                    expr(v, params, out, seen);
-                }
-            }
-            ExprKind::Object(fields) => {
-                for (_, v) in fields {
-                    expr(v, params, out, seen);
-                }
-            }
-            ExprKind::Ternary(c, t, e_) => {
-                expr(c, params, out, seen);
-                expr(t, params, out, seen);
-                expr(e_, params, out, seen);
-            }
-            ExprKind::Interval(iv) => {
-                if let Some(x) = &iv.start {
-                    expr(x, params, out, seen);
-                }
-                if let Some(x) = &iv.end {
-                    expr(x, params, out, seen);
-                }
-                if let Some(x) = &iv.step {
-                    expr(x, params, out, seen);
-                }
-            }
-            ExprKind::Cast(b, _) => expr(b, params, out, seen),
-            ExprKind::New(n) => {
-                for a in &n.args {
-                    expr(a, params, out, seen);
+                if let leek_hir::Callee::Function(NameRef::Local(id)) = &c.callee {
+                    note(*id, params, out, seen);
                 }
             }
             // Nested lambdas: descend with their own scope excluded. A
@@ -457,6 +386,11 @@ pub(crate) fn lambda_outer_captures(
             // the outer factory body) can pass it on. Skipping the descent
             // used to emit `__anon_1(a)` inside an `__anon_0` that never
             // declared `a`, a javac "cannot find symbol".
+            //
+            // This arm is why the descent below is not the whole story:
+            // the scope the children are read against changes here, and
+            // `walk_expr_children` treats a lambda as a leaf precisely so a
+            // consumer with a scope rule has to state it.
             ExprKind::Lambda(l) => {
                 let mut nested: std::collections::HashSet<leek_hir::DefId> = params.clone();
                 nested.extend(l.params.iter().map(|p| p.def));
@@ -467,8 +401,16 @@ pub(crate) fn lambda_outer_captures(
                         block_walk(b, &nested, out, seen);
                     }
                 }
+                return;
             }
+            _ => {}
         }
+        // Every other variant is plain descent, so it goes through the shared
+        // variant-complete child walk instead of a copy of it. The hand-rolled
+        // match this replaced is the class of code that let this backend's
+        // walkers drift apart (#253); `lambda_writes_to_outer`, which answers
+        // the other half of the same question, was already written this way.
+        leek_hir::walk_expr_children(e, &mut |c| expr(c, params, out, seen));
     }
     fn stmt(
         s: &Stmt,
@@ -772,107 +714,55 @@ pub(crate) fn lambda_writes_to_outer(
 ///
 /// `DefId`s are unique across the whole HIR file, so one set serves every
 /// function/method/main body.
+///
+/// Both halves are file-level walks over [`leek_hir::walk_file_bodies`]: the
+/// declarations through the statement walk that crosses lambda boundaries, the
+/// lambdas through the expression walk that crosses them *and* a lambda's own
+/// parameter defaults. The hand-rolled `defs` match this replaced enumerated
+/// top-level functions, class methods and constructors and the main block, so
+/// a lambda living in a global initialiser, a field initialiser or a parameter
+/// default was never analysed at all (#253).
 pub(crate) fn collect_boxed_locals(
     hir: &leek_hir::HirFile,
     out: &mut std::collections::HashSet<leek_hir::DefId>,
 ) {
-    use leek_hir::Def;
     let mut var_decls = std::collections::HashSet::new();
-    let mut captured_written = std::collections::HashSet::new();
-    for def in &hir.defs {
-        match def {
-            Def::Function(f) => {
-                if let Some(b) = &f.body {
-                    scan_stmts(&b.stmts, &mut var_decls, &mut captured_written);
-                }
-            }
-            Def::Class(c) => {
-                for m in c.methods.iter().chain(c.constructors.iter()) {
-                    if let Some(b) = &m.body {
-                        scan_stmts(&b.stmts, &mut var_decls, &mut captured_written);
-                    }
-                }
-            }
-            _ => {}
+    leek_hir::walk_file_stmts_deep(hir, &mut |s| {
+        if let Stmt::VarDecl(v) = s {
+            var_decls.insert(v.def);
         }
-    }
-    scan_stmts(&hir.main, &mut var_decls, &mut captured_written);
+    });
+
+    let mut captured_written = std::collections::HashSet::new();
+    leek_hir::walk_file_exprs(hir, &mut |e| {
+        let ExprKind::Lambda(l) = &e.kind else {
+            return;
+        };
+        // An expression-bodied lambda is always emitted inline, so it needs no
+        // box of its own; the walk reaches any block-bodied lambda inside it
+        // on its own.
+        let LambdaBody::Block(b) = &l.body else {
+            return;
+        };
+        let mut inner: std::collections::HashSet<_> = l.params.iter().map(|p| p.def).collect();
+        collect_inner_decls(b, &mut inner);
+        // `lambda_outer_captures` / `lambda_writes_to_outer` both see through
+        // nested lambdas, so a write a deeper lambda performs is attributed to
+        // this lambda's capture as well — every factory level then declares
+        // the box as a parameter.
+        for c in lambda_outer_captures(b, &inner) {
+            let one = std::iter::once(c).collect();
+            if lambda_writes_to_outer(b, &one) {
+                captured_written.insert(c);
+            }
+        }
+    });
+
     // A boxable local is one that is both a `var` declaration and is
-    // captured-and-written by some first-level lambda.
+    // captured-and-written by some lambda.
     out.extend(
         captured_written
             .into_iter()
             .filter(|d| var_decls.contains(d)),
     );
-}
-
-fn scan_stmts(
-    stmts: &[Stmt],
-    var_decls: &mut std::collections::HashSet<leek_hir::DefId>,
-    captured_written: &mut std::collections::HashSet<leek_hir::DefId>,
-) {
-    for s in stmts {
-        scan_stmt(s, var_decls, captured_written);
-    }
-}
-
-fn scan_stmt(
-    s: &Stmt,
-    var_decls: &mut std::collections::HashSet<leek_hir::DefId>,
-    captured_written: &mut std::collections::HashSet<leek_hir::DefId>,
-) {
-    if let Stmt::VarDecl(v) = s {
-        var_decls.insert(v.def);
-    }
-    // Lambdas in this statement's immediate expressions (at any depth).
-    leek_hir::walk_stmt_child_exprs(s, &mut |e| {
-        find_lambda_captured_writes(e, var_decls, captured_written);
-    });
-    // Recurse into child statements (control-flow bodies). Lambdas are
-    // expressions, not statements, so the walk above is what enters a body.
-    leek_hir::walk_stmt_child_stmts(s, &mut |child| {
-        scan_stmt(child, var_decls, captured_written);
-    });
-}
-
-/// Find every lambda in `e`, at any nesting depth, and record the outer locals
-/// each one captures **and** writes. A lambda body is also re-scanned as a
-/// statement list so the `var`s it declares reach `var_decls` — a local
-/// declared inside a lambda is boxable exactly like a top-level one when a
-/// deeper lambda writes it.
-fn find_lambda_captured_writes(
-    e: &Expr,
-    var_decls: &mut std::collections::HashSet<leek_hir::DefId>,
-    captured_written: &mut std::collections::HashSet<leek_hir::DefId>,
-) {
-    if let ExprKind::Lambda(l) = &e.kind {
-        match &l.body {
-            LambdaBody::Block(b) => {
-                let mut inner: std::collections::HashSet<_> =
-                    l.params.iter().map(|p| p.def).collect();
-                collect_inner_decls(b, &mut inner);
-                // `lambda_outer_captures` / `lambda_writes_to_outer` both see
-                // through nested lambdas, so a write a deeper lambda performs
-                // is attributed to this lambda's capture as well — every
-                // factory level then declares the box as a parameter.
-                for c in lambda_outer_captures(b, &inner) {
-                    let one = std::iter::once(c).collect();
-                    if lambda_writes_to_outer(b, &one) {
-                        captured_written.insert(c);
-                    }
-                }
-                scan_stmts(&b.stmts, var_decls, captured_written);
-            }
-            // An expression-bodied lambda is always emitted inline, so it
-            // needs no box of its own; still descend, since it may contain a
-            // block-bodied lambda that does.
-            LambdaBody::Expr(inner_e) => {
-                find_lambda_captured_writes(inner_e, var_decls, captured_written);
-            }
-        }
-        return;
-    }
-    leek_hir::walk_expr_children(e, &mut |child| {
-        find_lambda_captured_writes(child, var_decls, captured_written);
-    });
 }
