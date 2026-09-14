@@ -33,10 +33,19 @@
 //! safepoints plus function enter/leave hooks the native backend emits in
 //! debug builds (see [`debug::NativeDebugSession`]).
 //!
-//! Known gap: a breakpoint on a line that lowers to only a terminator (a
-//! bare `return x`) won't fire, since safepoints are per-statement; a line
-//! with any computation does.
+//! Breakpoints are a live model: [`breakpoints::BreakpointStore`] holds what
+//! the client asked for, keyed by canonical path, and every `setBreakpoints`
+//! pushes the resolved set into a running controller — so a breakpoint set
+//! mid-run takes effect on that run. Each is verified against the lines the
+//! backend actually emits a safepoint for, moved down to the next such line
+//! when the requested one has no code, and reported with an id the `stopped`
+//! event names back.
+//!
+//! Known gap: conditional breakpoints, hit counts and logpoints are not
+//! implemented, and the matching capabilities stay off rather than advertise
+//! them.
 
+mod breakpoints;
 mod capabilities;
 mod debug;
 mod event;
@@ -44,5 +53,7 @@ mod handlers;
 mod server;
 mod session;
 mod target;
+#[cfg(test)]
+mod testing;
 
 pub use server::run_stdio;

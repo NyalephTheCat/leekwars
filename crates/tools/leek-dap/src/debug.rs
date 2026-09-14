@@ -11,9 +11,9 @@
 //!
 //! [`resume`]: NativeDebugSession::resume
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, RwLock};
 
 use leek_span::LineTable;
 
@@ -39,6 +39,24 @@ pub(crate) enum StopReason {
 pub(crate) struct StopInfo {
     pub line: u32,
     pub reason: StopReason,
+    /// Ids of the breakpoints that caused the stop; empty for a step, a
+    /// client `pause`, or program entry. DAP's `stopped` event carries these
+    /// so the client can point at the breakpoint that fired.
+    pub hit_breakpoint_ids: Vec<i64>,
+}
+
+/// One executed safepoint, for the arrival test in [`NativeDebugSession::arrived`].
+#[derive(Clone, Copy)]
+struct Site {
+    /// Call-stack depth the safepoint ran at.
+    depth: usize,
+    /// Raw `SourceId` of the file it belongs to.
+    source: u32,
+    line: u32,
+    /// Byte offset within the file — the only thing that separates two
+    /// safepoints on the *same* line, and so the only thing that can tell a
+    /// loop back-edge from the next statement along.
+    offset: u32,
 }
 
 /// One live call frame on the shadow stack.
@@ -103,19 +121,21 @@ struct Wait {
 pub(crate) struct NativeDebugSession {
     /// Line tables and paths, keyed by raw `SourceId`.
     sources: HashMap<u32, DebugSource>,
-    /// Breakpoint lines per raw `SourceId`, so a breakpoint in an included
-    /// file is matched against that file's own lines.
-    breakpoint_lines: HashMap<u32, HashSet<u32>>,
+    /// Breakpoint id by line, per raw `SourceId`, so a breakpoint in an
+    /// included file is matched against that file's own lines. Behind a lock
+    /// and replaced wholesale by [`set_breakpoints`]: the client adds and
+    /// removes breakpoints at any time, including while the debuggee is
+    /// parked at a stop.
+    ///
+    /// [`set_breakpoints`]: NativeDebugSession::set_breakpoints
+    breakpoints: RwLock<HashMap<u32, HashMap<u32, i64>>>,
     /// The shadow call stack (bottom .. top).
     stack: Mutex<Vec<Frame>>,
     /// Frames captured at the most recent stop, top-first.
     snapshot: Mutex<Vec<FrameSnapshot>>,
-    /// Line of the previous safepoint (breakpoints fire on arrival from a
-    /// different line — see the breakpoint check).
-    prev_line: AtomicU32,
-    /// Source of the previous safepoint, paired with [`Self::prev_line`]:
-    /// crossing into another file is an arrival even at the same line number.
-    prev_source: AtomicU32,
+    /// The safepoint executed just before the current one, or `None` at the
+    /// very first. Breakpoints fire on *arrival* — see [`Self::arrived`].
+    prev: Mutex<Option<Site>>,
     /// Force a stop at the next safepoint (program entry or client `pause`).
     stop_next: AtomicBool,
     /// The pending forced stop is program entry.
@@ -131,17 +151,16 @@ pub(crate) struct NativeDebugSession {
 impl NativeDebugSession {
     pub(crate) fn new(
         sources: HashMap<u32, DebugSource>,
-        breakpoint_lines: HashMap<u32, HashSet<u32>>,
+        breakpoints: HashMap<u32, HashMap<u32, i64>>,
         stop_on_entry: bool,
         on_stop: Box<dyn Fn(StopInfo) + Send + Sync>,
     ) -> Self {
         Self {
             sources,
-            breakpoint_lines,
+            breakpoints: RwLock::new(breakpoints),
             stack: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Vec::new()),
-            prev_line: AtomicU32::new(0),
-            prev_source: AtomicU32::new(0),
+            prev: Mutex::new(None),
             stop_next: AtomicBool::new(stop_on_entry),
             entry_stop: AtomicBool::new(stop_on_entry),
             step: Mutex::new(Step::None),
@@ -149,6 +168,54 @@ impl NativeDebugSession {
             cv: Condvar::new(),
             on_stop,
         }
+    }
+
+    /// Replace the whole breakpoint set, keyed by raw `SourceId` then line.
+    ///
+    /// Whole-set replacement, not add/remove: the session owns the client's
+    /// breakpoints and always hands over the complete picture, so the two
+    /// cannot drift apart. Safe to call at any point in the run — while the
+    /// debuggee is running, and while it is parked at a stop.
+    pub(crate) fn set_breakpoints(&self, by_source: HashMap<u32, HashMap<u32, i64>>) {
+        *self.breakpoints.write().expect("breakpoint lock poisoned") = by_source;
+    }
+
+    /// The id of the breakpoint on this line, if the client set one.
+    ///
+    /// Takes the read lock and drops it before returning: the caller goes on
+    /// to park the debuggee, and a lock held across that park would block the
+    /// very `setBreakpoints` that could free it.
+    fn breakpoint_at(&self, source: u32, line: u32) -> Option<i64> {
+        self.breakpoints
+            .read()
+            .expect("breakpoint lock poisoned")
+            .get(&source)?
+            .get(&line)
+            .copied()
+    }
+
+    /// Whether `now` counts as *arriving* at its line — the condition a
+    /// breakpoint fires on — and record it as the new previous site.
+    ///
+    /// Consecutive safepoints on the same line of the same frame are one
+    /// arrival, so `var a = 1 var b = 2` written on one line stops once. A
+    /// safepoint at or before the previous offset is a backward jump, so the
+    /// back-edge of `for (var i = 0; i < 3; i++) { sum += i }` written on one
+    /// line re-arms the breakpoint and it fires every iteration; a different
+    /// depth covers recursion re-entering the same line.
+    ///
+    /// The previous site is recorded whether or not this is an arrival: the
+    /// test means nothing unless *every* safepoint updates it.
+    fn arrived(&self, now: Site) -> bool {
+        let mut prev = self.prev.lock().expect("prev site lock poisoned");
+        let arrived = prev.is_none_or(|p| {
+            p.depth != now.depth
+                || p.source != now.source
+                || p.line != now.line
+                || now.offset <= p.offset
+        });
+        *prev = Some(now);
+        arrived
     }
 
     /// Frames captured at the most recent stop, top-first.
@@ -209,7 +276,7 @@ impl NativeDebugSession {
 
     /// Capture every live frame's name/line/locals (debuggee thread, frames
     /// alive), publish the snapshot, then park until resumed.
-    fn stop(&self, line: u32, reason: StopReason) {
+    fn stop(&self, line: u32, reason: StopReason, hit_breakpoint_ids: Vec<i64>) {
         // Clone the frame pointers out under the lock, then render outside it.
         let frames: Vec<(usize, usize, u32, u32)> = {
             let stack = self.stack.lock().expect("stack lock poisoned");
@@ -236,7 +303,11 @@ impl NativeDebugSession {
         // loop below sees the resume instead of losing it.
         self.wait.lock().expect("debug wait lock poisoned").stopped = true;
 
-        (self.on_stop)(StopInfo { line, reason });
+        (self.on_stop)(StopInfo {
+            line,
+            reason,
+            hit_breakpoint_ids,
+        });
 
         let mut wait = self.wait.lock().expect("debug wait lock poisoned");
         while wait.stopped {
@@ -255,8 +326,6 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
             .sources
             .get(&source)
             .map_or(0, |s| s.line_table.line_col(offset).line);
-        let prev = self.prev_line.swap(line, Ordering::SeqCst);
-        let prev_source = self.prev_source.swap(source, Ordering::SeqCst);
 
         // Update the top frame and read the current depth.
         let depth = {
@@ -270,26 +339,30 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
             stack.len()
         };
 
-        let reason = if self.stop_next.swap(false, Ordering::SeqCst) {
+        // Recorded on every safepoint, stop or no stop, so the *next* one can
+        // tell "still on this line" from "back on this line".
+        let arrived = self.arrived(Site {
+            depth,
+            source,
+            line,
+            offset,
+        });
+
+        let (reason, hit_breakpoint_ids) = if self.stop_next.swap(false, Ordering::SeqCst) {
             if self.entry_stop.swap(false, Ordering::SeqCst) {
-                StopReason::Entry
+                (StopReason::Entry, Vec::new())
             } else {
-                StopReason::Pause
+                (StopReason::Pause, Vec::new())
             }
         } else if self.step_reached(line, depth) {
-            StopReason::Step
-        } else if (line != prev || source != prev_source)
-            && self
-                .breakpoint_lines
-                .get(&source)
-                .is_some_and(|lines| lines.contains(&line))
-        {
-            StopReason::Breakpoint
+            (StopReason::Step, Vec::new())
+        } else if let Some(id) = arrived.then(|| self.breakpoint_at(source, line)).flatten() {
+            (StopReason::Breakpoint, vec![id])
         } else {
             return;
         };
 
-        self.stop(line, reason);
+        self.stop(line, reason, hit_breakpoint_ids);
     }
 
     fn enter_frame(&self, frame_desc: usize) {
@@ -343,7 +416,7 @@ impl NativeDebugSession {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::mpsc;
     use std::sync::{Arc, OnceLock, Weak};
     use std::time::Duration;
@@ -388,7 +461,7 @@ mod tests {
     /// info, so the callback can answer the stop the way a DAP client does.
     fn session_from(
         sources: HashMap<u32, DebugSource>,
-        breakpoints: HashMap<u32, HashSet<u32>>,
+        breakpoints: HashMap<u32, HashMap<u32, i64>>,
         stop_on_entry: bool,
         on_stop: impl Fn(&NativeDebugSession, &StopInfo) + Send + Sync + 'static,
     ) -> Arc<NativeDebugSession> {
@@ -485,7 +558,10 @@ mod tests {
         let (announced, stopped) = mpsc::channel();
         let session = session_from(
             sources([(ENTRY, "main.leek", SOURCE), (LIB, "lib.leek", lib)]),
-            HashMap::from([(ENTRY, HashSet::from([2])), (LIB, HashSet::from([3]))]),
+            HashMap::from([
+                (ENTRY, HashMap::from([(2, 1)])),
+                (LIB, HashMap::from([(3, 2)])),
+            ]),
             false,
             move |session, info| {
                 let _ = announced.send(info.line);
@@ -520,7 +596,7 @@ mod tests {
                 (ENTRY, "main.leek", SOURCE),
                 (LIB, "lib.leek", "var z = 9;\n"),
             ]),
-            HashMap::from([(ENTRY, HashSet::from([1]))]),
+            HashMap::from([(ENTRY, HashMap::from([(1, 1)]))]),
             false,
             move |session, info| {
                 let _ = announced.send(info.line);
@@ -534,6 +610,122 @@ mod tests {
         assert!(
             stopped.recv_timeout(PARKED).is_err(),
             "an entry-file breakpoint fired inside an included file"
+        );
+    }
+
+    /// A breakpoint session over a one-line program: every safepoint lands on
+    /// line 1, so only the offsets tell them apart. Returns the session and a
+    /// receiver of `(line, hit ids)` per stop; each stop resumes immediately,
+    /// the way a client answering `stopped` with `continue` does.
+    fn breakpoint_session(
+        line: u32,
+        id: i64,
+    ) -> (Arc<NativeDebugSession>, mpsc::Receiver<(u32, Vec<i64>)>) {
+        let (announced, stopped) = mpsc::channel();
+        let session = session_from(
+            sources([(
+                ENTRY,
+                "main.leek",
+                "var sum = 0 for (var i = 0; i < 3; i++) sum += i\n",
+            )]),
+            HashMap::from([(ENTRY, HashMap::from([(line, id)]))]),
+            false,
+            move |session, info| {
+                let _ = announced.send((info.line, info.hit_breakpoint_ids.clone()));
+                session.resume();
+            },
+        );
+        (session, stopped)
+    }
+
+    #[test]
+    fn a_one_line_loop_body_fires_every_iteration() {
+        let (session, stopped) = breakpoint_session(1, 7);
+        // Body, increment, body again — all on line 1. The second body
+        // safepoint is at an offset the loop already ran past, so it is a
+        // fresh arrival and the breakpoint re-arms.
+        session.safepoint(ENTRY, 30, 0, 0);
+        session.safepoint(ENTRY, 42, 0, 0);
+        session.safepoint(ENTRY, 30, 0, 0);
+
+        assert_eq!(stopped.recv_timeout(RELEASED).ok(), Some((1, vec![7])));
+        assert_eq!(
+            stopped.recv_timeout(RELEASED).ok(),
+            Some((1, vec![7])),
+            "the loop's second pass over the breakpoint line did not fire"
+        );
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "the increment safepoint fired a second stop on the same line"
+        );
+    }
+
+    #[test]
+    fn two_statements_on_one_line_stop_once() {
+        let (session, stopped) = breakpoint_session(1, 7);
+        // Forward through the line, statement by statement: one arrival.
+        session.safepoint(ENTRY, 0, 0, 0);
+        session.safepoint(ENTRY, 12, 0, 0);
+
+        assert!(stopped.recv_timeout(RELEASED).is_ok(), "breakpoint missed");
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "a second statement on the same line fired the breakpoint again"
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_hit_reports_its_id() {
+        let (session, stopped) = breakpoint_session(1, 42);
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert_eq!(
+            stopped.recv_timeout(RELEASED).ok(),
+            Some((1, vec![42])),
+            "the stop did not name the breakpoint that caused it"
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_set_after_the_run_started_still_fires() {
+        let (announced, stopped) = mpsc::channel();
+        let session = session_from(entry_sources(), HashMap::new(), false, move |s, info| {
+            let _ = announced.send(info.hit_breakpoint_ids.clone());
+            s.resume();
+        });
+
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "stopped with no breakpoint set"
+        );
+
+        session.set_breakpoints(HashMap::from([(ENTRY, HashMap::from([(2, 5)]))]));
+        session.safepoint(ENTRY, 11, 0, 0);
+        assert_eq!(
+            stopped.recv_timeout(RELEASED).ok(),
+            Some(vec![5]),
+            "a breakpoint set after the run started never reached the debuggee"
+        );
+    }
+
+    #[test]
+    fn setting_breakpoints_while_the_debuggee_is_parked_does_not_deadlock() {
+        let (announced, stopped) = mpsc::channel();
+        let session = session_with(move |_: &NativeDebugSession| {
+            let _ = announced.send(());
+        });
+
+        let done = spawn_safepoint(&session);
+        stopped.recv_timeout(RELEASED).expect("stopped event fired");
+
+        // The debuggee is parked inside `stop`; the request loop updates the
+        // breakpoint set from this thread, exactly as `setBreakpoints` does.
+        session.set_breakpoints(HashMap::from([(ENTRY, HashMap::from([(1, 3)]))]));
+
+        session.resume();
+        assert!(
+            done.recv_timeout(RELEASED).is_ok(),
+            "setting breakpoints at a stop wedged the debuggee"
         );
     }
 

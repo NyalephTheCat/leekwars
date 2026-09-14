@@ -2,10 +2,11 @@
 
 use dap::types::Capabilities;
 
-/// What this adapter supports. Conservative for now: we honor the
-/// `configurationDone` handshake and the `terminate` request. Stepping
-/// and data/conditional breakpoints stay off until the target seam
-/// learns to pause.
+/// What this adapter supports. Stepping and line breakpoints need no
+/// capability flag and work; what stays off is what is genuinely not
+/// implemented — conditional breakpoints, hit counts and logpoints — since a
+/// client that believes the flag will send conditions the adapter silently
+/// ignores.
 pub(crate) fn capabilities() -> Capabilities {
     Capabilities {
         supports_configuration_done_request: Some(true),
