@@ -13,9 +13,9 @@ known-bad lists (#197) have been worked off to nothing and both suites gate
 on a plain assertion instead. See [Formatter ratchet](#formatter-ratchet)
 below.
 
-`parse-known-failures.tsv` — the parser's known-bad list over the upstream
-fixtures upstream's **own** suite enables. Two rows today, both open parser
-gaps under epic R7 (#351). See [Parser gate scope and
+There is no `parse-known-failures.tsv` here any more either: its two rows —
+the last open parser gaps under epic R7 — are closed (#351), and the parser
+gate is a plain assertion too. See [Parser gate scope and
 ratchet](#parser-gate-scope-and-ratchet) below.
 
 `reference.tsv` — the official-LeekScript reference dataset (value + ops +
@@ -185,38 +185,23 @@ bump move the scope instead of rotting it, and
 ever names a file that does not exist or comes back implausibly small (an
 uninitialised submodule embeds an empty set, which would gate on nothing).
 
-Two of the 45 still fail, and those **are** gaps. They are tracked in
-`parse-known-failures.tsv`, one `id<TAB>kind<TAB>detail` row each, in the same
-format as the formatter and `leek-bench` lists:
+All 45 parse cleanly, so the gate is a plain assertion with **no allow-list**.
+It briefly had one — `parse-known-failures.tsv`, a ratchet holding two
+fixtures, both of which turned out to be this toolchain disagreeing with the
+reference implementation rather than dialect it does not target:
 
-| Fixture | Diagnostics | The gap |
+| Fixture | Was | The divergence, and the fix (#351) |
 |---|---|---|
-| `code/french.leek` | `W0005` ×1 | the file ends inside an unterminated `/* …` block comment. Upstream's `LexicalParser.tryParseComments` runs to end of input and says nothing; this lexer warns. |
-| `code/french.min.leek` | `E0100` ×16 | minified LeekScript omits the comma between call arguments and array elements (`split('…' ' ')`, `[T ' ' x[d] …]`). Upstream's `readArray` / `readMap` / function-call loops treat `VIRG` as optional; this parser requires it. |
+| `code/french.leek` | `W0005` ×1 | the file ends inside an unterminated `/* …`. Upstream's `LexicalParser.tryParseComments` runs to end of input and says nothing, so the warning was a false positive on valid code; `W0005` is retired. |
+| `code/french.min.leek` | `E0100` ×16 | minified LeekScript omits the comma between call arguments and between array elements (`split('…' ' ')`, `[T ' ' x[d] …]`). Upstream's call-argument loop, `readArray` and `readMap` skip a `VIRG` only if one is there; the parser does the same now. |
 
-The gate is the **diff** against that file, and unlike the formatter's ratchet
-all three buckets fail the build:
-
-- a fixture that fails and is **not** listed — a parser regression;
-- a **listed fixture that now parses cleanly** — the gap was closed and the
-  row was left behind, so the file has started lying. The list can only
-  shrink;
-- a listed fixture whose **diagnostics moved** — still broken, but the row no
-  longer describes it.
-
-The last two are informational in `fmt_ratchet` for a good reason that does
-not apply here: those details came out of `javac` and a JDK bump can reword
-hundreds at once. These are our own diagnostics, and there are two of them.
-
-Rewrite the file after a deliberate change with:
-
-```bash
-LEEK_PARSE_WRITE_KNOWN_FAILURES=1 cargo test -p leek-test-corpus --test parser_fixtures
-```
-
-A missing or empty file is an error, not an empty allow-list — same rule, and
-same reasoning, as `src/fmt_ratchet.rs`. When the last row goes, delete the
-file *and* the ratchet in `tests/parser_fixtures.rs` together.
+With both closed the list had no rows, and a ratchet with nothing in it is not
+a passing gate but a missing one — so the file went, and
+`tests/parser_fixtures.rs` went back to the plain assertion a ratchet is only
+ever a detour from. The machinery stays in `src/parse_ratchet.rs` with its own
+tests, the way `fmt_ratchet` did after #197, for the next parser gap too large
+to close in the change that finds it. Until one turns up, a failing fixture is
+a parser bug and reads as one.
 
 ## CI
 

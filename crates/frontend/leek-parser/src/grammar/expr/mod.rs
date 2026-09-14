@@ -348,24 +348,134 @@ fn bracket_contains_top_level_colon(p: &Parser) -> bool {
     false
 }
 
-/// Parse `(arg, arg, ...)` for a function call.
+/// Parse elements up to `closer`, with the separating comma
+/// **optional**, then say whether the list ended *stuck*.
+///
+/// The comma is optional because upstream's element loops all have one
+/// shape — run until the closing token, and skip a comma only if one
+/// happens to be sitting there:
+///
+/// ```text
+/// while (… != PAR_RIGHT) { function.addParameter(readExpression(true));
+///                          if (get().getType() == VIRG) skip(); }
+/// ```
+///
+/// (`WordCompiler.java:1787` for call arguments, `:2214` `readArray`,
+/// `:2183` `readMap`). So `f(a b)`, `[1 2 3]` and `[k: v k2: v2]` are
+/// the same programs as their comma'd forms, and minified sources use
+/// that — `code/french.min.leek` is nothing but. Separation therefore
+/// falls out of *precedence*: `[a -b]` is one element `a - b`, because
+/// each element is a whole expression and `-` binds as the binary
+/// operator before the element ends.
+///
+/// `element` parses one element and returns `false` when it has already
+/// reported damage that makes the rest of the list meaningless (a map
+/// entry with no `:`).
+///
+/// The return value is `true` when the list ended on a token `element`
+/// could neither consume nor start from — it has already named that
+/// token, so [`close_list`] must not name it a second time. Two
+/// messages about one token is how a single missing comma used to grow
+/// into fifteen diagnostics (#351).
+pub(super) fn comma_optional_list(
+    p: &mut Parser,
+    closer: S,
+    mut element: impl FnMut(&mut Parser) -> bool,
+) -> bool {
+    while !p.at(closer) && !p.at_eof() {
+        // Flush pending trivia before taking the mark: `position`
+        // counts raw tokens, and an element that only got as far as
+        // flushing the newline in front of it would otherwise look like
+        // it had made progress — which is a spinning loop, one
+        // diagnostic per lap.
+        p.finish_trivia();
+        let before = p.position();
+        let ok = element(p);
+        if p.at(S::Comma) {
+            p.bump();
+        }
+        // No progress means `element` reported the token at the cursor
+        // and left it there; looping would report it forever.
+        if !ok || p.position() == before {
+            recover_to_closer(p, closer);
+            return true;
+        }
+    }
+    false
+}
+
+/// Swallow what is left of a list that gave up into one `ErrorNode`, so
+/// the list still ends on its own closing token.
+///
+/// Silent by design: `element` has already named the token that stopped
+/// it, and a message per skipped token is exactly the cascade this
+/// exists to prevent. It only runs when the closer really is in reach
+/// at this bracket depth — a list whose closer is missing altogether
+/// stops where it stands rather than swallowing the rest of the file.
+fn recover_to_closer(p: &mut Parser, closer: S) {
+    if p.at(closer) || !closer_in_reach(p, closer) {
+        return;
+    }
+    p.start_node(S::ErrorNode);
+    while !p.at(closer) && !p.at_eof() {
+        p.bump();
+    }
+    p.finish_node();
+}
+
+/// How far [`closer_in_reach`] looks before giving up. Same order as
+/// the collection-literal look-aheads: enough for any hand-written
+/// list, bounded so a pathological file cannot make recovery quadratic.
+const RESYNC_CAP: usize = 128;
+
+/// Does `closer` appear ahead at the *current* bracket depth? A closing
+/// bracket that is not ours appearing first means our own is missing,
+/// and skipping past it would swallow the construct we are nested in.
+fn closer_in_reach(p: &Parser, closer: S) -> bool {
+    let mut depth = 0i32;
+    for i in 0..RESYNC_CAP {
+        let kind = p.nth(i);
+        if depth == 0 && kind == closer {
+            return true;
+        }
+        match kind {
+            S::LParen | S::LBracket | S::LBrace => depth += 1,
+            S::RParen | S::RBracket | S::RBrace if depth == 0 => return false,
+            S::RParen | S::RBracket | S::RBrace => depth -= 1,
+            S::Eof => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Consume a list's closing token, reporting it missing unless
+/// [`comma_optional_list`] already reported why the list stopped.
+pub(super) fn close_list(p: &mut Parser, closer: S, stuck: bool) {
+    if stuck {
+        let _ = p.eat(closer);
+    } else {
+        p.expect(closer);
+    }
+}
+
+/// Parse `(arg, arg, ...)` for a function call. The comma between
+/// arguments is optional — see [`comma_optional_list`].
 pub(super) fn arg_list(p: &mut Parser) {
     assert!(p.at(S::LParen));
     p.start_node(S::ArgList);
     p.bump(); // '('
-    if !p.at(S::RParen) {
+    let stuck = comma_optional_list(p, S::RParen, |p| {
         expr(p);
-        while p.eat(S::Comma) {
-            expr(p);
-        }
-    }
-    p.expect(S::RParen);
+        true
+    });
+    close_list(p, S::RParen, stuck);
     p.finish_node();
 }
 
-/// `( … )` after an annotation. We accept a flat comma-separated
-/// expression list; richer arg syntax (key-value, identifiers) can
-/// land later.
+/// `( … )` after an annotation. We accept a flat expression list —
+/// same production as a call's, comma and all (it being optional);
+/// richer arg syntax (key-value, identifiers) can land later.
 pub(crate) fn annotation_args(p: &mut Parser) {
     arg_list(p);
 }

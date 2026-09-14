@@ -427,26 +427,21 @@ mod tests {
         assert_eq!(result.tokens[0].span.range(), 0..5);
     }
 
+    /// An unterminated `/*` is **valid** LeekScript: upstream's
+    /// `tryParseComments` consumes to end of input and reports nothing,
+    /// and `code/french.leek` ends on a deliberate `/*` that comments
+    /// out a benchmark loop. So no diagnostic — only a comment token
+    /// that still covers every byte to EOF, which is what `leek-fmt`
+    /// reads to decide the file ends unclosed (#417, #419, #351).
     #[test]
-    fn unterminated_block_comment_warns_and_labels_the_opener() {
+    fn unterminated_block_comment_is_accepted_and_runs_to_eof() {
         let src = SourceId::new(1).unwrap();
         let text = "var a = 1\n/* disabled\nvar b = 2\n";
         let result = lex(text, src, Version::LATEST);
         let open = text.find("/*").expect("an opener");
 
-        assert_eq!(result.diagnostics.len(), 1);
-        let d = &result.diagnostics[0];
-        assert_eq!(d.code, codes::BLOCK_COMMENT_NOT_CLOSED);
-        // Upstream accepts the unterminated form, so this must not be
-        // an error: an error flips `has_compile_error` for programs the
-        // reference compiler runs happily.
-        assert_eq!(d.severity, leek_diagnostics::Severity::Warning);
-        assert_eq!(d.span.range(), open..text.len());
-        assert_eq!(d.labels.len(), 1);
-        assert_eq!(d.labels[0].span.range(), open..open + 2);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
 
-        // The token still covers every byte to EOF — `leek-fmt` reads
-        // that extent to decide the file ends unclosed (#417, #419).
         let comment = result
             .tokens
             .iter()
@@ -462,16 +457,31 @@ mod tests {
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     }
 
-    /// `/*/` is a *complete* comment in v1 only, so only v2+ may warn.
+    /// `/*/` is a *complete* comment in v1 only. In v2+ it opens a
+    /// comment that never closes, so the rest of the line is trivia —
+    /// and, as upstream, that is not a diagnostic either. The
+    /// observable difference between the versions is the token extent,
+    /// not a message.
     #[test]
     fn v1_three_char_block_comment_is_closed() {
         let src = SourceId::new(1).unwrap();
         let v1 = lex("/*/ return 1", src, Version::V1);
         assert!(v1.diagnostics.is_empty(), "{:?}", v1.diagnostics);
+        let v1_comment = v1
+            .tokens
+            .iter()
+            .find(|t| t.kind == S::BlockComment)
+            .expect("a comment token");
+        assert_eq!(v1_comment.span.range(), 0..3);
 
         let v2 = lex("/*/ return 1", src, Version::V2);
-        assert_eq!(v2.diagnostics.len(), 1);
-        assert_eq!(v2.diagnostics[0].code, codes::BLOCK_COMMENT_NOT_CLOSED);
+        assert!(v2.diagnostics.is_empty(), "{:?}", v2.diagnostics);
+        let v2_comment = v2
+            .tokens
+            .iter()
+            .find(|t| t.kind == S::BlockComment)
+            .expect("a comment token");
+        assert_eq!(v2_comment.span.range(), 0..12);
     }
 
     #[test]
