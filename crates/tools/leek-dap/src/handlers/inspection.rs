@@ -1,8 +1,11 @@
 //! State-inspection requests: threads, stack frames, scopes, variables.
 //!
-//! Leekscript is single-threaded, so `threads` reports one fixed
-//! thread. The stack/scope/variable requests are only meaningful while
-//! stopped; until the target can pause they return empty results.
+//! Leekscript is single-threaded, so `threads` reports one fixed thread. The
+//! stack/scope/variable requests serve the frame snapshot the debug
+//! controller captured at the last stop — every live frame's name, line and
+//! locals, read while the debuggee was parked and those frames were alive.
+//! They are empty only when nothing is stopped: before the first stop, after
+//! a `continue`, or on a `noDebug` launch.
 
 use std::io::{Read, Write};
 

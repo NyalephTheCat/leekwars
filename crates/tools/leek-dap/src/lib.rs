@@ -25,7 +25,7 @@
 //! request loop keeps answering `terminate`/`disconnect` while a long
 //! program (or a whole fight) is running.
 //!
-//! # Status: skeleton
+//! # What works
 //!
 //! Working: the full DAP handshake, native execution, line breakpoints,
 //! `stopOnEntry`, step in/over/out (depth-aware), multi-frame stack traces,

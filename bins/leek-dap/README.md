@@ -9,10 +9,11 @@ the **native (Cranelift) backend**: on launch the adapter compiles the
 program in debug mode (no optimization, per-statement safepoints, DWARF) and
 runs it in-process, on a worker thread — so the adapter keeps answering
 requests (including `terminate` / `disconnect`) for the whole run. Supported
-today: line breakpoints, `stopOnEntry`, step in/over/out, multi-frame stack
-traces, and per-frame local-variable inspection. Known gap: a breakpoint on a
-line that lowers to only a terminator (a bare `return x`) won't fire, since
-safepoints are per-statement.
+today: line breakpoints, `stopOnEntry`, step in/over/out (depth-aware),
+`pause`, multi-frame stack traces, and per-frame local-variable inspection.
+Known gap: conditional breakpoints, hit counts and logpoints — the matching
+capabilities stay off rather than advertise something the adapter would
+silently ignore.
 
 The program is compiled through the same project front-end as `miku run`:
 `include("…")` resolves off disk, so a program split across files debugs the
@@ -77,3 +78,11 @@ defaults to the entity whose `ai` is this program), `profile` (a
 `[profiles.<name>]` block applied to the scenario), `seed`, and `maxTurns`.
 A runnable example with ready-made launch configs lives in
 [`examples/fight/`](../../examples/fight/).
+
+To check the fight path end to end — a breakpoint in the AI firing once per
+turn, and the duel still reaching a result — run the adapter's `#[ignore]`d
+protocol test, which drives the real request loop over a pipe:
+
+```sh
+cargo test -p leek-dap -- --ignored
+```

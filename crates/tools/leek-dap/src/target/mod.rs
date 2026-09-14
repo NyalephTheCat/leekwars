@@ -1,12 +1,17 @@
-//! The execution-engine seam.
+//! The execution-engine seam: what a `launch` asks for, and the two ways of
+//! running it.
 //!
-//! [`DebugTarget`] is the boundary between the protocol layer and
-//! whatever actually runs the program. Today the only implementation
-//! is [`native::NativeTarget`], which compiles via the Cranelift
-//! backend and runs to completion. When live debugging lands, the
-//! pausing/stepping/inspection methods grow here (mirroring the
-//! interpreter's existing profiler hook), and the protocol handlers
-//! stay unchanged.
+//! [`LaunchConfig`] is the adapter-specific half of a `launch` request and
+//! [`RunOutcome`] what a finished run reports back. [`native::NativeTarget`]
+//! compiles the program through the project front-end; [`native::run_compiled`]
+//! then runs it standalone and [`fight::run_fight_debug`] runs it as one
+//! entity's AI inside a fight. Both paths JIT through the Cranelift backend
+//! with the same debug options, so a breakpoint behaves the same either way.
+//!
+//! Pausing, stepping and inspection are not part of this seam: they live in
+//! [`crate::debug::NativeDebugSession`], which the compiled program feeds via
+//! [`native::Compiled::debug_sources`] and [`native::Compiled::breakpoint_map`]
+//! and which the backend calls at each safepoint.
 
 pub(crate) mod fight;
 pub(crate) mod native;

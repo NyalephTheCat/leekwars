@@ -34,6 +34,10 @@ pub(crate) fn serve<R: Read, W: Write + Send + 'static>(
             break;
         }
     }
+    // However the loop ended — `disconnect`, `terminate` or a closed pipe —
+    // the debuggee may still be parked at a breakpoint waiting for a client
+    // that has gone. Let it go before the session drops.
+    session.stop();
     Ok(())
 }
 
@@ -45,7 +49,9 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::testing::{SharedOut, messages, project, set_breakpoints};
+    use crate::testing::{
+        Client, SharedOut, debug_session_guard, messages, project, project_with, set_breakpoints,
+    };
 
     /// Feed a scripted request stream through the real request loop and hand
     /// back every message the adapter wrote. This is the whole adapter: the
@@ -199,6 +205,586 @@ mod tests {
             "no explanation: {unknown}"
         );
 
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    // --- interactive protocol tests -------------------------------------
+    //
+    // Everything above scripts a fixed request stream and reads the output
+    // once the loop has ended. These drive a live [`Client`] instead, so the
+    // test answers what the adapter says: a `stopped` event with `continue`,
+    // a stop with `stackTrace`. That is the only way to reach the execution
+    // and inspection handlers at all — they do nothing unless a debuggee is
+    // parked.
+
+    /// A program with a callee and a loop, so a test has somewhere to step
+    /// into, over and out of:
+    ///
+    /// ```text
+    /// 1  function twice(x) {
+    /// 2      var doubled = x * 2
+    /// 3      return doubled
+    /// 4  }
+    /// 5  var sum = 0
+    /// 6  for (var i = 0; i < 3; i++) {
+    /// 7      sum = sum + twice(i)
+    /// 8  }
+    /// 9  return sum
+    /// ```
+    const STEPS: &str = concat!(
+        "function twice(x) {\n",
+        "    var doubled = x * 2\n",
+        "    return doubled\n",
+        "}\n",
+        "var sum = 0\n",
+        "for (var i = 0; i < 3; i++) {\n",
+        "    sum = sum + twice(i)\n",
+        "}\n",
+        "return sum\n",
+    );
+
+    /// [`STEPS`] with `iterations` passes through the loop instead of three.
+    /// Same text otherwise, so the line numbers above still hold.
+    fn steps_looping(iterations: u32) -> String {
+        STEPS.replace("i < 3", &format!("i < {iterations}"))
+    }
+
+    /// The two requests every session opens with. `initialized` is what tells
+    /// a client it may start sending `setBreakpoints`.
+    fn handshake(client: &mut Client, config: Value) {
+        client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
+        client.event("initialized");
+        client.ok("launch", config);
+    }
+
+    /// The frames of the current stop, innermost first.
+    fn stack(client: &mut Client) -> Vec<Value> {
+        let response = client.ok("stackTrace", serde_json::json!({ "threadId": 1 }));
+        assert_eq!(
+            response["totalFrames"],
+            Value::from(response["stackFrames"].as_array().map_or(0, Vec::len)),
+            "totalFrames disagrees with the frames sent: {response}"
+        );
+        response["stackFrames"]
+            .as_array()
+            .expect("stack frames")
+            .clone()
+    }
+
+    /// The names of the variables behind a `variablesReference`.
+    fn variable_names(client: &mut Client, reference: i64) -> Vec<String> {
+        client.ok(
+            "variables",
+            serde_json::json!({ "variablesReference": reference }),
+        )["variables"]
+            .as_array()
+            .expect("variables")
+            .iter()
+            .map(|variable| variable["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn initialize_advertises_only_what_is_implemented() {
+        let mut client = Client::spawn();
+        let capabilities = client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
+        assert_eq!(capabilities["supportsConfigurationDoneRequest"], true);
+        assert_eq!(capabilities["supportsTerminateRequest"], true);
+        // A client that believes one of these sends conditions the adapter
+        // would silently ignore, so each stays off until it is real.
+        for unimplemented in [
+            "supportsConditionalBreakpoints",
+            "supportsHitConditionalBreakpoints",
+            "supportsLogPoints",
+        ] {
+            assert!(
+                capabilities[unimplemented].is_null(),
+                "advertised {unimplemented}: {capabilities}"
+            );
+        }
+        client.event("initialized");
+    }
+
+    #[test]
+    fn a_launch_with_no_program_is_an_error_and_starts_nothing() {
+        let mut client = Client::spawn();
+        client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
+        let response = client.request("launch", serde_json::json!({}));
+        assert_eq!(
+            response["success"], false,
+            "a launch with no program: {response}"
+        );
+        assert!(
+            response["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("program")),
+            "the error does not say what is missing: {response}"
+        );
+        // Nothing was stashed, so `configurationDone` starts nothing — and the
+        // session keeps answering requests rather than falling over.
+        client.ok("configurationDone", Value::Null);
+        assert_eq!(client.ok("threads", Value::Null)["threads"][0]["id"], 1);
+    }
+
+    #[test]
+    fn daps_own_no_debug_flag_is_honored() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-nodebug-top", &[("main.leek", STEPS)]);
+        let mut client = Client::spawn();
+        // `noDebug` here is DAP's own launch field: it is parsed out of the
+        // arguments before the adapter-specific blob is formed, so the config
+        // that reaches the target would lose it unless the two are merged.
+        // `stopOnEntry` is the tell — a debug launch would stop at line 5.
+        handshake(
+            &mut client,
+            serde_json::json!({
+                "noDebug": true,
+                "program": dir.join("main.leek").display().to_string(),
+                "stopOnEntry": true,
+            }),
+        );
+        client.ok("configurationDone", Value::Null);
+        let (event, _) = client.event_any(&["stopped", "terminated"]);
+        assert_eq!(event, "terminated", "a noDebug launch stopped the debuggee");
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_compile_error_ends_the_session_instead_of_starting_a_debuggee() {
+        let dir = project_with("proto-broken", &[("main.leek", "var a = \n")]);
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({ "program": dir.join("main.leek").display().to_string() }),
+        );
+        client.ok("configurationDone", Value::Null);
+
+        let output = client.event("output");
+        assert_eq!(
+            output["category"], "stderr",
+            "a diagnostic on stdout: {output}"
+        );
+        assert!(
+            output["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("compilation failed")),
+            "the diagnostic was not reported: {output}"
+        );
+        assert_eq!(client.event("exited")["exitCode"], 1);
+        client.event("terminated");
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_breakpoint_stops_the_debuggee_and_its_whole_state_is_inspectable() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-breakpoint", &[("main.leek", STEPS)]);
+        let entry = dir.join("main.leek").display().to_string();
+        let mut client = Client::spawn();
+        handshake(&mut client, serde_json::json!({ "program": entry }));
+
+        // Line 3 is `return doubled`, inside the callee: stopping there proves
+        // the stack has the caller under it.
+        let set = client.ok(
+            "setBreakpoints",
+            serde_json::json!({
+                "source": { "path": entry },
+                "breakpoints": [{ "line": 3 }],
+            }),
+        );
+        let id = set["breakpoints"][0]["id"].clone();
+        assert!(
+            id.is_i64(),
+            "no breakpoint id to match the stop against: {set}"
+        );
+        client.ok("configurationDone", Value::Null);
+
+        let stopped = client.event("stopped");
+        assert_eq!(stopped["reason"], "breakpoint");
+        assert_eq!(stopped["threadId"], 1);
+        assert_eq!(
+            stopped["hitBreakpointIds"],
+            serde_json::json!([id]),
+            "the stop does not name the breakpoint that caused it: {stopped}"
+        );
+
+        assert_eq!(
+            client.ok("threads", Value::Null)["threads"],
+            serde_json::json!([{ "id": 1, "name": "main" }])
+        );
+
+        let frames = stack(&mut client);
+        assert_eq!(frames.len(), 2, "the caller is missing: {frames:?}");
+        assert_eq!(frames[0]["name"], "twice");
+        assert_eq!(frames[0]["line"], 3);
+        assert_eq!(frames[0]["source"]["path"], entry.as_str());
+        assert_eq!(frames[1]["line"], 7, "the caller is not on the call line");
+
+        // `scopes` encodes the frame in the reference `variables` decodes:
+        // frame 0 → 1, frame 1 → 2.
+        for frame in &frames {
+            let scopes = client.ok("scopes", serde_json::json!({ "frameId": frame["id"] }));
+            assert_eq!(scopes["scopes"][0]["name"], "Locals");
+            assert_eq!(
+                scopes["scopes"][0]["variablesReference"],
+                Value::from(frame["id"].as_i64().expect("frame id") + 1)
+            );
+        }
+        assert_eq!(variable_names(&mut client, 1), ["x", "doubled"]);
+        assert_eq!(variable_names(&mut client, 2), ["sum", "i"]);
+        assert_eq!(
+            client.ok("variables", serde_json::json!({ "variablesReference": 1 }))["variables"][0]
+                ["value"],
+            "0",
+            "the callee's argument is not the value it was called with"
+        );
+
+        // The loop calls `twice` three times, so the breakpoint fires three
+        // times and the program then ends on its own.
+        let mut stops = 1;
+        loop {
+            client.ok("continue", serde_json::json!({ "threadId": 1 }));
+            if client.event_any(&["stopped", "terminated"]).0 == "terminated" {
+                break;
+            }
+            stops += 1;
+        }
+        assert_eq!(stops, 3, "the breakpoint did not fire once per iteration");
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn stepping_walks_into_a_callee_and_back_out_without_losing_the_depth() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-stepping", &[("main.leek", STEPS)]);
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({
+                "program": dir.join("main.leek").display().to_string(),
+                "stopOnEntry": true,
+            }),
+        );
+        client.ok("configurationDone", Value::Null);
+
+        /// Send one step request, wait for the stop it produces, and report
+        /// the frames it left the debuggee in.
+        fn step(client: &mut Client, command: &str) -> Vec<Value> {
+            client.ok(command, serde_json::json!({ "threadId": 1 }));
+            let stopped = client.event("stopped");
+            assert_eq!(stopped["reason"], "step", "after `{command}`: {stopped}");
+            stack(client)
+        }
+
+        assert_eq!(client.event("stopped")["reason"], "entry");
+        let entry = stack(&mut client);
+        assert_eq!(entry.len(), 1);
+        assert_eq!(entry[0]["name"], "<main>");
+        assert_eq!(entry[0]["line"], 5, "not the program's first statement");
+
+        // Down to the call line, one statement at a time.
+        assert_eq!(step(&mut client, "stepIn")[0]["line"], 6);
+        let at_call = step(&mut client, "stepIn");
+        assert_eq!(at_call[0]["line"], 7);
+        assert_eq!(at_call.len(), 1);
+
+        // Into the callee: a frame deeper, and the caller is still under it.
+        let inside = step(&mut client, "stepIn");
+        assert_eq!(
+            inside.len(),
+            2,
+            "stepIn did not enter the callee: {inside:?}"
+        );
+        assert_eq!(inside[0]["name"], "twice");
+        assert_eq!(inside[1]["line"], 7);
+
+        // Out again: back to the caller's depth, on the line that called.
+        let back = step(&mut client, "stepOut");
+        assert_eq!(back.len(), 1, "stepOut did not leave the callee: {back:?}");
+        assert_eq!(back[0]["line"], 7);
+
+        // Over the call line: the next stop is the loop header in *this*
+        // frame, not the callee's first statement.
+        let over = step(&mut client, "next");
+        assert_eq!(over.len(), 1, "next stepped into the callee: {over:?}");
+        assert_eq!(over[0]["line"], 6);
+
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        client.event("terminated");
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn pause_stops_the_debuggee_at_the_next_statement() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-pause", &[("main.leek", STEPS)]);
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({
+                "program": dir.join("main.leek").display().to_string(),
+                "stopOnEntry": true,
+            }),
+        );
+        client.ok("configurationDone", Value::Null);
+        assert_eq!(client.event("stopped")["reason"], "entry");
+
+        // Asked for while the debuggee is parked, then released: a `pause`
+        // aimed at a *running* debuggee would race the program to its end and
+        // decide the test on timing rather than on behavior.
+        client.ok("pause", serde_json::json!({ "threadId": 1 }));
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+
+        let stopped = client.event("stopped");
+        assert_eq!(stopped["reason"], "pause", "{stopped}");
+        assert!(
+            stopped["hitBreakpointIds"].is_null(),
+            "a pause blamed a breakpoint: {stopped}"
+        );
+        // Which statement it lands on is a lowering detail (one source line
+        // can carry several safepoints); that it landed inside the program,
+        // with a live frame to inspect, is the behavior.
+        let frames = stack(&mut client);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["name"], "<main>");
+
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        client.event("terminated");
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn variables_for_a_frame_that_is_not_there_is_empty_not_a_panic() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-badref", &[("main.leek", STEPS)]);
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({
+                "program": dir.join("main.leek").display().to_string(),
+                "stopOnEntry": true,
+            }),
+        );
+        client.ok("configurationDone", Value::Null);
+        client.event("stopped");
+
+        // Reference 1 is frame 0 and has locals; 0 underflows the `ref - 1`
+        // decoding and the huge one is simply past the end. Neither is a
+        // frame, and a client asks about both (a stale reference from the
+        // previous stop, a scope it never got from `scopes`).
+        assert!(!variable_names(&mut client, 1).is_empty());
+        for bad in [0, 99_999] {
+            assert!(
+                variable_names(&mut client, bad).is_empty(),
+                "variablesReference {bad} resolved to a frame"
+            );
+        }
+
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        client.event("terminated");
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn an_unsupported_request_is_answered_with_an_error() {
+        let mut client = Client::spawn();
+        client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
+        // `evaluate` is a request the adapter parses but does not implement;
+        // answering it is what keeps a client from waiting forever.
+        let response = client.request(
+            "evaluate",
+            serde_json::json!({ "expression": "sum", "context": "watch" }),
+        );
+        assert_eq!(response["success"], false, "{response}");
+        assert_eq!(response["message"], "unsupported request");
+        // The loop carries on afterwards.
+        assert_eq!(client.ok("threads", Value::Null)["threads"][0]["id"], 1);
+    }
+
+    #[test]
+    fn set_exception_breakpoints_is_answered_even_though_there_are_no_filters() {
+        let mut client = Client::spawn();
+        client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
+        let body = client.ok(
+            "setExceptionBreakpoints",
+            serde_json::json!({ "filters": [] }),
+        );
+        assert!(
+            body["breakpoints"].as_array().is_none_or(Vec::is_empty),
+            "filters were claimed that the adapter does not have: {body}"
+        );
+    }
+
+    #[test]
+    fn disconnecting_while_the_debuggee_is_parked_releases_it() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-disconnect", &[("main.leek", STEPS)]);
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({
+                "program": dir.join("main.leek").display().to_string(),
+                "stopOnEntry": true,
+            }),
+        );
+        client.ok("configurationDone", Value::Null);
+        client.event("stopped");
+
+        let response = client.request("disconnect", serde_json::json!({}));
+        assert_eq!(response["success"], true, "{response}");
+        // The debuggee is parked on a condvar with nobody left to answer its
+        // stop. Ending the request loop has to let it go: otherwise that
+        // thread sits there for the life of the process with the debug hook
+        // still installed, and this event never arrives.
+        client.event("terminated");
+
+        // And the loop really did end (`finish` asserts it), which it cannot
+        // do until the worker has been joined.
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// A `noDebug` run ending must leave a debug session that is already in
+    /// flight exactly as it found it.
+    ///
+    /// The backend's debug hook is one process-global slot. A run that never
+    /// installed a hook has none to remove, and a run that did owns only its
+    /// own: clearing the slot wholesale pulls the live session's controller
+    /// out from under a parked debuggee, which then sails through every later
+    /// breakpoint and runs to the end — exactly the failure the next test is
+    /// named for, a breakpoint set while parked that never fires.
+    #[test]
+    fn a_no_debug_run_ending_leaves_a_live_debug_session_alone() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-nodebug-bystander", &[("main.leek", STEPS)]);
+        let entry = dir.join("main.leek").display().to_string();
+
+        // A debug session, parked at program entry with its hook installed.
+        let mut debugged = Client::spawn();
+        handshake(
+            &mut debugged,
+            serde_json::json!({ "program": entry, "stopOnEntry": true }),
+        );
+        debugged.ok("configurationDone", Value::Null);
+        assert_eq!(debugged.event("stopped")["reason"], "entry");
+
+        // A second session runs the same program to completion with `noDebug`.
+        // Its worker sends `terminated` last of all, so by the time that event
+        // arrives whatever tidying up it does has already happened.
+        let mut bystander = Client::spawn();
+        handshake(
+            &mut bystander,
+            serde_json::json!({ "program": entry, "noDebug": true }),
+        );
+        bystander.ok("configurationDone", Value::Null);
+        bystander.event("terminated");
+        bystander.finish();
+
+        // The first session is still being debugged: a breakpoint set now
+        // still fires, on this run.
+        let set = debugged.ok(
+            "setBreakpoints",
+            serde_json::json!({
+                "source": { "path": entry },
+                "breakpoints": [{ "line": 3 }],
+            }),
+        );
+        debugged.ok("continue", serde_json::json!({ "threadId": 1 }));
+        let stopped = debugged.event("stopped");
+        assert_eq!(
+            stopped["reason"], "breakpoint",
+            "the noDebug run tore down the live debug session: {stopped}"
+        );
+        assert_eq!(
+            stopped["hitBreakpointIds"],
+            serde_json::json!([set["breakpoints"][0]["id"]])
+        );
+
+        debugged.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_breakpoint_set_while_parked_fires_on_this_run() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-live-bp", &[("main.leek", STEPS)]);
+        let entry = dir.join("main.leek").display().to_string();
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({ "program": entry, "stopOnEntry": true }),
+        );
+        client.ok("configurationDone", Value::Null);
+        client.event("stopped");
+
+        // The user clicks the gutter while parked. The program is compiled by
+        // now, so the answer is the real verdict rather than "pending launch".
+        let set = client.ok(
+            "setBreakpoints",
+            serde_json::json!({
+                "source": { "path": entry },
+                "breakpoints": [{ "line": 3 }],
+            }),
+        );
+        let placed = &set["breakpoints"][0];
+        assert_eq!(placed["verified"], true, "{placed}");
+        assert_eq!(placed["line"], 3);
+
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        let stopped = client.event("stopped");
+        assert_eq!(
+            stopped["reason"], "breakpoint",
+            "the new breakpoint waited for the next run: {stopped}"
+        );
+        assert_eq!(
+            stopped["hitBreakpointIds"],
+            serde_json::json!([placed["id"]])
+        );
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_continue_sent_the_instant_a_stop_is_announced_still_releases_the_debuggee() {
+        let _guard = debug_session_guard();
+        // A hundred stops in a tight loop, each answered with no delay at all:
+        // the `continue` routinely reaches the controller while the debuggee
+        // is still between claiming its stop and parking on the condvar. If
+        // that resume were lost the run would hang here instead of ending.
+        let dir = project_with("proto-race", &[("main.leek", &steps_looping(100))]);
+        let entry = dir.join("main.leek").display().to_string();
+        let mut client = Client::spawn();
+        handshake(&mut client, serde_json::json!({ "program": entry }));
+        client.ok(
+            "setBreakpoints",
+            serde_json::json!({
+                "source": { "path": entry },
+                "breakpoints": [{ "line": 3 }],
+            }),
+        );
+        client.ok("configurationDone", Value::Null);
+
+        let mut stops = 0;
+        while client.event_any(&["stopped", "terminated"]).0 == "stopped" {
+            stops += 1;
+            client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        }
+        assert_eq!(stops, 100, "the callee did not stop once per call");
+
+        client.finish();
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

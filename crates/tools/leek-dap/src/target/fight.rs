@@ -127,3 +127,90 @@ fn pick_debug_entity(
         .and_then(|e| e.id)
         .ok_or_else(|| "scenario has no entities to debug".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use crate::testing::{Client, debug_session_guard};
+
+    /// The repository root, so the fixture can be `examples/fight`.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repository root")
+    }
+
+    /// Debug an AI inside a real fight, end to end over the protocol: a
+    /// breakpoint in the AI fires once per turn it takes, and letting each
+    /// stop go plays the duel out to a result.
+    ///
+    /// This replaces `tools/dap-fight-smoke.py`, which drove the built binary
+    /// out of process and which nothing ever ran. `#[ignore]`d because it
+    /// plays a whole fight — far slower than every other test here — so it
+    /// gets its own CI step instead of weighing down the fast gate.
+    #[test]
+    #[ignore = "plays a whole fight"]
+    fn debugging_an_ai_inside_a_fight_stops_every_turn_and_the_fight_still_finishes() {
+        let _guard = debug_session_guard();
+        let root = repo_root();
+        let ai = root.join("examples/fight/ais/hero.leek");
+        let ai_path = ai.display().to_string();
+
+        let mut client = Client::spawn();
+        client.ok("initialize", json!({ "adapterID": "leek" }));
+        client.event("initialized");
+        client.ok(
+            "launch",
+            json!({
+                "program": ai_path,
+                "scenario": root.join("examples/fight/duel.toml").display().to_string(),
+                // The hero is entity 1 in `duel.toml`; naming it explicitly
+                // keeps the test independent of the `ai`-path fallback.
+                "fightEntity": 1,
+            }),
+        );
+        // Line 4 is the AI's first statement, so it runs once per turn.
+        let set = client.ok(
+            "setBreakpoints",
+            json!({
+                "source": { "path": ai_path },
+                "breakpoints": [{ "line": 4 }],
+            }),
+        );
+        let id = set["breakpoints"][0]["id"].clone();
+        client.ok("configurationDone", Value::Null);
+
+        let stopped = client.event("stopped");
+        assert_eq!(stopped["reason"], "breakpoint");
+        assert_eq!(stopped["hitBreakpointIds"], json!([id]));
+
+        // The stop is inside the AI, not somewhere in the game runtime: the
+        // frame names the AI's own file.
+        let frames = client.ok("stackTrace", json!({ "threadId": 1 }))["stackFrames"].clone();
+        assert_eq!(frames[0]["source"]["path"], ai_path.as_str());
+        assert_eq!(frames[0]["line"], 4);
+
+        // Let the fight play out, answering every stop the way an editor does.
+        let mut turns = 1;
+        loop {
+            client.ok("continue", json!({ "threadId": 1 }));
+            if client.event_any(&["stopped", "terminated"]).0 == "terminated" {
+                break;
+            }
+            turns += 1;
+        }
+        assert!(turns > 1, "the AI was only ever entered once");
+
+        let output = client.event("output");
+        assert!(
+            output["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("fight over")),
+            "the fight did not reach a result: {output}"
+        );
+
+        client.finish();
+    }
+}

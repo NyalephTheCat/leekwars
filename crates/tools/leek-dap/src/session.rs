@@ -37,6 +37,12 @@ pub(crate) struct Session {
     pub run_thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How long [`Session::stop`] waits for a detached debuggee to finish before
+/// giving up on it. A detached worker only has to run out the program with
+/// every stop switched off, so this is generous; abandoning it beats leaving
+/// the adapter unable to exit because the debuggee has real work left.
+const WORKER_EXIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl Session {
     pub(crate) fn new() -> Self {
         Self {
@@ -48,5 +54,38 @@ impl Session {
             program_path: None,
             run_thread: None,
         }
+    }
+
+    /// End the session: release the debuggee, uninstall the process-global
+    /// debug hook, and wait for the worker to leave.
+    ///
+    /// `disconnect`/`terminate` — and a client that simply closes the pipe —
+    /// arrive as often while the debuggee is parked at a breakpoint as while
+    /// it is running. Dropping the session there would drop the worker's
+    /// `JoinHandle` unjoined and leave that thread parked forever with the
+    /// hook still installed, so the run is detached first and only then
+    /// joined.
+    pub(crate) fn stop(&mut self) {
+        if let Some(debug) = self.native_debug.take() {
+            debug.detach();
+            // Only a session that installed the process-global hook clears
+            // it, and only its own: a `noDebug` session never had one, and
+            // the slot may already belong to whoever came next.
+            let hook: Arc<dyn leek_backend_native::DebugHook> = debug;
+            leek_backend_native::clear_debug_hook(&hook);
+        }
+        let Some(worker) = self.run_thread.take() else {
+            return;
+        };
+        // `JoinHandle` has no timed join; poll instead so a program that
+        // ignores the detach cannot wedge the adapter's exit.
+        let deadline = std::time::Instant::now() + WORKER_EXIT;
+        while !worker.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let _ = worker.join();
     }
 }
