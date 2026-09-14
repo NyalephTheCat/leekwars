@@ -85,7 +85,10 @@ pub unsafe fn aot_finish_ref(ptr: *mut Value) -> Value {
     // Clone the result out of its handle (AOT runs once then the process exits,
     // so the box need not be reclaimed); `take` no longer exists — handles are
     // owned by the per-run registry and read by cloning. See `runtime::read_handle`.
-    crate::runtime::invoke_top_level_string(unsafe { crate::runtime::read_handle(ptr) })
+    // SAFETY: caller's contract — `ptr` is the `Ref` result of `leek_main`,
+    // i.e. a handle from the run that just finished, not yet swept.
+    let v = unsafe { crate::runtime::read_handle(ptr) };
+    crate::runtime::invoke_top_level_string(v)
 }
 
 /// Compute the scalar return shape of the program's `main` without emitting

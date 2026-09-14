@@ -13,6 +13,10 @@
 
 // `#[unsafe(no_mangle)]` is unsafe code; the workspace denies it by default.
 #![allow(unsafe_code)]
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
 
 use std::ffi::{CString, c_char};
 
@@ -73,6 +77,8 @@ pub extern "C" fn leek_aot_print_bool(v: i64, version: i32) {
 /// `ptr` must be the pointer returned by a `Ref`-typed `leek_main`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn leek_aot_print_ref(ptr: *mut Value, version: i32) {
+    // SAFETY: caller's contract — `ptr` is the `Ref` result of `leek_main`,
+    // so it is a live handle `aot_finish_ref` may take the value out of.
     let v = unsafe { leek_backend_native::aot::aot_finish_ref(ptr) };
     print_value(&v, version);
 }

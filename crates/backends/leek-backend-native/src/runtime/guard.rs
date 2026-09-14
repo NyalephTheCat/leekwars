@@ -64,7 +64,27 @@ pub(crate) fn shim_guard<R: ShimReturn>(body: impl FnOnce() -> R) -> R {
 /// Declare a C-ABI runtime shim: adds `#[unsafe(no_mangle)]` and wraps the body
 /// in [`shim_guard`] so a panic can't abort the host. Use for every
 /// `extern "C"` function JIT'd or AOT code calls.
+///
+/// Accepts `unsafe extern "C" fn` as well: a shim that takes a handle (or any
+/// other raw pointer) must be `unsafe`, since dereferencing it is a promise
+/// only the caller can keep — see the
+/// [handle safety contract](super#handle-safety-contract). A shim taking only
+/// scalars stays safe.
 macro_rules! shim {
+    (
+        $(#[$attr:meta])*
+        $vis:vis unsafe extern "C" fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?
+        $body:block
+    ) => {
+        $(#[$attr])*
+        #[unsafe(no_mangle)]
+        $vis unsafe extern "C" fn $name($($arg: $ty),*) $(-> $ret)? {
+            // The body moves into a closure, so `unsafe_op_in_unsafe_fn` never
+            // applies to it: every raw-pointer read inside is its own explicit
+            // `unsafe` block, exactly as in a safe shim.
+            $crate::runtime::guard::shim_guard(move || $body)
+        }
+    };
     (
         $(#[$attr:meta])*
         $vis:vis extern "C" fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?

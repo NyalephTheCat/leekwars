@@ -2,6 +2,12 @@
 //! value- and int-indexed reads and writes, slices, counts, and the
 //! foreach iterator.
 
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "FFI conversion pending — see #114"
+)]
+
 use super::{aborting, handle, member_by_value, set_member, val};
 use leek_runtime::{IntervalValue, MapData, MapKey, SetData, Value};
 use std::cell::RefCell;
@@ -17,16 +23,16 @@ shim! {
         end: *mut Value,
         step: *mut Value,
     ) -> *mut Value {
-        let opt_int = |h: *mut Value| match unsafe { val(h) } {
+        let opt_int = |h: *mut Value| match unsafe { val(&h) } {
             Value::Null => None,
             v => Some(v.to_long()),
         };
-        let opt_real = |h: *mut Value| match unsafe { val(h) } {
+        let opt_real = |h: *mut Value| match unsafe { val(&h) } {
             Value::Null => None,
             v => Some(v.to_real()),
         };
         let (b, s, e, st) = (
-            unsafe { val(base) },
+            unsafe { val(&base) },
             opt_int(start),
             opt_int(end),
             opt_real(step),
@@ -191,9 +197,9 @@ shim! {
         if aborting() {
             return;
         }
-        if let Value::Array(a) = unsafe { val(arr) }.unbox() {
+        if let Value::Array(a) = unsafe { val(&arr) }.unbox() {
             let mut a = a.borrow_mut();
-            a.push(unsafe { val(elem) }.clone());
+            a.push(unsafe { val(&elem) }.clone());
             if version <= 3 {
                 super::leek_charge_ops(legacy_push_cost(a.len()));
             }
@@ -206,10 +212,10 @@ shim! {
     /// object), delegating to the interpreter's `read_index`. `idx` is itself
     /// a handle (so map string keys work too).
     pub extern "C" fn leek_value_index(base: *mut Value, idx: *mut Value, version: i64) -> *mut Value {
-        super::leek_charge_ops(index_read_cost(unsafe { val(base) }, version));
+        super::leek_charge_ops(index_read_cost(unsafe { val(&base) }, version));
         handle(member_by_value(
-            unsafe { val(base) },
-            unsafe { val(idx) },
+            unsafe { val(&base) },
+            unsafe { val(&idx) },
             version as u8,
         ))
     }
@@ -225,7 +231,7 @@ shim! {
     /// index) per read. The result is still a handle, so every consumer is
     /// unaffected.
     pub extern "C" fn leek_index_int(base: *mut Value, idx: i64, version: i64) -> *mut Value {
-        let b = unsafe { val(base) };
+        let b = unsafe { val(&base) };
         super::leek_charge_ops(index_read_cost(b, version));
         handle(leek_runtime::read_index_versioned(
             b,
@@ -242,7 +248,7 @@ shim! {
     /// budget.
     pub extern "C" fn leek_index_int_raw(base: *mut Value, idx: i64, version: i64) -> *mut Value {
         handle(leek_runtime::read_index_versioned(
-            unsafe { val(base) },
+            unsafe { val(&base) },
             &Value::Int(idx),
             version as u8,
         ))
@@ -259,7 +265,7 @@ shim! {
     /// actual runtime kind (an out-of-bounds `null` reads as `0`, exactly as the
     /// boxed path's `to_long(null)` would).
     pub extern "C" fn leek_array_get_int(base: *mut Value, idx: i64, version: i64) -> i64 {
-        let b = unsafe { val(base) };
+        let b = unsafe { val(&base) };
         super::leek_charge_ops(index_read_cost(b, version));
         leek_runtime::read_index_versioned(b, &Value::Int(idx), version as u8).to_long()
     }
@@ -270,7 +276,7 @@ shim! {
     /// coerced via `to_real`), for a read flowing directly into a `real`-typed
     /// slot. Equivalent to `leek_unbox_real(leek_index_int(..))`.
     pub extern "C" fn leek_array_get_real(base: *mut Value, idx: i64, version: i64) -> f64 {
-        let b = unsafe { val(base) };
+        let b = unsafe { val(&base) };
         super::leek_charge_ops(index_read_cost(b, version));
         leek_runtime::read_index_versioned(b, &Value::Int(idx), version as u8).to_real()
     }
@@ -288,12 +294,12 @@ shim! {
         version: i64,
     ) {
         super::leek_charge_ops(index_write_cost(
-            unsafe { val(base) },
-            unsafe { val(idx) },
+            unsafe { val(&base) },
+            unsafe { val(&idx) },
             version,
         ));
-        let v = unsafe { val(value) }.clone();
-        unsafe { set_member(base, val(idx), v, version as u8) };
+        let v = unsafe { val(&value) }.clone();
+        unsafe { set_member(base, idx, v, version as u8) };
     }
 }
 
@@ -304,12 +310,13 @@ shim! {
     /// heap box for the index. Used for `a[i] = v` when `i` is statically `integer`.
     pub extern "C" fn leek_set_index_int(base: *mut Value, idx: i64, value: *mut Value, version: i64) {
         super::leek_charge_ops(index_write_cost(
-            unsafe { val(base) },
+            unsafe { val(&base) },
             &Value::Int(idx),
             version,
         ));
-        let v = unsafe { val(value) }.clone();
-        unsafe { set_member(base, &Value::Int(idx), v, version as u8) };
+        let v = unsafe { val(&value) }.clone();
+        let key = Value::Int(idx);
+        unsafe { set_member(base, &raw const key, v, version as u8) };
     }
 }
 
@@ -323,8 +330,8 @@ shim! {
         value: *mut Value,
         version: i64,
     ) {
-        let v = unsafe { val(value) }.clone();
-        unsafe { set_member(base, val(idx), v, version as u8) };
+        let v = unsafe { val(&value) }.clone();
+        unsafe { set_member(base, idx, v, version as u8) };
     }
 }
 
@@ -337,8 +344,9 @@ shim! {
         value: *mut Value,
         version: i64,
     ) {
-        let v = unsafe { val(value) }.clone();
-        unsafe { set_member(base, &Value::Int(idx), v, version as u8) };
+        let v = unsafe { val(&value) }.clone();
+        let key = Value::Int(idx);
+        unsafe { set_member(base, &raw const key, v, version as u8) };
     }
 }
 
@@ -359,9 +367,9 @@ shim! {
         if aborting() {
             return;
         }
-        if let Value::Map(m) = unsafe { val(map) } {
-            let k = unsafe { val(key) }.clone();
-            let v = unsafe { val(value) }.clone();
+        if let Value::Map(m) = unsafe { val(&map) } {
+            let k = unsafe { val(&key) }.clone();
+            let v = unsafe { val(&value) }.clone();
             // Canonicalise before the mutable borrow — a composite
             // key renders through `Display`, which can read the very
             // map being written (`m[m] = …`).
@@ -391,8 +399,8 @@ shim! {
         if aborting() {
             return;
         }
-        if let Value::Set(s) = unsafe { val(set) } {
-            s.borrow_mut().insert(unsafe { val(elem) }.clone());
+        if let Value::Set(s) = unsafe { val(&set) } {
+            s.borrow_mut().insert(unsafe { val(&elem) }.clone());
         }
     }
 }
@@ -404,10 +412,10 @@ shim! {
     /// bounds execution, so extreme bounds (`<MIN..MAX>`) can't exhaust host
     /// memory or overflow an `end - start` length computation.
     pub extern "C" fn leek_set_add_range(set: *mut Value, start: *mut Value, end: *mut Value) {
-        let start = unsafe { val(start) }.to_long();
-        let end = unsafe { val(end) }.to_long();
+        let start = unsafe { val(&start) }.to_long();
+        let end = unsafe { val(&end) }.to_long();
         super::leek_charge_ops(1);
-        if let Value::Set(s) = unsafe { val(set) } {
+        if let Value::Set(s) = unsafe { val(&set) } {
             let mut s = s.borrow_mut();
             let step: i64 = if start <= end { 1 } else { -1 };
             let mut i = start;
@@ -437,7 +445,7 @@ shim! {
             if p.is_null() {
                 (None, false)
             } else {
-                let v = unsafe { val(p) };
+                let v = unsafe { val(&p) };
                 (Some(v.to_real()), matches!(v, Value::Int(_)))
             }
         };
@@ -462,7 +470,7 @@ shim! {
     /// its characters only in v4 — v1–v3 `count("…")` is 0 (strings aren't
     /// collections there).
     pub extern "C" fn leek_count(p: *mut Value, version: i64) -> i64 {
-        match unsafe { val(p) } {
+        match unsafe { val(&p) } {
             Value::Array(a) => a.borrow().len() as i64,
             Value::Map(m) => m.borrow().len() as i64,
             Value::Set(s) => s.borrow().len() as i64,
@@ -478,7 +486,7 @@ shim! {
     /// walks with [`leek_foreach_len`] / [`leek_iter_value`] /
     /// [`leek_iter_key`].
     pub extern "C" fn leek_foreach_iter(iterable: *mut Value) -> *mut Value {
-        handle(leek_runtime::make_foreach_iter(unsafe { val(iterable) }))
+        handle(leek_runtime::make_foreach_iter(unsafe { val(&iterable) }))
     }
 }
 
@@ -486,7 +494,7 @@ shim! {
     /// Length of a foreach snapshot (a [`leek_foreach_iter`] result) — the
     /// synthesized loop bound. Uncharged: upstream's `hasNext()` is free.
     pub extern "C" fn leek_foreach_len(iter: *mut Value) -> i64 {
-        leek_runtime::foreach_len(unsafe { val(iter) })
+        leek_runtime::foreach_len(unsafe { val(&iter) })
     }
 }
 
@@ -494,7 +502,7 @@ shim! {
     /// Element `pos` of a foreach snapshot. Uncharged: upstream's `next()` /
     /// `getValue()` are free.
     pub extern "C" fn leek_iter_value(iter: *mut Value, pos: i64) -> *mut Value {
-        handle(leek_runtime::foreach_value_at(unsafe { val(iter) }, pos))
+        handle(leek_runtime::foreach_value_at(unsafe { val(&iter) }, pos))
     }
 }
 
@@ -503,6 +511,6 @@ shim! {
     /// instance, otherwise the position itself. Uncharged: upstream's
     /// `getKey()` is free.
     pub extern "C" fn leek_iter_key(iter: *mut Value, pos: i64) -> *mut Value {
-        handle(leek_runtime::foreach_key_at(unsafe { val(iter) }, pos))
+        handle(leek_runtime::foreach_key_at(unsafe { val(&iter) }, pos))
     }
 }

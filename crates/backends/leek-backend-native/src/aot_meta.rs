@@ -186,9 +186,13 @@ pub unsafe extern "C" fn leek_aot_install(
     entries: *const LeekLambdaEntry,
     n_entries: usize,
 ) {
+    // SAFETY: caller's contract — `blob`/`blob_len` is the metadata blob the
+    // AOT emitter wrote into the program object, readable for the process.
     let bytes = unsafe { std::slice::from_raw_parts(blob, blob_len) };
     let meta: AotMeta = serde_json::from_slice(bytes).unwrap_or_default();
     let mut addrs: HashMap<usize, (*const u8, usize)> = HashMap::new();
+    // SAFETY: caller's contract — `entries`/`n_entries` is the emitted
+    // `leek_uniform_*` address array, a static in the same object.
     let entry_slice = unsafe { std::slice::from_raw_parts(entries, n_entries) };
     for e in entry_slice {
         addrs.insert(e.idx as usize, (e.func, e.arity as usize));

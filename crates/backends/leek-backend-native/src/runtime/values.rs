@@ -1,6 +1,11 @@
 //! Scalar boxing/unboxing, cells, casts/promotions, and the
 //! unary / binary operator shims (delegating to shared `leek_runtime`
 //! semantics so native matches the interpreter exactly).
+//!
+//! Every shim here that takes a handle is an `unsafe extern "C" fn` whose
+//! `# Safety` section defers to the
+//! [handle safety contract](super#handle-safety-contract); the four
+//! `leek_box_*` shims take only scalars and stay safe.
 
 use super::{handle, val};
 use leek_mir::ir::BinOp;
@@ -13,8 +18,12 @@ shim! {
     /// `2`=bool), preserving `null` (for nullable declared types). Used to make
     /// a typed static field's stored value match its declaration (`real? a = 12`
     /// reads back `12.0`), mirroring the interpreter's `coerce_to_type`.
-    pub extern "C" fn leek_coerce_scalar(h: *mut Value, kind: i64) -> *mut Value {
-        let v = unsafe { val(h) };
+    ///
+    /// # Safety
+    /// `h` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_coerce_scalar(h: *mut Value, kind: i64) -> *mut Value {
+        // SAFETY: handle contract on `h`.
+        let v = unsafe { val(&h) };
         if matches!(v, Value::Null) {
             return h;
         }
@@ -31,8 +40,12 @@ shim! {
     /// Coerce a boxed value to `Value::BigInt` for a store into a
     /// `big_integer`-declared slot (null and existing bigints pass through
     /// unchanged) — the bigint counterpart of [`leek_coerce_scalar`].
-    pub extern "C" fn leek_to_bigint(h: *mut Value) -> *mut Value {
-        let v = unsafe { val(h) };
+    ///
+    /// # Safety
+    /// `h` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_to_bigint(h: *mut Value) -> *mut Value {
+        // SAFETY: handle contract on `h`.
+        let v = unsafe { val(&h) };
         if matches!(v, Value::Null | Value::BigInt(_)) {
             return h;
         }
@@ -72,10 +85,11 @@ shim! {
     ///
     /// # Safety
     /// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
-    pub extern "C" fn leek_const_string(ptr: *const u8, len: i64) -> *mut Value {
+    pub unsafe extern "C" fn leek_const_string(ptr: *const u8, len: i64) -> *mut Value {
         let s = if len <= 0 || ptr.is_null() {
             String::new()
         } else {
+            // SAFETY: caller's contract — `len > 0` readable bytes at `ptr`.
             let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
             String::from_utf8_lossy(bytes).into_owned()
         };
@@ -90,10 +104,11 @@ shim! {
     ///
     /// # Safety
     /// `ptr` must point to `len` readable bytes (or be null when `len <= 0`).
-    pub extern "C" fn leek_const_bigint(ptr: *const u8, len: i64) -> *mut Value {
+    pub unsafe extern "C" fn leek_const_bigint(ptr: *const u8, len: i64) -> *mut Value {
         let digits = if len <= 0 || ptr.is_null() {
             String::new()
         } else {
+            // SAFETY: caller's contract — `len > 0` readable bytes at `ptr`.
             let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
             String::from_utf8_lossy(bytes).into_owned()
         };
@@ -104,36 +119,60 @@ shim! {
 }
 
 shim! {
-    pub extern "C" fn leek_unbox_int(p: *mut Value) -> i64 {
-        unsafe { val(p) }.to_long()
+    /// Unbox a handle as an `integer` (the shared `Value::to_long`).
+    ///
+    /// # Safety
+    /// `p` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_unbox_int(p: *mut Value) -> i64 {
+        // SAFETY: handle contract on `p`.
+        unsafe { val(&p) }.to_long()
     }
 }
 
 shim! {
-    pub extern "C" fn leek_unbox_real(p: *mut Value) -> f64 {
-        unsafe { val(p) }.to_real()
+    /// Unbox a handle as a `real` (the shared `Value::to_real`).
+    ///
+    /// # Safety
+    /// `p` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_unbox_real(p: *mut Value) -> f64 {
+        // SAFETY: handle contract on `p`.
+        unsafe { val(&p) }.to_real()
     }
 }
 
 shim! {
-    pub extern "C" fn leek_unbox_bool(p: *mut Value) -> i64 {
-        i64::from(unsafe { val(p) }.is_truthy())
+    /// Unbox a handle as a `boolean` (0 or 1), via [`leek_truthy`]'s rule.
+    ///
+    /// # Safety
+    /// `p` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_unbox_bool(p: *mut Value) -> i64 {
+        // SAFETY: handle contract on `p`.
+        i64::from(unsafe { val(&p) }.is_truthy())
     }
 }
 
 shim! {
     /// Truthiness of a boxed value (for branching / `!` on a dynamic value),
     /// using the shared `Value::is_truthy`. Returns 0 or 1.
-    pub extern "C" fn leek_truthy(p: *mut Value) -> i64 {
-        unsafe { val(p) }.is_truthy() as i64
+    ///
+    /// # Safety
+    /// `p` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_truthy(p: *mut Value) -> i64 {
+        // SAFETY: handle contract on `p`.
+        unsafe { val(&p) }.is_truthy() as i64
     }
 }
 
 shim! {
     /// Deep-clone a boxed value for v1 value semantics (assignment / pass-by-
     /// value of a composite copies it). Scalars clone trivially.
-    pub extern "C" fn leek_clone_v1(p: *mut Value) -> *mut Value {
-        handle(leek_runtime::deep_clone(unsafe { val(p) }))
+    ///
+    /// # Safety
+    /// `p` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_clone_v1(p: *mut Value) -> *mut Value {
+        // SAFETY: handle contract on `p`.
+        let v = unsafe { val(&p) };
+        handle(leek_runtime::deep_clone(v))
     }
 }
 
@@ -143,8 +182,12 @@ shim! {
     /// already a cell (e.g. a lambda capture-parameter that arrives holding the
     /// enclosing scope's cell handle), it is returned unchanged so the shared
     /// `Rc` is preserved; otherwise its value is wrapped in a fresh cell.
-    pub extern "C" fn leek_make_cell(inner: *mut Value) -> *mut Value {
-        match unsafe { val(inner) } {
+    ///
+    /// # Safety
+    /// `inner` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_make_cell(inner: *mut Value) -> *mut Value {
+        // SAFETY: handle contract on `inner`.
+        match unsafe { val(&inner) } {
             Value::Cell(_) => inner,
             v => handle(Value::Cell(std::rc::Rc::new(RefCell::new(v.clone())))),
         }
@@ -154,8 +197,12 @@ shim! {
 shim! {
     /// Read a cell local: clone the value currently behind the cell (peeled).
     /// A non-cell handle (defensive) is returned cloned unchanged.
-    pub extern "C" fn leek_cell_get(cell: *mut Value) -> *mut Value {
-        match unsafe { val(cell) } {
+    ///
+    /// # Safety
+    /// `cell` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_cell_get(cell: *mut Value) -> *mut Value {
+        // SAFETY: handle contract on `cell`.
+        match unsafe { val(&cell) } {
             Value::Cell(rc) => handle(rc.borrow().clone()),
             other => handle(other.clone()),
         }
@@ -166,13 +213,21 @@ shim! {
     /// Write a cell local: store `v` (peeled) into the shared slot, so any
     /// closure sharing the cell's `Rc` observes the new value. A no-op on a
     /// non-cell handle.
-    pub extern "C" fn leek_cell_set(cell: *mut Value, v: *mut Value) {
+    ///
+    /// # Safety
+    /// `cell` and `v` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_cell_set(cell: *mut Value, v: *mut Value) {
         // After a runtime error the store never happens (upstream threw).
         if super::aborting() {
             return;
         }
-        if let Value::Cell(rc) = unsafe { val(cell) } {
-            *rc.borrow_mut() = unsafe { val(v) }.unbox();
+        // SAFETY: handle contract on `cell`.
+        if let Value::Cell(rc) = unsafe { val(&cell) } {
+            // SAFETY: handle contract on `v`. Writing into the cell's `RefCell`
+            // is not a write through either handle, so both borrows stay valid.
+            let unboxed = unsafe { val(&v) }.unbox();
+            *rc.borrow_mut() = unboxed;
         }
     }
 }
@@ -181,7 +236,12 @@ shim! {
     /// Consume a pending v1 LegacyArray promotion (stashed by a mutating
     /// builtin like `push`) and return the promoted value; if none is pending,
     /// return `current` unchanged. Used to lower `Statement::ApplyPromotion`.
-    pub extern "C" fn leek_apply_promotion(current: *mut Value) -> *mut Value {
+    ///
+    /// # Safety
+    /// `current` is never dereferenced here, but it is handed straight back as
+    /// this shim's result handle, so it must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_apply_promotion(current: *mut Value) -> *mut Value {
         match leek_runtime::take_pending_promotion() {
             Some(v) => handle(v),
             None => current,
@@ -193,8 +253,12 @@ shim! {
     /// Apply a unary operator to a boxed value, returning a new handle.
     /// `code`: 0 = negate (`-x`), 1 = bitwise-not (`~x`). Delegates to the
     /// shared `leek_runtime` ops so the result matches the interpreter.
-    pub extern "C" fn leek_value_unary(code: i64, p: *mut Value) -> *mut Value {
-        let v = unsafe { val(p) };
+    ///
+    /// # Safety
+    /// `p` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_value_unary(code: i64, p: *mut Value) -> *mut Value {
+        // SAFETY: handle contract on `p`.
+        let v = unsafe { val(&p) };
         let r = match code {
             0 => leek_runtime::neg(v),
             1 => leek_runtime::bit_not(v),
@@ -209,8 +273,12 @@ shim! {
     /// handle. `code`: 0 = IntToReal, 1 = RealToInt, 2 = ToBool, 3 = ToString,
     /// else = User (identity clone). Mirrors the interpreter's `apply_cast`
     /// (same `Value` conversion methods), so the result matches exactly.
-    pub extern "C" fn leek_apply_cast(code: i64, p: *mut Value) -> *mut Value {
-        let v = unsafe { val(p) };
+    ///
+    /// # Safety
+    /// `p` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_apply_cast(code: i64, p: *mut Value) -> *mut Value {
+        // SAFETY: handle contract on `p`.
+        let v = unsafe { val(&p) };
         let r = match code {
             0 => Value::Real(v.to_real()),
             1 => Value::Int(v.to_long()),
@@ -228,7 +296,12 @@ shim! {
     /// matches the interpreter exactly (string concat, array `+`, version-
     /// specific division, etc.). `code` is a [`BinOp`] encoded via
     /// [`binop_code`].
-    pub extern "C" fn leek_value_binop(
+    ///
+    /// # Safety
+    /// `a` and `b` must satisfy the
+    /// [handle contract](super#handle-safety-contract); they may alias, since
+    /// both borrows are shared and nothing here writes through a handle.
+    pub unsafe extern "C" fn leek_value_binop(
         code: i64,
         a: *mut Value,
         b: *mut Value,
@@ -237,7 +310,11 @@ shim! {
         let Some(op) = binop_from_code(code) else {
             return handle(Value::Null);
         };
-        let (l, r) = (unsafe { val(a) }, unsafe { val(b) });
+        // SAFETY: handle contract on `a`.
+        let l = unsafe { val(&a) };
+        // SAFETY: handle contract on `b`; may alias `a`, but both are shared
+        // borrows and nothing below writes through a handle.
+        let r = unsafe { val(&b) };
         handle(apply_binop_charged(op, l, r, version as u8))
     }
 }
@@ -260,7 +337,10 @@ shim! {
     /// passed by value — so the backend never boxes it. Used for `dyn OP <int lit>`
     /// (`n - 1`, `n < 2`, …), removing one heap allocation per such operation; the
     /// constant `Value::Int` lives on the stack. Identical result to boxing it.
-    pub extern "C" fn leek_value_binop_cir(
+    ///
+    /// # Safety
+    /// `a` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_value_binop_cir(
         code: i64,
         a: *mut Value,
         c: i64,
@@ -269,7 +349,8 @@ shim! {
         let Some(op) = binop_from_code(code) else {
             return handle(Value::Null);
         };
-        let l = unsafe { val(a) };
+        // SAFETY: handle contract on `a`.
+        let l = unsafe { val(&a) };
         handle(apply_binop_charged(op, l, &Value::Int(c), version as u8))
     }
 }
@@ -277,7 +358,10 @@ shim! {
 shim! {
     /// Mirror of [`leek_value_binop_cir`] for a LEFT integer constant
     /// (`<int lit> OP dyn`) — order preserved for non-commutative ops.
-    pub extern "C" fn leek_value_binop_cil(
+    ///
+    /// # Safety
+    /// `b` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_value_binop_cil(
         code: i64,
         c: i64,
         b: *mut Value,
@@ -286,7 +370,8 @@ shim! {
         let Some(op) = binop_from_code(code) else {
             return handle(Value::Null);
         };
-        let r = unsafe { val(b) };
+        // SAFETY: handle contract on `b`.
+        let r = unsafe { val(&b) };
         handle(apply_binop_charged(op, &Value::Int(c), r, version as u8))
     }
 }
@@ -296,7 +381,10 @@ shim! {
     /// statically-`real` operand is passed by value as an `f64`, so a `dyn OP
     /// <real>` (or `<real> OP dyn`) never heap-boxes it. Building `Value::Real(c)`
     /// on the stack is identical to boxing the operand and dispatching.
-    pub extern "C" fn leek_value_binop_crr(
+    ///
+    /// # Safety
+    /// `a` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_value_binop_crr(
         code: i64,
         a: *mut Value,
         c: f64,
@@ -305,14 +393,18 @@ shim! {
         let Some(op) = binop_from_code(code) else {
             return handle(Value::Null);
         };
-        let l = unsafe { val(a) };
+        // SAFETY: handle contract on `a`.
+        let l = unsafe { val(&a) };
         handle(apply_binop_charged(op, l, &Value::Real(c), version as u8))
     }
 }
 
 shim! {
     /// Left-`real`-operand mirror of [`leek_value_binop_crr`].
-    pub extern "C" fn leek_value_binop_crl(
+    ///
+    /// # Safety
+    /// `b` must satisfy the [handle contract](super#handle-safety-contract).
+    pub unsafe extern "C" fn leek_value_binop_crl(
         code: i64,
         c: f64,
         b: *mut Value,
@@ -321,7 +413,8 @@ shim! {
         let Some(op) = binop_from_code(code) else {
             return handle(Value::Null);
         };
-        let r = unsafe { val(b) };
+        // SAFETY: handle contract on `b`.
+        let r = unsafe { val(&b) };
         handle(apply_binop_charged(op, &Value::Real(c), r, version as u8))
     }
 }
@@ -411,4 +504,48 @@ pub(super) fn binop_from_code(c: i64) -> Option<BinOp> {
         _ => return None,
     };
     Some(op)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{leek_const_string, leek_truthy, leek_unbox_int};
+    use crate::runtime::free_run_boxes;
+    use leek_runtime::Value;
+
+    /// The converted `unsafe` signature still builds the same string, and the
+    /// documented `len <= 0` / null escape hatch still yields `""` instead of
+    /// reading through the pointer.
+    #[test]
+    fn const_string_reads_the_bytes_and_tolerates_an_empty_literal() {
+        let bytes = b"hello";
+        // SAFETY: `bytes` is 5 readable bytes for the whole test.
+        let h = unsafe { leek_const_string(bytes.as_ptr(), 5) };
+        // SAFETY: `h` is the live handle just returned.
+        assert!(matches!(unsafe { &*h }, Value::String(s) if s.as_str() == "hello"));
+
+        // SAFETY: `len <= 0`, so the pointer is never read (the shim's
+        // documented precondition for a null pointer).
+        let empty = unsafe { leek_const_string(std::ptr::null(), 0) };
+        // SAFETY: `empty` is the live handle just returned.
+        assert!(matches!(unsafe { &*empty }, Value::String(s) if s.is_empty()));
+
+        // SAFETY: a negative length takes the same escape hatch.
+        let neg = unsafe { leek_const_string(std::ptr::null(), -3) };
+        // SAFETY: `neg` is the live handle just returned.
+        assert!(matches!(unsafe { &*neg }, Value::String(s) if s.is_empty()));
+        free_run_boxes();
+    }
+
+    /// The unbox/truthy shims still round-trip through their `unsafe`
+    /// signatures — a smoke test that the `shim!` unsafe arm keeps the same
+    /// `#[unsafe(no_mangle)]` + panic-guarded body.
+    #[test]
+    fn the_unsafe_shim_arm_keeps_the_scalar_shims_working() {
+        let h = super::leek_box_int(42);
+        // SAFETY: `h` is the live handle just returned.
+        assert_eq!(unsafe { leek_unbox_int(h) }, 42);
+        // SAFETY: same handle, still live.
+        assert_eq!(unsafe { leek_truthy(h) }, 1);
+        free_run_boxes();
+    }
 }
