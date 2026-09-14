@@ -23,8 +23,9 @@ use leek_generator::official::{
 };
 use leek_hir::HirFile;
 use leek_parser::{
+    ParseFeatures,
     ast::{AstNode, SourceFile},
-    parse,
+    parse_with_features,
 };
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
@@ -44,7 +45,12 @@ const BULB: i64 = 2;
 
 fn compile(src: &str) -> Arc<HirFile> {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(&format!("// @version: 4\n{src}\n"), source, Version::V4);
+    let parsed = parse_with_features(
+        &format!("// @version: 4\n{src}\n"),
+        source,
+        Version::V4,
+        ParseFeatures::default(),
+    );
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
     Arc::new(leek_hir::lower_file_versioned(&sf, source, 4).0)
 }
