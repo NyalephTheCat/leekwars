@@ -10,24 +10,30 @@ use dap::prelude::*;
 
 use crate::handlers::{self, Flow};
 use crate::session::Session;
+use crate::wire::{RawMessages, tee};
 
 /// Run the DAP server over stdio until the client disconnects.
 ///
 /// # Errors
 /// Returns any I/O or protocol error from the underlying transport.
 pub fn run_stdio() -> anyhow::Result<()> {
-    let input = BufReader::new(io::stdin());
+    let (input, raw) = tee(io::stdin());
     let output = BufWriter::new(io::stdout());
-    let mut server = Server::new(input, output);
-    serve(&mut server)
+    let mut server = Server::new(BufReader::new(input), output);
+    serve(&mut server, &raw)
 }
 
 /// Drive a [`Server`] to completion. Generic over the transport so
 /// tests can feed a scripted request stream.
+///
+/// `raw` is the transport's record of the message it last forwarded — see
+/// [`crate::wire`] for why one request field has to be read from there rather
+/// than from the typed arguments.
 pub(crate) fn serve<R: Read, W: Write + Send + 'static>(
     server: &mut Server<R, W>,
+    raw: &std::sync::Arc<RawMessages>,
 ) -> anyhow::Result<()> {
-    let mut session = Session::new();
+    let mut session = Session::new(std::sync::Arc::clone(raw));
     // `poll_request` yields `None` at EOF (client closed the pipe).
     while let Some(req) = server.poll_request()? {
         if let Flow::Shutdown = handlers::dispatch(&mut session, server, req)? {
@@ -59,11 +65,9 @@ mod tests {
     /// an editor drives them.
     fn converse(requests: &str) -> Vec<Value> {
         let sink = SharedOut::new();
-        let mut server = Server::new(
-            BufReader::new(Cursor::new(requests.as_bytes().to_vec())),
-            BufWriter::new(sink.clone()),
-        );
-        serve(&mut server).expect("request loop");
+        let (input, raw) = tee(Cursor::new(requests.as_bytes().to_vec()));
+        let mut server = Server::new(BufReader::new(input), BufWriter::new(sink.clone()));
+        serve(&mut server, &raw).expect("request loop");
         drop(server);
         messages(&sink)
     }
@@ -288,14 +292,26 @@ mod tests {
     fn initialize_advertises_only_what_is_implemented() {
         let mut client = Client::spawn();
         let capabilities = client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
-        assert_eq!(capabilities["supportsConfigurationDoneRequest"], true);
-        assert_eq!(capabilities["supportsTerminateRequest"], true);
-        // A client that believes one of these sends conditions the adapter
-        // would silently ignore, so each stays off until it is real.
-        for unimplemented in [
+        for implemented in [
+            "supportsConfigurationDoneRequest",
+            "supportsTerminateRequest",
             "supportsConditionalBreakpoints",
-            "supportsHitConditionalBreakpoints",
             "supportsLogPoints",
+            "supportsBreakpointLocationsRequest",
+        ] {
+            assert_eq!(
+                capabilities[implemented], true,
+                "did not advertise {implemented}: {capabilities}"
+            );
+        }
+        // A client that believes one of these sends the adapter something it
+        // cannot answer well, so each stays off until it is real: hit counts
+        // ride on an arrival test that fires several times per source line
+        // (#408), and a hover sends expressions outside the subset `evaluate`
+        // accepts.
+        for unimplemented in [
+            "supportsHitConditionalBreakpoints",
+            "supportsEvaluateForHovers",
         ] {
             assert!(
                 capabilities[unimplemented].is_null(),
@@ -601,11 +617,12 @@ mod tests {
     fn an_unsupported_request_is_answered_with_an_error() {
         let mut client = Client::spawn();
         client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
-        // `evaluate` is a request the adapter parses but does not implement;
-        // answering it is what keeps a client from waiting forever.
+        // `setFunctionBreakpoints` is a request the adapter parses but does
+        // not implement; answering it is what keeps a client from waiting
+        // forever.
         let response = client.request(
-            "evaluate",
-            serde_json::json!({ "expression": "sum", "context": "watch" }),
+            "setFunctionBreakpoints",
+            serde_json::json!({ "breakpoints": [{ "name": "twice" }] }),
         );
         assert_eq!(response["success"], false, "{response}");
         assert_eq!(response["message"], "unsupported request");
@@ -752,6 +769,306 @@ mod tests {
             stopped["hitBreakpointIds"],
             serde_json::json!([placed["id"]])
         );
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    // --- conditions, logpoints, evaluate, breakpointLocations -------------
+
+    /// Launch [`STEPS`] under the debugger with one breakpoint on line 3
+    /// (`return doubled`, inside `twice`), carrying whatever the client hung
+    /// off it. Returns the client and the `setBreakpoints` answer.
+    ///
+    /// Line 3 on purpose: it is a bare `return <var>`, which arrives exactly
+    /// once per call, so a test can count stops without tripping over #408.
+    fn launch_with_breakpoint(dir: &Path, breakpoint: &Value) -> (Client, Value) {
+        let entry = dir.join("main.leek").display().to_string();
+        let mut client = Client::spawn();
+        handshake(&mut client, serde_json::json!({ "program": entry }));
+        let set = client.ok(
+            "setBreakpoints",
+            serde_json::json!({
+                "source": { "path": entry },
+                "breakpoints": [breakpoint.clone()],
+            }),
+        );
+        client.ok("configurationDone", Value::Null);
+        (client, set)
+    }
+
+    /// Everything the adapter says from here until the program ends, as
+    /// `(event name, body)` pairs.
+    fn drain_to_terminated(client: &mut Client) -> Vec<(String, Value)> {
+        let mut seen = Vec::new();
+        loop {
+            let (event, body) = client.event_any(&["stopped", "output", "terminated"]);
+            if event == "terminated" {
+                return seen;
+            }
+            seen.push((event, body));
+        }
+    }
+
+    #[test]
+    fn a_condition_stops_only_on_the_call_that_satisfies_it() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-condition", &[("main.leek", STEPS)]);
+        // `twice` is called with 0, 1 and 2; only one of those is 1.
+        let (mut client, _set) = launch_with_breakpoint(
+            &dir,
+            &serde_json::json!({ "line": 3, "condition": "x == 1" }),
+        );
+
+        let stopped = client.event("stopped");
+        assert_eq!(stopped["reason"], "breakpoint");
+        let locals = client.ok("variables", serde_json::json!({ "variablesReference": 1 }));
+        assert_eq!(
+            locals["variables"][0],
+            serde_json::json!({ "name": "x", "value": "1", "variablesReference": 0 }),
+            "stopped on a call the condition excludes: {locals}"
+        );
+
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        let rest = drain_to_terminated(&mut client);
+        assert!(
+            !rest.iter().any(|(event, _)| event == "stopped"),
+            "the condition was true more than once: {rest:?}"
+        );
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_condition_that_cannot_be_evaluated_stops_and_says_so() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-cond-unknown", &[("main.leek", STEPS)]);
+        // `sum` is a local of the *caller*, not of `twice`. Failing open —
+        // stop, and print why — is the decision under test: a condition that
+        // quietly switched the breakpoint off would be invisible.
+        let (mut client, _set) = launch_with_breakpoint(
+            &dir,
+            &serde_json::json!({ "line": 3, "condition": "sum > 1" }),
+        );
+
+        let complaint = loop {
+            let (event, body) = client.event_any(&["stopped", "output"]);
+            if event == "output" {
+                break body;
+            }
+        };
+        assert!(
+            complaint["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("sum")),
+            "the broken condition was not reported: {complaint}"
+        );
+        assert_eq!(client.event("stopped")["reason"], "breakpoint");
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_condition_that_does_not_compile_leaves_the_breakpoint_unverified() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-cond-broken", &[("main.leek", STEPS)]);
+        let entry = dir.join("main.leek").display().to_string();
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({ "program": entry, "stopOnEntry": true }),
+        );
+        client.ok("configurationDone", Value::Null);
+        client.event("stopped");
+
+        // Parked, so the program is compiled and the answer is the real
+        // verdict rather than "pending launch".
+        let set = client.ok(
+            "setBreakpoints",
+            serde_json::json!({
+                "source": { "path": entry },
+                "breakpoints": [
+                    { "line": 3, "condition": "x ==" },
+                    { "line": 3, "hitCondition": "soon" },
+                ],
+            }),
+        );
+        for placed in set["breakpoints"].as_array().expect("breakpoints") {
+            assert_eq!(
+                placed["verified"], false,
+                "an expression that does not compile was armed: {placed}"
+            );
+            assert!(placed["message"].is_string(), "no reason given: {placed}");
+        }
+
+        // And it does not fire: the client was told it is dead.
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        let rest = drain_to_terminated(&mut client);
+        assert!(
+            !rest.iter().any(|(event, _)| event == "stopped"),
+            "a breakpoint reported unverified stopped the debuggee: {rest:?}"
+        );
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_logpoint_prints_once_per_hit_and_never_stops() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-logpoint", &[("main.leek", STEPS)]);
+        let (mut client, set) = launch_with_breakpoint(
+            &dir,
+            &serde_json::json!({ "line": 3, "logMessage": "doubled={doubled}" }),
+        );
+        // Set before `configurationDone`, so the response could only say
+        // "pending launch"; the real verdict arrives as a change event.
+        assert_eq!(set["breakpoints"][0]["verified"], false);
+        let announced = client.event("breakpoint")["breakpoint"].clone();
+        assert_eq!(
+            announced["verified"], true,
+            "the logpoint was never armed: {announced}"
+        );
+
+        let seen = drain_to_terminated(&mut client);
+        assert!(
+            !seen.iter().any(|(event, _)| event == "stopped"),
+            "a logpoint stopped the debuggee: {seen:?}"
+        );
+        let logged: Vec<&str> = seen
+            .iter()
+            .filter_map(|(_, body)| body["output"].as_str())
+            .filter(|text| text.starts_with("doubled="))
+            .collect();
+        assert_eq!(
+            logged,
+            ["doubled=0", "doubled=2", "doubled=4"],
+            "the loop's three calls did not each log their own value"
+        );
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn evaluate_reads_the_locals_of_the_frame_it_names() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-evaluate", &[("main.leek", STEPS)]);
+        let (mut client, _set) = launch_with_breakpoint(
+            &dir,
+            &serde_json::json!({ "line": 3, "condition": "x == 2" }),
+        );
+        client.event("stopped");
+
+        // Frame 0 is `twice`, frame 1 its caller: the same numbering
+        // `stackTrace` hands out and `scopes` encodes.
+        let in_callee = client.ok(
+            "evaluate",
+            serde_json::json!({ "expression": "x * 2 + 1", "frameId": 0 }),
+        );
+        assert_eq!(in_callee["result"], "5");
+        assert_eq!(
+            client.ok(
+                "evaluate",
+                serde_json::json!({ "expression": "i", "frameId": 1 })
+            )["result"],
+            "2",
+            "frame 1 did not answer with the caller's own local"
+        );
+
+        // A name that is not in *that* frame is an error naming it, not the
+        // other frame's value and not a panic.
+        let wrong_frame = client.request(
+            "evaluate",
+            serde_json::json!({ "expression": "doubled", "frameId": 1 }),
+        );
+        assert_eq!(wrong_frame["success"], false, "{wrong_frame}");
+        assert!(
+            wrong_frame["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("doubled")),
+            "{wrong_frame}"
+        );
+        // As is a frame that is not on the stack at all.
+        assert_eq!(
+            client.request(
+                "evaluate",
+                serde_json::json!({ "expression": "1", "frameId": 99 })
+            )["success"],
+            false
+        );
+
+        client.ok("continue", serde_json::json!({ "threadId": 1 }));
+        drain_to_terminated(&mut client);
+
+        client.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn evaluate_with_nothing_running_is_an_error_not_a_panic() {
+        let mut client = Client::spawn();
+        client.ok("initialize", serde_json::json!({ "adapterID": "leek" }));
+        let response = client.request(
+            "evaluate",
+            serde_json::json!({ "expression": "sum", "context": "watch" }),
+        );
+        assert_eq!(response["success"], false, "{response}");
+        assert!(response["message"].is_string(), "{response}");
+        // The loop carries on afterwards.
+        assert_eq!(client.ok("threads", Value::Null)["threads"][0]["id"], 1);
+    }
+
+    #[test]
+    fn breakpoint_locations_lists_only_lines_that_can_be_stopped_on() {
+        let _guard = debug_session_guard();
+        // Line 1 is a comment, line 2 a statement, line 3 a bare `return` —
+        // which lowers to no statement at all and still carries a safepoint.
+        let dir = project_with(
+            "proto-locations",
+            &[("main.leek", "// a comment\nvar a = 1\nreturn a\n")],
+        );
+        let entry = dir.join("main.leek").display().to_string();
+        let mut client = Client::spawn();
+        handshake(
+            &mut client,
+            serde_json::json!({ "program": entry, "noDebug": true }),
+        );
+        client.ok("configurationDone", Value::Null);
+        client.event("terminated");
+
+        let body = client.ok(
+            "breakpointLocations",
+            serde_json::json!({ "source": { "path": entry }, "line": 1, "endLine": 9 }),
+        );
+        let lines: Vec<i64> = body["breakpoints"]
+            .as_array()
+            .expect("locations")
+            .iter()
+            .filter_map(|location| location["line"].as_i64())
+            .collect();
+        assert_eq!(lines, [2, 3], "the comment line was offered: {body}");
+
+        // One line asks about that line only, and a file the program was
+        // never compiled from is empty rather than an error.
+        assert_eq!(
+            client.ok(
+                "breakpointLocations",
+                serde_json::json!({ "source": { "path": entry }, "line": 1 })
+            )["breakpoints"],
+            serde_json::json!([])
+        );
+        let elsewhere = client.ok(
+            "breakpointLocations",
+            serde_json::json!({
+                "source": { "path": dir.join("other.leek").display().to_string() },
+                "line": 1,
+                "endLine": 9,
+            }),
+        );
+        assert_eq!(elsewhere["breakpoints"], serde_json::json!([]));
 
         client.finish();
         std::fs::remove_dir_all(&dir).expect("cleanup");

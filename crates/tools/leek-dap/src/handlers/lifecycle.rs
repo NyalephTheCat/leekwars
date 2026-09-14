@@ -171,6 +171,18 @@ fn install_debug_hook<R: Read, W: Write + Send + 'static>(
         let _ = info.line; // surfaced via stackTrace, not the stopped event
     });
 
+    // A logpoint's text, and the complaint of a condition that could not be
+    // evaluated, reach the client the same way the program's own output does.
+    let on_output_sink = server.output.clone();
+    let on_output = Box::new(move |text: String| {
+        if let Ok(mut out) = on_output_sink.lock() {
+            let _ = out.send_event(Event::Output(event::output(
+                OutputEventCategory::Console,
+                text,
+            )));
+        }
+    });
+
     let by_source = session
         .program
         .as_ref()
@@ -181,6 +193,7 @@ fn install_debug_hook<R: Read, W: Write + Send + 'static>(
         by_source,
         config.stop_on_entry,
         on_stop,
+        on_output,
     ));
     let hook: Arc<dyn leek_backend_native::DebugHook> = controller.clone();
     leek_backend_native::set_debug_hook(Some(hook.clone()));
@@ -204,11 +217,12 @@ fn announce_breakpoints<R: Read, W: Write>(
     // By id: the order the client set them in, so the events read the way the
     // responses did.
     let mut stored: Vec<_> = session.breakpoints.iter().collect();
-    stored.sort_by_key(|&(_, _, id)| id);
-    for (path, line, id) in stored {
+    stored.sort_by_key(|(_, _, stored)| stored.id);
+    for (path, line, stored) in stored {
         let requested = Requested {
             line: i64::from(line),
-            stored: Some((line, id)),
+            stored: Some((line, stored.id)),
+            spec: stored.spec.clone(),
         };
         server.send_event(Event::Breakpoint(BreakpointEventBody {
             reason: BreakpointEventReason::Changed,
@@ -290,14 +304,14 @@ mod tests {
     use std::io::{BufReader, BufWriter};
 
     use super::*;
-    use crate::breakpoints::BreakpointStore;
+    use crate::breakpoints::{BreakpointSpec, BreakpointStore};
     use crate::testing::{SharedOut, project};
     use leek_span::paths::canonical_or_normalized;
 
     /// Drive `configurationDone` for a launch config and return the session
     /// plus everything the adapter wrote to the client.
     fn configure(config: serde_json::Value) -> (Session, SharedOut) {
-        let mut session = Session::new();
+        let mut session = Session::new(std::sync::Arc::default());
         session.pending_launch = Some(serde_json::from_value(config).expect("launch config"));
         let sink = SharedOut::new();
         let mut server = Server::new(
@@ -350,7 +364,7 @@ mod tests {
         let dir = project("includebp");
         let lib = dir.join("lib.leek");
         let mut breakpoints = BreakpointStore::default();
-        breakpoints.replace(&lib, &[1]);
+        breakpoints.replace(&lib, &[BreakpointSpec::line(1)]);
 
         let program = NativeTarget::launch(
             &serde_json::from_value(serde_json::json!({

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::breakpoints::{BreakpointStore, ProgramMap};
 use crate::debug::NativeDebugSession;
 use crate::target::LaunchConfig;
+use crate::wire::RawMessages;
 
 /// The one synthetic thread the adapter exposes. Leekscript programs
 /// are single-threaded, so a fixed id is enough.
@@ -12,6 +13,10 @@ pub(crate) const MAIN_THREAD_ID: i64 = 1;
 
 /// Mutable state for a single debug session.
 pub(crate) struct Session {
+    /// The transport's record of the message it last forwarded, for the
+    /// `setBreakpoints` fields the `dap` crate's types cannot carry (see
+    /// [`crate::wire`]).
+    pub raw: Arc<RawMessages>,
     /// Source breakpoints requested by the client. The session is the single
     /// source of truth: a running debug controller holds a derived copy that
     /// `setBreakpoints` refreshes wholesale.
@@ -44,8 +49,9 @@ pub(crate) struct Session {
 const WORKER_EXIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Session {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(raw: Arc<RawMessages>) -> Self {
         Self {
+            raw,
             breakpoints: BreakpointStore::default(),
             program: None,
             pending_launch: None,

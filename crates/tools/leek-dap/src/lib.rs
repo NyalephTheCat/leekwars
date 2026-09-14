@@ -29,9 +29,9 @@
 //!
 //! Working: the full DAP handshake, native execution, line breakpoints,
 //! `stopOnEntry`, step in/over/out (depth-aware), multi-frame stack traces,
-//! and per-frame local-variable inspection — all driven by per-statement
-//! safepoints plus function enter/leave hooks the native backend emits in
-//! debug builds (see [`debug::NativeDebugSession`]).
+//! per-frame local-variable inspection, and `breakpointLocations` — all driven
+//! by per-statement safepoints plus function enter/leave hooks the native
+//! backend emits in debug builds (see [`debug::NativeDebugSession`]).
 //!
 //! Breakpoints are a live model: [`breakpoints::BreakpointStore`] holds what
 //! the client asked for, keyed by canonical path, and every `setBreakpoints`
@@ -41,19 +41,35 @@
 //! when the requested one has no code, and reported with an id the `stopped`
 //! event names back.
 //!
-//! Known gap: conditional breakpoints, hit counts and logpoints are not
-//! implemented, and the matching capabilities stay off rather than advertise
-//! them.
+//! # Expressions
+//!
+//! A breakpoint carries a `condition` and a `logMessage`, and `evaluate`
+//! answers against a parked frame. All three go through one small expression
+//! language ([`expr`]): the real parser at the debugged program's language
+//! version, lowered to owned data, evaluated on [`leek_runtime`]'s own
+//! operator semantics against the frame's typed locals. It is a *subset* —
+//! literals, locals, operators and `?:`, with no call, index or field access,
+//! since there is no interpreter here to run one in — and what it leaves out
+//! is rejected by name when the breakpoint is set, so the client shows a
+//! hollow marker with a reason instead of a live one that never fires.
+//!
+//! Known gap: hit counts are honoured when a client sends one, but
+//! `supportsHitConditionalBreakpoints` stays off, because the arrival test a
+//! count rides on fires several times for one source line whose statement
+//! lowers to several MIR statements (#408). A logpoint on such a line prints
+//! once per arrival for the same reason.
 
 mod breakpoints;
 mod capabilities;
 mod debug;
 mod event;
+mod expr;
 mod handlers;
 mod server;
 mod session;
 mod target;
 #[cfg(test)]
 mod testing;
+mod wire;
 
 pub use server::run_stdio;

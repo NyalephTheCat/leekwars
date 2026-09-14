@@ -11,11 +11,15 @@
 //!
 //! [`resume`]: NativeDebugSession::resume
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, RwLock};
 
+use leek_backend_native::DebugValue;
 use leek_span::LineTable;
+
+use crate::breakpoints::Trigger;
+use crate::expr;
 
 /// One file the debuggee was compiled from, keyed by the `SourceId` its spans
 /// carry. A program built through the project include graph is spliced from
@@ -45,6 +49,17 @@ pub(crate) struct StopInfo {
     pub hit_breakpoint_ids: Vec<i64>,
 }
 
+/// What a breakpoint whose line has been reached does.
+enum Fires {
+    /// Stop the debuggee and announce it.
+    Yes,
+    /// Do nothing: the condition was false, or the hit count was not one the
+    /// client asked for.
+    No,
+    /// Print this and keep running — a logpoint.
+    Log(String),
+}
+
 /// One executed safepoint, for the arrival test in [`NativeDebugSession::arrived`].
 #[derive(Clone, Copy)]
 struct Site {
@@ -71,6 +86,18 @@ struct Frame {
     source: u32,
 }
 
+/// One local of a captured frame.
+#[derive(Clone)]
+pub(crate) struct FrameVar {
+    pub name: String,
+    /// The text `variables` reports. Rendered where it was read — on the
+    /// debuggee thread, the only one where the runtime's display version is
+    /// settled — rather than later, on the request loop.
+    pub display: String,
+    /// The same value typed, for `evaluate` to compute with.
+    pub value: DebugValue,
+}
+
 /// A frame captured at a stop, ready to serve `stackTrace`/`variables`.
 #[derive(Clone)]
 pub(crate) struct FrameSnapshot {
@@ -80,7 +107,7 @@ pub(crate) struct FrameSnapshot {
     /// program was compiled through the project include graph. `None` for a
     /// source the adapter has no text for (a synthetic span).
     pub path: Option<String>,
-    pub vars: Vec<(String, String)>,
+    pub vars: Vec<FrameVar>,
 }
 
 /// What the in-progress step is waiting for. `depth` is the call-stack depth
@@ -127,14 +154,17 @@ struct Wait {
 pub(crate) struct NativeDebugSession {
     /// Line tables and paths, keyed by raw `SourceId`.
     sources: HashMap<u32, DebugSource>,
-    /// Breakpoint id by line, per raw `SourceId`, so a breakpoint in an
+    /// Breakpoint by line, per raw `SourceId`, so a breakpoint in an
     /// included file is matched against that file's own lines. Behind a lock
     /// and replaced wholesale by [`set_breakpoints`]: the client adds and
     /// removes breakpoints at any time, including while the debuggee is
     /// parked at a stop.
     ///
     /// [`set_breakpoints`]: NativeDebugSession::set_breakpoints
-    breakpoints: RwLock<HashMap<u32, HashMap<u32, i64>>>,
+    breakpoints: RwLock<HashMap<u32, HashMap<u32, Trigger>>>,
+    /// How often each breakpoint has been hit with its condition satisfied,
+    /// by breakpoint id — what a `hitCondition` counts.
+    hits: Mutex<HashMap<i64, u64>>,
     /// The shadow call stack (bottom .. top).
     stack: Mutex<Vec<Frame>>,
     /// Frames captured at the most recent stop, top-first.
@@ -152,18 +182,23 @@ pub(crate) struct NativeDebugSession {
     cv: Condvar,
     /// Sends the DAP `stopped` event. Called on the debuggee thread.
     on_stop: Box<dyn Fn(StopInfo) + Send + Sync>,
+    /// Sends a DAP `output` event: a logpoint's message, or the complaint of
+    /// a condition that could not be evaluated. Also the debuggee thread.
+    on_output: Box<dyn Fn(String) + Send + Sync>,
 }
 
 impl NativeDebugSession {
     pub(crate) fn new(
         sources: HashMap<u32, DebugSource>,
-        breakpoints: HashMap<u32, HashMap<u32, i64>>,
+        breakpoints: HashMap<u32, HashMap<u32, Trigger>>,
         stop_on_entry: bool,
         on_stop: Box<dyn Fn(StopInfo) + Send + Sync>,
+        on_output: Box<dyn Fn(String) + Send + Sync>,
     ) -> Self {
         Self {
             sources,
             breakpoints: RwLock::new(breakpoints),
+            hits: Mutex::new(HashMap::new()),
             stack: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Vec::new()),
             prev: Mutex::new(None),
@@ -176,6 +211,7 @@ impl NativeDebugSession {
             }),
             cv: Condvar::new(),
             on_stop,
+            on_output,
         }
     }
 
@@ -185,22 +221,82 @@ impl NativeDebugSession {
     /// breakpoints and always hands over the complete picture, so the two
     /// cannot drift apart. Safe to call at any point in the run — while the
     /// debuggee is running, and while it is parked at a stop.
-    pub(crate) fn set_breakpoints(&self, by_source: HashMap<u32, HashMap<u32, i64>>) {
+    pub(crate) fn set_breakpoints(&self, by_source: HashMap<u32, HashMap<u32, Trigger>>) {
+        // Ids are never re-minted, so a stale hit count can never be charged
+        // to a new breakpoint — but a breakpoint the client removed and set
+        // again is a new id, and one it merely re-sent keeps its count, which
+        // is what a user watching a `hitCondition` expects.
+        let live: HashSet<i64> = by_source
+            .values()
+            .flat_map(|lines| lines.values().map(|trigger| trigger.id))
+            .collect();
+        self.hits
+            .lock()
+            .expect("hit count lock poisoned")
+            .retain(|id, _| live.contains(id));
         *self.breakpoints.write().expect("breakpoint lock poisoned") = by_source;
     }
 
-    /// The id of the breakpoint on this line, if the client set one.
+    /// The breakpoint on this line, if the client set one.
     ///
     /// Takes the read lock and drops it before returning: the caller goes on
     /// to park the debuggee, and a lock held across that park would block the
     /// very `setBreakpoints` that could free it.
-    fn breakpoint_at(&self, source: u32, line: u32) -> Option<i64> {
+    fn breakpoint_at(&self, source: u32, line: u32) -> Option<Trigger> {
         self.breakpoints
             .read()
             .expect("breakpoint lock poisoned")
             .get(&source)?
             .get(&line)
-            .copied()
+            .cloned()
+    }
+
+    /// What a breakpoint whose line has been reached should do.
+    ///
+    /// Runs on the debuggee thread, before the stop is claimed, so it must
+    /// not panic: a dead debuggee leaves the request loop waiting on a stop
+    /// that never comes. Every step returns a `Result` instead.
+    fn fires(&self, trigger: &Trigger, frame_desc: usize, frame_values: usize) -> Fires {
+        // Only a breakpoint that has something to say reads the frame; a
+        // plain one is the common case and pays nothing.
+        let vars = if trigger.condition.is_some() || trigger.log.is_some() {
+            leek_backend_native::read_frame_vars(frame_desc, frame_values)
+        } else {
+            Vec::new()
+        };
+
+        if let Some(condition) = &trigger.condition {
+            match expr::eval(condition, &vars, trigger.version) {
+                Ok(value) if !value.is_truthy() => return Fires::No,
+                Ok(_) => {}
+                // Fail open, loudly. A condition that cannot be evaluated
+                // here — a name that is not in scope at this line — would
+                // otherwise turn the breakpoint silently off, which is the
+                // one failure a user cannot see. Stopping and saying why is
+                // what every mainstream adapter does.
+                Err(message) => {
+                    (self.on_output)(format!("breakpoint condition: {message}\n"));
+                    return Fires::Yes;
+                }
+            }
+        }
+
+        if let Some(hit) = &trigger.hit {
+            let count = {
+                let mut hits = self.hits.lock().expect("hit count lock poisoned");
+                let count = hits.entry(trigger.id).or_insert(0);
+                *count += 1;
+                *count
+            };
+            if !hit.passes(count) {
+                return Fires::No;
+            }
+        }
+
+        match &trigger.log {
+            Some(log) => Fires::Log(expr::interpolate(log, &vars, trigger.version)),
+            None => Fires::Yes,
+        }
     }
 
     /// Whether `now` counts as *arriving* at its line — the condition a
@@ -316,7 +412,14 @@ impl NativeDebugSession {
                 name: leek_backend_native::frame_name(desc).unwrap_or_else(|| "<unknown>".into()),
                 line: fline,
                 path: self.sources.get(&fsource).map(|s| s.path.clone()),
-                vars: leek_backend_native::render_frame_vars(desc, values),
+                vars: leek_backend_native::read_frame_vars(desc, values)
+                    .into_iter()
+                    .map(|(name, value)| FrameVar {
+                        name,
+                        display: value.render(),
+                        value,
+                    })
+                    .collect(),
             })
             .collect();
         *self.snapshot.lock().expect("snapshot lock poisoned") = snapshot;
@@ -388,8 +491,18 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
             }
         } else if self.step_reached(line, depth) {
             (StopReason::Step, Vec::new())
-        } else if let Some(id) = arrived.then(|| self.breakpoint_at(source, line)).flatten() {
-            (StopReason::Breakpoint, vec![id])
+        } else if let Some(trigger) = arrived.then(|| self.breakpoint_at(source, line)).flatten() {
+            match self.fires(&trigger, frame_desc, frame_values) {
+                Fires::No => return,
+                // A logpoint prints and keeps running — that is the whole
+                // point of one. It is tested after the forced-stop and step
+                // arms above, so a user stepping is never skipped past.
+                Fires::Log(text) => {
+                    (self.on_output)(text);
+                    return;
+                }
+                Fires::Yes => (StopReason::Breakpoint, vec![trigger.id]),
+            }
         } else {
             return;
         };
@@ -458,6 +571,7 @@ mod tests {
     use leek_span::LineTable;
 
     use super::{DebugSource, NativeDebugSession, StopInfo};
+    use crate::breakpoints::{BreakpointSpec, BreakpointStore, ProgramMap, Trigger};
 
     const SOURCE: &str = "var a = 1;\nvar b = 2;\n";
     /// Raw `SourceId` of the entry file (the pipeline seeds it with 1).
@@ -493,9 +607,21 @@ mod tests {
     /// info, so the callback can answer the stop the way a DAP client does.
     fn session_from(
         sources: HashMap<u32, DebugSource>,
-        breakpoints: HashMap<u32, HashMap<u32, i64>>,
+        breakpoints: HashMap<u32, HashMap<u32, Trigger>>,
         stop_on_entry: bool,
         on_stop: impl Fn(&NativeDebugSession, &StopInfo) + Send + Sync + 'static,
+    ) -> Arc<NativeDebugSession> {
+        session_logging(sources, breakpoints, stop_on_entry, on_stop, |_| {})
+    }
+
+    /// [`session_from`] with the `output` sink the DAP layer wires up — a
+    /// logpoint's text, and a condition's complaint, arrive there.
+    fn session_logging(
+        sources: HashMap<u32, DebugSource>,
+        breakpoints: HashMap<u32, HashMap<u32, Trigger>>,
+        stop_on_entry: bool,
+        on_stop: impl Fn(&NativeDebugSession, &StopInfo) + Send + Sync + 'static,
+        on_output: impl Fn(String) + Send + Sync + 'static,
     ) -> Arc<NativeDebugSession> {
         let slot: Arc<OnceLock<Weak<NativeDebugSession>>> = Arc::new(OnceLock::new());
         let slot_for_cb = Arc::clone(&slot);
@@ -511,6 +637,7 @@ mod tests {
                     .expect("session alive");
                 on_stop(&me, &info);
             }),
+            Box::new(on_output),
         ));
         assert!(
             slot.set(Arc::downgrade(&session)).is_ok(),
@@ -591,8 +718,8 @@ mod tests {
         let session = session_from(
             sources([(ENTRY, "main.leek", SOURCE), (LIB, "lib.leek", lib)]),
             HashMap::from([
-                (ENTRY, HashMap::from([(2, 1)])),
-                (LIB, HashMap::from([(3, 2)])),
+                (ENTRY, HashMap::from([(2, Trigger::plain(1))])),
+                (LIB, HashMap::from([(3, Trigger::plain(2))])),
             ]),
             false,
             move |session, info| {
@@ -628,7 +755,7 @@ mod tests {
                 (ENTRY, "main.leek", SOURCE),
                 (LIB, "lib.leek", "var z = 9;\n"),
             ]),
-            HashMap::from([(ENTRY, HashMap::from([(1, 1)]))]),
+            HashMap::from([(ENTRY, HashMap::from([(1, Trigger::plain(1))]))]),
             false,
             move |session, info| {
                 let _ = announced.send(info.line);
@@ -660,7 +787,7 @@ mod tests {
                 "main.leek",
                 "var sum = 0 for (var i = 0; i < 3; i++) sum += i\n",
             )]),
-            HashMap::from([(ENTRY, HashMap::from([(line, id)]))]),
+            HashMap::from([(ENTRY, HashMap::from([(line, Trigger::plain(id))]))]),
             false,
             move |session, info| {
                 let _ = announced.send((info.line, info.hit_breakpoint_ids.clone()));
@@ -731,7 +858,10 @@ mod tests {
             "stopped with no breakpoint set"
         );
 
-        session.set_breakpoints(HashMap::from([(ENTRY, HashMap::from([(2, 5)]))]));
+        session.set_breakpoints(HashMap::from([(
+            ENTRY,
+            HashMap::from([(2, Trigger::plain(5))]),
+        )]));
         session.safepoint(ENTRY, 11, 0, 0);
         assert_eq!(
             stopped.recv_timeout(RELEASED).ok(),
@@ -752,13 +882,161 @@ mod tests {
 
         // The debuggee is parked inside `stop`; the request loop updates the
         // breakpoint set from this thread, exactly as `setBreakpoints` does.
-        session.set_breakpoints(HashMap::from([(ENTRY, HashMap::from([(1, 3)]))]));
+        session.set_breakpoints(HashMap::from([(
+            ENTRY,
+            HashMap::from([(1, Trigger::plain(3))]),
+        )]));
 
         session.resume();
         assert!(
             done.recv_timeout(RELEASED).is_ok(),
             "setting breakpoints at a stop wedged the debuggee"
         );
+    }
+
+    /// A trigger as the DAP layer builds one: a spec put through the store
+    /// and compiled against a one-file program, so these tests exercise the
+    /// same path `setBreakpoints` does rather than a hand-built `Trigger`.
+    fn trigger_for(line: u32, spec: BreakpointSpec) -> Trigger {
+        let path = std::path::Path::new("/tmp/leek-dap-trigger/main.leek");
+        let mut store = BreakpointStore::default();
+        store.replace(path, &[spec]);
+        let program = ProgramMap::new(
+            HashMap::from([(leek_span::paths::canonical_or_normalized(path), ENTRY)]),
+            HashMap::from([(ENTRY, std::collections::BTreeSet::from([line]))]),
+            leek_span::pragma::LATEST_VERSION,
+        );
+        store
+            .by_source(&program)
+            .remove(&ENTRY)
+            .and_then(|mut lines| lines.remove(&line))
+            .expect("the breakpoint compiled")
+    }
+
+    /// A session with one breakpoint on line 1, reporting stops and output
+    /// separately. Locals come from `vars`, the frame-descriptor pair a real
+    /// safepoint carries — `(0, 0)` for a frame with no named locals.
+    fn conditional_session(
+        spec: BreakpointSpec,
+    ) -> (
+        Arc<NativeDebugSession>,
+        mpsc::Receiver<Vec<i64>>,
+        mpsc::Receiver<String>,
+    ) {
+        let (announced, stopped) = mpsc::channel();
+        let (printed, output) = mpsc::channel();
+        let session = session_logging(
+            entry_sources(),
+            HashMap::from([(ENTRY, HashMap::from([(1, trigger_for(1, spec))]))]),
+            false,
+            move |session, info| {
+                let _ = announced.send(info.hit_breakpoint_ids.clone());
+                session.resume();
+            },
+            move |text| {
+                let _ = printed.send(text);
+            },
+        );
+        (session, stopped, output)
+    }
+
+    #[test]
+    fn a_condition_that_is_false_does_not_stop() {
+        let (session, stopped, _output) = conditional_session(BreakpointSpec {
+            line: 1,
+            condition: Some("false".to_string()),
+            ..BreakpointSpec::default()
+        });
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "a false condition stopped the debuggee"
+        );
+    }
+
+    #[test]
+    fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
+        // `nope` is not a local of this frame. Failing open is the decision:
+        // a condition that silently switched the breakpoint off would be
+        // invisible to the user.
+        let (session, stopped, output) = conditional_session(BreakpointSpec {
+            line: 1,
+            condition: Some("nope > 1".to_string()),
+            ..BreakpointSpec::default()
+        });
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert!(
+            stopped.recv_timeout(RELEASED).is_ok(),
+            "a condition that could not be evaluated turned the breakpoint off"
+        );
+        let complaint = output.recv_timeout(RELEASED).expect("an output line");
+        assert!(complaint.contains("nope"), "{complaint}");
+    }
+
+    #[test]
+    fn a_logpoint_prints_and_never_stops() {
+        let (session, stopped, output) = conditional_session(BreakpointSpec {
+            line: 1,
+            log_message: Some("hit {1 + 1}".to_string()),
+            ..BreakpointSpec::default()
+        });
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert_eq!(
+            output.recv_timeout(RELEASED).ok(),
+            Some("hit 2".to_string())
+        );
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "a logpoint stopped the debuggee"
+        );
+    }
+
+    #[test]
+    fn a_hit_condition_skips_the_hits_it_excludes() {
+        let (session, stopped, _output) = conditional_session(BreakpointSpec {
+            line: 1,
+            hit_condition: Some(">=2".to_string()),
+            ..BreakpointSpec::default()
+        });
+        // Three arrivals on line 1; only the second and third qualify. The
+        // offsets go backwards so each counts as a fresh arrival.
+        for offset in [0, 0, 0] {
+            session.safepoint(ENTRY, offset, 0, 0);
+        }
+        assert!(stopped.recv_timeout(RELEASED).is_ok(), "the second hit");
+        assert!(stopped.recv_timeout(RELEASED).is_ok(), "the third hit");
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "more stops than there were hits"
+        );
+    }
+
+    #[test]
+    fn removing_a_breakpoint_forgets_its_hit_count() {
+        let spec = BreakpointSpec {
+            line: 1,
+            hit_condition: Some("2".to_string()),
+            ..BreakpointSpec::default()
+        };
+        let (session, stopped, _output) = conditional_session(spec.clone());
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "the first hit stopped on a `hitCondition` of 2"
+        );
+
+        // The client clears the file, then sets the same breakpoint again:
+        // a new id, so the count starts over and the *next* hit is the first.
+        session.set_breakpoints(HashMap::new());
+        let fresh = trigger_for(1, spec);
+        session.set_breakpoints(HashMap::from([(ENTRY, HashMap::from([(1, fresh)]))]));
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert!(
+            stopped.recv_timeout(PARKED).is_err(),
+            "the re-set breakpoint kept the old count"
+        );
+        session.safepoint(ENTRY, 0, 0, 0);
+        assert!(stopped.recv_timeout(RELEASED).is_ok(), "the second hit");
     }
 
     #[test]

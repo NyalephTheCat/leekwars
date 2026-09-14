@@ -27,6 +27,14 @@ leek-resolver    = { workspace = true }
 # Debugging an AI inside a fight: build the fight from a scenario and drive it.
 leek-scenario    = { workspace = true }
 leek-generator   = { workspace = true }
+# Breakpoint conditions, logpoint messages and `evaluate`: parse the client's
+# expression with the real parser at the debugged program's language version,
+# then evaluate it on the runtime's own operator semantics rather than a
+# second, drifting implementation of them.
+leek-parser      = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-runtime     = { workspace = true }
+leek-text        = { workspace = true }
 
 dap         = { workspace = true }
 serde       = { workspace = true }
