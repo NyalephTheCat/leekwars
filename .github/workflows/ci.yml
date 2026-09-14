@@ -92,6 +92,12 @@ jobs:
           java-version: "21"
       - name: cargo build --workspace
         run: cargo build --workspace --locked
+      # A build script may write into OUT_DIR and nowhere else. This job has
+      # both a JDK and the submodules, which is exactly the combination that
+      # used to let leek-test-corpus's build script rewrite the tracked 13 MB
+      # data/reference.tsv from a multi-minute JVM run (#148).
+      - name: build left the tracked corpus data alone
+        run: git diff --exit-code -- crates/testing/leek-test-corpus/data
       # Mirrors `tools/check.sh`: the fast gate excludes the multi-minute
       # upstream corpus suite. That one runs in the separate `corpus` workflow
       # (.github/workflows/corpus.yml) — nightly, and on PRs touching the

@@ -44,9 +44,25 @@ pub struct CasePlan {
     pub kinds: Vec<CheckKind>,
 }
 
-impl TestCase {
+/// Check-plan policy for an upstream case.
+///
+/// An extension trait rather than an inherent `impl`: [`TestCase`] lives
+/// in the dependency-free `leek-test-cases` crate (#150), while *which*
+/// backends a case exercises is this crate's policy and depends on the
+/// backends it runs. Bring it into scope to call [`Self::check_plan`].
+pub trait CaseChecks {
     /// Backends and pipeline stages that should be exercised for this case.
-    pub fn check_plan(&self) -> CasePlan {
+    fn check_plan(&self) -> CasePlan;
+
+    /// Whether the interpreter must compare a value for this case.
+    fn needs_interp_value_check(&self) -> bool;
+
+    /// Whether the interpreter must compare an operation count.
+    fn needs_interp_ops_check(&self) -> bool;
+}
+
+impl CaseChecks for TestCase {
+    fn check_plan(&self) -> CasePlan {
         if !self.enabled {
             return CasePlan { kinds: vec![] };
         }
@@ -120,7 +136,7 @@ impl TestCase {
         CasePlan { kinds }
     }
 
-    pub fn needs_interp_value_check(&self) -> bool {
+    fn needs_interp_value_check(&self) -> bool {
         self.enabled
             && matches!(
                 self.expected,
@@ -128,7 +144,7 @@ impl TestCase {
             )
     }
 
-    pub fn needs_interp_ops_check(&self) -> bool {
+    fn needs_interp_ops_check(&self) -> bool {
         self.enabled && matches!(self.expected, Expectation::Ops { .. })
     }
 }

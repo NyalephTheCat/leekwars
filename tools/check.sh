@@ -12,9 +12,11 @@
 #
 # Notes:
 #   * `cargo clippy --workspace --all-targets` must be completely quiet — the
-#     workspace denies warnings here via `-D warnings`. (The leek-test-corpus
-#     build script prints an informational `cargo:warning` about extracted
-#     upstream cases; that is not a lint and is tolerated.)
+#     workspace denies warnings here via `-D warnings`. The leek-test-corpus
+#     build script now prints its extraction count on plain stdout, which cargo
+#     swallows; the one `cargo:warning` it can still emit says the upstream
+#     submodule is missing, i.e. that the corpus is empty. That is signal, not
+#     chatter — check out the submodules rather than ignoring it.
 #   * leek-backend-java's parity tests never write into tests/snapshots/ on a
 #     plain run: every report there — the per-fixture .diff files, SUMMARY.txt
 #     and the four run reports (OPS_DRIFT.txt, JVM_PARITY.txt,

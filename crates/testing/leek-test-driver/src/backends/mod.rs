@@ -15,7 +15,7 @@ use leek_span::SourceId;
 use serde::{Deserialize, Serialize};
 
 use crate::cases::{Expectation, Manifest, TestCase};
-use crate::checks::CheckKind;
+use crate::checks::{CaseChecks, CheckKind};
 use crate::run::CaseOutcome;
 
 /// Corpus runner target — includes the shared pipeline plus each linked backend.

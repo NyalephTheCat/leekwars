@@ -10,11 +10,6 @@
 //! cargo run -p leek-test-corpus -- unknown            # histogram of un-extracted expectations
 //! ```
 
-// `prepare_embed` / `HEADER` are only reached from `build.rs`; silence
-// the binary-context dead-code lint for the build-only helpers.
-#[allow(dead_code)]
-mod reference;
-
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -26,6 +21,7 @@ use leek_test_corpus::backends::{
     self, CaseProbe, FailureCategory, SuiteBackend, categorize_failure, probe_case,
 };
 use leek_test_corpus::cases::Expectation;
+use leek_test_corpus::reference;
 use leek_test_corpus::run::Summary;
 use leek_test_corpus::{
     Manifest, MultiReport, TestCase, baseline_path, embedded_manifest, run_manifest_on_large_stack,
@@ -434,8 +430,23 @@ fn cmd_extract_reference() -> Result<()> {
     }
 
     eprintln!("running the official LeekScript suite to extract value + ops + Java per case…");
-    eprintln!("(this takes a few minutes; see /tmp/reference-run.log for progress)");
+    eprintln!("(this takes a few minutes; the generator prints the path of its run log)");
     reference::regenerate(manifest_dir, &out).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Record what produced this dataset. It is the only staleness signal
+    // left after #148 — `tests/reference_provenance.rs` reads it back —
+    // so write it before anything else looks at the file.
+    match reference::current_provenance(manifest_dir) {
+        Some(p) => {
+            reference::record_provenance(&out, &p)
+                .with_context(|| format!("recording provenance in {}", out.display()))?;
+            eprintln!("provenance: {}", p.replace('\t', "  "));
+        }
+        None => eprintln!(
+            "warning: could not read the upstream commit / overlay hash from git — \
+             the dataset is left without a provenance line"
+        ),
+    }
 
     let text =
         std::fs::read_to_string(&out).with_context(|| format!("reading {}", out.display()))?;
@@ -454,7 +465,7 @@ fn cmd_extract_reference() -> Result<()> {
     for (kind, n) in &by_kind {
         eprintln!("  {kind:<8} {n}");
     }
-    eprintln!("\nRebuild `leek-test-corpus` to embed the refreshed dataset, then commit it.");
+    eprintln!("\nCommit the refreshed dataset; its readers open data/reference.tsv directly.");
     Ok(())
 }
 

@@ -1,14 +1,18 @@
 //! Build script: extract the upstream JUnit suite into
-//! `OUT_DIR/upstream_cases.toml`, and stage the official-LeekScript
-//! reference dataset into `OUT_DIR/reference.tsv` (both embedded at
-//! compile time). See `src/reference.rs` for the gated-regen policy.
+//! `OUT_DIR/upstream_cases.toml`, embedded at compile time.
+//!
+//! That is deliberately *all* it does. The official-LeekScript reference
+//! dataset is not staged, regenerated or embedded here (#148): producing
+//! it runs the upstream JVM suite for minutes and writes a tracked file,
+//! which is the explicit `cargo run -p leek-test-corpus --
+//! extract-reference` command's job, not a build's. This script must
+//! stay cheap enough to run on every `cargo build` / `cargo clippy`,
+//! with no JDK, no submodule and no network.
 
 #[path = "src/extract.rs"]
 mod extract;
-#[path = "src/reference.rs"]
-mod reference;
 
-use leek_test_driver::cases;
+use leek_test_cases as cases;
 
 use std::path::{Path, PathBuf};
 
@@ -25,10 +29,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/extract.rs");
-    println!("cargo:rerun-if-changed=src/reference.rs");
-    println!("cargo:rerun-if-changed=../../../tools/java-emitter/generate-reference.sh");
-    println!("cargo:rerun-if-changed=../../../tools/java-emitter/GenerateReference.java");
-    println!("cargo:rerun-if-changed=../leek-test-driver/src/cases.rs");
+    println!("cargo:rerun-if-changed=../leek-test-cases/src/lib.rs");
     for dir in [&upstream, &overlay] {
         if dir.exists()
             && let Ok(entries) = std::fs::read_dir(dir)
@@ -65,16 +66,13 @@ fn main() {
         panic!("failed to write {}: {}", out_path.display(), e);
     }
 
+    // Plain stdout, not `cargo:warning=`: this is progress information,
+    // and `cargo clippy --workspace --all-targets` is required to be
+    // silent (tools/check.sh). Only the two failure branches above warn.
     println!(
-        "cargo:warning=extracted {} upstream test cases (skipped {} calls) -> {}",
+        "extracted {} upstream test cases (skipped {} calls) -> {}",
         manifest.cases.len(),
         manifest.skipped.len(),
         out_path.display(),
     );
-
-    // Stage the official-LeekScript reference dataset (value + ops +
-    // Java per case) into OUT_DIR for `include_str!`. Gated: only
-    // re-runs the JVM suite when the dataset is missing/stale and a JDK
-    // + submodule are present (see `reference::prepare_embed`).
-    reference::prepare_embed(manifest_dir, Path::new(&out_dir_path));
 }

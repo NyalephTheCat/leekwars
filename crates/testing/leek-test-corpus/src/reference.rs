@@ -1,4 +1,4 @@
-//! Official-LeekScript reference dataset: gated regeneration + embed.
+//! Official-LeekScript reference dataset: explicit regeneration + provenance.
 //!
 //! The reference dataset (`data/reference.tsv`) holds one row per
 //! passing upstream value-bearing assertion — `version, strict, kind,
@@ -7,12 +7,20 @@
 //! `tools/java-emitter/generate-reference.sh` and the probe in
 //! `TestCommon.java`).
 //!
-//! This module is shared by `build.rs` (via `#[path]`) and the
-//! `extract-reference` subcommand, so it depends on `std` only.
+//! Regeneration is **never** a side effect of a build (#148): it takes
+//! minutes of JVM time and rewrites a tracked 13 MB file, so it belongs
+//! to one explicit command,
+//! `cargo run -p leek-test-corpus -- extract-reference`. `build.rs` does
+//! not use this module at all.
+//!
+//! What replaces the old mtime-based staleness guess is *provenance*:
+//! the regenerating command records which upstream sources produced the
+//! dataset in its first line, and `tests/reference_provenance.rs`
+//! compares that against the checkout. A recorded fact beats a
+//! timestamp, which a fresh clone resets to "now" in arbitrary order.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
 
 /// The committed reference dataset under the crate's `data/` dir.
 pub fn committed_path(manifest_dir: &Path) -> PathBuf {
@@ -30,20 +38,20 @@ pub fn script_path(manifest_dir: &Path) -> PathBuf {
     repo_root(manifest_dir).join("tools/java-emitter/generate-reference.sh")
 }
 
+/// The upstream generator submodule.
+fn submodule_path(manifest_dir: &Path) -> PathBuf {
+    repo_root(manifest_dir).join("official-generator/leek-wars-generator")
+}
+
+/// The pristine-submodule overlay carrying the `LEEK_REFERENCE` probe,
+/// relative to the repo root (see `tools/java-emitter/overlay.sh`).
+const OVERLAY_REL: &str = "tools/java-emitter/overlay";
+
 /// Upstream Java source trees whose changes invalidate the reference
 /// (the test cases themselves + the compiler that emits their Java).
 fn upstream_dirs(manifest_dir: &Path) -> [PathBuf; 2] {
-    let leek = repo_root(manifest_dir).join("official-generator/leek-wars-generator/leekscript");
+    let leek = submodule_path(manifest_dir).join("leekscript");
     [leek.join("src/test/java"), leek.join("src/main/java")]
-}
-
-/// All Java source trees feeding the reference run: the upstream
-/// submodule plus the pristine-submodule overlay that carries the
-/// `LEEK_REFERENCE` probe (see `tools/java-emitter/overlay.sh`).
-fn source_dirs(manifest_dir: &Path) -> [PathBuf; 3] {
-    let [test, main] = upstream_dirs(manifest_dir);
-    let overlay = repo_root(manifest_dir).join("tools/java-emitter/overlay/src");
-    [test, main, overlay]
 }
 
 /// True when the upstream submodule is checked out.
@@ -65,52 +73,9 @@ fn runnable(bin: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Newest mtime of any `*.java` under `dir` (recursive). `None` if the
-/// dir is absent or empty.
-fn newest_java_mtime(dir: &Path) -> Option<SystemTime> {
-    let mut newest: Option<SystemTime> = None;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.extension().is_some_and(|x| x == "java")
-                && let Ok(m) = e.metadata().and_then(|m| m.modified())
-            {
-                newest = Some(newest.map_or(m, |cur| cur.max(m)));
-            }
-        }
-    }
-    newest
-}
-
-/// Newest mtime across all source trees (upstream + overlay).
-fn sources_newest(manifest_dir: &Path) -> Option<SystemTime> {
-    source_dirs(manifest_dir)
-        .iter()
-        .filter_map(|d| newest_java_mtime(d))
-        .max()
-}
-
-/// `target` is stale if it is missing or older than the newest upstream
-/// source. With no upstream sources (submodule absent) nothing is
-/// considered stale — we can't do better than the committed copy.
-pub fn is_stale(target: &Path, manifest_dir: &Path) -> bool {
-    let Ok(target_mtime) = std::fs::metadata(target).and_then(|m| m.modified()) else {
-        return true;
-    };
-    match sources_newest(manifest_dir) {
-        Some(src) => target_mtime < src,
-        None => false,
-    }
-}
-
 /// Run the generator script, writing the reference dataset to `out`.
-/// Blocks for as long as the official JVM suite takes (minutes).
+/// Blocks for as long as the official JVM suite takes (minutes), which
+/// is why only the `extract-reference` subcommand calls it.
 pub fn regenerate(manifest_dir: &Path, out: &Path) -> Result<(), String> {
     let script = script_path(manifest_dir);
     if !script.exists() {
@@ -133,75 +98,105 @@ pub fn regenerate(manifest_dir: &Path, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Header for an empty/placeholder dataset (keeps the embed valid when
-/// no reference can be produced).
-pub const HEADER: &str = "# version\tstrict\tkind\tvalue\tjvm_ops\tcode\tjava\n";
+// ───────────────────────────── provenance ────────────────────────────
 
-fn mtime(p: &Path) -> Option<SystemTime> {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+/// Marker starting the dataset's provenance line. A `#`-prefixed first
+/// line is inert for every reader of the file: they all split on tabs
+/// and skip rows with fewer than seven columns, or skip `#` outright.
+pub const PROVENANCE_PREFIX: &str = "# provenance\t";
+
+/// Which upstream sources a reference run was made from:
+/// `upstream=<submodule commit>\toverlay=<git tree hash>[-dirty]`.
+///
+/// `None` when it cannot be established — no submodule checkout, or no
+/// `git` — in which case the dataset is left without a provenance line
+/// rather than carrying a guess.
+///
+/// The overlay hash is git's own tree hash of [`OVERLAY_REL`], so it
+/// covers committed overlay content exactly; uncommitted edits there
+/// cannot change a tree hash, so they are reported as `-dirty` instead.
+pub fn current_provenance(manifest_dir: &Path) -> Option<String> {
+    let root = repo_root(manifest_dir);
+    let upstream = git(&submodule_path(manifest_dir), &["rev-parse", "HEAD"])?;
+    let overlay = git(&root, &["rev-parse", &format!("HEAD:{OVERLAY_REL}")])?;
+    let dirty = !git(&root, &["status", "--porcelain", "--", OVERLAY_REL])?.is_empty();
+    let suffix = if dirty { "-dirty" } else { "" };
+    Some(format!("upstream={upstream}\toverlay={overlay}{suffix}"))
 }
 
-/// build.rs entry point: regenerate the committed dataset when it is
-/// stale vs the upstream sources (the only *expensive* step, gated on a
-/// JDK + submodule), then stage it into `out_dir/reference.tsv` for
-/// `include_str!`.
-///
-/// The regen decision is keyed on `committed`-vs-sources, while the
-/// (cheap) copy is keyed on `committed`-vs-`embed`. Keeping those two
-/// independent means a regeneration — which refreshes `committed` —
-/// never triggers a rebuild loop (we never `rerun-if-changed` on the
-/// committed file), yet a freshly-committed dataset is always picked up.
-/// Set `LEEK_SKIP_REFERENCE_REGEN=1` to embed the committed copy as-is.
-pub fn prepare_embed(manifest_dir: &Path, out_dir: &Path) {
-    let committed = committed_path(manifest_dir);
-    let embed = out_dir.join("reference.tsv");
+/// The provenance recorded in a dataset, or `None` when it carries none
+/// (datasets generated before #148 do not).
+pub fn recorded_provenance(dataset: &str) -> Option<&str> {
+    dataset.lines().next()?.strip_prefix(PROVENANCE_PREFIX)
+}
 
-    let skip = std::env::var_os("LEEK_SKIP_REFERENCE_REGEN").is_some();
-    if is_stale(&committed, manifest_dir) {
-        if !skip && submodule_present(manifest_dir) && jvm_available() {
-            println!(
-                "cargo:warning=reference dataset stale/missing — regenerating via official JVM suite (minutes)…"
-            );
-            match regenerate(manifest_dir, &committed) {
-                Ok(()) => {
-                    let rows = std::fs::read_to_string(&committed)
-                        .map_or(0, |s| s.lines().filter(|l| !l.starts_with('#')).count());
-                    println!(
-                        "cargo:warning=regenerated {} ({rows} rows)",
-                        committed.display()
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "cargo:warning=reference regen failed: {e} (embedding committed/empty)"
-                    );
-                }
-            }
-        } else if committed.exists() {
-            println!(
-                "cargo:warning=reference dataset may be stale (no JDK / submodule, or regen skipped) — \
-                 embedding committed copy; run `cargo run -p leek-test-corpus -- extract-reference` to refresh"
-            );
-        }
+/// Rewrite `path` so its first line records `provenance`, replacing any
+/// line already there.
+pub fn record_provenance(path: &Path, provenance: &str) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let body = match text.split_once('\n') {
+        Some((first, rest)) if first.starts_with(PROVENANCE_PREFIX) => rest,
+        _ => text.as_str(),
+    };
+    std::fs::write(path, format!("{PROVENANCE_PREFIX}{provenance}\n{body}"))
+}
+
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("leek-reference-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir.join("reference.tsv")
     }
 
-    // Stage committed → embed (cheap). Skip the copy when the embed copy
-    // is already up to date with the committed file.
-    let copy_needed = !embed.exists()
-        || match (mtime(&committed), mtime(&embed)) {
-            (Some(c), Some(e)) => c > e,
-            _ => true,
-        };
-    if !copy_needed {
-        return;
+    #[test]
+    fn provenance_reads_back_and_leaves_the_rows_alone() {
+        let path = scratch("roundtrip");
+        std::fs::write(&path, "# version\tstrict\n4\t-\tequals\n").unwrap();
+
+        record_provenance(&path, "upstream=abc\toverlay=def").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            recorded_provenance(&text),
+            Some("upstream=abc\toverlay=def")
+        );
+        assert!(text.ends_with("# version\tstrict\n4\t-\tequals\n"));
+        std::fs::remove_file(&path).unwrap();
     }
-    if committed.exists() {
-        if let Err(e) = std::fs::copy(&committed, &embed) {
-            println!("cargo:warning=failed to stage reference dataset: {e}");
-            let _ = std::fs::write(&embed, HEADER);
-        }
-    } else {
-        println!("cargo:warning=no reference dataset found — embedding empty placeholder");
-        let _ = std::fs::write(&embed, HEADER);
+
+    #[test]
+    fn recording_twice_replaces_rather_than_stacks() {
+        let path = scratch("replace");
+        std::fs::write(&path, "4\t-\tequals\n").unwrap();
+
+        record_provenance(&path, "upstream=one\toverlay=x").unwrap();
+        record_provenance(&path, "upstream=two\toverlay=y").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(recorded_provenance(&text), Some("upstream=two\toverlay=y"));
+        assert_eq!(text.lines().filter(|l| l.starts_with('#')).count(), 1);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_dataset_without_a_provenance_line_reports_none() {
+        assert_eq!(recorded_provenance("# version\tstrict\n4\t-\n"), None);
+        assert_eq!(recorded_provenance(""), None);
     }
 }
