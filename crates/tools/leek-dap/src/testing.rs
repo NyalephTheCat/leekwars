@@ -38,6 +38,11 @@ pub(crate) fn project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("leek-dap-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp project");
+    // The server canonicalises every source path it reports, so hand back the
+    // canonical directory: on macOS the temp dir is `/var/folders/…` while
+    // `/var` is a symlink to `/private/var`, and a test comparing the reported
+    // path with this one string-for-string would fail there but pass on Linux.
+    let dir = dir.canonicalize().unwrap_or(dir);
     std::fs::write(
         dir.join("Miku.toml"),
         "[project]\nname = \"dbg\"\nversion = \"0.1.0\"\nentry = \"main.leek\"\n\n[paths]\nsrc = \".\"\n",
