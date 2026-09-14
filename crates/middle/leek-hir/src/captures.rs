@@ -50,6 +50,24 @@ fn refs_def_deep(e: &Expr, def: DefId) -> bool {
 }
 
 fn stmt_refs_def_deep(s: &Stmt, def: DefId) -> bool {
+    // A `foreach` header without `var` stores into a binding from an
+    // enclosing scope every iteration — a reference to `def`, and the only one
+    // `walk_stmt_child_exprs` does not report: it surfaces just the iterable,
+    // deliberately, because leek-lint's rules and the LeekScript backend's
+    // const-folder consume that walk and have never seen an l-value come out
+    // of it. So ask the binding targets here instead. Without this a closure
+    // whose only use of an outer parameter (or outer foreach binding) is
+    // `for (p in …)` looked like it captured nothing, and the parameter was
+    // left unboxed — an assignment to a `final` Java parameter.
+    if let Stmt::Foreach(fe) = s
+        && fe
+            .key
+            .iter()
+            .chain([&fe.value])
+            .any(|b| refs_def_deep(&b.target, def))
+    {
+        return true;
+    }
     let mut found = false;
     walk_stmt_child_exprs(s, &mut |e| found = found || refs_def_deep(e, def));
     if !found {

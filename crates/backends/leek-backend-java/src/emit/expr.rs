@@ -967,6 +967,83 @@ impl Emitter<'_> {
         }
     }
 
+    /// Store the already-rendered Java `value` into the l-value `target`,
+    /// dispatching on the same l-value vocabulary — in the same order, with the
+    /// same spellings — that [`Self::write_assignment`] uses for a plain `=`:
+    /// a `@`-ref param's `Box.set`, an own instance field's direct Java field,
+    /// any other field's reflective `setField`, a shadowed builtin name's
+    /// `__shadows.put`, and otherwise the target as written by
+    /// [`Self::write_expr`] with the declared-scalar coercion a plain `=`
+    /// applies.
+    ///
+    /// For callers that hold the stored value as *text* rather than as an
+    /// [`Expr`] — a foreach binding stores `<entry>.getValue()`, which no HIR
+    /// node describes. The two r-value–shaped steps `write_assignment` takes
+    /// therefore have nothing to act on here and are deliberately absent: the
+    /// v1 `copy(…)` deep clone (a runtime read is not an aliasing load the
+    /// source could observe twice) and the typed-static-field coercion (which
+    /// applies only to a *statically numeric* right-hand side, never to a
+    /// runtime value). Index l-values are absent too — they reach
+    /// [`Self::write_index_assignment`], and no caller of this function can
+    /// produce one. Keep the rest in step with `write_assignment`: a
+    /// divergence is a miscompile, not a formatting difference.
+    pub(crate) fn write_place_store(&self, buf: &mut String, target: &Expr, value: &str) {
+        // `@`-ref param (a runtime `Box`) — route the write through `Box.set`
+        // so it propagates to the caller's variable / array element.
+        if self.is_ref_box(target) {
+            buf.push_str(&self.ref_box_name(target));
+            buf.push_str(".set(");
+            buf.push_str(value);
+            buf.push(')');
+            return;
+        }
+        // Field write. `this.field` inside its own class writes the real Java
+        // field (coerced to the field's declared type); any other base is
+        // `Object`-typed, so go through reflective `setField`.
+        if let ExprKind::Field(base, fname, _) = &target.kind {
+            if self.is_own_instance_field(base, fname) {
+                buf.push_str(&self.own_instance_field_ref(fname));
+                buf.push_str(" = ");
+                buf.push_str(&Self::coerce_decl(
+                    self.own_field_ty(fname).as_ref(),
+                    value.to_string(),
+                ));
+            } else {
+                buf.push_str("setField(");
+                self.write_expr(buf, base, false);
+                buf.push_str(", \"");
+                buf.push_str(fname);
+                buf.push_str("\", ");
+                buf.push_str(value);
+                buf.push_str(", ");
+                buf.push_str(&self.calling_class());
+                buf.push(')');
+            }
+            return;
+        }
+        // Reassigned builtin name — there is no Java variable of that name, so
+        // the write goes into the AI class's `__shadows` map, where
+        // `write_name` reads it back.
+        if let ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &target.kind
+            && self.shadowed_builtins.borrow().contains(name)
+        {
+            buf.push_str("__shadows.put(\"");
+            buf.push_str(name);
+            buf.push_str("\", ");
+            buf.push_str(value);
+            buf.push(')');
+            return;
+        }
+        // Plain store: a local (through its `Object[]` box when boxed), a
+        // global, coerced to the target's declared scalar type.
+        self.write_expr(buf, target, false);
+        buf.push_str(" = ");
+        buf.push_str(&Self::coerce_decl(
+            self.assign_target_scalar_ty(target),
+            value.to_string(),
+        ));
+    }
+
     /// Emit `put*(base, idx, value, null)` — the reference's idiom
     /// for writing through an indexed l-value. The fourth `null` is
     /// the calling-class for visibility checks; top-level array/map

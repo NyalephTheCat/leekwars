@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use leek_hir::{
-    Def, DefId, ExprKind, ForeachStmt, HirFile, LambdaBody, LowerUnit, NameRef, Stmt, lower_file,
-    lower_files,
+    Def, DefId, ExprKind, ForeachStmt, HirFile, LambdaBody, LowerUnit, NameRef, Stmt,
+    captured_by_nested_lambda_stmts, lower_file, lower_files,
 };
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::{FeatureFlags, SourceId};
@@ -61,6 +61,17 @@ fn find_foreach(stmts: &[Stmt]) -> Option<&ForeachStmt> {
 
 fn main_foreach(hir: &HirFile) -> &ForeachStmt {
     find_foreach(&hir.main).expect("foreach in main")
+}
+
+/// The body of the top-level function named `name`.
+fn function_body<'a>(hir: &'a HirFile, name: &str) -> &'a leek_hir::Block {
+    hir.defs
+        .iter()
+        .find_map(|d| match d {
+            Def::Function(f) if f.name == name => f.body.as_ref(),
+            _ => None,
+        })
+        .expect("function body")
 }
 
 fn function_foreach<'a>(hir: &'a HirFile, name: &str) -> &'a ForeachStmt {
@@ -183,5 +194,44 @@ fn bare_binding_over_an_include_level_global() {
     assert_eq!(
         function_foreach(&hir, "f").value.global_def(),
         Some(global(&hir, "g"))
+    );
+}
+
+/// A closure whose only use of an outer binding is a bare `for (p in …)`
+/// header still *captures* it — the header writes `p` on every iteration.
+///
+/// [`captured_by_nested_lambda_stmts`] answers this for two consumers that
+/// have to agree (the Java emitter boxes the parameter, leek-mir charges that
+/// box), and a binding target is the one reference `walk_stmt_child_exprs`
+/// does not report: it surfaces only the iterable. Missing it left the
+/// parameter unboxed, i.e. a Java assignment to a `final` parameter.
+#[test]
+fn a_bare_binding_inside_a_lambda_captures_the_outer_parameter() {
+    let hir = lower("function h(p) { var q = function() { for (p in [1, 2]) {} } }\n");
+    assert!(
+        captured_by_nested_lambda_stmts(&function_body(&hir, "h").stmts, local(&hir, "p")),
+        "`for (p in …)` inside the lambda captures `p`"
+    );
+}
+
+/// The same for a `key : value` header's key binding.
+#[test]
+fn a_bare_key_binding_inside_a_lambda_captures_the_outer_parameter() {
+    let hir = lower("function h(k) { var q = function() { for (k : v in [1: 2]) {} } }\n");
+    assert!(
+        captured_by_nested_lambda_stmts(&function_body(&hir, "h").stmts, local(&hir, "k")),
+        "`for (k : v in …)` inside the lambda captures `k`"
+    );
+}
+
+/// A binding the header *declares* is the loop's own local, so it captures
+/// nothing from outside even when it shadows an outer name.
+#[test]
+fn a_declared_binding_inside_a_lambda_captures_nothing() {
+    let hir = lower("function h(p) { var q = function() { for (var p in [1, 2]) {} } }\n");
+    // `local` finds the first `p` — the parameter, lowered before the loop's.
+    assert!(
+        !captured_by_nested_lambda_stmts(&function_body(&hir, "h").stmts, local(&hir, "p")),
+        "`for (var p in …)` declares its own `p`"
     );
 }
