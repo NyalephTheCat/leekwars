@@ -13,7 +13,8 @@
   ],
   "activationEvents": [
     "onLanguage:leek",
-    "onDebugResolve:leek"
+    "onDebugResolve:leek",
+    "workspaceContains:**/Miku.toml"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -129,6 +130,78 @@
         "command": "leek.restartServer",
         "title": "Restart Language Server",
         "category": "Leekscript"
+      },
+      {
+        "command": "leek.runFight",
+        "title": "Run Fight",
+        "category": "Leekscript"
+      },
+      {
+        "command": "leek.runFightMatrix",
+        "title": "Run Fight Matrix",
+        "category": "Leekscript"
+      },
+      {
+        "command": "leek.runTests",
+        "title": "Run Tests",
+        "category": "Leekscript"
+      },
+      {
+        "command": "leek.debugFightHere",
+        "title": "Debug AI in Fight",
+        "category": "Leekscript"
+      },
+      {
+        "command": "leek.showAnalysis",
+        "title": "Show Complexity Analysis",
+        "category": "Leekscript"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "leek.runFight",
+          "when": "resourceExtname == .toml"
+        },
+        {
+          "command": "leek.runFightMatrix",
+          "when": "resourceExtname == .toml"
+        },
+        {
+          "command": "leek.showAnalysis",
+          "when": "editorLangId == leek"
+        },
+        {
+          "command": "leek.debugFightHere",
+          "when": "false"
+        }
+      ]
+    },
+    "taskDefinitions": [
+      {
+        "type": "leek",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The miku invocation this task runs."
+          }
+        }
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "miku-test",
+        "owner": "leek",
+        "source": "miku test",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": "^FAIL (.*?) — (.*)$",
+          "file": 1,
+          "message": 2
+        }
       }
     ],
     "languages": [
@@ -165,6 +238,11 @@
           "default": "leek-dap",
           "description": "Path to the leek-dap debug adapter executable."
         },
+        "leek.miku.path": {
+          "type": "string",
+          "default": "miku",
+          "description": "Path to the miku executable, used by the Run Fight / Run Tests commands and the scenario code lenses."
+        },
         "leek.trace.server": {
           "type": "string",
           "enum": [
@@ -188,6 +266,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "tsc --outDir dist/test && node --test dist/test/scenario.test.js",
     "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
     "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
     "package": "npm run compile && vsce package --no-yarn --skip-license"

@@ -24,7 +24,7 @@ crates/
   game/      game-runtime, generator, scenario   (the fight simulator)
   tools/     lsp, dap, fmt, lint, migrate, rewrite, ide
   testing/   builtin-suite, test-driver, test-corpus, bench
-editors/     vscode (extension + DAP), nvim (LSP config)
+editors/     vscode (extension + DAP), nvim (filetype + syntax)
 examples/    runnable examples (see examples/fight/)
 official/, official-generator/   upstream reference impls (git submodules)
 ```
