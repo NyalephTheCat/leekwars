@@ -68,7 +68,45 @@ leekbench --corpus --fast-java                  # full rust-java correctness swe
 
 `--fast-java` is the batch correctness sweep: it emits every case, compiles
 them in one `javac`, and runs them in one JVM — minutes instead of hours.
-It checks values only (no timing; native and upstream are skipped).
+It checks values only (no timing; native and upstream are skipped). It prints
+its failures grouped by signature, so "49 compile errors" arrives as a short
+list of distinct defects rather than a count.
+
+### The known-failures ratchet
+
+The sweep's failures are otherwise in-memory only, so a fix in one case and a
+regression in another net to zero unnoticed. `--write-known-failures` records
+them in a tracked, sorted file — by default
+`crates/backends/leek-backend-java/tests/snapshots/CORPUS_FAST_JAVA.tsv` —
+and `--check-known-failures` diffs a fresh sweep against it, exiting non-zero
+on any case that is newly broken:
+
+```sh
+leekbench --corpus --fast-java --limit 100000 --write-known-failures
+leekbench --corpus --fast-java --limit 100000 --check-known-failures
+```
+
+`--limit 100000` is not decoration. `--limit` defaults to 20, and a 20-case
+sweep checked against the full file finds no new ids and exits green, so both
+flags **refuse to run** unless the sweep covers the whole corpus — and refuse
+`--case-filter` or a non-`equals` `--corpus-expectation` for the same reason.
+The file's `# total=` header is a second backstop on the same hole.
+
+Only newly failing ids fail the check. A reworded `javac` message is reported
+as a detail change, never as a red gate — a JDK bump can reword hundreds at
+once without any compiler change — and `timeout` / `no-result` cases are
+reported but never gate, because `BatchRunner`'s timeout only interrupts and a
+CPU-bound Leekscript loop never checks interrupts (#297), so which cases land
+in those buckets depends on machine speed.
+
+**This is a developer-run gate, not a CI gate.** It needs a JDK *and* the
+upstream classes built (`official-generator/leek-wars-generator/leekscript/
+build/classes`); no CI job builds those today. Do not wire it into
+`tools/check.sh` — on a machine without the classes the sweep bails, and a
+check that is skipped rather than run is exactly the "passes by being absent"
+failure the ratchet exists to prevent. For the same reason
+`--check-known-failures` fails closed when the file is missing rather than
+treating an absent file as "nothing is broken".
 
 Other corpus flags: `--corpus-expectation {equals|clean|all}`,
 `--include-disabled`, `--manifest <json>` (an external corpus manifest),

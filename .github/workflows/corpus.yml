@@ -64,7 +64,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # The whole gate, in one suite run: a non-empty manifest, a canonical
-      # failures-only baseline, columns that are not all identical (#71), and
+      # failures-only baseline, every backend this build runs having its own
+      # full-size column (`every_backend_has_a_full_size_baseline_column`), and
       # no case that used to pass and now doesn't. `--nocapture` so the
       # per-backend pass/fail/skip lines reach the log and the job summary.
       # `--release` because the suite is >10 min even optimised; parallelising

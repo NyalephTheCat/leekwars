@@ -36,8 +36,11 @@ pub enum FastOutcome {
     Disagree { got: String, expected: String },
     /// The Leekscript front-end / Java emit failed (no `.java` produced).
     EmitError(String),
-    /// The generated Java didn't compile (`javac` reported an error).
-    CompileError,
+    /// The generated Java didn't compile. Carries the first `javac` error
+    /// line reported against this case's file — the later lines are usually
+    /// cascades of the first. Without it the ratchet can only say "49 compile
+    /// errors" and cannot group them by defect (#107).
+    CompileError { javac: String },
     /// The Java threw at runtime (exception class name).
     RuntimeError(String),
     /// The case exceeded the per-case wall-clock budget.
@@ -168,19 +171,24 @@ pub fn run_fast_java_corpus(
                 compilable.extend(&remaining);
                 break;
             }
-            let failed = parse_failed_ids(&javac.1);
+            let failed = parse_failed_errors(&javac.1);
             if failed.is_empty() || chunk_rounds > 60 {
                 // Unattributable failure (a JVM crash with no useful stderr) or
                 // a non-converging chunk: mark the survivors as compile-errors
                 // rather than spin. Rare; bounded to one chunk.
                 for &id in &remaining {
-                    failures.push((cases[id].id.clone(), FastOutcome::CompileError));
+                    failures.push((
+                        cases[id].id.clone(),
+                        FastOutcome::CompileError {
+                            javac: UNATTRIBUTED.to_string(),
+                        },
+                    ));
                 }
                 break;
             }
-            for id in failed {
+            for (id, javac) in failed {
                 if remaining.remove(&id) {
-                    failures.push((cases[id].id.clone(), FastOutcome::CompileError));
+                    failures.push((cases[id].id.clone(), FastOutcome::CompileError { javac }));
                 }
             }
         }
@@ -300,9 +308,19 @@ fn compile_chunk(work: &Path, cp: &str, ids: &HashSet<usize>) -> Result<(bool, S
     ))
 }
 
-/// Extract the set of `AI_<n>` indices that `javac` reported errors for.
-fn parse_failed_ids(stderr: &str) -> HashSet<usize> {
-    let mut out = HashSet::new();
+/// Detail recorded for a compile error `javac` blamed on no particular file.
+pub(crate) const UNATTRIBUTED: &str = "<unattributed javac failure>";
+
+/// Map each `AI_<n>` index `javac` reported an error for to its **first**
+/// error line.
+///
+/// First, not last or joined: `javac` cascades (one bad expression produces a
+/// "cannot find symbol" for every later use of the name it failed to bind), so
+/// the first line is the one that names the actual defect and the rest are
+/// noise. Keeping it is what lets the ratchet group compile errors by message
+/// instead of only counting them (#107).
+pub(crate) fn parse_failed_errors(stderr: &str) -> HashMap<usize, String> {
+    let mut out: HashMap<usize, String> = HashMap::new();
     for line in stderr.lines() {
         if !line.contains("error:") {
             continue;
@@ -314,7 +332,7 @@ fn parse_failed_ids(stderr: &str) -> HashSet<usize> {
             if rest[digits.len()..].starts_with(".java")
                 && let Ok(n) = digits.parse::<usize>()
             {
-                out.insert(n);
+                out.entry(n).or_insert_with(|| line.trim().to_string());
             }
         }
     }
@@ -384,3 +402,63 @@ public class BatchRunner {
     }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::parse_failed_errors;
+
+    /// Real `javac` shape: `<path>/AI_<n>.java:<line>: error: <message>`, many
+    /// files in one stderr. Each error has to reach the case it belongs to —
+    /// the failure-exclusion loop drops exactly the ids named here, so a
+    /// mis-attribution drops a case that compiles fine.
+    #[test]
+    fn attributes_each_javac_error_to_its_own_case() {
+        let stderr = "\
+/tmp/leek-fastjava-1/AI_7.java:12: error: variable __scrut is already defined in method runIA()
+/tmp/leek-fastjava-1/AI_31.java:4: error: cannot find symbol
+  symbol:   variable u_2
+/tmp/leek-fastjava-1/AI_7.java:19: error: cannot find symbol
+2 errors";
+
+        let got = parse_failed_errors(stderr);
+
+        assert_eq!(got.len(), 2);
+        // First line per id wins: the later `AI_7` error is a cascade of the
+        // first, and recording it would group this case with unrelated ones.
+        assert_eq!(
+            got[&7],
+            "/tmp/leek-fastjava-1/AI_7.java:12: error: variable __scrut is \
+             already defined in method runIA()"
+        );
+        assert_eq!(
+            got[&31],
+            "/tmp/leek-fastjava-1/AI_31.java:4: error: cannot find symbol"
+        );
+    }
+
+    /// Lines without `error:` are notes, warnings and the trailing count. They
+    /// must not invent a failing id, or the loop excludes a case that built.
+    #[test]
+    fn ignores_lines_that_are_not_errors() {
+        let stderr = "\
+Note: /tmp/leek-fastjava-1/AI_3.java uses unchecked or unsafe operations.
+/tmp/leek-fastjava-1/AI_9.java:2: warning: [removal] AI_9 is deprecated
+1 warning";
+
+        assert!(parse_failed_errors(stderr).is_empty());
+    }
+
+    /// A `javac` crash dump mentions no `AI_<n>.java` at all. Returning an
+    /// empty map is what tells the caller to fall back to the unattributed
+    /// arm; panicking or slicing off a char boundary would abort the sweep.
+    #[test]
+    fn survives_stderr_it_cannot_attribute() {
+        let stderr = "\
+error: an exception has occurred in the compiler (21.0.2)
+AI_ error: truncated
+  at jdk.compiler/com.sun.tools.javac.comp.Attr.visitSelect(Attr.java)
+erreur: caractère « é » inattendu";
+
+        assert!(parse_failed_errors(stderr).is_empty());
+    }
+}

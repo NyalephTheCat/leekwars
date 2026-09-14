@@ -145,6 +145,10 @@ features the older table flagged as unimplemented (sets ×160, intervals
 Cranelift compile). The rust-java figure is the **full** corpus via the
 batch sweep (`--corpus --fast-java`: one `javac` per batch, one JVM; ≈ 85 s,
 27 javac rounds): 9 320 correct, 150 wrong values, 49 compile/emit errors.
+Which cases those are is tracked in
+`crates/backends/leek-backend-java/tests/snapshots/CORPUS_FAST_JAVA.tsv`
+(`leekbench --corpus --fast-java --check-known-failures`); these prose counts
+drift, that file does not.
 **² JIT**: re-compiles each run — jit-compile + execute (the speed cell).
 The compile is a small fraction of each run (≈ 0.3 ms on the scalar
 programs, a few ms on `array`), so warm time is mostly execution.
