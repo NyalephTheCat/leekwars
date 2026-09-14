@@ -183,7 +183,7 @@ fn inject_block_comments(src: &str) -> String {
     {
         let range = t.span.range();
         out.push_str(&src[pos..range.start]);
-        write!(out, " /*c{i}*/ ").unwrap();
+        let _ = write!(out, " /*c{i}*/ ");
         pos = range.start;
     }
     out.push_str(&src[pos..]);
@@ -202,7 +202,7 @@ fn inject_line_comments(src: &str) -> String {
         for (offset, _) in src[range.clone()].match_indices('\n') {
             let at = range.start + offset;
             out.push_str(&src[pos..at]);
-            write!(out, " // l{n}").unwrap();
+            let _ = write!(out, " // l{n}");
             n += 1;
             pos = at;
         }

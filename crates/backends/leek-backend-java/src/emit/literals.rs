@@ -7,9 +7,9 @@ impl super::Emitter<'_> {
         match lit {
             Literal::Int(n) => {
                 if parens_if_negative && *n < 0 {
-                    write!(buf, "({n}l)").unwrap();
+                    let _ = write!(buf, "({n}l)");
                 } else {
-                    write!(buf, "{n}l").unwrap();
+                    let _ = write!(buf, "{n}l");
                 }
             }
             Literal::Real(r) => {
@@ -20,7 +20,7 @@ impl super::Emitter<'_> {
                 } else if r.is_nan() {
                     buf.push_str("Double.NaN");
                 } else if parens_if_negative && *r < 0.0 {
-                    write!(buf, "({r})").unwrap();
+                    let _ = write!(buf, "({r})");
                 } else {
                     // Match Java's `String.valueOf(double)` (always
                     // a decimal point — `42.0` not `42`).
@@ -41,7 +41,7 @@ impl super::Emitter<'_> {
             // Upstream `LeekBigInteger` codegen:
             // `new BigIntegerValue(<ai>, "<decimal>")`.
             Literal::BigInt(d) => {
-                write!(buf, "new BigIntegerValue({}, \"{d}\")", self.ai_this()).unwrap();
+                let _ = write!(buf, "new BigIntegerValue({}, \"{d}\")", self.ai_this());
             }
             Literal::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
             Literal::Null => buf.push_str("null"),

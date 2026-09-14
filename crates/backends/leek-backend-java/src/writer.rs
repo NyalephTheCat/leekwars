@@ -37,7 +37,7 @@ impl JavaWriter {
             for (java_line, leek_line) in &self.line_map {
                 // `<javaLine> <fileIndex> <leekLine>\n`. Single-file
                 // emission ⇒ fileIndex always 0.
-                writeln!(self.lines_file, "{java_line} 0 {leek_line}").unwrap();
+                let _ = writeln!(self.lines_file, "{java_line} 0 {leek_line}");
             }
         }
         (self.code, self.lines_file)

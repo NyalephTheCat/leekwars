@@ -1068,9 +1068,9 @@ pub(crate) fn builtin_fn_wrapper(name: &str, version: leek_syntax::Version) -> O
                 // `FunctionLeekValue`, not `Object`. Cast at the call
                 // site so javac can pick the right overload.
                 if i == 1 && takes_function_arg(name) {
-                    write!(s, ", (FunctionLeekValue) AI.load(values[{i}])").unwrap();
+                    let _ = write!(s, ", (FunctionLeekValue) AI.load(values[{i}])");
                 } else {
-                    write!(s, ", AI.load(values[{i}])").unwrap();
+                    let _ = write!(s, ", AI.load(values[{i}])");
                 }
             }
             s.push_str(");");
@@ -1120,7 +1120,7 @@ pub(crate) fn user_fn_wrapper(mangled: &str, arity: usize) -> String {
         if i > 0 {
             body.push_str(", ");
         }
-        write!(body, "values.length > {i} ? (Object) values[{i}] : null").unwrap();
+        let _ = write!(body, "values.length > {i} ? (Object) values[{i}] : null");
     }
     body.push_str(");");
     format!(

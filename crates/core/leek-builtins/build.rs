@@ -103,12 +103,11 @@ fn write_java_catalog(builtins: &[Builtin], path: &Path) {
     for b in &java {
         let class = b.java_class.as_deref().unwrap();
         let ret = b.return_type.as_deref().unwrap_or("double");
-        writeln!(
+        let _ = writeln!(
             out,
             "    JavaBuiltin {{ name: \"{}\", java_class: \"{class}\", return_type: \"{ret}\" }},",
             b.name
-        )
-        .unwrap();
+        );
     }
     out.push_str("];\n\npub fn lookup_java(name: &str) -> Option<&'static JavaBuiltin> {\n");
     out.push_str("    JAVA_BUILTINS.iter().find(|b| b.name == name)\n}\n");
@@ -127,7 +126,7 @@ fn write_op_costs(builtins: &[Builtin], path: &Path) {
          pub fn op_cost(name: &str) -> u32 {\n    match name {\n",
     );
     for (name, cost) in &costs {
-        writeln!(out, "        \"{name}\" => {cost},").unwrap();
+        let _ = writeln!(out, "        \"{name}\" => {cost},");
     }
     out.push_str("        _ => 1,\n    }\n}\n\n");
     out.push_str("pub fn op_cost_u64(name: &str) -> u64 {\n    u64::from(op_cost(name))\n}\n\n");
@@ -136,7 +135,7 @@ fn write_op_costs(builtins: &[Builtin], path: &Path) {
          pub fn op_cost_emit(name: &str) -> u32 {\n    match name {\n",
     );
     for (name, cost) in &costs {
-        writeln!(out, "        \"{name}\" => {cost},").unwrap();
+        let _ = writeln!(out, "        \"{name}\" => {cost},");
     }
     out.push_str("        _ => 0,\n    }\n}\n");
     fs::write(path, out).expect("write op_costs.rs");
@@ -154,7 +153,7 @@ fn write_batch_mults(builtins: &[Builtin], path: &Path) {
          pub fn batch_multiplier(name: &str) -> Option<u32> {\n    match name {\n",
     );
     for (name, mult) in &mults {
-        writeln!(out, "        \"{name}\" => Some({mult}),").unwrap();
+        let _ = writeln!(out, "        \"{name}\" => Some({mult}),");
     }
     out.push_str("        _ => None,\n    }\n}\n\n");
     out.push_str(
@@ -167,7 +166,7 @@ fn write_batch_mults(builtins: &[Builtin], path: &Path) {
 fn write_registry(builtins: &[Builtin], path: &Path) {
     let mut out = String::from("pub static ALL_CATALOG_NAMES: &[&str] = &[\n");
     for b in builtins {
-        writeln!(out, "    \"{}\",", b.name).unwrap();
+        let _ = writeln!(out, "    \"{}\",", b.name);
     }
     out.push_str("];\n");
     fs::write(path, out).expect("write registry.rs");

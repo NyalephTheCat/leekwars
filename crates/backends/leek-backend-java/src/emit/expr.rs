@@ -228,7 +228,7 @@ impl Emitter<'_> {
             ExprKind::Ternary(c, t, e) => self.write_ternary(buf, c, t, e),
             ExprKind::Interval(iv) => self.write_interval(buf, iv),
             ExprKind::Cast(x, ty) => {
-                write!(buf, "(({}) ", java_class_name(ty)).unwrap();
+                let _ = write!(buf, "(({}) ", java_class_name(ty));
                 self.write_expr(buf, x, false);
                 buf.push(')');
             }
@@ -1642,7 +1642,7 @@ impl Emitter<'_> {
         if branch_ops && then_cost > 0 {
             buf.push_str("ops(");
             self.write_expr(buf, t, false);
-            write!(buf, ", {then_cost})").unwrap();
+            let _ = write!(buf, ", {then_cost})");
         } else {
             self.write_expr(buf, t, false);
         }
@@ -1650,7 +1650,7 @@ impl Emitter<'_> {
         if branch_ops && else_cost > 0 {
             buf.push_str("ops(");
             self.write_expr(buf, e, false);
-            write!(buf, ", {else_cost})").unwrap();
+            let _ = write!(buf, ", {else_cost})");
         } else {
             self.write_expr(buf, e, false);
         }
