@@ -213,6 +213,11 @@ pub fn lower_files(
         lo.enter_unit(unit);
         lo.predeclare_globals(unit.ast);
     }
+    // Bodiless signatures' parameter defaults, deferred out of the item
+    // loop so they see every file's globals (see
+    // `Lowerer::lower_pending_signatures`). Each entry carries its own
+    // unit's source and version, so this needs no per-unit loop.
+    lo.lower_pending_signatures();
 
     // Arm include expansion for passes 2 and 3. Without a graph
     // (`resolved_includes == None`, the prelude path) the lowerer keeps
@@ -302,6 +307,21 @@ pub(crate) struct Lowerer {
     /// `include(...)` statement expand inline at its site; `None` (the
     /// single-file and prelude entries) keeps it as a `Stmt::Include`.
     pub(crate) include_ctx: Option<IncludeExpander>,
+    /// Bodiless signatures whose parameters pass 1 deferred, in source
+    /// order. Drained by [`Lowerer::lower_pending_signatures`].
+    pub(crate) pending_signatures: Vec<PendingSignature>,
+}
+
+/// A bodiless signature that has its `DefId` but not yet its parameters.
+///
+/// Pass 1 allocates every item's `DefId` in source order, so the unit a
+/// signature came from is no longer current by the time its parameters are
+/// lowered — it carries the source and version its spans and literals need.
+pub(crate) struct PendingSignature {
+    pub(crate) source: SourceId,
+    pub(crate) version: Version,
+    pub(crate) def: DefId,
+    pub(crate) decl: ast::FnDecl,
 }
 
 #[derive(Default)]
@@ -349,6 +369,7 @@ impl Lowerer {
             file_decls: HashMap::new(),
             class_ctx: Vec::new(),
             include_ctx: None,
+            pending_signatures: Vec::new(),
         }
     }
 
@@ -368,6 +389,7 @@ impl Lowerer {
             }
         }
         self.predeclare_globals(file);
+        self.lower_pending_signatures();
         // Second pass — lower bodies (functions / classes) and the
         // main-block statements in source order.
         for child in file.syntax().children() {
@@ -509,6 +531,36 @@ impl Lowerer {
                 self.declare_global(t.text(), span, None);
             }
         }
+    }
+
+    /// Lower the parameters of every bodiless signature pass 1 deferred,
+    /// now that every item and every `global` is registered.
+    ///
+    /// A signature's parameter defaults are real expressions, and for an
+    /// *overloaded* signature pass 1 is the only place they are lowered:
+    /// [`Self::lower_function_body`] refills whichever declaration
+    /// `file_decls` remembers, which is the last same-named one. Lowering
+    /// them inside the item loop resolved them against a half-built
+    /// `file_decls` — a default naming a `global` declared anywhere in the
+    /// file missed and fell through to `Builtin`/`Unresolved`, so the read
+    /// reached the global's slot by name only and was invisible to every
+    /// `DefId`-keyed HIR pass (#53). Deferring to just after
+    /// [`Self::predeclare_globals`], still before any body, gives a default
+    /// the same view of the file every body has.
+    fn lower_pending_signatures(&mut self) {
+        let (source, version) = (self.source, self.version);
+        for pending in std::mem::take(&mut self.pending_signatures) {
+            self.source = pending.source;
+            self.version = pending.version;
+            self.push_function_scope();
+            let params = self.lower_params(pending.decl.syntax());
+            self.pop_scope();
+            if let Some(Def::Function(f)) = self.out.defs.get_mut(pending.def.0 as usize) {
+                f.params = params;
+            }
+        }
+        self.source = source;
+        self.version = version;
     }
 
     /// Register a `Def::Global` and expose its name via the file's

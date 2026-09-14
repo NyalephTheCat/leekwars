@@ -306,8 +306,8 @@ pub struct ForeachBind {
     /// - `Name(Local(def))` for a `var` declaration (a fresh local) or a
     ///   reused local / lambda capture;
     /// - `Name(Global(def))` for a declared global;
-    /// - `Name(Builtin(name))` for a name HIR can't resolve yet (a global
-    ///   declared after this body was lowered — a name-keyed global write);
+    /// - `Name(Builtin(name) | Unresolved(name))` for a name no binding
+    ///   claims — never a global, which lowering always pre-declares first;
     /// - `Field(this | class, name)` for a class field inside a method.
     pub target: Expr,
     pub name: String,

@@ -873,19 +873,20 @@ fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
 ///   before the initializing statement, and — when a function, method or
 ///   field initializer reads it — nothing before that statement can call into
 ///   user code (a call, `new`, or unspliced `include`). A read from a static
-///   field initializer (run before `main`) disqualifies outright;
-/// - its name is never used as a [`NameRef::Builtin`] / [`NameRef::Unresolved`].
+///   field initializer (run before `main`) disqualifies outright.
 ///
-/// The last rule is belt and braces, and is kept deliberately. Both of its
-/// preconditions for removal now hold: HIR pre-declares every file-level
-/// `global` before it lowers any body (`Lowerer::predeclare_globals`), so a
-/// use above its declaration resolves to `Global`; and `Builtin` now means a
-/// *real* builtin, with every other unclaimed name tagged `Unresolved`, so
-/// neither tag can name a candidate global — `resolve_class_or_builtin` was
-/// the last construction site that bypassed `file_decls`, and it no longer
-/// does. Deleting the rule is its own change (#53), kept out of the change
-/// that split the tags so that split stays observably inert. The rule costs
-/// only precision. The before-initializer ordering rule stays either way.
+/// Every rule keys on the global's `DefId`. That is sound only because a
+/// global can never be reached *by name*, and it now isn't: lowering
+/// registers every file-level `global` in `file_decls`
+/// (`Lowerer::predeclare_globals`) before it lowers a single
+/// expression — a bodiless signature's parameter defaults, the one pass-1
+/// holdout, are deferred past it — and `builtin_or_unresolved`, the only
+/// site that builds a [`NameRef::Builtin`] / [`NameRef::Unresolved`] from a
+/// real name, runs only after a `file_decls` miss. So neither tag can carry
+/// a candidate global's name, and the pass needs no by-name disqualification
+/// on top of its `DefId` rules (#53). `no_global_is_ever_tagged_by_name`
+/// pins the invariant; if a future lowering change reopens it, that test
+/// fails instead of this pass silently miscompiling.
 pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
     // 1. Candidate globals from their top-level initializers in `main`, with
     //    the index of the initializing statement. A global declared more than
@@ -918,19 +919,15 @@ pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
     }
 
     // 2. Disqualify any global written / address-taken / passed to a call /
-    //    bound by a foreach, scanning the whole file (lambda bodies included),
-    //    and any global whose name is also used by name (see the doc above).
+    //    bound by a foreach, scanning the whole file (lambda bodies included).
     let mut disq: HashSet<DefId> = HashSet::new();
-    let mut by_name: HashSet<String> = HashSet::new();
-    for_each_file_expr(hir, &mut |e| {
-        analyze_global_expr(e, &mut disq);
-        collect_name_keyed_uses(e, &mut by_name);
-    });
+    for_each_file_expr(hir, &mut |e| analyze_global_expr(e, &mut disq));
+    // Foreach binding targets need their own walk: `walk_stmt_child_exprs`
+    // yields only the iterated expression for a `Stmt::Foreach`.
     for_each_file_stmt(hir, &mut |s| {
         if let Stmt::Foreach(fe) = s {
             for bind in fe.key.iter().chain([&fe.value]) {
                 disq.extend(bind.global_def());
-                collect_name_keyed_uses(&bind.target, &mut by_name);
             }
         }
     });
@@ -974,14 +971,10 @@ pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
         });
     }
     candidates.retain(|d, (_, init_at)| {
-        let named = match hir.defs.get(d.0 as usize) {
-            Some(Def::Global(g)) => by_name.contains(&g.name),
-            _ => false,
-        };
         let read_early = first_main_read.get(d).is_some_and(|r| r < init_at)
             || static_init_reads.contains(d)
             || (body_reads.contains(d) && first_call < *init_at);
-        !disq.contains(d) && !named && !read_early
+        !disq.contains(d) && !read_early
     });
     if candidates.is_empty() {
         return 0;
@@ -1047,23 +1040,6 @@ fn collect_global_reads(e: &Expr, set: &mut HashSet<DefId>) {
             set.insert(*d);
         }
     });
-}
-
-/// Record the name of `e` when it is a by-name use — a `Builtin` or
-/// `Unresolved` name, as a value or as a call's callee. Shallow: callers
-/// already visit every expression.
-fn collect_name_keyed_uses(e: &Expr, names: &mut HashSet<String>) {
-    let nr = match &e.kind {
-        ExprKind::Name(nr) => nr,
-        ExprKind::Call(c) => match &c.callee {
-            Callee::Function(nr) => nr,
-            _ => return,
-        },
-        _ => return,
-    };
-    if let NameRef::Builtin(n) | NameRef::Unresolved(n) = nr {
-        names.insert(n.clone());
-    }
 }
 
 /// Whether running `s` can call into user code before the next statement:
@@ -1853,12 +1829,171 @@ mod tests {
     #[test]
     fn included_global_written_by_any_function_is_not_propagated() {
         // `lower_files` lowers every function body before any main block, so
-        // the write in `f` is by name even though `f` follows the include.
+        // `f` is lowered before the include is spliced — yet pass 1
+        // pre-declares the included file's globals, so the write resolves to
+        // `NameRef::Global` and the `DefId` rule catches it. Nothing here
+        // relies on the name.
         let mut hir = lower_with_include(
             "include(\"lib\")\nfunction f() { G = 2 }\nf()\nvar y = G\n",
             "global G = 1\n",
         );
+        let mut writes_global = false;
+        for_each_file_expr(&hir, &mut |e| {
+            if let ExprKind::Binary(op, lhs, _) = &e.kind
+                && op.is_assignment()
+            {
+                writes_global |= matches!(lhs.kind, ExprKind::Name(NameRef::Global(_)));
+            }
+        });
+        assert!(writes_global, "the write must resolve to the global");
         assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    // ----- the invariant that lets `propagate_const_globals` key on `DefId` -----
+
+    /// Every name in `hir` tagged `Builtin` / `Unresolved` — reads, callees,
+    /// and foreach binding targets, which no expression walk reaches.
+    fn names_used_by_name(hir: &HirFile) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut record = |e: &Expr| {
+            let nr = match &e.kind {
+                ExprKind::Name(nr) => nr,
+                ExprKind::Call(c) => match &c.callee {
+                    Callee::Function(nr) => nr,
+                    _ => return,
+                },
+                _ => return,
+            };
+            if let NameRef::Builtin(n) | NameRef::Unresolved(n) = nr {
+                out.push(n.clone());
+            }
+        };
+        for_each_file_expr(hir, &mut record);
+        for_each_file_stmt(hir, &mut |s| {
+            if let Stmt::Foreach(fe) = s {
+                for bind in fe.key.iter().chain([&fe.value]) {
+                    visit_expr_all(&bind.target, &mut record);
+                }
+            }
+        });
+        out
+    }
+
+    /// Assert no global's name is ever reached by name. `propagate_const_globals`
+    /// disqualifies purely on `DefId`, so a global that lowered to a
+    /// `Builtin`/`Unresolved` tag anywhere would have that use hidden from the
+    /// pass and could fold to a literal while a name-keyed store changes it.
+    fn assert_no_global_used_by_name(hir: &HirFile, what: &str) {
+        let by_name = names_used_by_name(hir);
+        for def in &hir.defs {
+            if let Def::Global(g) = def {
+                assert!(
+                    !by_name.contains(&g.name),
+                    "{what}: global `{}` is reached by name ({by_name:?})",
+                    g.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_global_is_ever_tagged_by_name() {
+        for (what, src) in [
+            ("read above its own `global`", "var y = G\nglobal G = 1\n"),
+            (
+                "read from a body above the `global`",
+                "function f() { return G }\nglobal G = 1\nf()\n",
+            ),
+            (
+                "`global` inside a function body",
+                "function f() { global G = 2 }\nf()\nvar y = G\n",
+            ),
+            (
+                "`global` inside a lambda body",
+                "var f = function() { global G = 2 }\nf()\nvar y = G\n",
+            ),
+            (
+                "bare foreach binding",
+                "global G = 1\nfor (G in [2, 3]) {}\nvar y = G\n",
+            ),
+            (
+                "`instanceof` operand",
+                "global G = 1\nvar b = 1 instanceof G\nvar y = G\n",
+            ),
+            (
+                "call callee",
+                "global G = 1\nfunction f() { return G() }\nvar y = G\n",
+            ),
+            (
+                "an overloaded bodiless signature's parameter default",
+                "global G = 1\nfunction f(x = G);\nfunction f(a, b);\nvar y = G\n",
+            ),
+        ] {
+            assert_no_global_used_by_name(&lower(src), what);
+        }
+    }
+
+    #[test]
+    fn no_included_global_is_ever_tagged_by_name() {
+        // `lower_files` lowers every body before any main block, so a body's
+        // reference to an *included* global is the hardest case for
+        // pre-declaration to get right.
+        let hir = lower_with_include(
+            "include(\"lib\")\nfunction f() { G = 2 }\nf()\nvar y = G\n",
+            "global G = 1\n",
+        );
+        assert_no_global_used_by_name(&hir, "included global written by a function");
+        let hir = lower_with_include(
+            "function f(x = G);\nfunction f(a, b);\ninclude(\"lib\")\nvar y = G\n",
+            "global G = 1\n",
+        );
+        assert_no_global_used_by_name(&hir, "included global in a signature default");
+    }
+
+    #[test]
+    fn a_signature_default_naming_a_global_resolves_to_it() {
+        // The earlier overload's parameters are only ever lowered in pass 1
+        // (`lower_function_body` refills the last same-named decl), so they
+        // are the one place a default could outrun `predeclare_globals`.
+        let hir = lower("global G = 1\nfunction f(x = G);\nfunction f(a, b);\n");
+        let Def::Function(f) = hir
+            .defs
+            .iter()
+            .find(|d| matches!(d, Def::Function(f) if f.params.len() == 1))
+            .expect("the one-parameter overload")
+        else {
+            panic!()
+        };
+        let default = f.params[0].default.as_ref().expect("has a default");
+        assert!(
+            matches!(default.kind, ExprKind::Name(NameRef::Global(_))),
+            "the default must resolve to the global, got {:?}",
+            default.kind
+        );
+    }
+
+    #[test]
+    fn a_signature_default_folds_with_the_global_it_names() {
+        // The end of that story: the default is a plain `DefId` read, so it
+        // is rewritten along with every other use when the global folds —
+        // rather than being left naming an initializer this pass just
+        // dropped.
+        let mut hir = lower("global G = 1\nfunction f(x = G);\nfunction f(a, b);\nvar y = G\n");
+        assert!(
+            propagate_const_globals(&mut hir) >= 2,
+            "both reads rewritten"
+        );
+        let Some(Def::Function(f)) = hir
+            .defs
+            .iter()
+            .find(|d| matches!(d, Def::Function(f) if f.params.len() == 1))
+        else {
+            panic!("the one-parameter overload")
+        };
+        assert_eq!(
+            f.params[0].default.as_ref().expect("has a default").kind,
+            ExprKind::Literal(Int(1))
+        );
     }
 
     // ----- dead-statement elimination -----
