@@ -14,6 +14,15 @@
 //! pushing an internal `PopMarker` frame onto the main work stack
 //! after the inner doc, so the pop happens at the natural moment
 //! the region's last work item is consumed.
+//!
+//! ## Raw text
+//!
+//! [`Doc::Verbatim`] holds source the formatter reproduces rather
+//! than lays out, so unlike [`Doc::Text`] it can carry its own
+//! newlines. The printer therefore re-bases `col` on the run's last
+//! line instead of adding the whole run's width, and [`fits`] treats
+//! a run that breaks its own line the way it treats a hard line
+//! (#198).
 
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, Version};
@@ -297,6 +306,20 @@ pub fn print(doc: &Doc, version: Version, opts: &FormatOptions) -> String {
                 out.push_str(s);
                 col += s.chars().count();
             }
+            Doc::Verbatim(s) => {
+                if separator_needed(&out, s, version) {
+                    out.push(' ');
+                    col += 1;
+                }
+                out.push_str(s);
+                // A raw run carries its own newlines, so the column
+                // for what follows is the width of its last line, not
+                // the width of the whole run (#198).
+                col = match s.rsplit_once('\n') {
+                    Some((_, tail)) => tail.chars().count(),
+                    None => col + s.chars().count(),
+                };
+            }
             Doc::Line => match mode {
                 Mode::Flat => {
                     out.push(' ');
@@ -428,6 +451,14 @@ fn next_rest_doc<'d>(rest: &[Frame<'d>], next: &mut usize) -> Option<(Mode, &'d 
 /// exactly that case; choosing `Mode::Flat` for its group would join
 /// the argument separators onto one line around a body that still
 /// breaks (#199).
+///
+/// A [`Doc::Verbatim`] whose raw text carries a newline is the same
+/// case for the same reason — flat mode cannot take a newline out of
+/// source the formatter has promised to reproduce — with one
+/// difference past the group: there the run's first newline ends the
+/// line, so only the text in front of it is charged to the budget,
+/// exactly as a hard line ends the walk with the budget intact
+/// (#198).
 fn fits(doc: &Doc, rest: &[Frame<'_>], width: usize) -> bool {
     let mut budget = isize::try_from(width).unwrap_or(isize::MAX);
     let mut stack: Vec<(Mode, &Doc)> = vec![(Mode::Flat, doc)];
@@ -461,6 +492,21 @@ fn fits(doc: &Doc, rest: &[Frame<'_>], width: usize) -> bool {
         match d {
             Doc::Nil => {}
             Doc::Text(s) => budget -= isize::try_from(s.chars().count()).unwrap_or(isize::MAX),
+            // A run that breaks its own line cannot be flattened, so
+            // inside the group it answers "no" the way a hard line
+            // does. Past the group it ends the line instead: only the
+            // text in front of its first newline is spent on the line
+            // being measured (#198).
+            Doc::Verbatim(s) => match s.split_once('\n') {
+                Some((head, _)) => {
+                    if !in_rest {
+                        return false;
+                    }
+                    budget -= isize::try_from(head.chars().count()).unwrap_or(isize::MAX);
+                    return budget >= 0;
+                }
+                None => budget -= isize::try_from(s.chars().count()).unwrap_or(isize::MAX),
+            },
             Doc::Line => match mode {
                 Mode::Flat => budget -= 1,
                 Mode::Break => return true, // line breaks reset width

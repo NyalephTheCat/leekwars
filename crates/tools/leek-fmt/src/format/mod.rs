@@ -14,7 +14,7 @@ use std::ops::Range;
 use leek_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::FormatOptions;
-use crate::doc::{Doc, concat, hardline, text};
+use crate::doc::{Doc, concat, hardline, text, verbatim};
 
 mod blocks;
 mod exprs;
@@ -457,7 +457,7 @@ pub(crate) fn has_unplaced_comment(node: &SyntaxNode) -> bool {
 /// and the enclosing formatter supplies its own spacing). The fallback
 /// for nodes with [unplaced comments](has_unplaced_comment).
 pub(crate) fn format_verbatim(node: &SyntaxNode) -> Doc {
-    let body = text(node.text().to_string().trim().to_string());
+    let body = verbatim(node.text().to_string().trim().to_string());
     // A parameter list's parens are usually tokens of the enclosing
     // function or lambda, whose formatter skips them and relies on
     // `format_param_list` to emit them — so the fallback must too.
@@ -477,7 +477,7 @@ pub(crate) fn format_verbatim(node: &SyntaxNode) -> Doc {
 /// the fact that any unmodified subtree round-trips, this gives
 /// idempotence on broken input.
 pub(crate) fn format_raw(node: &SyntaxNode) -> Doc {
-    text(node.text().to_string())
+    verbatim(node.text().to_string())
 }
 
 /// [`format_raw`] minus the node's edge *whitespace tokens*.
@@ -509,7 +509,7 @@ pub(crate) fn format_raw_trim_ws(node: &SyntaxNode) -> Doc {
     let base = node.text_range().start();
     let lo = usize::from(first.text_range().start() - base);
     let hi = usize::from(last.text_range().end() - base);
-    text(node.text().to_string()[lo..hi].to_string())
+    verbatim(node.text().to_string()[lo..hi].to_string())
 }
 
 // ---- Token / element helpers shared by sub-modules ----
@@ -766,9 +766,11 @@ pub(crate) fn comment_doc(t: &SyntaxToken) -> Doc {
     // file's own trailing newline(s). Re-laying it out turns that final
     // empty line into a ` *` continuation, which the next pass reads
     // back as real comment content and pads again — a line per pass
-    // (#419). Malformed input round-trips instead.
+    // (#419). Malformed input round-trips verbatim instead, so the
+    // newlines it carries move the printer's column rather than
+    // inflating it (#198).
     if t.kind() == S::BlockComment && !block_comment_is_closed(raw) {
-        return text(raw.to_string());
+        return verbatim(raw.to_string());
     }
     if !raw.contains('\n') {
         if with_ctx(|cx| cx.opts.pad_line_comments) {
