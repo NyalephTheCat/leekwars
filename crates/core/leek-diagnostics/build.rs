@@ -23,8 +23,11 @@ fn main() {
     // a grouping label in the generated `catalog!` invocation now
     // (categories are not part of the public API); it still fixes the
     // order entries are assigned their stable CATALOG indices.
+    // Append-only: a section's position fixes the stable CATALOG indices of
+    // every entry after it, so a new section goes on the end.
     let sections_order = [
-        "lexer", "pragma", "parser", "resolver", "types", "lowering", "manifest", "rewrite", "lint",
+        "lexer", "pragma", "parser", "resolver", "types", "lowering", "manifest", "rewrite",
+        "lint", "backend",
     ];
 
     let mut entries: Vec<Entry> = Vec::new();

@@ -140,6 +140,58 @@ default = true
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `miku run` used to answer a native compile failure with one line —
+/// `error: unsupported: integer ** with non-constant/large exponent` — and no
+/// hint of where in the file it was (NATIVE-15 / #173).
+#[test]
+fn run_reports_an_unsupported_construct_with_a_file_and_a_line() {
+    let dir = scratch_dir("run_unsupported");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "nope"
+version = "0.1.0"
+
+[backend.native]
+enable  = true
+default = true
+"#,
+    );
+    // `2 ** b` with an exponent the optimiser cannot fold is outside the
+    // native subset. It is on line 4.
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4\nvar b = 3;\nfor (var i = 0; i < 1; i++) { b = b + i; }\nreturn 2 ** b;\n",
+    );
+
+    let out = miku(&["run", "--color", "never"], &dir);
+    assert_eq!(out.status, 1, "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("error[E0600]"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("main.leek:4:8"),
+        "no file:line:col in stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("return 2 ** b;"),
+        "no source line in stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("while compiling `"),
+        "no function attribution in stderr: {}",
+        out.stderr
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn run_honors_file_version_pragma_over_manifest_language() {
     // Regression (#36): the project pre-scan never matched `// @version:N`,

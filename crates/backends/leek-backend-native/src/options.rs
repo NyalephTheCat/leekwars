@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+use leek_diagnostics::{Diagnostic, IntoDiagnostic, codes};
+use leek_span::Span;
+
 /// Default operation budget for a single CLI run (`miku run`, `miku test`
 /// without a `timeout` annotation, `leekc --emit run`): 20M, the in-game
 /// `OPERATIONS_LIMIT`.
@@ -271,31 +274,193 @@ impl NativeOptions {
     }
 }
 
+/// What kind of native failure this is. The discriminant, not the message,
+/// is what callers should branch on — `miku test` matching an expected
+/// runtime error, the corpus runner bucketing a skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NativeErrorKind {
+    /// A MIR construct the backend doesn't lower yet. The corpus
+    /// runner treats this as "skip", so the supported subset still
+    /// gets exercised as coverage grows.
+    Unsupported,
+    /// MIR lowering or Cranelift compilation failed.
+    Compile,
+    /// The compiled program trapped at runtime.
+    ///
+    /// This is the one kind with no source location and no catalog code, and
+    /// that is not an omission: the trap happens inside generated code, and
+    /// the value it reports is a *fight* error key (`TOO_MUCH_OPERATIONS`,
+    /// `ARRAY_OUT_OF_BOUND`, …) that the generator logs verbatim. Its
+    /// `message` is therefore exactly that key, unprefixed and with nothing
+    /// appended.
+    Runtime,
+}
+
+impl NativeErrorKind {
+    /// The `Display` prefix — kept byte-identical to the three strings this
+    /// error printed before it carried a location, because downstream code
+    /// has bucketed on them.
+    fn prefix(self) -> &'static str {
+        match self {
+            NativeErrorKind::Unsupported => "unsupported",
+            NativeErrorKind::Compile => "compile error",
+            NativeErrorKind::Runtime => "runtime error",
+        }
+    }
+}
+
 /// Outcome of a native compile/run.
+///
+/// Carries where it happened, not just what happened: the statement span the
+/// translator was on, the function that statement belongs to, and — for a MIR
+/// lowering failure — every `Diagnostic` the lowerer produced, so `miku` can
+/// render the same caret-under-the-construct output a frontend error gets
+/// instead of a bare line of text.
 ///
 /// `Clone` because a compiled module is cached for the length of a fight (see
 /// [`crate::CompiledProgram`]): an AI that fails to compile must still report
 /// that same failure on *every* turn, as it did back when each turn recompiled
 /// it, so the cached `Err` is handed out by clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NativeError {
-    /// A MIR construct the backend doesn't lower yet. The corpus
-    /// runner treats this as "skip", so the supported subset still
-    /// gets exercised as coverage grows.
-    Unsupported(String),
-    /// MIR lowering or Cranelift compilation failed.
-    Compile(String),
-    /// The compiled program trapped at runtime.
-    Runtime(String),
+pub struct NativeError {
+    pub kind: NativeErrorKind,
+    /// The bare reason, with no kind prefix and no location appended. For
+    /// [`NativeErrorKind::Runtime`] this is the fight error key itself.
+    pub message: String,
+    /// Where in the source the failure is, when the backend knows.
+    pub span: Option<Span>,
+    /// The user function being translated, when the backend knows.
+    pub function: Option<String>,
+    /// For a lowering failure, every diagnostic the lowerer produced —
+    /// not just the first, and each with its own span and catalog code.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl NativeError {
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(NativeErrorKind::Unsupported, message)
+    }
+
+    pub fn compile(message: impl Into<String>) -> Self {
+        Self::new(NativeErrorKind::Compile, message)
+    }
+
+    /// A runtime trap. `code` is the bare fight error key; nothing is
+    /// prepended or appended to it, because the generator logs it verbatim.
+    pub fn runtime(code: impl Into<String>) -> Self {
+        Self::new(NativeErrorKind::Runtime, code)
+    }
+
+    fn new(kind: NativeErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            span: None,
+            function: None,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// The bare reason. Use this instead of parsing [`Display`](std::fmt::Display).
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.message
+    }
+
+    /// The fight error key, when this is a runtime trap — `None` otherwise.
+    /// The key is the whole message, so a caller comparing against
+    /// `"TOO_MUCH_OPERATIONS"` never has to strip a prefix.
+    #[must_use]
+    pub fn runtime_code(&self) -> Option<&str> {
+        (self.kind == NativeErrorKind::Runtime).then_some(&*self.message)
+    }
+
+    /// Whether this is the "outside the native subset" outcome the corpus
+    /// runner treats as a skip.
+    #[must_use]
+    pub fn is_unsupported(&self) -> bool {
+        self.kind == NativeErrorKind::Unsupported
+    }
+
+    /// Pin the error to `span`, replacing any span already set.
+    #[must_use]
+    pub fn at(mut self, span: Span) -> Self {
+        self.span = Some(span);
+        self
+    }
+
+    /// Pin the error to `span` only if it has none — how an outer frame adds
+    /// function-level attribution without overwriting a statement-level span.
+    #[must_use]
+    pub fn or_span(mut self, span: Span) -> Self {
+        self.span.get_or_insert(span);
+        self
+    }
+
+    /// Name the function being translated, if not already named.
+    #[must_use]
+    pub fn in_fn(mut self, name: &str) -> Self {
+        if self.function.is_none() {
+            self.function = Some(name.to_string());
+        }
+        self
+    }
+
+    /// Attach the lowerer's own diagnostics.
+    #[must_use]
+    pub fn with_diagnostics(mut self, diagnostics: Vec<Diagnostic>) -> Self {
+        self.diagnostics = diagnostics;
+        self
+    }
+
+    /// Every diagnostic this error should render as: the carried lowering
+    /// diagnostics when there are any (each with its own code and span),
+    /// otherwise one built from the error itself.
+    #[must_use]
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        if self.diagnostics.is_empty() {
+            vec![self.clone().into_diagnostic()]
+        } else {
+            self.diagnostics.clone()
+        }
+    }
+}
+
+impl IntoDiagnostic for NativeError {
+    fn into_diagnostic(self) -> Diagnostic {
+        let code = match self.kind {
+            NativeErrorKind::Unsupported => codes::NATIVE_UNSUPPORTED,
+            // A runtime trap has no source location; it still needs *a* code
+            // to render, and "the native backend failed" is the truthful one.
+            NativeErrorKind::Compile | NativeErrorKind::Runtime => codes::NATIVE_COMPILE_FAILED,
+        };
+        let message = match self.kind {
+            NativeErrorKind::Unsupported => {
+                format!("the native backend does not support {}", self.message)
+            }
+            NativeErrorKind::Compile => format!("native compilation failed: {}", self.message),
+            NativeErrorKind::Runtime => format!("the program trapped: {}", self.message),
+        };
+        let mut diag = Diagnostic::error(code, self.span.unwrap_or_else(Span::synthetic), message);
+        if let Some(function) = self.function {
+            diag = diag.with_note(format!("while compiling `{function}`"));
+        }
+        diag
+    }
 }
 
 impl std::fmt::Display for NativeError {
+    /// Byte-identical to what this error printed before it carried a
+    /// location: `"unsupported: {message}"`, `"compile error: {message}"`,
+    /// `"runtime error: {message}"`.
+    ///
+    /// The location deliberately stays out of it. This string is a fight-log
+    /// parameter (`official::log_ai_error`) and a corpus skip bucket, both of
+    /// which compare it; the location belongs in the rendered
+    /// [`Diagnostic`](IntoDiagnostic::into_diagnostic), which is what a human
+    /// reads.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            NativeError::Unsupported(m) => write!(f, "unsupported: {m}"),
-            NativeError::Compile(m) => write!(f, "compile error: {m}"),
-            NativeError::Runtime(m) => write!(f, "runtime error: {m}"),
-        }
+        write!(f, "{}: {}", self.kind.prefix(), self.message)
     }
 }
 

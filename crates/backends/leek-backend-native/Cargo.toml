@@ -11,6 +11,9 @@ leek-mir      = { workspace = true }
 leek-hir      = { workspace = true }
 leek-types    = { workspace = true }
 leek-span     = { workspace = true }
+# `NativeError` carries its own `Diagnostic`s and converts into one, so a
+# backend failure reaches the user with a file, a line and a caret.
+leek-diagnostics = { workspace = true }
 # `NativeOptions::jit_for_input` reads the settled language settings from
 # the pipeline `Input`.
 leek-pipeline = { workspace = true }
@@ -18,7 +21,6 @@ leek-pipeline = { workspace = true }
 # live in `leek-runtime`; the native backend links them as C-ABI shims.
 # No dependency on any backend — `leek-runtime` is the shared library.
 leek-runtime  = { workspace = true }
-anyhow        = { workspace = true }
 # Per-run bump arena for value boxes — replaces a malloc-per-value with
 # chunked bump allocation that is reset (capacity-retaining) between runs.
 bumpalo       = "3"
@@ -37,6 +39,8 @@ target-lexicon       = { workspace = true }
 
 [dev-dependencies]
 leek-parser = { workspace = true }
+# `tests/error_locations.rs` asserts on the *rendered* diagnostic.
+leek-diagnostics = { workspace = true }
 leek-syntax = { workspace = true }
 leek-span   = { workspace = true }
 

@@ -21,13 +21,6 @@ leek-driver -> anyhow: pipeline construction folds three error kinds into one
 # `anyhow::Result` around it.
 leek-backends -> anyhow: registry entry points wrap the typed BackendError
 
-# `NativeError` exists (options.rs) but the JIT and object-file paths still
-# reach for `anyhow` around it — and `NativeError::Compile(String)` throws away
-# every MIR diagnostic but the first. Tracked as its own change, because
-# retyping it rewrites every native skip reason and those are the input to the
-# test-driver's failure ratchet.
-leek-backend-native -> anyhow: NativeError needs to carry diagnostics first
-
 # Scenario loading (TOML + IO + validation) and the fight runner.
 leek-scenario -> anyhow: scenario load/run errors not yet enumerated
 

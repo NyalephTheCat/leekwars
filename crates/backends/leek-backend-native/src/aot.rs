@@ -96,7 +96,7 @@ pub unsafe fn aot_finish_ref(ptr: *mut Value) -> Value {
 pub fn main_ret(hir: &HirFile, opts: &NativeOptions) -> Result<MainRet, NativeError> {
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
-        return Err(NativeError::Compile(format!(
+        return Err(NativeError::compile(format!(
             "MIR lowering failed: {}",
             first.message
         )));
@@ -105,7 +105,7 @@ pub fn main_ret(hir: &HirFile, opts: &NativeOptions) -> Result<MainRet, NativeEr
         .functions
         .iter()
         .position(|f| f.kind == leek_mir::ir::FunctionKind::Main)
-        .ok_or_else(|| NativeError::Compile("no main function".into()))?;
+        .ok_or_else(|| NativeError::compile("no main function"))?;
     let lang = Lang {
         version: opts.version,
         strict: opts.strict,
@@ -197,7 +197,7 @@ pub fn compile_to_executable(
     // carries empty tables for the AOT-able subset.)
     let (program, _) = leek_mir::lower_file(hir);
     if let Some(what) = aot_unsupported_reason(&program) {
-        return Err(NativeError::Unsupported(format!(
+        return Err(NativeError::unsupported(format!(
             "AOT (compile-to-executable) does not yet support {what}; \
              run it on the JIT instead — `miku run` or `leekc --emit native`"
         )));
@@ -254,12 +254,10 @@ pub fn compile_to_executable(
         })
         .stderr(Stdio::inherit());
     let status = cmd.status().map_err(|e| {
-        NativeError::Compile(format!("running `{cc}` (a C compiler on PATH?): {e}"))
+        NativeError::compile(format!("running `{cc}` (a C compiler on PATH?): {e}"))
     })?;
     if !status.success() {
-        return Err(NativeError::Compile(
-            "cc link of the AOT executable failed".into(),
-        ));
+        return Err(NativeError::compile("cc link of the AOT executable failed"));
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -400,18 +398,18 @@ fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
         .stderr(Stdio::inherit())
         .status()
         .map_err(|e| {
-            NativeError::Compile(format!("building static runtime (cargo on PATH?): {e}"))
+            NativeError::compile(format!("building static runtime (cargo on PATH?): {e}"))
         })?;
     if !status.success() {
-        return Err(NativeError::Compile(
-            "building the AOT static runtime failed".into(),
+        return Err(NativeError::compile(
+            "building the AOT static runtime failed",
         ));
     }
     let dir = target.join("release");
     if dir.join(archive).is_file() {
         Ok(dir)
     } else {
-        Err(NativeError::Compile(format!(
+        Err(NativeError::compile(format!(
             "static runtime archive not found at {}",
             dir.join(archive).display()
         )))
@@ -423,17 +421,17 @@ fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
 fn workspace_root() -> Result<PathBuf, NativeError> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR")); // crates/backends/leek-backend-native
     std::fs::canonicalize(here.join("../../.."))
-        .map_err(|e| NativeError::Compile(format!("locating workspace root: {e}")))
+        .map_err(|e| NativeError::compile(format!("locating workspace root: {e}")))
 }
 
 fn mkdirs(p: &Path) -> Result<(), NativeError> {
     std::fs::create_dir_all(p)
-        .map_err(|e| NativeError::Compile(format!("creating {}: {e}", p.display())))
+        .map_err(|e| NativeError::compile(format!("creating {}: {e}", p.display())))
 }
 
 fn write_file(p: &Path, contents: &str) -> Result<(), NativeError> {
     std::fs::write(p, contents)
-        .map_err(|e| NativeError::Compile(format!("writing {}: {e}", p.display())))
+        .map_err(|e| NativeError::compile(format!("writing {}: {e}", p.display())))
 }
 
 #[cfg(test)]

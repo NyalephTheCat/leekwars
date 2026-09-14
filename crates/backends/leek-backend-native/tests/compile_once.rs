@@ -7,9 +7,7 @@
 //! *compile-time constants* (boxed `Value` handles whose addresses are baked
 //! into the generated code) must survive the per-run box sweep.
 
-use leek_backend_native::{
-    NativeError, NativeOptions, compile_program, jit_compiles, reset_jit_compiles, run,
-};
+use leek_backend_native::{NativeOptions, compile_program, jit_compiles, reset_jit_compiles, run};
 use leek_hir::lower_file_versioned;
 use leek_parser::{
     ast::{AstNode, SourceFile},
@@ -73,7 +71,7 @@ fn an_unsupported_program_fails_the_same_way_every_time() {
     reset_jit_compiles();
     let first = compile_program(&h, &opts).expect_err("unsupported");
     let second = compile_program(&h, &opts).expect_err("unsupported");
-    assert!(matches!(first, NativeError::Unsupported(_)));
+    assert!(first.is_unsupported());
     // `Clone`/`PartialEq` are what let a fight hand the same error to every
     // turn instead of recompiling to re-derive it.
     assert_eq!(first, second);

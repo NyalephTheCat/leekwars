@@ -3,7 +3,7 @@
 use super::{
     BlockId, Const, InstBuilder, IntCC, LocalId, LocalKind, NativeError, Operand, Place, Rvalue,
     Statement, Terminator, TrapCode, Tx, Type, ValTy, Value, map_value_valty, no_coalesce,
-    receiver_class, resolve_static_field, types, unsupported,
+    receiver_class, resolve_static_field, types,
 };
 
 impl Tx<'_, '_> {
@@ -256,7 +256,7 @@ impl Tx<'_, '_> {
             {
                 Ok(())
             }
-            Statement::Assign(p, _) => Err(unsupported(format!("assign to {p:?}"))),
+            Statement::Assign(p, _) => Err(self.unsupported(format!("assign to {p:?}"))),
             // Static op charge inserted by the `leek-charge` HIR pass (statement
             // costs — assignments, returns, … — that aren't charged dynamically
             // by the binary/branch/builtin sites). The interpreter executes
@@ -320,10 +320,10 @@ impl Tx<'_, '_> {
                 let v = self.coerce(v, vt, ValTy::Ref)?;
                 return self.static_field_set(owner, name, v);
             }
-            return Err(unsupported("class reference index assignment"));
+            return Err(self.unsupported("class reference index assignment"));
         }
         if self.var_tys[base.0 as usize] != ValTy::Ref {
-            return Err(unsupported("index assign to non-composite"));
+            return Err(self.unsupported("index assign to non-composite"));
         }
         // Honor `final` fields when the base is a known class instance: a
         // constant field name no-ops if final (and the write is external);
@@ -345,9 +345,9 @@ impl Tx<'_, '_> {
                 _ if self.owning_class != Some(c.def_id)
                     && c.field_layout.iter().any(|fs| fs.is_final) =>
                 {
-                    return Err(unsupported(
-                        "dynamic index-write on instance with final field",
-                    ));
+                    return Err(
+                        self.unsupported("dynamic index-write on instance with final field")
+                    );
                 }
                 _ => {}
             }
@@ -411,7 +411,7 @@ impl Tx<'_, '_> {
         // `C.staticField = …` — write to per-class static storage.
         if let Some(cls) = self.classref_locals.get(&base).cloned() {
             let Some((owner, field)) = resolve_static_field(self.program, &cls, name) else {
-                return Err(unsupported("class reference member assignment"));
+                return Err(self.unsupported("class reference member assignment"));
             };
             // A `final` static field, or one inaccessible from here, ignores
             // the write (matching the interpreter).
@@ -423,7 +423,7 @@ impl Tx<'_, '_> {
             return self.static_field_set(owner, name, v);
         }
         if self.var_tys[base.0 as usize] != ValTy::Ref {
-            return Err(unsupported("field assign to non-object"));
+            return Err(self.unsupported("field assign to non-object"));
         }
         // A `final` field ignores writes (its initializer already set it).
         if self.is_final_field(base, name) {
@@ -508,7 +508,7 @@ impl Tx<'_, '_> {
         // cell) and jumps to the continuation rather than returning.
         if let Some(&(param, cont)) = self.default_fill.get(&block_id) {
             let Terminator::Return(Some(op)) = t else {
-                return Err(unsupported("default-init block: non-return terminator"));
+                return Err(self.unsupported("default-init block: non-return terminator"));
             };
             let (v, vt) = self.operand(op)?;
             let target = self.var_tys[param.0 as usize];
@@ -630,13 +630,13 @@ impl Tx<'_, '_> {
                 }
                 let (disc, dty) = self.operand(discriminant)?;
                 if dty == ValTy::Real {
-                    return Err(unsupported("switch on real"));
+                    return Err(self.unsupported("switch on real"));
                 }
                 for (k, target) in arms {
                     let key = match k {
                         Const::Int(n) => *n,
                         Const::Bool(x) => *x as i64,
-                        other => return Err(unsupported(format!("switch on {other:?}"))),
+                        other => return Err(self.unsupported(format!("switch on {other:?}"))),
                     };
                     let kv = self.b.ins().iconst(types::I64, key);
                     let eq = self.b.ins().icmp(IntCC::Equal, disc, kv);

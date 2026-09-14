@@ -1,6 +1,6 @@
 //! End-to-end JIT tests: source → HIR → Cranelift → run.
 
-use leek_backend_native::{NativeArtifact, NativeEmit, NativeError, NativeOptions, compile, run};
+use leek_backend_native::{NativeArtifact, NativeEmit, NativeOptions, compile, run};
 use leek_hir::lower_file_versioned;
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_span::SourceId;
@@ -682,13 +682,13 @@ fn unsupported_constructs_are_reported() {
     // threaded through a `Callee::Method` call — which the cell-threading
     // (`byref_cells_threadable`, restricted to plain `Callee::Function`) does
     // not handle. Native must skip (report Unsupported), never miscompile.
-    assert!(matches!(
+    assert!(
         run(
             &hir("class A { m(@x) { x = 9 } } var o = new A() var n = 5 o.m(n) return n"),
             &NativeOptions::debug().with_lang(1, false)
-        ),
-        Err(NativeError::Unsupported(_))
-    ));
+        )
+        .is_err_and(|e| e.is_unsupported())
+    );
 }
 
 #[test]

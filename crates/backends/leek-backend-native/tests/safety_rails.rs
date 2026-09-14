@@ -39,7 +39,7 @@ fn a_panicking_shim_becomes_a_runtime_error_instead_of_aborting() {
     set_game_runtime(None);
     std::panic::set_hook(hook);
     match out {
-        Err(NativeError::Runtime(code)) => assert_eq!(code, "INTERNAL_PANIC"),
+        Err(e) if e.runtime_code().is_some() => assert_eq!(e.reason(), "INTERNAL_PANIC"),
         other => panic!("expected INTERNAL_PANIC, got {other:?}"),
     }
 }
@@ -77,7 +77,7 @@ fn no_game_action_after_the_op_budget_runs_out_mid_block() {
         .with_op_limit(100);
     let (out, calls) = run_recording(&src, &opts);
     assert!(
-        matches!(&out, Err(NativeError::Runtime(c)) if c == "TOO_MUCH_OPERATIONS"),
+        matches!(&out, Err(e) if e.runtime_code() == Some("TOO_MUCH_OPERATIONS")),
         "expected TOO_MUCH_OPERATIONS, got {out:?}"
     );
     assert!(
@@ -92,7 +92,7 @@ fn no_game_action_after_a_strict_out_of_bounds_write() {
     let opts = NativeOptions::release().with_lang(4, true);
     let (out, calls) = run_recording(src, &opts);
     assert!(
-        matches!(&out, Err(NativeError::Runtime(c)) if c == "ARRAY_OUT_OF_BOUND"),
+        matches!(&out, Err(e) if e.runtime_code() == Some("ARRAY_OUT_OF_BOUND")),
         "expected ARRAY_OUT_OF_BOUND, got {out:?}"
     );
     assert!(
@@ -107,14 +107,17 @@ fn game_actions_before_an_error_still_happen() {
     let src = "useWeapon(1) var a = [1] a[5] = 2 moveToward(3) return a";
     let opts = NativeOptions::release().with_lang(4, true);
     let (out, calls) = run_recording(src, &opts);
-    assert!(matches!(out, Err(NativeError::Runtime(_))), "got {out:?}");
+    assert!(
+        matches!(&out, Err(e) if e.runtime_code().is_some()),
+        "got {out:?}"
+    );
     assert_eq!(calls, vec!["useWeapon".to_string()]);
 }
 
 fn outcome(src: &str, opts: &NativeOptions) -> String {
     match run(&hir(src), opts) {
         Ok(v) => v.to_string(),
-        Err(NativeError::Runtime(code)) => format!("runtime error {code}"),
+        Err(e) if e.runtime_code().is_some() => format!("runtime error {}", e.reason()),
         Err(e) => format!("other error: {e}"),
     }
 }

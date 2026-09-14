@@ -530,11 +530,11 @@ fn native_run(
     }));
     match result {
         Ok(Ok(v)) => NativeRun::Value(v.to_string()),
-        Ok(Err(leek_backend_native::NativeError::Runtime(m))) => {
+        Ok(Err(e)) if e.runtime_code().is_some() => {
             // A clean compile that trapped at runtime. Log for triage; the
             // caller distinguishes this from `Unsupported` to verify
             // runtime-error expectations.
-            eprintln!("native runtime error on case {}: {m}", case.id);
+            eprintln!("native runtime error on case {}: {}", case.id, e.reason());
             NativeRun::RuntimeError
         }
         Ok(Err(_)) => NativeRun::Unsupported,
@@ -1092,11 +1092,12 @@ fn native_skip_reason(case: &TestCase, runner: &CaseRunner) -> Option<String> {
 
 /// Collapse a [`leek_backend_native::NativeError`] into a stable bucket
 /// key by dropping the case-specific tail (identifiers, `Debug` payloads).
+///
+/// Reads `reason()` rather than splitting `Display` on the first `": "`: the
+/// bare reason is now a field, and the `Display` form has grown a second
+/// line carrying the location, which that split was never going to survive.
 fn normalize_native_skip(e: &leek_backend_native::NativeError) -> String {
-    let msg = e.to_string();
-    // Drop the error-kind prefix ("unsupported: ", "compile error: ", …)
-    // to get the bare reason.
-    let reason = msg.split_once(": ").map_or(&*msg, |(_, rest)| rest);
+    let reason = e.reason();
     // Drop any case-specific tail (a concrete identifier or `Debug` blob)
     // so similar reasons bucket together.
     let head = reason.split([':', '(']).next().unwrap_or(reason).trim();
@@ -1129,7 +1130,7 @@ fn compile_error_outcome(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
         && let Some(hir) = ctx.hir.as_deref()
     {
         // The native JIT surfaces a runtime error (e.g. ARRAY_OUT_OF_BOUND,
-        // TOO_MUCH_OPERATIONS) as `Err(NativeError::Runtime(..))`. The budget
+        // TOO_MUCH_OPERATIONS) as `Err(NativeError::runtime(..))`. The budget
         // matches `native_error_outcome`: it must stay *small*, because a
         // terminating program (e.g. `rec(10000)` under upstream `max_ops(1000)`)
         // has to trip the budget before it completes — op-charge coalescing
@@ -1140,10 +1141,7 @@ fn compile_error_outcome(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
             leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
         opts.op_limit = 10_000;
         opts.emit = leek_backend_native::NativeEmit::Jit;
-        if matches!(
-            leek_backend_native::compile(hir, &opts),
-            Err(leek_backend_native::NativeError::Runtime(_))
-        ) {
+        if leek_backend_native::compile(hir, &opts).is_err_and(|e| e.runtime_code().is_some()) {
             return CaseOutcome::PassExpectedError;
         }
     }
@@ -1481,5 +1479,45 @@ fn run_java_emit(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
     match java_emit(case, hir) {
         JavaEmitRun::Emitted { .. } => CaseOutcome::Pass,
         JavaEmitRun::Panicked => CaseOutcome::FailWrongValue,
+    }
+}
+
+#[cfg(test)]
+mod skip_bucket_tests {
+    use super::normalize_native_skip;
+    use leek_backend_native::NativeError;
+
+    /// The bucket key is derived from `reason()` now, not from splitting
+    /// `Display` on its first `": "`. These are the keys the histogram
+    /// produced before that change; a location on the error must not move
+    /// any of them.
+    #[test]
+    fn bucket_keys_are_unchanged_by_the_error_carrying_a_location() {
+        let span = leek_span::Span::new(leek_span::SourceId::new(1).unwrap(), 4, 9);
+        let cases = [
+            ("builtin getWeapon", "builtin <name>"),
+            ("assign to a field of an instance", "assign to <place>"),
+            ("const other-kind", "const <other>"),
+            ("rvalue cast: to class", "rvalue cast"),
+            ("real binary op <=>", "real binary op <other>"),
+            ("binary op <=>", "binary op <other>"),
+            ("sqrt expected 1 arg", "sqrt: arity != 1"),
+            ("switch on real", "switch on real"),
+        ];
+        for (reason, want) in cases {
+            let bare = NativeError::unsupported(reason);
+            assert_eq!(normalize_native_skip(&bare), want, "bare: {reason}");
+            // The same error, now carrying a span and a function name.
+            let located = NativeError::unsupported(reason).at(span).in_fn("helper");
+            assert_eq!(normalize_native_skip(&located), want, "located: {reason}");
+        }
+    }
+
+    /// A compile failure buckets on its own reason too — the kind prefix was
+    /// never part of the key.
+    #[test]
+    fn a_compile_failure_buckets_without_its_kind_prefix() {
+        let e = NativeError::compile("no main function");
+        assert_eq!(normalize_native_skip(&e), "no main function");
     }
 }

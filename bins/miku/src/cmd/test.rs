@@ -211,7 +211,7 @@ fn run_one(
     let budget = chosen_budget.unwrap_or(leek_backend_native::DEFAULT_OP_BUDGET);
     // Execute via the native JIT (the interpreter backend was removed), at the
     // input's settled version and strict mode. A runtime error surfaces as
-    // `Err(NativeError::Runtime(..))`.
+    // `Err(NativeError::runtime(..))`.
     let mut opts = leek_backend_native::NativeOptions::jit_for_input(result.input(), budget);
     crate::util::apply_native_settings(&mut opts, &project.manifest);
     let run = match leek_backend_native::compile(hir.0.as_ref(), &opts) {
@@ -246,7 +246,7 @@ fn judge(
         (Expectation::CompileError(code), _) => fail(format!(
             "expected compile error {code} but the program compiled"
         )),
-        (Expectation::RuntimeError(want), Err(NativeError::Runtime(got))) if got == *want => {
+        (Expectation::RuntimeError(want), Err(e)) if e.runtime_code() == Some(want.as_str()) => {
             TestOutcome::Pass
         }
         (Expectation::RuntimeError(want), Err(e)) => {
@@ -256,7 +256,8 @@ fn judge(
             "expected runtime error {want} but the program ran clean"
         )),
         (Expectation::Fail, Ok(_)) => fail("expected failure but program ran clean".into()),
-        (Expectation::Fail, Err(NativeError::Runtime(code))) => {
+        (Expectation::Fail, Err(e)) if e.runtime_code().is_some() => {
+            let code = e.reason();
             if code != BUDGET_EXHAUSTED || budget_chosen {
                 TestOutcome::Pass
             } else {
@@ -498,7 +499,7 @@ mod tests {
     use super::*;
 
     fn runtime(code: &str) -> Result<String, NativeError> {
-        Err(NativeError::Runtime(code.into()))
+        Err(NativeError::runtime(code))
     }
 
     fn is_fail(outcome: &TestOutcome) -> bool {
@@ -558,7 +559,7 @@ mod tests {
         assert!(is_fail(&judge(
             &loose,
             loose.timeout.is_some(),
-            Err(NativeError::Compile("boom".into()))
+            Err(NativeError::compile("boom"))
         )));
         assert!(is_fail(&judge(
             &loose,
