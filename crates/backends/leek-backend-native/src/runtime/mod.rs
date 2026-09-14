@@ -7,6 +7,31 @@
 //! shortly after). The shims box/unbox scalars and implement array
 //! operations by delegating to the shared `leek_runtime` value logic, so
 //! the semantics match the interpreter.
+//!
+//! # Handle safety contract
+//!
+//! A shim that takes a handle should be an `unsafe extern "C" fn` whose
+//! `# Safety` section defers to this one contract (values.rs is converted;
+//! calls.rs / collections.rs / objects.rs are not yet — see #114). For each
+//! handle parameter the caller — JIT'd or AOT'd code, or another shim —
+//! promises:
+//!
+//! 1. **Provenance.** The pointer was produced by [`handle`] (live until
+//!    [`free_run_boxes`] ends the run) or by [`box_value`] / `const_handle`
+//!    (live until the owning module's `ConstArena` is dropped). Null is never a
+//!    handle, except where a shim documents it (`leek_interval`'s open bounds).
+//! 2. **Alignment and initialisation.** It points at a fully initialised
+//!    `Value` — guaranteed by (1), since both allocators bump-allocate a
+//!    `Value` and never hand back the storage.
+//! 3. **No write while borrowed.** The runtime is single-threaded per run, and
+//!    no write through the handle (or through an aliasing handle) happens while
+//!    a borrow taken by [`val`] is alive. Two parameters CAN be the same handle
+//!    — `a[a] = x` passes one as both base and index — which is why
+//!    [`objects::set_member`] takes its index raw and keeps every borrow
+//!    derived from it inside a statement that writes nothing.
+//!
+//! Shims that take only scalars (`leek_box_int`, `leek_map_new`, …) promise
+//! nothing and stay safe.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -32,7 +57,11 @@ pub use values::*;
 /// A JIT-compiled lambda body, called with the uniform ABI
 /// `(argv, argc) -> result` where `argv` is `captured ++ args`, each a boxed
 /// `*mut Value` handle, and the result is a boxed handle.
-type LambdaFn = extern "C" fn(*const *mut Value, i64) -> *mut Value;
+///
+/// `unsafe`, because calling one runs machine code the borrow checker has never
+/// seen: the address must come from the `lambda_fns` table of the module
+/// currently executing, and `argv` must point at `argc` live handles.
+type LambdaFn = unsafe extern "C" fn(*const *mut Value, i64) -> *mut Value;
 
 /// Per-run storage for every value handle: a bump arena that owns the `Value`s
 /// plus the list of pointers to drop. Held in ONE thread-local so the hot
@@ -227,12 +256,20 @@ fn handle(v: Value) -> *mut Value {
 
 /// Borrow the `Value` behind a handle.
 ///
+/// The borrow is tied to the *handle variable*, not to an inferred (and
+/// therefore unbounded) lifetime: `val(&h)` reborrows through `h`, so the
+/// resulting `&Value` cannot outlive the shim frame that received `h`, and the
+/// borrow checker rejects a write through `h` while it is live.
+///
 /// # Safety
-/// `p` must be a handle previously produced by one of these shims (and
-/// still live — handles are leaked, so they always are).
+/// `*p` must satisfy the [module-level handle contract](self#handle-safety-contract):
+/// a live handle, not written through (directly or via an aliasing handle)
+/// while the returned borrow is alive.
 #[inline]
-unsafe fn val<'a>(p: *mut Value) -> &'a Value {
-    unsafe { &*p }
+unsafe fn val(p: &*mut Value) -> &Value {
+    // SAFETY: caller's contract — `*p` is a live handle, and the reborrow the
+    // signature ties to `p` keeps the result inside the caller's frame.
+    unsafe { &**p }
 }
 
 /// Box an arbitrary compile-time-known `Value` (e.g. a builtin constant
@@ -318,6 +355,7 @@ pub fn take_const_arena() -> ConstArena {
 /// # Safety
 /// `p` must be a live handle (created by [`handle`] and not yet swept).
 pub unsafe fn read_handle(p: *mut Value) -> Value {
+    // SAFETY: caller's contract — `p` is a live, un-swept handle.
     unsafe { (*p).clone() }
 }
 

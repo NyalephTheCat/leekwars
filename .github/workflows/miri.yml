@@ -1,0 +1,48 @@
+name: Miri
+
+# Undefined-behaviour check over the native runtime's pointer-handling code.
+# The `leek_*` shims are ordinary Rust functions, so their unit tests run under
+# Miri even though the JIT'd code they normally serve cannot: Miri interprets
+# MIR and has no way to execute machine code Cranelift emitted. The filter is
+# therefore doubly narrow — `--lib` (every test under
+# `crates/backends/leek-backend-native/tests/` compiles AND runs a program) and
+# then `runtime::`, which excludes the handful of unit tests that JIT
+# (`lib.rs`'s arena-steady-state test, `game::`'s re-entrancy test).
+#
+# Non-blocking for now (`continue-on-error`): the job is new, and the FFI
+# surface is only partly converted to documented `unsafe` (see #114). Flip it
+# to blocking once the remaining runtime modules land.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: miri-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  miri:
+    name: miri (leek-backend-native runtime shims)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      # Miri only ships on nightly. Install it as its own toolchain and invoke
+      # it as `cargo +nightly`: rust-toolchain.toml stays the exact pin that
+      # `cargo xtask check-toolchain` enforces, and nothing else in CI moves.
+      - name: Install nightly + Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          cargo +nightly miri setup
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+      - name: cargo +nightly miri test -p leek-backend-native --lib runtime::
+        run: cargo +nightly miri test -p leek-backend-native --lib runtime::

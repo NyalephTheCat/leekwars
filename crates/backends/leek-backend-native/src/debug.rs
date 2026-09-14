@@ -108,7 +108,13 @@ pub fn render_frame_vars(desc: usize, values: usize) -> Vec<(String, String)> {
         .iter()
         .enumerate()
         .map(|(i, desc)| {
-            let raw = unsafe { *slots.add(i) };
+            // SAFETY: `i < table.vars.len()`, and `values` points at that
+            // many i64 slots (see the borrow of `table` above), so the
+            // offset is in bounds.
+            let slot = unsafe { slots.add(i) };
+            // SAFETY: the parked debuggee's frame is alive and the slot is
+            // an initialised i64.
+            let raw = unsafe { *slot };
             (desc.name.clone(), render_slot(desc.kind, raw))
         })
         .collect()

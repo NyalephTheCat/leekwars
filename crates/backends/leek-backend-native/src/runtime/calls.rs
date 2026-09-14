@@ -2,6 +2,12 @@
 //! builtin dispatch (`leek_builtin0..4`, game builtins), and the
 //! [`NativeHost`] that adapts the shared builtin machinery to native.
 
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "FFI conversion pending — see #114"
+)]
+
 use super::{
     CLASS_CTOR_THUNK, CLASS_STRING_METHOD, DISPATCH, GLOBALS, LambdaFn, NATIVE_RNG, aborting,
     charge_builtin_ops, handle, read_handle, val,
@@ -256,7 +262,10 @@ shim! {
         ncap: i64,
     ) -> *mut Value {
         let captured: Vec<Value> = (0..ncap as isize)
-            .map(|i| unsafe { val(*caps.offset(i)) }.clone())
+            .map(|i| {
+                let p = unsafe { *caps.offset(i) };
+                unsafe { val(&p) }.clone()
+            })
             .collect();
         handle(Value::Function(Function::Lambda(std::rc::Rc::new(
             LambdaCapture {
@@ -285,7 +294,7 @@ shim! {
         argc: i64,
         version: i64,
     ) -> *mut Value {
-        let Some(method) = builtin_name_ref(name) else {
+        let Some(method) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         // Instance method on the receiver's runtime class — the hot path. Build the
@@ -293,7 +302,7 @@ shim! {
         // handles, skipping the clone-to-`Value`-then-rebox round-trip: the callee
         // shares the same boxed values (the prior `.clone()` was an `Rc` clone, not
         // a deep copy — so field mutations were already visible to the caller).
-        if let Value::Instance(inst) = unsafe { val(receiver) } {
+        if let Value::Instance(inst) = unsafe { val(&receiver) } {
             let class_def = inst.borrow().class.0;
             // One TLS access resolves the method index AND its address+arity.
             if let Some((addr, nparams)) = DISPATCH.with(|c| {
@@ -311,7 +320,7 @@ shim! {
                 // Pad missing params with null; truncate any surplus args.
                 handles.resize_with(nparams, || handle(Value::Null));
                 let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
-                return f(handles.as_ptr(), handles.len() as i64);
+                return unsafe { f(handles.as_ptr(), handles.len() as i64) };
             }
         }
         // Builtin method fallback (an unknown name / non-number receiver yields null,
@@ -320,11 +329,12 @@ shim! {
         if aborting() {
             return handle(Value::Null);
         }
-        let recv = unsafe { val(receiver) }.clone();
+        let recv = unsafe { val(&receiver) }.clone();
         let mut all = Vec::with_capacity(argc as usize + 1);
         all.push(recv);
         for i in 0..argc as isize {
-            all.push(unsafe { val(*argv.offset(i)) }.clone());
+            let p = unsafe { *argv.offset(i) };
+            all.push(unsafe { val(&p) }.clone());
         }
         let mut host = NativeHost {
             version: version as u8,
@@ -341,12 +351,15 @@ shim! {
         version: i64,
     ) -> *mut Value {
         let args: Vec<Value> = (0..argc as isize)
-            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .map(|i| {
+                let p = unsafe { *argv.offset(i) };
+                unsafe { val(&p) }.clone()
+            })
             .collect();
         let mut host = NativeHost {
             version: version as u8,
         };
-        let callee_v = unsafe { val(callee) };
+        let callee_v = unsafe { val(&callee) };
         handle(dispatch_call_value(&mut host, callee_v, args))
     }
 }
@@ -461,7 +474,7 @@ shim! {
     /// interpreter's dynamic resolution: the global's value if one has been
     /// assigned, otherwise the builtin handle (constant or `Function::Builtin`).
     pub extern "C" fn leek_ref_or_builtin(name: *mut Value) -> *mut Value {
-        let Some(n) = builtin_name(name) else {
+        let Some(n) = (unsafe { builtin_name(name) }) else {
             return handle(Value::Null);
         };
         if let Some(h) = GLOBALS.with(|g| g.borrow().get(&n).copied()) {
@@ -484,17 +497,20 @@ shim! {
         argc: i64,
         version: i64,
     ) -> *mut Value {
-        let Some(n) = builtin_name_ref(name) else {
+        let Some(n) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let args: Vec<Value> = (0..argc as isize)
-            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .map(|i| {
+                let p = unsafe { *argv.offset(i) };
+                unsafe { val(&p) }.clone()
+            })
             .collect();
         let mut host = NativeHost {
             version: version as u8,
         };
         if let Some(g) = GLOBALS.with(|g| g.borrow().get(n).copied()) {
-            let gv = unsafe { val(g) }.clone();
+            let gv = unsafe { val(&g) }.clone();
             return handle(dispatch_call_value(&mut host, &gv, args));
         }
         if aborting() {
@@ -510,8 +526,11 @@ shim! {
 /// Read a builtin's name out of a (boxed string) handle, cloned. For sites
 /// that need an owned `String` (a `HashMap` key, a `Function::Builtin`); the
 /// hot dispatch shims use [`builtin_name_ref`] instead.
-pub(super) fn builtin_name(h: *mut Value) -> Option<String> {
-    match unsafe { val(h) } {
+///
+/// # Safety
+/// `h` must satisfy the [module-level handle contract](super#handle-safety-contract).
+pub(super) unsafe fn builtin_name(h: *mut Value) -> Option<String> {
+    match unsafe { val(&h) } {
         Value::String(s) => Some(s.as_ref().clone()),
         _ => None,
     }
@@ -520,11 +539,15 @@ pub(super) fn builtin_name(h: *mut Value) -> Option<String> {
 /// Borrow a builtin's name out of a (boxed string) handle WITHOUT cloning — for
 /// the hot dispatch shims, whose name only flows into `&str` consumers
 /// (`charge_builtin_ops` / `call_builtin` / `game::dispatch` / a `HashMap<String,
-/// _>` lookup, which borrows `str`). The handle is a live arena box that
-/// outlives the call and the bump arena never moves an existing allocation, so
-/// the borrow stays valid for the whole dispatch (mirrors [`val`]'s unbounded
-/// lifetime). Removes a `String` allocation on every `push`/`abs`/`getCell`/… .
-pub(super) fn builtin_name_ref<'a>(h: *mut Value) -> Option<&'a str> {
+/// _>` lookup, which borrows `str`). Like [`val`], the borrow is tied to the
+/// *handle variable*: the handle is a live arena box and the bump arena never
+/// moves an existing allocation, so the name stays valid for as long as the
+/// shim frame holds the handle — the whole dispatch. Removes a `String`
+/// allocation on every `push`/`abs`/`getCell`/… .
+///
+/// # Safety
+/// `*h` must satisfy the [module-level handle contract](super#handle-safety-contract).
+pub(super) unsafe fn builtin_name_ref(h: &*mut Value) -> Option<&str> {
     match unsafe { val(h) } {
         Value::String(s) => Some(s.as_str()),
         _ => None,
@@ -540,11 +563,14 @@ shim! {
         argv: *const *mut Value,
         argc: i64,
     ) -> *mut Value {
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let args: Vec<Value> = (0..argc as isize)
-            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .map(|i| {
+                let p = unsafe { *argv.offset(i) };
+                unsafe { val(&p) }.clone()
+            })
             .collect();
         handle(leek_runtime::construct_builtin_class(name, args))
     }
@@ -566,11 +592,14 @@ shim! {
         if aborting() {
             return handle(Value::Null);
         }
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let args: Vec<Value> = (0..argc as isize)
-            .map(|i| unsafe { val(*argv.offset(i)) }.clone())
+            .map(|i| {
+                let p = unsafe { *argv.offset(i) };
+                unsafe { val(&p) }.clone()
+            })
             .collect();
         handle(crate::game::dispatch(name, &args))
     }
@@ -578,7 +607,7 @@ shim! {
 
 shim! {
     pub extern "C" fn leek_builtin0(name: *mut Value, version: i64) -> *mut Value {
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let mut host = NativeHost {
@@ -593,13 +622,13 @@ shim! {
 
 shim! {
     pub extern "C" fn leek_builtin1(name: *mut Value, a0: *mut Value, version: i64) -> *mut Value {
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let mut host = NativeHost {
             version: version as u8,
         };
-        let args = [unsafe { val(a0) }.clone()];
+        let args = [unsafe { val(&a0) }.clone()];
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);
         }
@@ -614,13 +643,13 @@ shim! {
         a1: *mut Value,
         version: i64,
     ) -> *mut Value {
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let mut host = NativeHost {
             version: version as u8,
         };
-        let args = [unsafe { val(a0) }.clone(), unsafe { val(a1) }.clone()];
+        let args = [unsafe { val(&a0) }.clone(), unsafe { val(&a1) }.clone()];
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);
         }
@@ -636,16 +665,16 @@ shim! {
         a2: *mut Value,
         version: i64,
     ) -> *mut Value {
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let mut host = NativeHost {
             version: version as u8,
         };
         let args = [
-            unsafe { val(a0) }.clone(),
-            unsafe { val(a1) }.clone(),
-            unsafe { val(a2) }.clone(),
+            unsafe { val(&a0) }.clone(),
+            unsafe { val(&a1) }.clone(),
+            unsafe { val(&a2) }.clone(),
         ];
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);
@@ -663,17 +692,17 @@ shim! {
         a3: *mut Value,
         version: i64,
     ) -> *mut Value {
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         let mut host = NativeHost {
             version: version as u8,
         };
         let args = [
-            unsafe { val(a0) }.clone(),
-            unsafe { val(a1) }.clone(),
-            unsafe { val(a2) }.clone(),
-            unsafe { val(a3) }.clone(),
+            unsafe { val(&a0) }.clone(),
+            unsafe { val(&a1) }.clone(),
+            unsafe { val(&a2) }.clone(),
+            unsafe { val(&a3) }.clone(),
         ];
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);

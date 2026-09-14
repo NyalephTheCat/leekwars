@@ -16,6 +16,15 @@
 // workspace's `unsafe_code = "deny"` would otherwise block, so re-allow it
 // here — scoped to this crate rather than dropping every other workspace lint.
 #![allow(unsafe_code)]
+// The flip side of that allowance: where this crate does use `unsafe`, every
+// block must state its contract, and one block may assert only one thing. The
+// FFI surface predates this rule, so the modules that have not been converted
+// yet carry a module-level `allow` with `reason = "FFI conversion pending —
+// see #114"`; `grep -rn "FFI conversion pending"` is the remaining-work list.
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
 // MIR → Cranelift IR lowering performs deliberate integer width conversions
 // (usize↔i64, i64→u8/u32, bool→i64) at nearly every translation site. The
 // `cast_*` pedantic lints fire en masse here and are reviewed per-site as part
@@ -410,7 +419,9 @@ impl Drop for CompiledProgram {
         // moment `drop` returns, so nothing can dispatch into it again. The
         // runtime tables it installed are overwritten by the next run's
         // `RuntimeTables::install` before they could be consulted.
-        unsafe { std::mem::ManuallyDrop::take(&mut self.module).free_memory() };
+        let module = unsafe { std::mem::ManuallyDrop::take(&mut self.module) };
+        // SAFETY: see above — no JIT'd function from this module can run again.
+        unsafe { module.free_memory() };
     }
 }
 
@@ -472,16 +483,19 @@ impl CompiledProgram {
         let value = match entry {
             JitEntry::Main => match self.ret_ty {
                 ValTy::Real => {
+                    // SAFETY: see above.
                     let f =
                         unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr) };
                     Value::Real(f())
                 }
                 ValTy::Bool => {
+                    // SAFETY: see above.
                     let f =
                         unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
                     Value::Bool(f() != 0)
                 }
                 ValTy::Int => {
+                    // SAFETY: see above.
                     let f =
                         unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr) };
                     Value::Int(f())
@@ -491,6 +505,7 @@ impl CompiledProgram {
                 // top-level instance whose class declares `string()` is routed
                 // through it (matching the interpreter's display).
                 ValTy::Ref => {
+                    // SAFETY: see above.
                     let f = unsafe {
                         std::mem::transmute::<*const u8, extern "C" fn() -> *mut Value>(ptr)
                     };
@@ -498,7 +513,10 @@ impl CompiledProgram {
                     // `free_run_boxes` below reclaims every handle at once). The
                     // clone keeps the result's `Rc`-backed data alive past the
                     // sweep.
-                    runtime::invoke_top_level_string(unsafe { runtime::read_handle(f()) })
+                    // SAFETY: `f` returns a handle from the run that just
+                    // finished, so it is live until `free_run_boxes` below.
+                    let v = unsafe { runtime::read_handle(f()) };
+                    runtime::invoke_top_level_string(v)
                 }
             },
             // `run_call`: skip `main` entirely and dispatch the stored

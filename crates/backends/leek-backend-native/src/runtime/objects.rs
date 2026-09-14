@@ -2,6 +2,12 @@
 //! (by name and by slot), class reflection (`class_of` / `class_super`),
 //! statics, and file-level globals.
 
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "FFI conversion pending — see #114"
+)]
+
 use super::{
     CLASS_PARENT, CLASS_REFLECT, DISPATCH, GLOBALS, LambdaFn, STATIC_FIELDS, STATIC_INIT, STRICT,
     aborting, builtin_name, builtin_name_ref, handle, raise_runtime_error, val,
@@ -16,7 +22,7 @@ shim! {
     /// break self-referential init cycles). Mirrors the interpreter's lazy
     /// static-field initialisation.
     pub extern "C" fn leek_static_get(class_def: i64, name: *mut Value) -> *mut Value {
-        let Some(field) = builtin_name(name) else {
+        let Some(field) = (unsafe { builtin_name(name) }) else {
             return handle(Value::Null);
         };
         let key = (class_def as u32, field);
@@ -30,8 +36,12 @@ shim! {
         if let Some(idx) = init
             && let Some((addr, _)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied())
         {
+            // SAFETY: `addr` is a finalized body address from the running
+            // module's `lambda_fns` table, so it has the `LambdaFn` ABI; a
+            // static initialiser takes no captures and no arguments, so an
+            // empty `argv` with `argc == 0` is the whole contract.
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
-            let v = f(std::ptr::null(), 0);
+            let v = unsafe { f(std::ptr::null(), 0) };
             STATIC_FIELDS.with(|c| c.borrow_mut().insert(key, v));
             return v;
         }
@@ -42,7 +52,7 @@ shim! {
 shim! {
     /// `C.staticField = v` — store the handle.
     pub extern "C" fn leek_static_set(class_def: i64, name: *mut Value, val: *mut Value) {
-        let Some(field) = builtin_name(name) else {
+        let Some(field) = (unsafe { builtin_name(name) }) else {
             return;
         };
         STATIC_FIELDS.with(|c| c.borrow_mut().insert((class_def as u32, field), val));
@@ -169,7 +179,7 @@ shim! {
         version: i64,
     ) -> *mut Value {
         let name = unsafe { member_name(name_ptr, name_len) };
-        handle(read_member(unsafe { val(base) }, name, version as u8))
+        handle(read_member(unsafe { val(&base) }, name, version as u8))
     }
 }
 
@@ -184,7 +194,7 @@ shim! {
         version: i64,
     ) -> i64 {
         let name = unsafe { member_name(name_ptr, name_len) };
-        read_member(unsafe { val(base) }, name, version as u8).to_long()
+        read_member(unsafe { val(&base) }, name, version as u8).to_long()
     }
 }
 
@@ -198,7 +208,7 @@ shim! {
         version: i64,
     ) -> f64 {
         let name = unsafe { member_name(name_ptr, name_len) };
-        read_member(unsafe { val(base) }, name, version as u8).to_real()
+        read_member(unsafe { val(&base) }, name, version as u8).to_real()
     }
 }
 
@@ -215,7 +225,7 @@ shim! {
     ) -> *mut Value {
         let name = unsafe { member_name(name_ptr, name_len) };
         handle(read_member_slot(
-            unsafe { val(base) },
+            unsafe { val(&base) },
             slot as usize,
             name,
             version as u8,
@@ -234,7 +244,7 @@ shim! {
         version: i64,
     ) -> i64 {
         let name = unsafe { member_name(name_ptr, name_len) };
-        read_member_slot(unsafe { val(base) }, slot as usize, name, version as u8).to_long()
+        read_member_slot(unsafe { val(&base) }, slot as usize, name, version as u8).to_long()
     }
 }
 
@@ -249,16 +259,24 @@ shim! {
         version: i64,
     ) -> f64 {
         let name = unsafe { member_name(name_ptr, name_len) };
-        read_member_slot(unsafe { val(base) }, slot as usize, name, version as u8).to_real()
+        read_member_slot(unsafe { val(&base) }, slot as usize, name, version as u8).to_real()
     }
 }
 
 /// Shared `base[idx] = value` writeback used by [`leek_value_set_index`] (boxed
 /// key) and [`leek_field_set`]'s fallback (`&str` key built into a `Value`).
 ///
+/// `idx` is a raw pointer, not a `&Value`, on purpose: `a[a] = x` reaches here
+/// with `idx == base`, and the morph write-back below stores through `base`. A
+/// `&Value` *argument* would be live — and, under Stacked Borrows, protected —
+/// across that write, which is undefined behaviour. Taking it raw keeps every
+/// borrow derived from `idx` scoped to a single statement that performs no
+/// write, so the aliasing case is merely a same-location read-then-write.
+///
 /// # Safety
-/// `base` must be a live handle.
-pub(super) unsafe fn set_member(base: *mut Value, idx: &Value, value: Value, version: u8) {
+/// `base` and `idx` must both satisfy the
+/// [module-level handle contract](super#handle-safety-contract); they may alias.
+pub(super) unsafe fn set_member(base: *mut Value, idx: *const Value, value: Value, version: u8) {
     // The run already errored: upstream threw, so the store never happens.
     if aborting() {
         return;
@@ -270,19 +288,25 @@ pub(super) unsafe fn set_member(base: *mut Value, idx: &Value, value: Value, ver
     // OOB index; `run()` surfaces the recorded error after `main` returns.
     if version >= 4
         && STRICT.with(std::cell::Cell::get)
-        && let Value::Array(a) = unsafe { val(base) }
+        && let Value::Array(a) = unsafe { val(&base) }
     {
         let len = leek_runtime::len_as_int(a.borrow().len());
-        let raw = idx.as_int().unwrap_or(0);
+        // SAFETY: caller's contract — `idx` is a live handle. The borrow dies
+        // at the end of this statement, before any write through `base`.
+        let raw = unsafe { &*idx }.as_int().unwrap_or(0);
         let i = if raw < 0 { raw + len } else { raw };
         if i < 0 || i >= len {
             raise_runtime_error("ARRAY_OUT_OF_BOUND");
             return;
         }
     }
-    let morphed = leek_runtime::set_index(unsafe { val(base) }, idx, value, version);
+    // SAFETY: caller's contract — both are live handles. `set_index` only reads
+    // through `idx`, so the two borrows (which alias for `a[a] = x`) are both
+    // shared and both end with this statement.
+    let morphed = unsafe { leek_runtime::set_index(val(&base), &*idx, value, version) };
     if let Some(new_base) = morphed {
-        // SAFETY: `base` is a live, owned handle (leaked box).
+        // SAFETY: `base` is a live, owned handle (leaked box), and no borrow
+        // derived from `base` or `idx` is alive here.
         unsafe {
             *base = new_base;
         }
@@ -306,19 +330,15 @@ shim! {
             return;
         }
         let name = unsafe { member_name(name_ptr, name_len) };
-        let v = unsafe { val(value) }.clone();
-        match unsafe { val(base) } {
+        let v = unsafe { val(&value) }.clone();
+        match unsafe { val(&base) } {
             Value::Instance(_) | Value::Object(_) => {
-                leek_runtime::set_field(unsafe { val(base) }, name, v);
+                leek_runtime::set_field(unsafe { val(&base) }, name, v);
             }
-            _ => unsafe {
-                set_member(
-                    base,
-                    &Value::String(std::rc::Rc::new(name.to_owned())),
-                    v,
-                    version as u8,
-                );
-            },
+            _ => {
+                let key = Value::String(std::rc::Rc::new(name.to_owned()));
+                unsafe { set_member(base, &raw const key, v, version as u8) };
+            }
         }
     }
 }
@@ -342,30 +362,26 @@ shim! {
         if aborting() {
             return;
         }
-        if let Value::Instance(inst) = unsafe { val(base) } {
+        if let Value::Instance(inst) = unsafe { val(&base) } {
             let mut b = inst.borrow_mut();
             if (slot as usize) < b.fields.len() {
-                let v = unsafe { val(value) }.clone();
+                let v = unsafe { val(&value) }.clone();
                 b.fields.set_slot(slot as usize, v);
                 return;
             }
         }
         // Cold fallback (non-instance base, or an unexpectedly out-of-range slot):
         // the exact `leek_field_set` name path.
-        let v = unsafe { val(value) }.clone();
+        let v = unsafe { val(&value) }.clone();
         let name = unsafe { member_name(name_ptr, name_len) };
-        match unsafe { val(base) } {
+        match unsafe { val(&base) } {
             Value::Instance(_) | Value::Object(_) => {
-                leek_runtime::set_field(unsafe { val(base) }, name, v);
+                leek_runtime::set_field(unsafe { val(&base) }, name, v);
             }
-            _ => unsafe {
-                set_member(
-                    base,
-                    &Value::String(std::rc::Rc::new(name.to_owned())),
-                    v,
-                    version as u8,
-                );
-            },
+            _ => {
+                let key = Value::String(std::rc::Rc::new(name.to_owned()));
+                unsafe { set_member(base, &raw const key, v, version as u8) };
+            }
         }
     }
 }
@@ -384,7 +400,7 @@ shim! {
     /// `class_def` is the class's [`ClassId`] raw value; `name_box` is a boxed-string
     /// handle carrying the class name (used by `Display`).
     pub extern "C" fn leek_instance_new(class_def: i64, name_box: *mut Value) -> *mut Value {
-        let class_name = match unsafe { val(name_box) } {
+        let class_name = match unsafe { val(&name_box) } {
             Value::String(s) => s.to_string(),
             _ => String::new(),
         };
@@ -400,7 +416,7 @@ shim! {
     /// Read a global by name (a null handle → a fresh `null`, matching the
     /// interpreter's treatment of an unset global).
     pub extern "C" fn leek_global_get(name: *mut Value) -> *mut Value {
-        let Some(name) = builtin_name_ref(name) else {
+        let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
         };
         GLOBALS.with(|g| {
@@ -416,7 +432,7 @@ shim! {
     /// Store a global by name (the handle aliases, matching v4 reference
     /// semantics; the previous handle is left to leak).
     pub extern "C" fn leek_global_set(name: *mut Value, value: *mut Value) {
-        if let Some(name) = builtin_name(name) {
+        if let Some(name) = unsafe { builtin_name(name) } {
             GLOBALS.with(|g| g.borrow_mut().insert(name, value));
         }
     }
@@ -428,7 +444,7 @@ shim! {
     /// host. One shim per small arity (most builtins take ≤ 3 args).
     /// The `.class` meta-property: the runtime class of a value.
     pub extern "C" fn leek_class_of(v: *mut Value) -> *mut Value {
-        handle(leek_runtime::class_of(unsafe { val(v) }))
+        handle(leek_runtime::class_of(unsafe { val(&v) }))
     }
 }
 
@@ -437,7 +453,7 @@ shim! {
     /// explicit parent yields that class's ref; one with no explicit parent yields
     /// the builtin `Value` base. A non-class value yields null.
     pub extern "C" fn leek_class_super(v: *mut Value) -> *mut Value {
-        match unsafe { val(v) } {
+        match unsafe { val(&v) } {
             Value::ClassRef(def, _) => match CLASS_PARENT.with(|c| c.borrow().get(&def.0).cloned()) {
                 // Explicit user parent.
                 Some(Some((pdef, pname))) => handle(Value::ClassRef(ClassId(pdef), Rc::new(pname))),
@@ -451,5 +467,94 @@ shim! {
             Value::BuiltinClass(_) => handle(Value::BuiltinClass("Value")),
             _ => handle(Value::Null),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_member;
+    use crate::runtime::{
+        free_run_boxes, handle, reset_runtime_error, set_strict, take_runtime_error,
+    };
+    use leek_runtime::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// `Value` has no `PartialEq`; compare arrays through `as_int`.
+    fn ints(a: &Rc<RefCell<Vec<Value>>>) -> Vec<Option<i64>> {
+        a.borrow().iter().map(Value::as_int).collect()
+    }
+
+    /// `a[a] = x`: the index handle IS the base handle. The shim must survive
+    /// it, and (an array's `as_int()` being `None`, i.e. 0) write slot 0 —
+    /// exactly what a boxed non-integer key does. Run under Miri this also
+    /// checks that no borrow derived from the index is live across the
+    /// write-back below.
+    #[test]
+    fn set_member_accepts_an_index_handle_that_aliases_the_base() {
+        reset_runtime_error();
+        let h = handle(Value::Array(Rc::new(RefCell::new(vec![
+            Value::Int(1),
+            Value::Int(2),
+        ]))));
+        // SAFETY: `h` is a live handle, deliberately passed as both arguments.
+        unsafe { set_member(h, h, Value::Int(9), 1) };
+        // SAFETY: `h` is still live.
+        let Value::Array(a) = (unsafe { &*h }) else {
+            panic!("base morphed unexpectedly")
+        };
+        assert_eq!(ints(a), [Some(9), Some(2)]);
+        free_run_boxes();
+    }
+
+    /// v1–v3 write past the end promotes the array to a sparse map, and the new
+    /// value must be written back THROUGH the handle so the caller's local sees
+    /// it. Guards the write-back Part 2 of #114/#80 reorders.
+    #[test]
+    fn set_member_writes_a_morphed_base_back_through_the_handle() {
+        reset_runtime_error();
+        let h = handle(Value::Array(Rc::new(RefCell::new(vec![Value::Int(1)]))));
+        let key = Value::Int(5);
+        // SAFETY: both are live handles; `key` is a stack temporary.
+        unsafe { set_member(h, &raw const key, Value::Int(9), 1) };
+        // SAFETY: `h` is still live.
+        let Value::Map(m) = (unsafe { &*h }) else {
+            panic!("expected the array to morph into a map")
+        };
+        assert_eq!(
+            m.borrow().get(&Value::Int(5)).and_then(Value::as_int),
+            Some(9)
+        );
+        free_run_boxes();
+    }
+
+    /// v4-strict reads the index *before* any write, including the negative
+    /// wrap (`a[-1]` is the last element). Guards the reordered OOB block.
+    #[test]
+    fn set_member_v4_strict_bounds_check_reads_the_index_including_the_wrap() {
+        reset_runtime_error();
+        set_strict(true);
+        let h = handle(Value::Array(Rc::new(RefCell::new(vec![
+            Value::Int(1),
+            Value::Int(2),
+        ]))));
+
+        let in_bounds = Value::Int(-1);
+        // SAFETY: both are live; `in_bounds` is a stack temporary.
+        unsafe { set_member(h, &raw const in_bounds, Value::Int(9), 4) };
+        assert_eq!(take_runtime_error(), None);
+
+        let oob = Value::Int(7);
+        // SAFETY: both are live; `oob` is a stack temporary.
+        unsafe { set_member(h, &raw const oob, Value::Int(9), 4) };
+        assert_eq!(take_runtime_error().as_deref(), Some("ARRAY_OUT_OF_BOUND"));
+
+        // SAFETY: `h` is still live.
+        let Value::Array(a) = (unsafe { &*h }) else {
+            panic!("base morphed unexpectedly")
+        };
+        assert_eq!(ints(a), [Some(1), Some(9)]);
+        set_strict(false);
+        free_run_boxes();
     }
 }
