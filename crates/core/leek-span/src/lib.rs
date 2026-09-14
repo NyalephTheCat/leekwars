@@ -7,6 +7,7 @@
 use std::num::NonZeroU32;
 use std::ops::Range;
 
+pub mod paths;
 pub mod pragma;
 
 /// Define a `u32`-backed index newtype with the workspace's standard

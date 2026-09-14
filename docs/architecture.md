@@ -137,9 +137,10 @@ A `.leek` program flows down the layers:
      classes.
    - `leek-backends` is the registry that selects between them.
 
-`core` underpins all of it: `leek-span` (source positions), `leek-diagnostics`
-(error reporting + codes for `miku explain`), `leek-manifest` (the `Miku.toml`
-project model), `leek-runtime`/`leek-prelude`/`leek-builtins`/`leek-environment`
+`core` underpins all of it: `leek-span` (source positions, and `leek_span::paths`
+— the one rule for collapsing two spellings of a path to one map key),
+`leek-diagnostics` (error reporting + codes for `miku explain`), `leek-manifest`
+(the `Miku.toml` project model), `leek-runtime`/`leek-prelude`/`leek-builtins`/`leek-environment`
 (the value model and host/standard library surface).
 
 ## The fight simulator

@@ -25,6 +25,7 @@ use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::Input;
 use leek_recipes::Target;
 use leek_resolver::pipeline::IncludeGraphArtifact;
+use leek_span::paths::canonical_or_normalized;
 use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
 use leek_span::{LineTable, SourceId, Span};
 
@@ -84,7 +85,7 @@ impl Compiled {
         ProgramMap::new(
             self.sources
                 .iter()
-                .map(|file| (canonical(&file.path), file.source.get()))
+                .map(|file| (canonical_or_normalized(&file.path), file.source.get()))
                 .collect(),
             self.safepoint_lines(),
         )
@@ -136,12 +137,6 @@ impl Compiled {
         }
         lines
     }
-}
-
-/// Canonical form of a path, falling back to the path itself when it cannot
-/// be canonicalized (the file may not exist yet).
-pub(crate) fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 impl NativeTarget {
@@ -200,7 +195,7 @@ impl NativeTarget {
         };
         let mut sources = vec![CompiledSource {
             source: src_id,
-            path: canonical(path),
+            path: canonical_or_normalized(path),
             text: source,
         }];
         if let Some(graph) = run.get::<IncludeGraphArtifact>() {
@@ -223,7 +218,7 @@ impl NativeTarget {
 /// the debugged file, or [`DEFAULT_VERSION`] / non-strict when the file is
 /// standalone. Same source of truth `miku run` settles its inputs from.
 fn manifest_defaults(program: &Path) -> (u8, bool) {
-    let program = canonical(program);
+    let program = canonical_or_normalized(program);
     let dir = program.parent().unwrap_or_else(|| Path::new("."));
     leek_manifest::discover(dir).map_or((DEFAULT_VERSION, false), |load| {
         (load.manifest.project.language, load.manifest.project.strict)

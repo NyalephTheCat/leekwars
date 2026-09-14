@@ -403,8 +403,16 @@ impl Workspace {
                 project_file: None,
             })
             .collect();
+        // An indexed file that also has an open buffer is already in
+        // `out`. Match on the salsa `SourceFile` rather than the URI:
+        // a client that reached the file through another spelling of
+        // its path — a workspace root behind a symlink (#181) — sends
+        // a URI that is not `indexed.uri`, but `open` has already
+        // handed that buffer the indexed file's `SourceFile`, so this
+        // is the identity that actually settles "same file".
+        let open: Vec<_> = self.docs.values().map(|doc| doc.source_file).collect();
         for indexed in self.indexed.values() {
-            if self.docs.contains_key(&indexed.uri) {
+            if self.docs.contains_key(&indexed.uri) || open.contains(&indexed.source_file) {
                 continue;
             }
             out.push(AnalysisTarget {
@@ -674,8 +682,24 @@ pub fn path_to_uri(path: &Path) -> Url {
         .unwrap_or_else(|()| Url::parse(&format!("file://{}", path.display())).expect("file uri"))
 }
 
+/// The path a `file:` URI names, in the same shape every path-keyed
+/// map in the workspace is built with.
+///
+/// Canonicalizing here — rather than at each of the six `self.indexed`
+/// lookups — is what makes those lookups hit: `indexed` is keyed by
+/// `ProjectIndex::canonicalize` output, so a client that reaches the
+/// workspace through a symlink (`file:///var/folders/…` on macOS,
+/// where `/var` links to `/private/var`) would otherwise miss every
+/// entry, mint a second `SourceFile` on `open`, silently no-op on
+/// `reload_from_disk`, and fail to evict on `remove_file` (#181).
+///
+/// Paths handed *back* to the client must still come from the stored
+/// `IndexedFile::uri`, never from re-deriving a URI out of this: the
+/// canonical spelling is ours, not the client's.
 pub fn uri_to_path(uri: &Url) -> Option<PathBuf> {
-    uri.to_file_path().ok()
+    uri.to_file_path()
+        .ok()
+        .map(|path| leek_span::paths::canonical_or_normalized(&path))
 }
 
 /// Whether a `Miku.toml` exists at `start` or in one of its ancestors.
@@ -1058,6 +1082,11 @@ mod tests {
         fs::rename(&old_path, &new_path).expect("rename entry");
         ws.rename_file(&path_to_uri(&old_path), &path_to_uri(&new_path));
 
+        // `indexed` is keyed by the canonical path (#181), so look the entry
+        // up the same way. On macOS the temp root is reached through a symlink
+        // (`/var` -> `/private/var`), so the raw join and the canonical
+        // spelling differ and only the canonical one is a key.
+        let new_path = new_path.canonicalize().expect("canonical renamed entry");
         let stored = ws
             .indexed
             .get(&new_path)
@@ -1065,5 +1094,47 @@ mod tests {
         fs::remove_dir_all(&root).expect("remove project");
 
         assert_eq!(stored, Some(new_path.display().to_string()));
+    }
+
+    /// #181: `indexed` is keyed by `ProjectIndex::canonicalize` output,
+    /// but every lookup used the URI's raw path. A client that reached
+    /// the workspace through a linked directory — every macOS client,
+    /// since `/var` links to `/private/var` — therefore missed the key
+    /// and `open` minted a second `SourceFile` for a file the index
+    /// already owned. `uri_to_path` now canonicalizes, so the lookup
+    /// hits whichever spelling the client used.
+    #[cfg(unix)]
+    #[test]
+    fn opening_through_a_linked_root_reuses_the_indexed_file() {
+        let root = temp_root();
+        let real = root.join("real");
+        fs::create_dir_all(&real).expect("create project");
+        fs::write(real.join("main.leek"), "class OnDisk {}\n").expect("write entry");
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("link the project dir");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&real);
+        let indexed_source = ws
+            .indexed
+            .values()
+            .next()
+            .expect("one indexed file")
+            .source_file;
+
+        // The client only ever knows the aliased spelling.
+        let uri = path_to_uri(&alias.join("main.leek"));
+        ws.open(uri.clone(), "class InBuffer {}\n".into());
+        let opened_source = ws.doc(&uri).expect("open doc").source_file;
+        let indexed_len = ws.indexed.len();
+        let targets = ws.analysis_targets().len();
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert!(
+            opened_source == indexed_source,
+            "the open buffer must reuse the indexed file's SourceFile",
+        );
+        assert_eq!(indexed_len, 1, "no second entry for the same file");
+        assert_eq!(targets, 1, "the file must not be analysed twice");
     }
 }

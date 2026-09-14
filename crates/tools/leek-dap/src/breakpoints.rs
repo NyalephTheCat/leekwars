@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use crate::target::native::canonical;
+use leek_span::paths::canonical_or_normalized;
 
 /// One line the client asked to break on, after the store has taken it.
 pub(crate) struct Requested {
@@ -72,7 +72,7 @@ impl BreakpointStore {
             })
             .collect();
 
-        let path = canonical(path);
+        let path = canonical_or_normalized(path);
         if stored.is_empty() {
             self.by_path.remove(&path);
         } else {
@@ -144,7 +144,7 @@ impl ProgramMap {
 
     /// Raw `SourceId` of a file the program was compiled from.
     pub(crate) fn source_of(&self, path: &Path) -> Option<u32> {
-        self.sources.get(&canonical(path)).copied()
+        self.sources.get(&canonical_or_normalized(path)).copied()
     }
 
     /// The line a breakpoint on `line` actually lands on: `line` itself when
@@ -161,8 +161,9 @@ impl ProgramMap {
 mod tests {
     use super::*;
 
-    /// A directory that need not exist: `canonical` keeps a missing path as
-    /// written, so the store keys on it deterministically either way.
+    /// A directory that need not exist: `canonical_or_normalized` falls
+    /// back to the lexically normalized form for a path that does not
+    /// resolve, so the store keys on it deterministically either way.
     const DIR: &str = "/tmp/leek-dap-store";
 
     fn store_with(path: &Path, lines: &[i64]) -> BreakpointStore {
@@ -173,7 +174,7 @@ mod tests {
 
     /// Lines held for `path`, low to high.
     fn lines_of(store: &BreakpointStore, path: &Path) -> Vec<u32> {
-        let path = canonical(path);
+        let path = canonical_or_normalized(path);
         let mut lines: Vec<u32> = store
             .iter()
             .filter(|(p, _, _)| *p == path)
@@ -255,7 +256,10 @@ mod tests {
         store.replace(&lib, &[12]);
 
         let program = ProgramMap::new(
-            HashMap::from([(canonical(&main), 1), (canonical(&lib), 2)]),
+            HashMap::from([
+                (canonical_or_normalized(&main), 1),
+                (canonical_or_normalized(&lib), 2),
+            ]),
             HashMap::from([(1, BTreeSet::from([12])), (2, BTreeSet::from([12]))]),
         );
         let by_source = store.by_source(&program);
@@ -272,7 +276,10 @@ mod tests {
         let mut store = BreakpointStore::default();
         store.replace(&Path::new(DIR).join("scratch.leek"), &[1]);
         let program = ProgramMap::new(
-            HashMap::from([(canonical(&Path::new(DIR).join("main.leek")), 1)]),
+            HashMap::from([(
+                canonical_or_normalized(&Path::new(DIR).join("main.leek")),
+                1,
+            )]),
             HashMap::from([(1, BTreeSet::from([1]))]),
         );
         assert!(store.by_source(&program).is_empty());

@@ -25,9 +25,10 @@
 //! approach would wrongly merge.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use leek_pipeline::salsa::SourceFile;
+use leek_span::paths::normalize_lexical;
 use leek_syntax::{SyntaxKind, SyntaxNode, language::NodeOrToken};
 use tower_lsp::lsp_types::Url;
 
@@ -57,11 +58,11 @@ pub(crate) fn program_scope(ws: &Workspace, home_uri: &Url) -> Vec<ScopeFile> {
             home_file = Some(sf.clone());
         }
         if let Some(p) = uri_to_path(t.uri) {
-            by_path.insert(normalize(&p), sf);
+            by_path.insert(normalize_lexical(&p), sf);
         }
     }
 
-    let Some(home_path) = uri_to_path(home_uri).map(|p| normalize(&p)) else {
+    let Some(home_path) = uri_to_path(home_uri).map(|p| normalize_lexical(&p)) else {
         return home_file.into_iter().collect();
     };
     if !by_path.contains_key(&home_path) {
@@ -140,8 +141,8 @@ fn include_targets(
         let Some(name) = include_name(&node) else {
             continue;
         };
-        let with_ext = normalize(&dir.join(format!("{name}.leek")));
-        let bare = normalize(&dir.join(&name));
+        let with_ext = normalize_lexical(&dir.join(format!("{name}.leek")));
+        let bare = normalize_lexical(&dir.join(&name));
         let resolved = if by_path.contains_key(&with_ext) {
             Some(with_ext)
         } else if by_path.contains_key(&bare) {
@@ -170,23 +171,6 @@ fn include_name(include_stmt: &SyntaxNode) -> Option<String> {
         return None;
     }
     Some(raw[1..raw.len() - 1].to_string())
-}
-
-/// Lexically normalize a path (resolve `.` and `..`, no I/O). Both the
-/// workspace index keys and the include candidates go through this, so
-/// sibling spellings collapse to the same key without touching disk.
-fn normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

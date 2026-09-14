@@ -9,11 +9,12 @@ use leek_parser::pipeline::{AstArtifact, KnownClassesArtifact, parse_file_with_c
 use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 use leek_span::Span;
+use leek_span::paths::canonical_or_normalized;
 use leek_syntax::Version;
 use leek_syntax::pipeline::PragmasArtifact;
 use leek_syntax::pipeline::version_from_byte;
 
-use crate::folder::{Folder, canonical_or_normalized};
+use crate::folder::Folder;
 use crate::include_graph::{ResolvedFile, build_include_graph};
 use crate::index::ResolveTable;
 use crate::{Options, ResolveResult, resolve_collecting, resolve_collecting_files};

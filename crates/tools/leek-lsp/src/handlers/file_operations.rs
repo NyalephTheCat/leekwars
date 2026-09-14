@@ -26,8 +26,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use leek_resolver::folder::normalize_path;
 use leek_span::Span;
+use leek_span::paths::normalize_lexical;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
@@ -45,7 +45,7 @@ pub fn will_rename(ws: &Workspace, renames: &[(String, String)]) -> Option<lsp::
         let (Some(old), Some(new)) = (parse_leek_uri(old_uri), parse_leek_uri(new_uri)) else {
             continue;
         };
-        let (old, new) = (normalize_path(&old), normalize_path(&new));
+        let (old, new) = (normalize_lexical(&old), normalize_lexical(&new));
         if old != new {
             renamed.insert(old, new);
         }
@@ -60,13 +60,13 @@ pub fn will_rename(ws: &Workspace, renames: &[(String, String)]) -> Option<lsp::
     let mut known: HashSet<PathBuf> = renamed.keys().cloned().collect();
     for target in &targets {
         if let Some(path) = uri_to_path(target.uri) {
-            known.insert(normalize_path(&path));
+            known.insert(normalize_lexical(&path));
         }
     }
 
     let mut changes: HashMap<lsp::Url, Vec<lsp::TextEdit>> = HashMap::new();
     for target in &targets {
-        let Some(path) = uri_to_path(target.uri).map(|p| normalize_path(&p)) else {
+        let Some(path) = uri_to_path(target.uri).map(|p| normalize_lexical(&p)) else {
             continue;
         };
         let edits = edits_for_document(ws, target.source_file, &path, &known, &renamed);
@@ -177,11 +177,11 @@ fn resolve_include(dir: &Path, name: &str, known: &HashSet<PathBuf>) -> Option<P
     if name.is_empty() {
         return None;
     }
-    let with_ext = normalize_path(&dir.join(format!("{name}.leek")));
+    let with_ext = normalize_lexical(&dir.join(format!("{name}.leek")));
     if known.contains(&with_ext) {
         return Some(with_ext);
     }
-    let bare = normalize_path(&dir.join(name));
+    let bare = normalize_lexical(&dir.join(name));
     known.contains(&bare).then_some(bare)
 }
 

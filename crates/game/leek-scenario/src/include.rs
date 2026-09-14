@@ -24,7 +24,7 @@ pub fn load(path: &Path) -> Result<Scenario> {
 }
 
 fn load_inner(path: &Path, on_stack: &mut HashSet<PathBuf>) -> Result<Scenario> {
-    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let key = leek_span::paths::canonical_or_normalized(path);
     if !on_stack.insert(key.clone()) {
         bail!("scenario `extends` cycle through {}", path.display());
     }

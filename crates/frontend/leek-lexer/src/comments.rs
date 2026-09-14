@@ -1,6 +1,7 @@
 //! Whitespace, line, and block comments. Each is emitted as a
 //! trivia token covering the full whitespace/comment span.
 
+use leek_diagnostics::{codes, diag};
 use leek_syntax::{SyntaxKind, Token, Version};
 
 use crate::Lexer;
@@ -59,11 +60,24 @@ impl Lexer<'_> {
             self.pos += 1;
         }
         // Unterminated block comment: consume to EOF, still emit as
-        // a comment token.
+        // a comment token — the token extent is what the formatter
+        // reads to decide the file ends unclosed (#417/#419), so it
+        // must keep covering every byte to EOF.
+        //
+        // Upstream (`LexicalParser.java:582`) accepts this silently,
+        // and two upstream AI fixtures end on a deliberate `/*`, so
+        // this is a *warning*: rejecting the program would diverge,
+        // but saying nothing hides that the rest of the file stopped
+        // being compiled.
         self.pos = self.text.len();
-        self.tokens.push(Token::new(
-            SyntaxKind::BlockComment,
-            self.span(start, self.pos),
+        let span = self.span(start, self.pos);
+        self.diagnostics.push(diag!(
+            codes::BLOCK_COMMENT_NOT_CLOSED,
+            span,
+            "block comment not closed before end of file";
+            label = (self.span(start, start + 2), "unclosed block comment opened here"),
+            note = "everything after `/*` is commented out",
         ));
+        self.tokens.push(Token::new(SyntaxKind::BlockComment, span));
     }
 }
