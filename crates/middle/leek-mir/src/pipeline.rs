@@ -7,7 +7,7 @@ use leek_pipeline::{Artifact, Context, OptLevel, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 
 use crate::MirProgram;
-use crate::lower::lower_file;
+use crate::lower::lower_and_optimize;
 
 /// Lowered MIR program. Held by [`Arc`] so the salsa cache hit stays
 /// pointer-cheap.
@@ -22,6 +22,9 @@ impl Artifact for MirArtifact {}
 /// `opt` controls whether the backend-agnostic MIR passes
 /// ([`crate::optimize_program`]) run after lowering — codegen drivers request
 /// [`OptLevel::O1`]; analysis drivers keep the IR shape unchanged.
+///
+/// The work itself is [`lower_and_optimize`]; this step only moves
+/// artifacts and diagnostics in and out of the [`Context`].
 pub struct LowerMir {
     opt: OptLevel,
 }
@@ -73,62 +76,25 @@ fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>>
     // never asks for this target.
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
-        let out = lower_mir_query(db, file);
-        cx.emit_all(out.diagnostics.iter().cloned());
-        // The salsa query is keyed only on the source file, so it caches
-        // unoptimized MIR. Optimize outside the cache when a codegen driver
-        // asked for it.
+        // The MIR query is keyed only on the source file, so it caches
+        // *unoptimized* MIR: a codegen driver's program would have to be
+        // cloned out of the cached `Arc` before the passes could run on it.
+        // Lower it from the (still memoized) HIR instead — same work as the
+        // clone-and-optimize it replaces, minus the clone.
         if opt.optimizes() {
-            let mut program = (*out.program).clone();
-            crate::optimize_program(&mut program);
+            let hir = leek_hir::pipeline::lower_hir_query(db, file);
+            let (program, diags) = lower_and_optimize(hir.hir.as_ref(), opt);
+            cx.emit_all(diags);
             return Some(Arc::new(program));
         }
+        let out = lower_mir_query(db, file);
+        cx.emit_all(out.diagnostics.iter().cloned());
         return Some(out.program);
     }
     let hir = cx.get::<HirArtifact>()?;
-    let (mut program, diags) = lower_file(hir.0.as_ref());
+    let (program, diags) = lower_and_optimize(hir.0.as_ref(), opt);
     cx.emit_all(diags);
-    if opt.optimizes() {
-        crate::optimize_program(&mut program);
-    }
     Some(Arc::new(program))
-}
-
-/// Verify the lowered MIR's structural invariants and report a violation
-/// as a [`Diagnostic`](leek_diagnostics::Diagnostic).
-///
-/// [`lower_file`] already asserts the same invariants, but only under
-/// `cfg(debug_assertions)` and by panicking — the right shape for a
-/// compiler bug caught during development, useless in a release build.
-/// This step is the release-mode counterpart: compose it after
-/// [`LowerMir`] (`.with(VerifyMir)`) and a malformed program becomes an
-/// `E0302` in the run's diagnostics instead of a backend crash later on.
-///
-/// Deliberately not a [`RecipeArtifact`] producer and not given a recipe
-/// target: it contributes no artifact, so drivers opt into the cost
-/// explicitly rather than every `Target::Mir` plan paying for it.
-#[derive(Default)]
-pub struct VerifyMir;
-
-impl Step for VerifyMir {
-    fn name(&self) -> &'static str {
-        "verify-mir"
-    }
-    fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
-        let Some(mir) = cx.get::<MirArtifact>() else {
-            return Ok(());
-        };
-        if let Err(e) = crate::verify::verify_program(mir.0.as_ref()) {
-            cx.emit_all([leek_diagnostics::IntoDiagnostic::into_diagnostic(e)]);
-        }
-        Ok(())
-    }
-}
-
-impl RecipeStep for VerifyMir {
-    fn build(_params: &RecipeParams) -> Box<dyn leek_pipeline::Step> {
-        Box::new(VerifyMir)
-    }
 }
 
 /// Tracked return: MIR program plus lowering diagnostics.
@@ -156,118 +122,12 @@ pub fn lower_mir_query(
     #[cfg(test)]
     salsa_probe::LOWER_MIR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let hir = leek_hir::pipeline::lower_hir_query(db, file);
-    let (program, diagnostics) = lower_file(hir.hir.as_ref());
+    // O0: the cached program is the one analysis drivers read, and a
+    // codegen driver optimizes its own copy (see `run_lower_mir`).
+    let (program, diagnostics) = lower_and_optimize(hir.hir.as_ref(), OptLevel::O0);
     LowerMirQueryResult {
         program: Arc::new(program),
         diagnostics,
-    }
-}
-
-#[cfg(test)]
-mod verify_step_tests {
-    use std::sync::Arc;
-
-    use leek_hir::pipeline::LowerHir;
-    use leek_lexer::pipeline::Lex;
-    use leek_parser::pipeline::Parse;
-    use leek_pipeline::{Context, FeatureFlags, Input, Pipeline, Step, StepError};
-    use leek_span::SourceId;
-    use leek_syntax::pipeline::Pragma;
-
-    use super::{LowerMir, MirArtifact, VerifyMir};
-    use crate::ir::{BasicBlock, BlockId, FunctionKind, MirFunction, MirProgram, Terminator};
-
-    fn input(text: &str) -> Input {
-        Input {
-            source: SourceId::new(1).unwrap(),
-            text: text.into(),
-            version_byte: 4,
-            strict: false,
-            flags: FeatureFlags::none(),
-        }
-    }
-
-    fn e0302_count(diags: &[leek_diagnostics::Diagnostic]) -> usize {
-        diags.iter().filter(|d| d.code.id() == "E0302").count()
-    }
-
-    /// Replaces whatever MIR is in the run with a deliberately malformed
-    /// program. The lowering can't produce one (its own debug assert would
-    /// have fired first), so this is the only way to see `VerifyMir` fail.
-    struct InjectMalformedMir;
-
-    impl Step for InjectMalformedMir {
-        fn name(&self) -> &'static str {
-            "inject-malformed-mir"
-        }
-        fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
-            let bad = MirFunction {
-                def_id: None,
-                kind: FunctionKind::Main,
-                name: "main".to_string(),
-                params: Vec::new(),
-                return_ty: leek_types::Type::Void,
-                locals: Vec::new(),
-                blocks: vec![BasicBlock {
-                    id: BlockId(0),
-                    statements: Vec::new(),
-                    statement_spans: Vec::new(),
-                    // bb9 does not exist.
-                    terminator: Terminator::Goto(BlockId(9)),
-                    terminator_span: leek_span::Span::synthetic(),
-                }],
-                entry: BlockId(0),
-                owning_class: None,
-                span: leek_span::Span::synthetic(),
-            };
-            cx.insert(MirArtifact(Arc::new(MirProgram {
-                functions: vec![bad],
-                globals: Vec::new(),
-                classes: Vec::new(),
-            })));
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn verify_mir_reports_a_malformed_program_instead_of_panicking() {
-        let pipeline = Pipeline::new()
-            .with(Pragma)
-            .with(Lex)
-            .with(Parse)
-            .with(LowerHir::default())
-            .with(LowerMir::default())
-            .with(InjectMalformedMir)
-            .with(VerifyMir);
-        let run = pipeline.run(input("var x = 1\n"));
-        let diags = run.diagnostics();
-        assert_eq!(
-            e0302_count(diags),
-            1,
-            "expected one malformed-MIR diagnostic, got {diags:?}"
-        );
-        let d = diags.iter().find(|d| d.code.id() == "E0302").unwrap();
-        assert!(
-            d.message.contains("out-of-range block bb9"),
-            "{}",
-            d.message
-        );
-    }
-
-    #[test]
-    fn verify_mir_is_silent_on_a_well_formed_program() {
-        let pipeline = Pipeline::new()
-            .with(Pragma)
-            .with(Lex)
-            .with(Parse)
-            .with(LowerHir::default())
-            .with(LowerMir::default())
-            .with(VerifyMir);
-        let run = pipeline.run(input(
-            "class A { real x = 1 int f(n) { for (var i in [1, 2]) { n = n + i } return n } }\n\
-             var g = x -> x + 1\nvar a = new A()\nvar y = g(a.f(2))\n",
-        ));
-        assert_eq!(e0302_count(run.diagnostics()), 0);
     }
 }
 

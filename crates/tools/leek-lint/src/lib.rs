@@ -40,6 +40,7 @@ pub use pipeline::{Lint, LintFindings};
 
 use leek_diagnostics::Diagnostic;
 use leek_hir::HirFile;
+use leek_syntax::SyntaxNode;
 
 /// Run the default lint groups against `file` and return all
 /// findings. Equivalent to [`lint_with`] with default options.
@@ -61,6 +62,23 @@ pub fn lint_with(file: &HirFile, opts: &LintOptions) -> Vec<Diagnostic> {
         (a.code.0, a.span.start, a.span.end).cmp(&(b.code.0, b.span.start, b.span.end))
     });
     out
+}
+
+/// Run the lints `opts` enables over `file` and drop the findings
+/// `@allow(...)` annotations suppress.
+///
+/// The pure entry point behind [`Lint`]: everything that step does apart
+/// from reading and writing a [`Context`](leek_pipeline::Context).
+///
+/// `root` is the file's CST, which the annotations need — they live in
+/// comment trivia the HIR doesn't carry. Pass `None` when the caller has
+/// no tree (a pipeline wired without `Parse`) and nothing is suppressed.
+pub fn lint_file(file: &HirFile, root: Option<&SyntaxNode>, opts: &LintOptions) -> Vec<Diagnostic> {
+    let findings = lint_with(file, opts);
+    match root {
+        Some(root) => collect_allows(root).suppress(findings),
+        None => findings,
+    }
 }
 
 /// Every known lint pass, including the opt-in groups — one per entry in
