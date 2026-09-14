@@ -4,11 +4,12 @@
 //! few need backend-provided capabilities: the active language version,
 //! the RNG (`randInt`/`randFloat`/…), and the ability to invoke a callback
 //! for higher-order builtins (`arrayMap`/`arrayFilter`/`arrayReduce`/…).
-//! Rather than couple the builtin catalog to a concrete interpreter, those
-//! needs are abstracted behind [`BuiltinHost`]. The interpreter implements
-//! it over its own state; the native backend can supply a trivial host
-//! (it never reaches higher-order builtins, since lambda creation isn't
-//! lowered there).
+//! Rather than couple the builtin catalog to a concrete backend, those
+//! needs are abstracted behind [`BuiltinHost`]. The native backend
+//! implements it over its per-run thread-local state: `call_value` enters a
+//! JIT-compiled lambda, and reports the run's recorded runtime error as
+//! [`BuiltinFlow::Error`] so a higher-order builtin stops at the first fault
+//! instead of calling back for every remaining element.
 
 use crate::Value;
 

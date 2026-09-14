@@ -204,6 +204,15 @@ pub fn take_runtime_error() -> Option<String> {
     RUNTIME_ERROR.with(|e| e.borrow_mut().take())
 }
 
+/// The error recorded so far this run, cloned WITHOUT consuming it — so a
+/// mid-run reader (a builtin reporting the fault up its own error channel)
+/// leaves the slot for [`take_runtime_error`], which is what turns the run
+/// into an `Err` at the end. Only called once [`aborting`] is already true,
+/// so the clone never costs anything on the hot path.
+pub(super) fn current_runtime_error() -> Option<String> {
+    RUNTIME_ERROR.with(|e| e.borrow().clone())
+}
+
 /// Record a runtime error (first one wins) and raise the abort flag, so loop
 /// back-edges and side-effecting shims stop the run from here on. Called by
 /// shims that detect a fault the JIT'd code can't itself signal.

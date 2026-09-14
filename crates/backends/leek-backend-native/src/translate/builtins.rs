@@ -3,8 +3,10 @@
 
 /// Builtins routed generically through the shared `leek_runtime::call_builtin`
 /// (boxed args in, boxed result out). Restricted to *pure*, deterministic,
-/// state-independent ops — no higher-order (lambda-taking) builtins, which
-/// never reach native anyway.
+/// state-independent ops — which includes the higher-order (lambda-taking)
+/// builtins below: they are pure given their callback, and native invokes it
+/// through [`BuiltinHost::call_value`](leek_runtime::BuiltinHost::call_value)
+/// (see `runtime::calls`).
 /// Whether [`Tx::dispatch_builtin`](super::Tx::dispatch_builtin) recognizes
 /// `name` as a builtin it can lower (so it won't hit the `unsupported` else).
 /// Mirrors that method's recognition chain exactly. Used to decide, in the
