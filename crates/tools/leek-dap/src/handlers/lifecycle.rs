@@ -1,22 +1,22 @@
 //! Lifecycle requests: initialize, launch, configurationDone, and the
 //! disconnect/terminate shutdown.
 
-use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use dap::events::StoppedEventBody;
+use dap::events::{BreakpointEventBody, StoppedEventBody};
 use dap::prelude::*;
 use dap::server::ServerOutput;
-use dap::types::{OutputEventCategory, StoppedEventReason};
+use dap::types::{BreakpointEventReason, OutputEventCategory, StoppedEventReason};
 
+use crate::breakpoints::Requested;
 use crate::capabilities::capabilities;
 use crate::debug::{NativeDebugSession, StopInfo, StopReason};
 use crate::event;
-use crate::handlers::Flow;
+use crate::handlers::{Flow, breakpoints};
 use crate::session::{MAIN_THREAD_ID, Session};
-use crate::target::native::{Compiled, NativeTarget, canonical, run_compiled};
+use crate::target::native::{Compiled, NativeTarget, run_compiled};
 use crate::target::{LaunchConfig, RunOutcome};
 
 /// `initialize`: advertise capabilities, then announce readiness.
@@ -45,7 +45,14 @@ pub(crate) fn launch<R: Read, W: Write>(
         };
         match &args.additional_data {
             Some(value) => serde_json::from_value::<LaunchConfig>(value.clone())
-                .map_err(|e| format!("invalid launch configuration: {e}")),
+                .map_err(|e| format!("invalid launch configuration: {e}"))
+                // `noDebug` is DAP's own launch field, so it is parsed out of
+                // the arguments before the adapter-specific blob is formed and
+                // would otherwise be dropped on the floor.
+                .map(|config| LaunchConfig {
+                    no_debug: config.no_debug || args.no_debug.unwrap_or(false),
+                    ..config
+                }),
             None => {
                 Err("launch request is missing a `program` (set it in launch.json)".to_string())
             }
@@ -94,6 +101,16 @@ pub(crate) fn configuration_done<R: Read, W: Write + Send + 'static>(
         }
     };
 
+    // Which file is which `SourceId` and which lines carry a safepoint. Kept
+    // on the session because `program` is about to be moved into the run
+    // thread: without it a `setBreakpoints` arriving mid-run would have
+    // nothing left to resolve a path against.
+    session.program = Some(program.breakpoint_map());
+    // Where each breakpoint really lands is a fact about the compiled program,
+    // so it is reported either way; a `noDebug` client ignores breakpoints
+    // anyway.
+    announce_breakpoints(session, server)?;
+
     // `noDebug` runs the very same program with breakpoints, stepping and the
     // per-statement safepoints switched off.
     let debug = !config.no_debug;
@@ -139,7 +156,11 @@ fn install_debug_hook<R: Read, W: Write + Send + 'static>(
             preserve_focus_hint: None,
             text: None,
             all_threads_stopped: Some(true),
-            hit_breakpoint_ids: None,
+            // Which breakpoint fired, so the client can point at it rather
+            // than guess from the line. Absent, not empty, for a stop no
+            // breakpoint caused.
+            hit_breakpoint_ids: (!info.hit_breakpoint_ids.is_empty())
+                .then_some(info.hit_breakpoint_ids),
         };
         if let Ok(mut out) = on_stop_output.lock() {
             let _ = out.send_event(Event::Stopped(body));
@@ -147,9 +168,14 @@ fn install_debug_hook<R: Read, W: Write + Send + 'static>(
         let _ = info.line; // surfaced via stackTrace, not the stopped event
     });
 
+    let by_source = session
+        .program
+        .as_ref()
+        .map(|map| session.breakpoints.by_source(map))
+        .unwrap_or_default();
     let controller = Arc::new(NativeDebugSession::new(
         program.debug_sources(),
-        breakpoints_by_source(session, program),
+        by_source,
         config.stop_on_entry,
         on_stop,
     ));
@@ -157,28 +183,34 @@ fn install_debug_hook<R: Read, W: Write + Send + 'static>(
     session.native_debug = Some(controller);
 }
 
-/// Match the client's per-file breakpoints against the files the program was
-/// compiled from, keyed by raw `SourceId`. A breakpoint in an included file
-/// then fires on that file's own lines instead of being tested against the
-/// entry's.
-fn breakpoints_by_source(session: &Session, program: &Compiled) -> HashMap<u32, HashSet<u32>> {
-    let requested: HashMap<_, _> = session
-        .breakpoints
-        .iter()
-        .map(|(path, lines)| (canonical(std::path::Path::new(path)), lines))
-        .collect();
-    program
-        .sources
-        .iter()
-        .filter_map(|file| {
-            let lines = requested.get(&canonical(&file.path))?;
-            let lines: HashSet<u32> = lines
-                .iter()
-                .filter_map(|&l| u32::try_from(l).ok())
-                .collect();
-            (!lines.is_empty()).then(|| (file.source.get(), lines))
-        })
-        .collect()
+/// Re-answer every breakpoint now that the program is compiled.
+///
+/// A client sets its breakpoints before `configurationDone`, when there is
+/// nothing to check them against and each one was answered "pending launch".
+/// A `breakpoint` change event carrying the same id is how DAP delivers the
+/// real verdict — and the moved line, when the requested one carried no code.
+fn announce_breakpoints<R: Read, W: Write>(
+    session: &Session,
+    server: &mut Server<R, W>,
+) -> anyhow::Result<()> {
+    let Some(program) = session.program.as_ref() else {
+        return Ok(());
+    };
+    // By id: the order the client set them in, so the events read the way the
+    // responses did.
+    let mut stored: Vec<_> = session.breakpoints.iter().collect();
+    stored.sort_by_key(|&(_, _, id)| id);
+    for (path, line, id) in stored {
+        let requested = Requested {
+            line: i64::from(line),
+            stored: Some((line, id)),
+        };
+        server.send_event(Event::Breakpoint(BreakpointEventBody {
+            reason: BreakpointEventReason::Changed,
+            breakpoint: breakpoints::answer(Some(program), path, &requested),
+        }))?;
+    }
+    Ok(())
 }
 
 /// Run the debuggee on a worker thread, then report its output, exit code and
@@ -240,55 +272,23 @@ pub(crate) fn shutdown<R: Read, W: Write>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::{BufReader, BufWriter};
-    use std::path::PathBuf;
 
     use super::*;
-
-    /// A `Write` sink the test can read back. The request loop needs the
-    /// server's writer to be `Send + 'static`, so it can't borrow a local.
-    #[derive(Clone)]
-    struct SharedOut(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedOut {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("output lock poisoned").extend(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// A throw-away project directory holding `main.leek` (which includes
-    /// `lib.leek`) plus a `Miku.toml` naming the entry.
-    fn project(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("leek-dap-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp project");
-        std::fs::write(
-            dir.join("Miku.toml"),
-            "[project]\nname = \"dbg\"\nversion = \"0.1.0\"\nentry = \"main.leek\"\n\n[paths]\nsrc = \".\"\n",
-        )
-        .expect("manifest");
-        std::fs::write(dir.join("lib.leek"), "function answer() { return 42 }\n").expect("lib");
-        std::fs::write(
-            dir.join("main.leek"),
-            "include(\"lib\")\nvar a = answer()\nreturn a\n",
-        )
-        .expect("entry");
-        dir
-    }
+    use crate::breakpoints::BreakpointStore;
+    use crate::target::native::canonical;
+    use crate::testing::{SharedOut, project};
 
     /// Drive `configurationDone` for a launch config and return the session
     /// plus everything the adapter wrote to the client.
-    fn configure(config: serde_json::Value) -> (Session, Arc<Mutex<Vec<u8>>>) {
+    fn configure(config: serde_json::Value) -> (Session, SharedOut) {
         let mut session = Session::new();
         session.pending_launch = Some(serde_json::from_value(config).expect("launch config"));
-        let sink = Arc::new(Mutex::new(Vec::new()));
+        let sink = SharedOut::new();
         let mut server = Server::new(
             BufReader::new(std::io::empty()),
-            BufWriter::new(SharedOut(Arc::clone(&sink))),
+            BufWriter::new(sink.clone()),
         );
         let flow = configuration_done(
             &mut session,
@@ -319,8 +319,7 @@ mod tests {
             .expect("a noDebug launch must run the debuggee on a worker thread");
         worker.join().expect("debuggee worker");
 
-        let out = String::from_utf8(sink.lock().expect("output lock poisoned").clone())
-            .expect("utf-8 output");
+        let out = sink.text();
         assert!(
             out.contains("\"event\":\"terminated\""),
             "no terminated event: {out}"
@@ -336,10 +335,8 @@ mod tests {
     fn a_breakpoint_in_an_included_file_maps_to_its_own_source() {
         let dir = project("includebp");
         let lib = dir.join("lib.leek");
-        let mut session = Session::new();
-        session
-            .breakpoints
-            .insert(lib.display().to_string(), vec![1]);
+        let mut breakpoints = BreakpointStore::default();
+        breakpoints.replace(&lib, &[1]);
 
         let program = NativeTarget::launch(
             &serde_json::from_value(serde_json::json!({
@@ -358,10 +355,16 @@ mod tests {
             .source
             .get();
         assert_ne!(lib_id, 1, "the included file gets its own SourceId");
+
+        let by_source = breakpoints.by_source(&program.breakpoint_map());
         assert_eq!(
-            breakpoints_by_source(&session, &program).get(&lib_id),
-            Some(&HashSet::from([1])),
+            by_source.get(&lib_id).map(HashMap::len),
+            Some(1),
             "the breakpoint was not attributed to the included file"
+        );
+        assert!(
+            !by_source.contains_key(&1),
+            "an included file's breakpoint leaked into the entry"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");

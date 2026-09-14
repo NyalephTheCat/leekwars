@@ -8,9 +8,9 @@ use std::io::{Read, Write};
 
 use dap::prelude::*;
 use dap::responses::{ScopesResponse, StackTraceResponse, ThreadsResponse, VariablesResponse};
-use dap::types::{Scope, Source, StackFrame, Thread, Variable};
+use dap::types::{Scope, StackFrame, Thread, Variable};
 
-use crate::handlers::Flow;
+use crate::handlers::{Flow, source_ref};
 use crate::session::{MAIN_THREAD_ID, Session};
 
 /// `threads`: the single synthetic main thread.
@@ -52,7 +52,7 @@ pub(crate) fn stack_trace<R: Read, W: Write>(
                 .path
                 .as_ref()
                 .or(session.program_path.as_ref())
-                .map(|path| source_ref(path)),
+                .map(|path| source_ref(std::path::Path::new(path))),
             line: i64::from(frame.line),
             column: 1,
             ..Default::default()
@@ -66,18 +66,6 @@ pub(crate) fn stack_trace<R: Read, W: Write>(
     };
     server.respond(req.success(ResponseBody::StackTrace(response)))?;
     Ok(Flow::Continue)
-}
-
-/// A DAP `source` reference for a file path.
-fn source_ref(path: &str) -> Source {
-    Source {
-        name: std::path::Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(String::from),
-        path: Some(path.to_string()),
-        ..Default::default()
-    }
 }
 
 /// `scopes`: a single "Locals" scope for the requested frame. Its

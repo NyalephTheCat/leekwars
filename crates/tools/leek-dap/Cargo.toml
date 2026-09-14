@@ -11,6 +11,9 @@ description = "Debug Adapter Protocol implementation for Leekscript (native back
 # target: `NativeOptions::debug()` keeps frame pointers and emits DWARF.
 leek-backend-native = { workspace = true }
 leek-hir         = { workspace = true }
+# Breakpoint verification: lower the program's HIR a second time to learn
+# which source lines the backend emits a debug safepoint on.
+leek-mir         = { workspace = true }
 leek-span        = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-recipes     = { workspace = true }

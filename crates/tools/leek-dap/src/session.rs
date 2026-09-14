@@ -1,8 +1,8 @@
 //! Per-connection debug session state.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::breakpoints::{BreakpointStore, ProgramMap};
 use crate::debug::NativeDebugSession;
 use crate::target::LaunchConfig;
 
@@ -12,9 +12,14 @@ pub(crate) const MAIN_THREAD_ID: i64 = 1;
 
 /// Mutable state for a single debug session.
 pub(crate) struct Session {
-    /// Source breakpoints requested by the client, keyed by source
-    /// path. Recorded verbatim; not yet honored by the target.
-    pub breakpoints: HashMap<String, Vec<i64>>,
+    /// Source breakpoints requested by the client. The session is the single
+    /// source of truth: a running debug controller holds a derived copy that
+    /// `setBreakpoints` refreshes wholesale.
+    pub breakpoints: BreakpointStore,
+    /// Which file is which `SourceId` and which lines carry a safepoint, for
+    /// the program launched at `configurationDone`. `None` until then —
+    /// before that there is nothing to resolve a breakpoint against.
+    pub program: Option<ProgramMap>,
     /// Launch configuration captured at `launch`. DAP defers the
     /// actual program start until `configurationDone`, so we stash it
     /// here and consume it there.
@@ -35,7 +40,8 @@ pub(crate) struct Session {
 impl Session {
     pub(crate) fn new() -> Self {
         Self {
-            breakpoints: HashMap::new(),
+            breakpoints: BreakpointStore::default(),
+            program: None,
             pending_launch: None,
             started: false,
             native_debug: None,

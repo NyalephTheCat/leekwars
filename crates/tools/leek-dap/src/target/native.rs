@@ -8,11 +8,13 @@
 //! frame pointers kept, DWARF emitted — the configuration meant for
 //! stepping.
 //!
-//! This runs to completion; honoring breakpoints requires driving the
-//! JIT with the emitted DWARF (or an interpreter hook), which is the
-//! next phase. See the module-level note in [`crate::target`].
+//! Breakpoints and stepping ride on the per-statement safepoints that
+//! build emits (see [`crate::debug`]); [`Compiled::breakpoint_map`] answers
+//! which file is which `SourceId` and which lines carry one, so a breakpoint
+//! can be verified — or snapped to the next line that does — instead of being
+//! reported armed on a line the debuggee never reaches.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,9 +25,10 @@ use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::Input;
 use leek_recipes::Target;
 use leek_resolver::pipeline::IncludeGraphArtifact;
-use leek_span::SourceId;
 use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
+use leek_span::{LineTable, SourceId, Span};
 
+use crate::breakpoints::ProgramMap;
 use crate::debug::DebugSource;
 
 use super::{LaunchConfig, RunOutcome};
@@ -68,11 +71,70 @@ impl Compiled {
                     file.source.get(),
                     DebugSource {
                         path: file.path.display().to_string(),
-                        line_table: leek_span::LineTable::new(&file.text),
+                        line_table: LineTable::new(&file.text),
                     },
                 )
             })
             .collect()
+    }
+
+    /// The breakpoint-resolution view of this program: which file is which
+    /// `SourceId`, and which of its lines the debuggee can stop on.
+    pub(crate) fn breakpoint_map(&self) -> ProgramMap {
+        ProgramMap::new(
+            self.sources
+                .iter()
+                .map(|file| (canonical(&file.path), file.source.get()))
+                .collect(),
+            self.safepoint_lines(),
+        )
+    }
+
+    /// Lines that carry a debug safepoint, per raw `SourceId`.
+    ///
+    /// Mirrors what the native backend's debug build emits: one safepoint per
+    /// MIR statement, plus one on the terminator line of a real `return` block
+    /// so a bare `return x` — which lowers to no statement at all — still
+    /// stops. Lowering the HIR a second time costs nothing next to the JIT and
+    /// is what keeps breakpoint verification honest: a line with no safepoint
+    /// is a line the debuggee cannot stop on, and saying so beats a marker
+    /// that sits there armed and never fires.
+    ///
+    /// Deliberately generous in one spot: the backend skips the terminator
+    /// safepoint inside a non-constant default argument's fill blocks, a
+    /// translation detail with no MIR-level tell. Counting those lines can
+    /// only leave a breakpoint verified that never fires — today's behavior —
+    /// never mark a working one broken.
+    fn safepoint_lines(&self) -> HashMap<u32, BTreeSet<u32>> {
+        // Synthetic spans carry no file, so they simply find no line table.
+        let tables: HashMap<u32, LineTable> = self
+            .sources
+            .iter()
+            .map(|file| (file.source.get(), LineTable::new(&file.text)))
+            .collect();
+        let (program, _) = leek_mir::lower_file(&self.hir);
+
+        let mut lines: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+        let mut note = |span: Span| {
+            let source = span.source.get();
+            if let Some(table) = tables.get(&source) {
+                lines
+                    .entry(source)
+                    .or_default()
+                    .insert(table.line_col(span.start).line);
+            }
+        };
+        for function in &program.functions {
+            for block in &function.blocks {
+                for span in &block.statement_spans {
+                    note(*span);
+                }
+                if matches!(block.terminator, leek_mir::ir::Terminator::Return(_)) {
+                    note(block.terminator_span);
+                }
+            }
+        }
+        lines
     }
 }
 
@@ -257,6 +319,43 @@ mod tests {
     fn pragma_overrides_the_manifest_default() {
         let lang = settle_language("// @version:3\n", &config(None, false), (2, false));
         assert_eq!(lang.version, 3);
+    }
+
+    #[test]
+    fn safepoint_lines_cover_a_bare_return_and_skip_a_comment() {
+        let dir = std::env::temp_dir().join(format!("leek-dap-safepoints-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let program = dir.join("main.leek");
+        // Line 1 is a comment, line 2 a statement, line 3 a bare `return`
+        // that lowers to a terminator and no statement at all.
+        std::fs::write(&program, "// a comment\nvar a = 1\nreturn a\n").expect("program");
+
+        let compiled = NativeTarget::launch(
+            &serde_json::from_value(serde_json::json!({
+                "program": program.display().to_string(),
+            }))
+            .expect("launch config"),
+        )
+        .compile()
+        .unwrap_or_else(|outcome| panic!("compile failed: {}", outcome.output));
+        let entry = compiled.sources[0].source.get();
+        let map = compiled.breakpoint_map();
+
+        assert_eq!(map.source_of(&program), Some(entry));
+        assert_eq!(map.place(entry, 2), Some(2), "the statement line");
+        assert_eq!(
+            map.place(entry, 3),
+            Some(3),
+            "a bare `return` line carries a safepoint of its own"
+        );
+        assert_eq!(
+            map.place(entry, 1),
+            Some(2),
+            "a comment line slides down to the next line with code"
+        );
+        assert_eq!(map.place(entry, 4), None, "nothing executable follows");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

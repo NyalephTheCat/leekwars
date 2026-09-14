@@ -14,6 +14,7 @@ mod lifecycle;
 use std::io::{Read, Write};
 
 use dap::prelude::*;
+use dap::types::Source;
 
 use crate::session::Session;
 
@@ -21,6 +22,16 @@ use crate::session::Session;
 pub(crate) enum Flow {
     Continue,
     Shutdown,
+}
+
+/// A DAP `source` reference for a file path. Stack frames and breakpoints
+/// both name the file they point at, and a client matches the two by path.
+pub(crate) fn source_ref(path: &std::path::Path) -> Source {
+    Source {
+        name: path.file_name().and_then(|s| s.to_str()).map(String::from),
+        path: Some(path.display().to_string()),
+        ..Default::default()
+    }
 }
 
 /// Route a single request to its handler.

@@ -1110,6 +1110,7 @@ dependencies = [
  "leek-generator",
  "leek-hir",
  "leek-manifest",
+ "leek-mir",
  "leek-pipeline",
  "leek-recipes",
  "leek-resolver",
