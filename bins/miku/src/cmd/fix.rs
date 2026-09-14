@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use leek_diagnostics::{Applicability, Diagnostic, Reporter, Severity};
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_project::Project;
 use leek_rewrite::EditSet;
 use leek_session::{DriverConfig, RecipeParams, Target};

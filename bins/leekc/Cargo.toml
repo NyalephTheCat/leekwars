@@ -17,6 +17,7 @@ leek-diagnostics = { workspace = true }
 leek-hir         = { workspace = true }
 leek-mir         = { workspace = true }
 leek-pipeline    = { workspace = true }
+leek-project     = { workspace = true }
 leek-session     = { workspace = true }
 leek-environment = { workspace = true }
 leek-prelude     = { workspace = true }

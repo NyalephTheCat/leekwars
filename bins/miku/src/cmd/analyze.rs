@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use leek_complexity::Complexity;
 use leek_complexity::pipeline::ComplexityArtifact;
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_session::{DriverConfig, Target};
 use leek_span::SourceId;
 

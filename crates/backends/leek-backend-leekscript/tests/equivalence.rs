@@ -20,7 +20,7 @@ use leek_hir::lower::lower_file_versioned_with_flags;
 use leek_hir::pipeline::HirArtifact;
 use leek_hir::{LowerUnit, lower_files};
 use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse, parse_with_features};
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_resolver::folder::MemFolder;
 use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::ResolveIncludes;

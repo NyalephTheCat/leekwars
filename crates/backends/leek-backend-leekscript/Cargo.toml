@@ -23,5 +23,5 @@ leek-parser         = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
 leek-resolver       = { workspace = true }
-leek-pipeline       = { workspace = true }
+leek-project        = { workspace = true }
 leek-session        = { workspace = true }

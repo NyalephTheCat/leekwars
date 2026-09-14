@@ -269,7 +269,7 @@ fn hash_sorted_names(names: &HashSet<String>, hasher: &mut DefaultHasher) {
 /// # `FeatureFlags` is deliberately not a field
 ///
 /// The experimental `FeatureFlags` already travel with the compilation:
-/// `leek_pipeline::Input::flags` carries them in, and
+/// `leek_project::Input::flags` carries them in, and
 /// `SourceFile::flags_bits` is the salsa input every pass reads them back
 /// from (`leek_parser`, `leek_hir`, `leek_resolver` and `leek_types` all do
 /// `FeatureFlags::from_bits(file.flags_bits(db))`). They are not a

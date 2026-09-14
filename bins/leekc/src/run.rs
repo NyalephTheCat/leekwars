@@ -11,7 +11,7 @@ use leek_hir::pipeline::HirArtifact;
 use leek_lexer::pipeline::TokensArtifact;
 use leek_mir::pipeline::MirArtifact;
 use leek_parser::pipeline::GreenTreeArtifact;
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_span::SourceId;
 use leek_span::pragma::LanguageSettings;
 use leek_syntax::{SyntaxNode, Version, build_flat_tree};
@@ -43,7 +43,7 @@ pub fn run() -> Result<ExitCode> {
         text: text.clone().into(),
         version_byte: lang.version,
         strict: lang.strict,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     };
 
     // Load formatter options for `--emit fmt`. The `--fmt-config`

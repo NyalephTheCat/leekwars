@@ -16,8 +16,8 @@ leek-syntax      = { workspace = true }
 leek-parser      = { workspace = true }
 
 [dev-dependencies]
+leek-project     = { workspace = true }
 leek-session     = { workspace = true }
-leek-pipeline    = { workspace = true }
 leek-rewrite     = { workspace = true }
 
 [lints]

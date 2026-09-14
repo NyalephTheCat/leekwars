@@ -144,7 +144,7 @@ pub fn typecheck_query(
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return TypeCheckArtifact::default();
     };
-    let flags = leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db));
+    let flags = leek_span::FeatureFlags::from_bits(file.flags_bits(db));
     let opts = Options::from_settings(flags, file.strict(db), file.seed_library(db));
     let TypeCheckResult {
         diagnostics,

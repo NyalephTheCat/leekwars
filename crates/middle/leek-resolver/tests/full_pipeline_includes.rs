@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use leek_diagnostics::{Diagnostic, codes};
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_resolver::folder::MemFolder;
 use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::{IncludeGraphArtifact, ResolveIncludes};
@@ -67,7 +67,7 @@ fn run_to_typecheck(entry_path: &str, files: &[(&str, &str)]) -> Run {
         text: entry_text.into(),
         version_byte: 4,
         strict: true,
-        flags: leek_pipeline::FeatureFlags::none(),
+        flags: leek_span::FeatureFlags::none(),
     };
     // The walker interns the entry first, so the counter starts at the
     // entry's own id — exactly what `leek_session::includes_step` does.

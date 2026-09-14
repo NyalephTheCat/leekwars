@@ -7,8 +7,8 @@ use crate::recipes::{RecipeParams, Target};
 use anyhow::Result;
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter, Sources};
 use leek_diagnostics::{LintLevelError, LintLevels};
-use leek_pipeline::{Input, Pipeline, Run, TimingSink};
-use leek_project::Project;
+use leek_pipeline::{Pipeline, Run, TimingSink};
+use leek_project::{Input, Project};
 
 /// The include-id interner, re-exported so front-ends that own one for
 /// a whole run (`miku test`) do not need a direct `leek-resolver`

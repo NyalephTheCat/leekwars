@@ -14,6 +14,7 @@ leek-span     = { workspace = true }
 salsa         = { version = "0.26", optional = true }
 
 [dev-dependencies]
+leek-project  = { workspace = true }
 # Self dev-dependency: turns this crate's own `salsa` feature on whenever
 # it is built as a test target, so `complexity_query` and the memoization
 # tests in `pipeline.rs` actually compile. Without it nothing in a

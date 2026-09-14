@@ -184,7 +184,7 @@ impl Workspace {
             lang.version,
             lang.strict,
             leek_types::seed_library_enabled(),
-            leek_pipeline::FeatureFlags::from_env().to_bits(),
+            leek_span::FeatureFlags::from_env().to_bits(),
             self.class_union.clone(),
         );
         self.docs.insert(
@@ -365,7 +365,7 @@ impl Workspace {
     /// rebuild it once at the end.
     fn register_indexed(&mut self, uri: Url, loaded: leek_pipeline::LoadedProjectFile) {
         let arc_text: Arc<str> = Arc::from(loaded.text.as_str());
-        let flags_bits = leek_pipeline::FeatureFlags::from_env().to_bits();
+        let flags_bits = leek_span::FeatureFlags::from_env().to_bits();
         let source_id = self.alloc_source_id();
         let source = leek_span::SourceId::new(source_id).expect("non-zero SourceId");
         let classes = Self::scan_classes(&loaded.text, source, loaded.version_byte);

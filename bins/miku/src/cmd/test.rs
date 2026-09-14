@@ -36,7 +36,7 @@ use leek_backend_native::{NativeArtifact, NativeError};
 use leek_hir::pipeline::HirArtifact;
 
 use leek_diagnostics::{Code, Reporter, Severity};
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_project::Project;
 use leek_session::{DriverConfig, PathInterner, RecipeParams, SourceInterner, Target};
 

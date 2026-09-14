@@ -1,7 +1,7 @@
 //! End-to-end `@allow(LXXXX)` suppression tests.
 
 use leek_lint::pipeline::LintFindings;
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 
@@ -11,7 +11,7 @@ fn lint_with_allows(src: &str) -> Vec<leek_diagnostics::Diagnostic> {
         text: src.to_string().into(),
         version_byte: 4,
         strict: false,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     };
     let pipeline =
         leek_session::pipeline(Target::Linted, &RecipeParams::permissive()).expect("recipe");

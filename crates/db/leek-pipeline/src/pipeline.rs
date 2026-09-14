@@ -1,8 +1,9 @@
 //! Pipeline, Step trait, and Run wrapper.
 
 use leek_diagnostics::Diagnostic;
+use leek_project::Input;
 
-use crate::context::{Artifact, Context, Input};
+use crate::context::{Artifact, Context};
 
 /// Error returned by a step. Steps may also report problems as
 /// diagnostics via [`Context::emit`] — `StepError` is reserved for

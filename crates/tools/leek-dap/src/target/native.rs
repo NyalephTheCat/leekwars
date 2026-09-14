@@ -22,7 +22,7 @@ use leek_backend_native::NativeOptions;
 use leek_diagnostics::Severity;
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_resolver::pipeline::IncludeGraphArtifact;
 use leek_session::Target;
 use leek_span::paths::canonical_or_normalized;
@@ -165,7 +165,7 @@ impl NativeTarget {
             text: source.clone().into(),
             version_byte: lang.version,
             strict: lang.strict,
-            flags: leek_pipeline::FeatureFlags::from_env(),
+            flags: leek_span::FeatureFlags::from_env(),
         };
 
         let pipeline = match leek_session::pipeline_with_includes(

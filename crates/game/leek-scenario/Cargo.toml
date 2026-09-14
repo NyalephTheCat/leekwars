@@ -10,7 +10,7 @@ description = "Fight-scenario format for Leekscript: a mergable, file-composable
 leek-generator    = { workspace = true }
 leek-hir          = { workspace = true }
 leek-session      = { workspace = true }
-leek-pipeline     = { workspace = true }
+leek-project      = { workspace = true }
 leek-span         = { workspace = true }
 leek-workpool     = { workspace = true }
 leek-diagnostics  = { workspace = true }
