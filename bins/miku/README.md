@@ -53,9 +53,10 @@ miku clean           remove the build output root (--doc: docs only)
 
 Global flags include `--manifest-path` (point at a `Miku.toml` elsewhere;
 otherwise `miku` walks up from the current directory), `--library leekwars`
-(load host function libraries), `--message-format {human|json|junit}`,
-`--color`, `--quiet`, and `--verbose` (e.g. `miku build --verbose` prints
-per-stage pipeline timings).
+(load host function libraries, on top of `[project] libraries`),
+`--message-format {human|json|junit}`, `--color`, `--quiet`, and `--verbose`
+(which names the active `[experimental]` features, and e.g. makes
+`miku build` print per-stage pipeline timings).
 
 ## Output layout
 
@@ -158,21 +159,27 @@ nothing in this toolchain reads is a warning naming the reason (`W0402`).
 Silence is not an option any of them has — a key you can set that quietly does
 nothing is worse than a message.
 
+`[experimental]` is the one table where an unknown *key* is an error (`E0401`)
+rather than a warning: its keys switch language features on, so a misspelled
+one that only warned would compile the project with the feature off.
+
 Manifest warnings are ordinary diagnostics, so `[lint]` governs them:
 `allow = ["W0402"]` silences the ignored-key notices, `deny = ["W0402"]` turns
 them into errors.
 
 ```toml
 [project]                       # required
-name        = "my-leek"         # required
-version     = "0.1.0"           # required
-language    = 4                 # default `@version` for sources (1..=4)
-strict      = false             # default `@strict`
-entry       = "src/main.leek"   # entry point
-description = "…"               # rendered by `miku doc`
-authors     = ["…"]             # rendered by `miku doc`
-license     = "MIT"             # rendered by `miku doc`
-repository  = "https://…"       # rendered by `miku doc`
+name           = "my-leek"      # required
+version        = "0.1.0"        # required
+language       = 4              # default `@version` for sources (1..=4)
+strict         = false          # default `@strict`
+entry          = "src/main.leek" # entry point
+libraries      = ["leekwars"]   # host libraries, as `--library` spells them
+fold_constants = false          # fold library constants (WEAPON_PISTOL → 37)
+description    = "…"            # rendered by `miku doc`
+authors        = ["…"]          # rendered by `miku doc`
+license        = "MIT"          # rendered by `miku doc`
+repository     = "https://…"    # rendered by `miku doc`
 
 [paths]
 src     = "src"                 # sources
@@ -214,6 +221,45 @@ junit_xml = "build/tests.xml"   # where --message-format junit writes
 
 [format]                        # see `miku fmt --help`
 [fight]                         # see "The `[fight]` manifest table" above
+
+[experimental]                  # opt-in language features, all false by default
+function_signatures = false     # bodiless `function f() -> T;` + `@backend:`
+generic_syntax      = false     # parse generic type syntax
+generics            = false     # generic builtin type inference
+overloads           = false     # function overloading
+prelude             = false     # implicit standard-library prelude
+types               = false     # `type Name = T`, tuple-shaped array types
+interfaces          = false     # `interface` declarations, `implements`
+enums               = false     # `enum Name { A, B = 10 }`
+```
+
+### Libraries and constant folding
+
+`[project] libraries` is the manifest half of the repeatable `--library` flag,
+spelled the same way (a built-in name such as `leekwars`, or a path to a
+library-definition file). The two **compose**: an invocation loads everything
+the manifest declares plus everything `--library` adds, manifest first, with a
+spec named in both loaded once. Registration is process-global and additive —
+`miku fight` registers `leekwars` on top of whatever came before either way —
+so there is no "load the manifest's libraries except this one".
+
+`[project] fold_constants = true` folds the loaded libraries' constants
+(`WEAPON_PISTOL` → `37`) to literals during lowering, the same thing
+`leekc --fold-constants` does.
+
+### Experimental features
+
+`[experimental]` is where a project records the language features it compiles
+with. The `LEEK_EXPERIMENTAL_*` environment variables still work and **add** to
+the table rather than replacing it: an unset variable and one set to `false`
+are indistinguishable, so letting the environment override the manifest would
+switch off everything the project asked for on every ordinary invocation.
+
+`miku --verbose` prints the active set once per invocation, marking any feature
+that only the environment asked for:
+
+```
+experimental features: enums, types (env)
 ```
 
 Keys outside a backend's own list warn: `mode` and `emit_lines` are java-only,
@@ -221,8 +267,8 @@ Keys outside a backend's own list warn: `mode` and `emit_lines` are java-only,
 `main_class` are also legal on `jar`), so `[backend.native] mode = "clean"` is
 a `W0400` rather than a setting that quietly does nothing.
 
-`[lsp]`, `[bench]`, `[experimental]`, `[profiles]`, `[profile]`, `[workspace]`
-and `[toolchain]` parse and warn as deferred tables (`W0401`).
+`[lsp]`, `[bench]`, `[profiles]`, `[profile]`, `[workspace]` and `[toolchain]`
+parse and warn as deferred tables (`W0401`).
 
 ### Keys that were removed
 

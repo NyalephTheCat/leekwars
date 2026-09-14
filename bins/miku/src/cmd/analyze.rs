@@ -58,7 +58,7 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
     for (i, path) in files.iter().enumerate() {
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let (src, _text) = project.pipeline_input(source, path)?;
-        let input = Input::from(src);
+        let input = Input::from_source_with_flags(src, project.feature_flags());
         let pipeline = leek_session::file_pipeline(&project, path, source, &config)?;
         let result = pipeline.run(input);
         let Some(report) = result.get::<ComplexityArtifact>() else {

@@ -25,6 +25,7 @@ pub mod fight;
 pub mod host;
 pub mod map;
 pub mod official_builtins;
+pub mod official_items;
 pub mod order;
 pub mod outcome;
 pub mod rng;

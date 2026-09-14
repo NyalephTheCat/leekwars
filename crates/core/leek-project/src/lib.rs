@@ -142,6 +142,22 @@ impl Project {
         &mut self.index
     }
 
+    /// The experimental language features this project compiles with: its
+    /// `[experimental]` table, plus whatever the `LEEK_EXPERIMENTAL_*`
+    /// variables switch on (leekwars#206).
+    ///
+    /// Every driver that compiles *this project's* files settles the flags
+    /// here, instead of each `Input` conversion reading the environment on
+    /// its own — which is what made `[experimental]` inert and left an
+    /// env-driven build with nothing in the repository to point at.
+    ///
+    /// The two sources compose by union, not by replacement: see
+    /// [`FeatureFlags::union`].
+    #[must_use]
+    pub fn feature_flags(&self) -> FeatureFlags {
+        self.manifest.experimental.union(FeatureFlags::from_env())
+    }
+
     pub fn entry_path(&self) -> PathBuf {
         self.root.join(&self.manifest.project.entry)
     }

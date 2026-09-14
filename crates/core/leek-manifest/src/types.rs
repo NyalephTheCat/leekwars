@@ -14,7 +14,21 @@ pub struct Manifest {
     pub format: FormatOptions,
     pub test: TestTable,
     pub fight: FightTable,
+    pub experimental: ExperimentalTable,
 }
+
+/// `[experimental]` — the opt-in language features this project compiles
+/// with. One key per flag, each a boolean defaulting to `false`.
+///
+/// It *is* [`leek_span::FeatureFlags`] rather than a struct mirroring it: a
+/// parallel copy would let a flag added to the pipeline become unexpressible
+/// in `Miku.toml` without anything failing, and every consumer would then
+/// have to translate between two identical shapes. The key names and their
+/// `LEEK_EXPERIMENTAL_*` equivalents come from
+/// [`FeatureFlags::FIELDS`](leek_span::FeatureFlags::FIELDS), so the parser
+/// here, the environment, and what `miku --verbose` prints cannot disagree
+/// about which features exist.
+pub type ExperimentalTable = leek_span::FeatureFlags;
 
 /// `[project]` — required.
 #[derive(Debug, Clone)]
@@ -31,6 +45,19 @@ pub struct ProjectTable {
     pub description: Option<String>,
     pub license: Option<String>,
     pub repository: Option<String>,
+    /// Host-environment function libraries to load for every command — the
+    /// manifest half of the repeatable `--library` flag. Each entry is a
+    /// built-in name (`leekwars`) or a path to a library-definition file,
+    /// spelled exactly as the flag spells it.
+    ///
+    /// A project whose sources call the game's functions declares them here
+    /// once instead of every invocation carrying `--library leekwars`
+    /// (leekwars#132).
+    pub libraries: Vec<String>,
+    /// Fold the loaded libraries' constants (`WEAPON_PISTOL` → `37`) to
+    /// literals during HIR lowering — what `leekc --fold-constants` does.
+    /// The manifest half of that flag (leekwars#132).
+    pub fold_constants: bool,
 }
 
 impl ProjectTable {
@@ -45,6 +72,8 @@ impl ProjectTable {
             description: None,
             license: None,
             repository: None,
+            libraries: Vec::new(),
+            fold_constants: false,
         }
     }
 }
