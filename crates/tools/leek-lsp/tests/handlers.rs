@@ -3661,3 +3661,286 @@ fn call_hierarchy_prepare_refuses_a_method() {
         "a method has no sound call hierarchy yet"
     );
 }
+
+// ─── slice 7: completion scope & cross-file symbols (leekwars#157) ──
+
+fn complete(ws: &Workspace, uri: &lsp::Url, line: u32, character: u32) -> Vec<lsp::CompletionItem> {
+    let resp = completion::handle(ws, uri, lsp::Position { line, character }).expect("completion");
+    match resp {
+        lsp::CompletionResponse::Array(v) => v,
+        lsp::CompletionResponse::List(l) => l.items,
+    }
+}
+
+fn labels(items: &[lsp::CompletionItem]) -> Vec<&str> {
+    items.iter().map(|i| i.label.as_str()).collect()
+}
+
+#[test]
+fn completion_offers_a_top_level_function_from_an_included_file() {
+    let ws = open_files(&[
+        (
+            "xfile_util.leek",
+            "// Helps out.\nfunction help() { return 1 }\n",
+        ),
+        ("xfile_main.leek", "include(\"xfile_util\")\n"),
+    ]);
+    let items = complete(&ws, &proj("xfile_main.leek"), 1, 0);
+    let help = items
+        .iter()
+        .find(|i| i.label == "help")
+        .unwrap_or_else(|| panic!("`help` from the include: {:?}", labels(&items)));
+    assert_eq!(help.kind, Some(lsp::CompletionItemKind::FUNCTION));
+
+    // The item must point at *util*'s declaration, not at whatever
+    // happens to sit at the same byte offset in main.leek.
+    let resolved = completion::resolve(&ws, help.clone());
+    let lsp::Documentation::MarkupContent(m) = resolved.documentation.expect("documentation")
+    else {
+        panic!("expected markup documentation");
+    };
+    assert!(
+        m.value.contains("Helps out."),
+        "resolved doc = {:?}",
+        m.value
+    );
+}
+
+#[test]
+fn completion_hides_a_local_from_another_function() {
+    let text = concat!(
+        "function a() {\n",
+        "    var secret = 1\n",
+        "    return secret\n",
+        "}\n",
+        "function b() {\n",
+        "    \n",
+        "}\n",
+    );
+    let ws = open(text);
+    let items = complete(&ws, &url(), 5, 4);
+    let labels = labels(&items);
+    assert!(
+        !labels.contains(&"secret"),
+        "`secret` is out of scope in b(): {labels:?}"
+    );
+    assert!(
+        labels.contains(&"a"),
+        "top-level functions stay: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"b"),
+        "top-level functions stay: {labels:?}"
+    );
+}
+
+#[test]
+fn completion_hides_a_param_of_another_function() {
+    let text = concat!(
+        "function a(integer hidden) { return hidden }\n",
+        "function b() {\n",
+        "    \n",
+        "}\n",
+    );
+    let ws = open(text);
+    let items = complete(&ws, &url(), 2, 4);
+    let labels = labels(&items);
+    assert!(
+        !labels.contains(&"hidden"),
+        "a()'s parameter is out of scope in b(): {labels:?}"
+    );
+}
+
+#[test]
+fn completion_keeps_a_local_visible_inside_its_own_function() {
+    let text = concat!("function a() {\n", "    var kept = 1\n", "    \n", "}\n",);
+    let ws = open(text);
+    let items = complete(&ws, &url(), 2, 4);
+    let labels = labels(&items);
+    assert!(labels.contains(&"kept"), "own local must stay: {labels:?}");
+}
+
+#[test]
+fn this_dot_uses_the_enclosing_class_not_the_last_one() {
+    let text = concat!(
+        "class First {\n",
+        "    integer alpha\n",
+        "    function m() {\n",
+        "        this.\n",
+        "    }\n",
+        "}\n",
+        "class Second {\n",
+        "    integer omega\n",
+        "}\n",
+    );
+    let ws = open(text);
+    let items = complete(
+        &ws,
+        &url(),
+        3,
+        u32::try_from("        this.".len()).unwrap(),
+    );
+    let labels = labels(&items);
+    assert!(labels.contains(&"alpha"), "First's own field: {labels:?}");
+    assert!(
+        !labels.contains(&"omega"),
+        "Second's field is not reachable through First's `this`: {labels:?}"
+    );
+}
+
+#[test]
+fn member_completion_walks_the_extends_chain() {
+    let text = concat!(
+        "class Base {\n",
+        "    integer baseField\n",
+        "}\n",
+        "class Derived extends Base {\n",
+        "    integer ownField\n",
+        "}\n",
+        "var x = Derived.\n",
+    );
+    let ws = open(text);
+    let items = complete(
+        &ws,
+        &url(),
+        6,
+        u32::try_from("var x = Derived.".len()).unwrap(),
+    );
+    let labels = labels(&items);
+    assert!(labels.contains(&"ownField"), "{labels:?}");
+    assert!(labels.contains(&"baseField"), "inherited field: {labels:?}");
+    let inherited = items
+        .iter()
+        .find(|i| i.label == "baseField")
+        .expect("baseField");
+    assert!(
+        inherited
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("from Base"),
+        "inherited members say where they come from: {:?}",
+        inherited.detail
+    );
+}
+
+#[test]
+fn member_completion_walks_the_extends_chain_across_an_include() {
+    let ws = open_files(&[
+        (
+            "xfile_base.leek",
+            "class Base {\n    integer baseField\n}\n",
+        ),
+        (
+            "xfile_derived.leek",
+            concat!(
+                "include(\"xfile_base\")\n",
+                "class Derived extends Base {\n",
+                "    integer ownField\n",
+                "}\n",
+                "var x = Derived.\n",
+            ),
+        ),
+    ]);
+    let items = complete(
+        &ws,
+        &proj("xfile_derived.leek"),
+        4,
+        u32::try_from("var x = Derived.".len()).unwrap(),
+    );
+    let labels = labels(&items);
+    assert!(labels.contains(&"ownField"), "{labels:?}");
+    assert!(
+        labels.contains(&"baseField"),
+        "the base class lives in another file: {labels:?}"
+    );
+}
+
+#[test]
+fn overridden_member_appears_once() {
+    let text = concat!(
+        "class Base {\n",
+        "    function speak() { return 1 }\n",
+        "}\n",
+        "class Derived extends Base {\n",
+        "    function speak() { return 2 }\n",
+        "}\n",
+        "var x = Derived.\n",
+    );
+    let ws = open(text);
+    let items = complete(
+        &ws,
+        &url(),
+        6,
+        u32::try_from("var x = Derived.".len()).unwrap(),
+    );
+    let speak: Vec<&lsp::CompletionItem> = items.iter().filter(|i| i.label == "speak").collect();
+    assert_eq!(speak.len(), 1, "the override hides the inherited copy");
+    assert!(
+        !speak[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("from Base"),
+        "the surviving item is Derived's own: {:?}",
+        speak[0].detail
+    );
+}
+
+#[test]
+fn a_local_shadow_wins_over_a_cross_file_symbol_of_the_same_name() {
+    let ws = open_files(&[
+        ("xfile_shadowed.leek", "function shared() { return 1 }\n"),
+        (
+            "xfile_shadower.leek",
+            "include(\"xfile_shadowed\")\nvar shared = 2\n",
+        ),
+    ]);
+    let items = complete(&ws, &proj("xfile_shadower.leek"), 2, 0);
+    let shared: Vec<&lsp::CompletionItem> = items.iter().filter(|i| i.label == "shared").collect();
+    assert_eq!(shared.len(), 1, "one item per name");
+    assert_eq!(
+        shared[0].kind,
+        Some(lsp::CompletionItemKind::VARIABLE),
+        "the file's own binding wins"
+    );
+}
+
+#[test]
+fn builtin_detail_uses_the_typed_signature() {
+    let ws = open("var x = 1\n");
+    let items = complete(&ws, &url(), 0, 9);
+    let count = items.iter().find(|i| i.label == "count").expect("count");
+    let detail = count.detail.as_deref().unwrap_or("");
+    assert!(detail.contains("function count("), "detail = {detail:?}");
+    assert!(!detail.contains("arg1"), "detail = {detail:?}");
+}
+
+#[test]
+fn snippet_labels_match_their_keywords() {
+    let ws = open("var x = 1\n");
+    let items = complete(&ws, &url(), 1, 0);
+    let snippet = items
+        .iter()
+        .find(|i| i.label == "if" && i.kind == Some(lsp::CompletionItemKind::SNIPPET))
+        .expect("an `if` snippet labelled after its keyword");
+    let keyword = items
+        .iter()
+        .find(|i| i.label == "if" && i.kind == Some(lsp::CompletionItemKind::KEYWORD))
+        .expect("the `if` keyword survives alongside it");
+    assert!(
+        keyword.sort_text < snippet.sort_text,
+        "the bare keyword sorts first: {:?} vs {:?}",
+        keyword.sort_text,
+        snippet.sort_text
+    );
+    assert!(
+        snippet
+            .insert_text
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("if ("),
+        "snippet body = {:?}",
+        snippet.insert_text
+    );
+}

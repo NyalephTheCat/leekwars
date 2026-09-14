@@ -192,7 +192,7 @@ pub(crate) fn find_class_decl_by_name(root: &SyntaxNode, name: &str) -> Option<S
 }
 
 /// The `extends Parent` name on a class declaration, if any.
-fn class_parent_name_of(cls: &SyntaxNode) -> Option<String> {
+pub(crate) fn class_parent_name_of(cls: &SyntaxNode) -> Option<String> {
     let mut saw_extends = false;
     for el in cls.children_with_tokens() {
         if let Some(t) = el.into_token() {

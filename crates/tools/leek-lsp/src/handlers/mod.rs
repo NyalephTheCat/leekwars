@@ -2,8 +2,9 @@ pub(crate) mod member;
 mod mod_support;
 pub(crate) use mod_support::{
     cross_file_use_target, enclosing_class_name, find_top_level_decl, ident_name_at,
-    ident_range_at, is_workspace_global, occurrences_in_file, preceded_by_dot, resolve_symbol,
-    resolve_symbol_id, symbol_is_class_member, workspace_occurrences,
+    ident_range_at, is_top_level_decl, is_workspace_global, occurrences_in_file, preceded_by_dot,
+    resolve_symbol, resolve_symbol_id, symbol_in_scope_at, symbol_is_class_member,
+    workspace_occurrences,
 };
 
 pub mod call_hierarchy;
