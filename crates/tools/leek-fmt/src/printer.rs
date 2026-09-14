@@ -15,8 +15,179 @@
 //! after the inner doc, so the pop happens at the natural moment
 //! the region's last work item is consumed.
 
+use leek_span::SourceId;
+use leek_syntax::{SyntaxKind, Version};
+
 use crate::doc::Doc;
 use crate::{FormatOptions, IndentStyle};
+
+/// Longest fragment either side of a boundary that [`needs_separator`]
+/// will look at. Every token that can munch with a neighbour is an
+/// identifier, a number or an operator, all far shorter than this; the
+/// cap only stops a pathological unbroken line from making the check
+/// quadratic.
+const FRAGMENT_CAP: usize = 64;
+
+/// Characters an identifier, keyword or number is built from. Two of
+/// them either side of a boundary can merge into one token
+/// (`not` + `true` → `nottrue`).
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Characters operators are built from. Two of them either side of a
+/// boundary can merge (`<` + `=>` → `<=` `>`).
+fn is_op_char(c: char) -> bool {
+    matches!(
+        c,
+        '<' | '='
+            | '>'
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '!'
+            | '&'
+            | '|'
+            | '^'
+            | '~'
+            | '?'
+            | ':'
+            | '.'
+    )
+}
+
+/// Cheap pre-filter: could these two characters possibly belong to the
+/// same token? Everything else — a bracket, a comma, a quote, any
+/// whitespace — is a token boundary no matter what sits next to it, so
+/// the boundary needs no lexing at all.
+fn may_merge(left: char, right: char) -> bool {
+    (is_word_char(left) && is_word_char(right))
+        || (is_op_char(left) && is_op_char(right))
+        // A digit and a `.` merge into a real literal (`5` + `.` → `5.`).
+        || (is_word_char(left) && right == '.')
+        || (left == '.' && is_word_char(right))
+}
+
+/// The trailing slice of `out` that could belong to its last token:
+/// the maximal run of characters in the same class as the final one.
+///
+/// Taking a class-run rather than a fixed-size suffix is what keeps
+/// this safe — a run of word or operator characters can never start
+/// inside a string literal or a comment (quotes and letters end the
+/// respective runs), so the fragment always lexes the way its tail
+/// does in the full document.
+fn trailing_fragment(out: &str) -> &str {
+    let Some(last) = out.chars().next_back() else {
+        return "";
+    };
+    // `.` joins the word class so a real literal (`1.5`) stays whole;
+    // splitting it would make `1.5` look like a bare `5`.
+    let wordish = is_word_char(last) || last == '.';
+    let mut start = out.len();
+    for (i, c) in out.char_indices().rev().take(FRAGMENT_CAP) {
+        let in_class = if wordish {
+            is_word_char(c) || c == '.'
+        } else {
+            is_op_char(c)
+        };
+        if !in_class {
+            break;
+        }
+        start = i;
+    }
+    &out[start..]
+}
+
+/// Mirror of [`trailing_fragment`] for the text about to be emitted.
+fn leading_fragment(s: &str) -> &str {
+    let Some(first) = s.chars().next() else {
+        return "";
+    };
+    let wordish = is_word_char(first) || first == '.';
+    let mut end = 0;
+    for (i, c) in s.char_indices().take(FRAGMENT_CAP) {
+        let in_class = if wordish {
+            is_word_char(c) || c == '.'
+        } else {
+            is_op_char(c)
+        };
+        if !in_class {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    &s[..end]
+}
+
+/// Lex `s` into `(kind, text)` pairs, dropping the terminating `Eof`.
+fn tokens_of(s: &str, version: Version) -> (Vec<(SyntaxKind, &str)>, usize) {
+    let src = SourceId::new(1).expect("1 is a valid SourceId");
+    let res = leek_lexer::lex(s, src, version);
+    let toks = res
+        .tokens
+        .iter()
+        .filter(|t| t.kind != SyntaxKind::Eof)
+        .map(|t| (t.kind, &s[t.span.range()]))
+        .collect();
+    (toks, res.diagnostics.len())
+}
+
+/// Would writing `left` and `right` back to back change how they lex?
+///
+/// This is the whole of the separator rule: a space goes in exactly
+/// when the concatenation does *not* re-lex into the same tokens as
+/// the two pieces do apart. Asking the lexer is the only definition of
+/// "one token" that cannot drift away from the language — a hand-kept
+/// list of keyword/operator pairs would rot on the next new operator.
+fn needs_separator(left: &str, right: &str, version: Version) -> bool {
+    let (l, l_diags) = tokens_of(left, version);
+    let (r, r_diags) = tokens_of(right, version);
+    if l.is_empty() || r.is_empty() {
+        return false;
+    }
+    // A fragment that is already malformed on its own — an
+    // unterminated string, a stray character — is some other bug's
+    // territory (#417). A space would not repair it, so add none.
+    if l_diags > 0 || r_diags > 0 {
+        return false;
+    }
+    // A line comment swallows the rest of its line whatever we do.
+    if l.iter()
+        .any(|(k, _)| matches!(k, SyntaxKind::LineComment | SyntaxKind::StringLiteral))
+    {
+        return false;
+    }
+
+    let mut joined = String::with_capacity(left.len() + right.len());
+    joined.push_str(left);
+    joined.push_str(right);
+    let (j, _) = tokens_of(&joined, version);
+
+    let expected = l.len() + r.len();
+    if j.len() != expected {
+        return true;
+    }
+    j.iter()
+        .zip(l.iter().chain(r.iter()))
+        .any(|((jk, jt), (ek, et))| jk != ek || jt != et)
+}
+
+/// Does a space have to go between what has been printed and `next`?
+///
+/// Answers "no" without lexing for the overwhelming majority of
+/// boundaries: only two adjacent word characters, two adjacent
+/// operator characters, or a digit/`.` pair can ever merge.
+fn separator_needed(out: &str, next: &str, version: Version) -> bool {
+    let (Some(l), Some(r)) = (out.chars().next_back(), next.chars().next()) else {
+        return false;
+    };
+    if !may_merge(l, r) {
+        return false;
+    }
+    needs_separator(trailing_fragment(out), leading_fragment(next), version)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -37,7 +208,13 @@ enum Frame<'d> {
 ///
 /// Indent levels in [`Doc::Indent`] are *levels*, not columns; they
 /// are scaled by the active `opts.indent` when emitting whitespace.
-pub fn print(doc: &Doc, opts: &FormatOptions) -> String {
+///
+/// Before each piece of text lands in the buffer, [`separator_needed`]
+/// decides whether a space has to go in first so the two sides keep
+/// lexing as the tokens they came from (#412). The check is exactly
+/// the complement of "this boundary already round-trips", so output
+/// that formats correctly today is unchanged byte for byte.
+pub fn print(doc: &Doc, version: Version, opts: &FormatOptions) -> String {
     let mut out = String::new();
     let mut col: usize = 0;
     let mut active = opts.clone();
@@ -57,6 +234,10 @@ pub fn print(doc: &Doc, opts: &FormatOptions) -> String {
         match doc {
             Doc::Nil => {}
             Doc::Text(s) => {
+                if separator_needed(&out, s, version) {
+                    out.push(' ');
+                    col += 1;
+                }
                 out.push_str(s);
                 col += s.chars().count();
             }

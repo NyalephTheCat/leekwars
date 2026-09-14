@@ -86,15 +86,18 @@ that now passes is reported so the file shrinks, and a reworded detail is
 information. An empty or missing file is an error, not a pass — see
 `src/fmt_ratchet.rs` for why.
 
+Three of those classes are now fixed and their rows are gone: the printer
+inserts a separator wherever two adjacent tokens would otherwise re-lex as one
+(#412), `format_binary` emits every operator token so `not in` keeps its `in`
+(#413), and `format_class_body` emits a stray modifier instead of dropping it
+(#414). That took the files to **141 corpus rows and 6 AI rows**.
+
 **Every row is an open bug.** Fixing one means deleting its row; nothing here
 is accepted behaviour, and nothing here is a reason to weaken the check that
-found it. The rows group into nine defect classes:
+found it. The remaining rows group into six defect classes:
 
 | Row detail looks like | Defect | Issue |
 |---|---|---|
-| `` `KwNot` becomes `nottrue` ``, `` `KwStatic` becomes `staticArray` ``, `` `12` becomes `12b` ``, `` `<` becomes `<=` `` | adjacent tokens printed with no separator, re-lexing as one | #412 |
-| `` `KwIn` becomes … `` | `not in` loses its `in` | #413 |
-| `` `KwStatic` becomes `Kw…` `` | `static` dropped from a class member | #414 |
 | `` `:` becomes `]` ``, `` `..` becomes `]` `` | `a[i:j]` / `[a..b]` shredded into separate statements | #415 |
 | `enter CallExpr becomes enter LambdaExpr` | the paren making a lambda the callee is peeled (114 rows) | #416 |
 | `` `<end of file>` becomes … ``, `` `"` becomes `"\n` `` | tokens invented past the end of the file | #417 |

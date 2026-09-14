@@ -3,4 +3,5 @@ class Foo  extends   Bar {
    private   real y =1.5;
    constructor(integer v){this.x =v;}
    public  add( integer  n) -> integer{ return this.x +n; }
+   public  static  Array  execute( Array t){ return t; }
 }

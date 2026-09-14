@@ -31,6 +31,13 @@ impl DocHandle {
         self.source_file.source(db)
     }
 
+    /// The language version this buffer is analyzed under. The
+    /// formatter needs it to re-lex token boundaries when deciding
+    /// where a separator is required.
+    pub fn source_file_version(&self, db: &dyn Db) -> leek_syntax::Version {
+        leek_syntax::pipeline::version_from_byte(self.source_file.version_byte(db))
+    }
+
     /// UTF-16-aware position map (line table + source text) for converting
     /// between LSP positions and byte offsets.
     pub fn pos_map(&self) -> crate::util::position::PosMap<'_> {

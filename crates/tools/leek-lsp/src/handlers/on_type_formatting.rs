@@ -40,7 +40,12 @@ pub fn handle(
         _ => None,
     }?;
 
-    let (target_range, replacement) = leek_fmt::format_range(green, &ws.settings.format, range)?;
+    let (target_range, replacement) = leek_fmt::format_range(
+        green,
+        doc.source_file_version(&ws.db),
+        &ws.settings.format,
+        range,
+    )?;
     if !super::formatting::edit_is_safe(ws, uri, doc, target_range.clone(), &replacement) {
         return Some(Vec::new());
     }
