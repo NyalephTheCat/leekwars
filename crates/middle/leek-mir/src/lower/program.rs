@@ -63,10 +63,11 @@ impl<'a> ProgramCtx<'a> {
         }
 
         // Lower the file's top-level statements into a synthetic
-        // `main` function. Globals' initializers are *not* run
-        // here — HIR keeps each global's init separately. A future
-        // slice should prepend a `__init` block; for now we just
-        // emit the main statements.
+        // `main` function. A `global x = init` at the top level is
+        // one of those statements, and `lower_var_decl` emits its
+        // initializer inline as a store into `Place::Global` (see
+        // `lower::func::stmt`), so no separate `__init` block is
+        // needed.
         let main = self.lower_main();
         self.program.functions.push(main);
 
@@ -249,7 +250,7 @@ impl<'a> ProgramCtx<'a> {
                 p.span,
             );
             // `@x` reference param — slot is shared with caller's
-            // local. `is_shared` triggers the interp to accept a
+            // local. `is_shared` triggers the backend to accept a
             // `Value::Cell` on entry; `is_by_ref` additionally
             // tells the call site to PROMOTE the caller's slot
             // before invoking.
@@ -280,7 +281,7 @@ impl<'a> ProgramCtx<'a> {
         fl.lower_block_stmts(&body.stmts);
         fl.close_with_implicit_return(body.span);
         // Lower each param's default expression as a side block
-        // ending in `Return(Some(value))`. The interpreter runs
+        // ending in `Return(Some(value))`. The backend runs
         // these on a per-arg-shortfall basis. Defaults can refer
         // to earlier params (their locals are already in scope),
         // which is why the blocks live inside the same function.
@@ -307,7 +308,7 @@ impl<'a> ProgramCtx<'a> {
 
         // Field initializers. Instance-field initializers run with
         // `this` available as a method-shaped first param; static
-        // field initializers are nullary. The interpreter calls
+        // field initializers are nullary. The backend calls
         // these on demand (per-instance for instance fields, lazily
         // on first access for static).
         for f in &c.fields {

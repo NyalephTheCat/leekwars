@@ -270,23 +270,19 @@ shim! {
 
 shim! {
     /// Apply a [`leek_mir::ir::CastKind`] to a boxed value, returning a new
-    /// handle. `code`: 0 = IntToReal, 1 = RealToInt, 2 = ToBool, 3 = ToString,
-    /// else = User (identity clone). Mirrors the interpreter's `apply_cast`
-    /// (same `Value` conversion methods), so the result matches exactly.
+    /// handle. The only kind lowering emits is `User` (code 4), which clones
+    /// the value and lets the destination local's declared type drive the
+    /// coercion. Codes 0-3 were named numeric/bool/string conversions that
+    /// never had a producer; they are still accepted (as identity) so an
+    /// older AOT object linked against a newer archive keeps working.
     ///
     /// # Safety
     /// `p` must satisfy the [handle contract](super#handle-safety-contract).
     pub unsafe extern "C" fn leek_apply_cast(code: i64, p: *mut Value) -> *mut Value {
         // SAFETY: handle contract on `p`.
         let v = unsafe { val(&p) };
-        let r = match code {
-            0 => Value::Real(v.to_real()),
-            1 => Value::Int(v.to_long()),
-            2 => Value::Bool(v.is_truthy()),
-            3 => Value::String(std::rc::Rc::new(v.to_string())),
-            _ => v.clone(),
-        };
-        handle(r)
+        let _ = code;
+        handle(v.clone())
     }
 }
 

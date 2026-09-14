@@ -679,7 +679,6 @@ fn rvalue_refs(rvalue: &Rvalue, out: &mut Refs) {
         | Rvalue::BuiltinRef(_)
         | Rvalue::This
         | Rvalue::ClassSelf
-        | Rvalue::Super
         | Rvalue::ClassRef(_, _)
         | Rvalue::Unsupported(_) => {}
     }

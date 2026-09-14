@@ -2027,7 +2027,6 @@ fn rvalue_name(rv: &Rvalue) -> &'static str {
         Rvalue::This => "this",
         Rvalue::ClassSelf => "class-self",
         Rvalue::MakeSuper { .. } => "make-super",
-        Rvalue::Super => "super",
         Rvalue::ClassRef(..) => "class-ref",
         Rvalue::Unsupported(_) => "unsupported",
     }

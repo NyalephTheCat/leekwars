@@ -169,12 +169,12 @@ impl FnLowerer<'_> {
             // pointing at the same `Rc` as `a` for composite
             // values while scalars still copy by value.
             // `MakeAlias` is a raw-read assignment that the
-            // interp's `Place::Local` handler treats as
+            // backend's `Place::Local` handler treats as
             // copy-not-clone (no `deep_clone_for_v1`).
             if let ExprKind::Unary(leek_hir::UnaryOp::Ref, inner) = &init.kind {
                 let src = self.lower_expr_to_operand(inner);
                 self.push_stmt(Statement::Assign(Place::Local(id), Rvalue::Use(src)));
-                // Mark the local so the interp knows not to clone
+                // Mark the local so the backend knows not to clone
                 // composite values on this assignment in v1.
                 self.locals[id.0 as usize].is_by_ref = true;
                 return;

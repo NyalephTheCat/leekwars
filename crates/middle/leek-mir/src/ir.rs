@@ -7,8 +7,8 @@
 //!
 //! This is **not full SSA**. Locals can be reassigned; the
 //! Cranelift frontend takes care of SSA conversion when the native
-//! backend consumes us. We keep the form simple so the bytecode VM
-//! can map locals to slot indices directly.
+//! backend consumes us. We keep the form simple so a consumer can map
+//! locals to slot indices directly.
 //!
 //! All operands are either a local (a `LocalId`) or a literal
 //! constant — there are no nested expression trees inside an
@@ -57,7 +57,7 @@ impl MirProgram {
     }
 
     /// Resolve a method call against a class's flattened vtable,
-    /// mirroring the interpreter's arity-aware dispatch: when
+    /// mirroring upstream's arity-aware dispatch: when
     /// `argc` is `Some(n)`, prefer the `(name, n)` overload; the
     /// any-arity fallback picks the most-derived class's
     /// first-declared same-name method. Instance methods only.
@@ -83,8 +83,8 @@ impl MirProgram {
     }
 
     /// Select the constructor `class` (or its nearest ancestor that
-    /// declares any) uses for `argc` arguments. Matches the
-    /// interpreter: walk child-first to the first class with
+    /// declares any) uses for `argc` arguments. Matches upstream:
+    /// walk child-first to the first class with
     /// constructors, then prefer an exact-arity match, else its
     /// first constructor. Returns its `function_idx`.
     pub fn select_constructor(&self, class: &MirClass, argc: usize) -> Option<usize> {
@@ -310,7 +310,7 @@ pub struct MirField {
     /// modifier — assignment doesn't error, it just doesn't take.
     pub is_final: bool,
     /// Declared field type (`real` in `class A { real x }`), or
-    /// `Type::Any` if unannotated. Used by the interp to coerce
+    /// `Type::Any` if unannotated. Used by the backend to coerce
     /// the init value / writes to the declared type.
     pub ty: Type,
     pub span: Span,
@@ -357,7 +357,7 @@ pub struct MirFunction {
     pub blocks: Vec<BasicBlock>,
     pub entry: BlockId,
     /// When this function is a method, constructor, or field
-    /// initializer of a class, the class's DefId. The interpreter
+    /// initializer of a class, the class's DefId. The backend
     /// uses it to enforce private/protected visibility from the
     /// caller side.
     pub owning_class: Option<DefId>,
@@ -411,7 +411,7 @@ pub struct LocalDecl {
     /// For parameters with a default value, the block that
     /// computes the default. The block ends in a
     /// [`Terminator::Return`] yielding the default value, which
-    /// the interpreter assigns to this local when the caller
+    /// the backend assigns to this local when the caller
     /// omits the corresponding argument.
     pub default_init: Option<BlockId>,
     /// Type inferred from a `var x = init` initializer (when
@@ -421,7 +421,7 @@ pub struct LocalDecl {
     /// that expect `var a = 5.5; a = 2` to land as Int still pass.
     pub inferred_ty: Option<Type>,
     /// True when this local is referenced by a nested lambda's
-    /// capture set. The interpreter wraps shared locals in a
+    /// capture set. The backend wraps shared locals in a
     /// `Value::Cell` so writes from the closure propagate back to
     /// the outer scope (and vice versa).
     pub is_shared: bool,
@@ -491,7 +491,7 @@ pub enum Statement {
     /// v2+'s plain set — resolve to a constant at emission, where
     /// the backend knows the version.
     ChargeVersioned { v1: u64, vn: u64 },
-    /// Drain the interpreter's "pending v1-v3 LegacyArray
+    /// Drain the runtime's "pending v1-v3 LegacyArray
     /// promotion" side-channel into the given local. Emitted
     /// after builtins that may morph their first arg from an
     /// Array to a sparse Map (e.g. `removeElement`,
@@ -519,6 +519,15 @@ pub enum Terminator {
     /// `return value`.
     Return(Option<Operand>),
     /// `switch (disc) { case k0 -> bb0; … default -> bbN }`.
+    ///
+    /// **No lowering emits this today.** `lower_switch` expands a
+    /// `switch` into a chain of `Branch` terminators so that the
+    /// per-case op charges match upstream exactly. The variant and
+    /// its handling in [`crate::opt`], [`crate::cfg`],
+    /// [`crate::verify`] and the native backend are kept for the
+    /// intended producer: a dense int/string case set lowered to a
+    /// Cranelift `br_table`. Anything added here must reproduce the
+    /// `Statement::Charge` sequence `lower_switch` emits.
     Switch {
         discriminant: Operand,
         arms: Vec<(Const, BlockId)>,
@@ -600,7 +609,7 @@ pub enum Rvalue {
     Use(Operand),
     /// Like [`Rvalue::Use`] but the operand is a *freshly produced*
     /// value (e.g. the new array a builtin like `arrayMap` returns),
-    /// so the interpreter's v1 pass-by-value clone is skipped on
+    /// so the runtime's v1 pass-by-value clone is skipped on
     /// assignment. Cloning would deep-copy the result and break the
     /// references its elements share (`arrayMap(a, v -> r)` returns an
     /// array whose every element aliases the same `r`). Identical to
@@ -661,7 +670,7 @@ pub enum Rvalue {
     /// Construct a closure value. `function_idx` indexes into
     /// `MirProgram.functions` — the lambda's body lives there with
     /// `captures.len()` extra parameter slots prepended to its
-    /// regular params. The interpreter evaluates `captures` in the
+    /// regular params. The backend evaluates `captures` in the
     /// enclosing frame and binds them to those slots when the
     /// closure is later invoked.
     MakeLambda {
@@ -687,10 +696,6 @@ pub enum Rvalue {
         this: LocalId,
         parent_class: String,
     },
-    /// Deprecated marker — kept to avoid breaking call sites; the
-    /// lowerer no longer emits this. Treated by the interpreter
-    /// the same as `Unsupported("super")`.
-    Super,
     /// Class name used as a value (`var c = MyClass`).
     ClassRef(DefId, String),
     /// Placeholder for HIR shapes we don't fully lower yet
@@ -797,7 +802,7 @@ pub enum Callee {
     Indirect(LocalId),
     /// `super(args)` from a subclass constructor — dispatch to
     /// `parent_class`'s constructor with `this` as the receiver.
-    /// The interpreter looks up the matching constructor by
+    /// The backend looks up the matching constructor by
     /// arity on the parent class.
     SuperConstructor { this: LocalId, parent_class: String },
 }
@@ -830,7 +835,7 @@ pub enum BinOp {
     /// Compound `^=` desugared into a binary op. Distinct from
     /// `BitXor` because the `^=` form means POWER-assign in v1
     /// (`x ^= 5` → `x = x ** 5`) and XOR-assign in v2+. The
-    /// interpreter dispatches on its `version` field. Standalone
+    /// backend dispatches on its `version` field. Standalone
     /// `^` is always XOR and lowers to `BitXor` instead.
     CompoundXor,
     /// Logical / value XOR (`xor`). Both operands are evaluated;
@@ -850,11 +855,11 @@ pub enum BinOp {
 impl BinOp {
     /// Operations charged for this binary op, mirroring the upstream VM.
     /// Draws its tiers from [`leek_hir::op_cost`] — the single source of the
-    /// numbers shared with the Java emitter — so the interpreter, the native
-    /// backend, and Java all report identical `.ops(N)` counts. Note:
+    /// numbers shared with the Java emitter — so the native backend and
+    /// Java both report identical `.ops(N)` counts. Note:
     /// `In`/`NotIn` use the interval-membership tier (the common `.ops`
-    /// target); an array-RHS `in` over-charges by 1, matching the
-    /// interpreter's existing behavior.
+    /// target); an array-RHS `in` over-charges by 1, matching
+    /// upstream's existing behavior.
     #[must_use]
     pub fn op_cost(self) -> u64 {
         use leek_hir::op_cost::{CONTAINS, DEFAULT, DIV, MUL, POW};
@@ -905,14 +910,9 @@ impl UnOp {
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastKind {
-    IntToReal,
-    RealToInt,
-    /// `as bool` / coercion for the condition of a branch.
-    ToBool,
-    /// `as string` / implicit stringification.
-    ToString,
-    /// User-written `expr as T` where T isn't one of the special
-    /// numeric casts above. The target type lives alongside the
-    /// rvalue's containing assignment, so we don't carry it here.
+    /// A written `expr as T`. The target type lives alongside the
+    /// rvalue's containing assignment, so we don't carry it here:
+    /// the backend coerces the boxed result to the destination
+    /// local's declared type.
     User,
 }

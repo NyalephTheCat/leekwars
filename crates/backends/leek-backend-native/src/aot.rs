@@ -192,7 +192,7 @@ fn aot_unsupported_reason(program: &leek_mir::ir::MirProgram) -> Option<&'static
                         Rvalue::MakeLambda { .. } => return Some("lambdas / closures"),
                         Rvalue::FunctionRef(_) => return Some("first-class function references"),
                         Rvalue::New { .. } | Rvalue::ClassRef(..) => return Some("classes"),
-                        Rvalue::MakeSuper { .. } | Rvalue::Super => return Some("`super`"),
+                        Rvalue::MakeSuper { .. } => return Some("`super`"),
                         // A builtin used as a *value* (`PI`, `var f = abs`,
                         // `var c = Array`) still boxes a constant `Value` into a
                         // baked handle — not yet relocatable.
