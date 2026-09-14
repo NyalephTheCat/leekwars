@@ -16,17 +16,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Call, Callee, Expr, ExprKind, NameRef};
 use leek_span::Span;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct DeprecatedFeature;
 
-static META: LintMeta = LintMeta {
-    name: "deprecated-feature",
-    code: codes::DEPRECATED_FEATURE,
-    group: LintGroup::Style,
-    description: "call to a deprecated builtin that has a newer replacement",
-};
+declare_lint!(
+    DeprecatedFeature,
+    "deprecated-feature",
+    codes::DEPRECATED_FEATURE,
+    Style,
+    "call to a deprecated builtin that has a newer replacement"
+);
 
 impl LintPass for DeprecatedFeature {
     fn meta(&self) -> &'static LintMeta {

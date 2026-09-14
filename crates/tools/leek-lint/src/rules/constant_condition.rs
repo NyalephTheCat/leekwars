@@ -21,17 +21,19 @@ use leek_hir::{Expr, ExprKind, Literal, Stmt};
 use leek_span::Span;
 
 use super::for_each_stmt;
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct ConstantCondition;
 
-static META: LintMeta = LintMeta {
-    name: "constant-condition",
-    code: codes::CONSTANT_CONDITION,
-    group: LintGroup::Suspicious,
-    description: "`if`/`while` condition is a compile-time constant — the branch is unconditional",
-};
+declare_lint!(
+    ConstantCondition,
+    "constant-condition",
+    codes::CONSTANT_CONDITION,
+    Suspicious,
+    "`if`/`while` condition is a compile-time constant — the branch is unconditional"
+);
 
 impl LintPass for ConstantCondition {
     fn meta(&self) -> &'static LintMeta {

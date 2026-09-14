@@ -8,17 +8,19 @@ use leek_hir::{BinaryOp, Expr, ExprKind};
 use leek_span::Span;
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct IdenticalOperands;
 
-static META: LintMeta = LintMeta {
-    name: "identical-operands",
-    code: codes::IDENTICAL_OPERANDS,
-    group: LintGroup::Suspicious,
-    description: "logical/bitwise expression whose two operands are identical",
-};
+declare_lint!(
+    IdenticalOperands,
+    "identical-operands",
+    codes::IDENTICAL_OPERANDS,
+    Suspicious,
+    "logical/bitwise expression whose two operands are identical"
+);
 
 impl LintPass for IdenticalOperands {
     fn meta(&self) -> &'static LintMeta {

@@ -14,17 +14,19 @@
 use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct ChainedComparison;
 
-static META: LintMeta = LintMeta {
-    name: "chained-comparison",
-    code: codes::CHAINED_COMPARISON,
-    group: LintGroup::Suspicious,
-    description: "`a < b < c` compares a boolean with `c` — write `a < b && b < c`",
-};
+declare_lint!(
+    ChainedComparison,
+    "chained-comparison",
+    codes::CHAINED_COMPARISON,
+    Suspicious,
+    "`a < b < c` compares a boolean with `c` — write `a < b && b < c`"
+);
 
 impl LintPass for ChainedComparison {
     fn meta(&self) -> &'static LintMeta {

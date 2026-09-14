@@ -16,17 +16,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Callee, DefId, ExprKind, NameRef};
 
 use super::for_each_expr_deep_in_stmts;
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct UnusedParameter;
 
-static META: LintMeta = LintMeta {
-    name: "unused-parameter",
-    code: codes::UNUSED_PARAMETER,
-    group: LintGroup::Suspicious,
-    description: "function parameter that is never read in the body",
-};
+declare_lint!(
+    UnusedParameter,
+    "unused-parameter",
+    codes::UNUSED_PARAMETER,
+    Suspicious,
+    "function parameter that is never read in the body"
+);
 
 impl LintPass for UnusedParameter {
     fn meta(&self) -> &'static LintMeta {

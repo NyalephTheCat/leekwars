@@ -22,17 +22,19 @@ use leek_hir::{Callee, ExprKind, NameRef, Stmt};
 use leek_span::Span;
 
 use super::{for_each_expr_deep_in_stmts, for_each_stmt};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{Body, LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct UnusedVariable;
 
-static META: LintMeta = LintMeta {
-    name: "unused-variable",
-    code: codes::UNUSED_VARIABLE,
-    group: LintGroup::Suspicious,
-    description: "local variable declared but never used",
-};
+declare_lint!(
+    UnusedVariable,
+    "unused-variable",
+    codes::UNUSED_VARIABLE,
+    Suspicious,
+    "local variable declared but never used"
+);
 
 impl LintPass for UnusedVariable {
     fn meta(&self) -> &'static LintMeta {

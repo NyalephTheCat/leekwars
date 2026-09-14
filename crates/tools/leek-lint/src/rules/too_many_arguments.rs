@@ -7,21 +7,23 @@
 
 use leek_diagnostics::{codes, diag};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct TooManyArguments;
 
 /// Threshold above which the lint fires (clippy uses 7; Leekscript
 /// AIs pass smaller bundles around, so be a little stricter).
 const MAX_PARAMS: usize = 5;
 
-static META: LintMeta = LintMeta {
-    name: "too-many-arguments",
-    code: codes::TOO_MANY_ARGUMENTS,
-    group: LintGroup::Pedantic,
-    description: "function with a very long parameter list — group related values instead",
-};
+declare_lint!(
+    TooManyArguments,
+    "too-many-arguments",
+    codes::TOO_MANY_ARGUMENTS,
+    Pedantic,
+    "function with a very long parameter list — group related values instead"
+);
 
 impl LintPass for TooManyArguments {
     fn meta(&self) -> &'static LintMeta {

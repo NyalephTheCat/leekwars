@@ -20,17 +20,19 @@ use leek_hir::{DefId, Expr, ExprKind, NameRef, PostfixOp, Stmt, UnaryOp};
 
 use super::for_each_expr_deep;
 use super::for_each_stmt;
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct UselessForeachWrite;
 
-static META: LintMeta = LintMeta {
-    name: "useless-foreach-write",
-    code: codes::USELESS_FOREACH_WRITE,
-    group: LintGroup::Nursery,
-    description: "assignment to a by-value foreach binding — use `var @x` to write through",
-};
+declare_lint!(
+    UselessForeachWrite,
+    "useless-foreach-write",
+    codes::USELESS_FOREACH_WRITE,
+    Nursery,
+    "assignment to a by-value foreach binding — use `var @x` to write through"
+);
 
 impl LintPass for UselessForeachWrite {
     fn meta(&self) -> &'static LintMeta {

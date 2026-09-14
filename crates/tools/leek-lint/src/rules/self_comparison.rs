@@ -7,17 +7,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct SelfComparison;
 
-static META: LintMeta = LintMeta {
-    name: "self-comparison",
-    code: codes::SELF_COMPARISON,
-    group: LintGroup::Suspicious,
-    description: "comparison whose two sides are identical — always true or always false",
-};
+declare_lint!(
+    SelfComparison,
+    "self-comparison",
+    codes::SELF_COMPARISON,
+    Suspicious,
+    "comparison whose two sides are identical — always true or always false"
+);
 
 impl LintPass for SelfComparison {
     fn meta(&self) -> &'static LintMeta {

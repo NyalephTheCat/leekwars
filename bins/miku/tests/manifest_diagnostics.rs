@@ -175,3 +175,124 @@ fn an_unknown_lint_code_names_the_entry_that_spelled_it() {
     assert!(out.stderr.contains("NOPE9999"), "stderr: {}", out.stderr);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---- keys that are in the schema but do nothing (DRIVER-06) ----
+
+#[test]
+fn an_ignored_key_warns_with_a_caret_and_does_not_fail_the_build() {
+    let dir = project(
+        "ignored",
+        "[backend.native]\nenable = true\ndefault = true\ntarget = \"riscv64-unknown-linux-gnu\"\n",
+    );
+    let out = miku(&["check"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("W0402") && out.stderr.contains("backend.native.target"),
+        "stderr: {}",
+        out.stderr
+    );
+    // The reason, not just the fact.
+    assert!(
+        out.stderr.contains("cross-compilation is not supported"),
+        "stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_ignored_key_can_be_allowed() {
+    let dir = project(
+        "ignored_allow",
+        "[lint]\nallow = [\"W0402\"]\n\n\
+         [backend.native]\nenable = true\ndefault = true\ntarget = \"riscv64\"\n",
+    );
+    let out = miku(&["check"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(!out.stderr.contains("W0402"), "stderr: {}", out.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn two_default_backends_fail_the_command() {
+    // Before this was validated, `default_kind` silently took the first in a
+    // fixed order — so a project asking for native got java and no warning.
+    let dir = project(
+        "two_defaults",
+        "[backend.java]\nenable = true\ndefault = true\n\n\
+         [backend.native]\nenable = true\ndefault = true\n",
+    );
+    let out = miku(&["check"], &dir);
+    // A manifest that cannot be resolved at all is a load failure (exit 2),
+    // not a diagnostic against the source.
+    assert_eq!(out.status, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("backend.native.default")
+            && out.stderr.contains("the only backend marked `default`"),
+        "stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_default_backend_that_is_disabled_fails_the_command() {
+    let dir = project(
+        "disabled_default",
+        "[backend.native]\nenable = false\ndefault = true\n",
+    );
+    let out = miku(&["check"], &dir);
+    assert_eq!(out.status, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("backend.native.enable"),
+        "stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_removed_key_reports_as_unknown_rather_than_being_swallowed() {
+    // `edition` and `java_version` parsed into fields nothing read.
+    let dir = project(
+        "removed_keys",
+        "edition = \"2024\"\n\n[backend.java]\nenable = true\njava_version = 17\n",
+    );
+    let out = miku(&["check"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("project.edition") && out.stderr.contains("backend.java.java_version"),
+        "stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_backend_key_on_the_wrong_backend_warns() {
+    let dir = project(
+        "wrong_backend_key",
+        "[backend.native]\nenable = true\ndefault = true\nmode = \"clean\"\n",
+    );
+    let out = miku(&["check"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("backend.native.mode"),
+        "stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_duration_shaped_test_timeout_is_an_error_not_silence() {
+    let dir = project("timeout_str", "[test]\ntimeout = \"5s\"\n");
+    let out = miku(&["check"], &dir);
+    assert_eq!(out.status, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("test.timeout") && out.stderr.contains("ops"),
+        "stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

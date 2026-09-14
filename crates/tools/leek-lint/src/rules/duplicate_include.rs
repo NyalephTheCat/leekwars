@@ -7,17 +7,19 @@ use std::collections::HashSet;
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, codes, diag};
 use leek_hir::Stmt;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct DuplicateInclude;
 
-static META: LintMeta = LintMeta {
-    name: "duplicate-include",
-    code: codes::DUPLICATE_INCLUDE,
-    group: LintGroup::Style,
-    description: "second `include` of the same file — a no-op",
-};
+declare_lint!(
+    DuplicateInclude,
+    "duplicate-include",
+    codes::DUPLICATE_INCLUDE,
+    Style,
+    "second `include` of the same file — a no-op"
+);
 
 impl LintPass for DuplicateInclude {
     fn meta(&self) -> &'static LintMeta {

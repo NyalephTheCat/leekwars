@@ -1985,3 +1985,118 @@ fn dev_pipeline_prints_a_timing_per_front_end_pass() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `[test] timeout` is an op budget the runner actually enforces, and the
+/// per-file `// miku-test: timeout` annotation still wins over it.
+#[test]
+fn manifest_test_timeout_is_the_default_op_budget() {
+    let dir = scratch_dir("test_timeout");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "budgeted"
+version = "0.1.0"
+
+[test]
+timeout = 1000
+"#,
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 0;\n");
+    // No annotation: the manifest budget applies, so the hot loop trips
+    // TOO_MUCH_OPERATIONS and `expect-fail` accepts it.
+    write(
+        &dir,
+        "tests/hot.leek",
+        "// miku-test: expect-fail\n// @version:4\nwhile (true) { var x = 1; }\n",
+    );
+    // A per-file annotation overrides the manifest — a generous budget here
+    // means this quick test finishes normally rather than being cut off.
+    write(
+        &dir,
+        "tests/quick.leek",
+        "// miku-test: timeout 10000000\n// @version:4\nvar t = 0;\nfor (var i = 0; i < 2000; i++) { t += i; }\nreturn 1;\n",
+    );
+
+    let out = miku(&["test"], &dir);
+    assert_eq!(
+        out.status, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
+    assert!(
+        out.stdout.contains("2 passed"),
+        "stdout: {}\nstderr: {}",
+        out.stdout,
+        out.stderr
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Without the manifest budget the same hot loop runs on the much larger
+/// default, so `[test] timeout` really is what cut it short above.
+#[test]
+fn without_a_manifest_timeout_the_default_budget_applies() {
+    let dir = scratch_dir("test_timeout_absent");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"unbudgeted\"\nversion = \"0.1.0\"\n",
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 0;\n");
+    // 2000 iterations is far past a 1000-op budget and far short of the
+    // backend default, so this passes only when no manifest budget is set.
+    write(
+        &dir,
+        "tests/quick.leek",
+        "// @version:4\nvar t = 0;\nfor (var i = 0; i < 2000; i++) { t += i; }\nreturn 1;\n",
+    );
+
+    let out = miku(&["test"], &dir);
+    assert_eq!(
+        out.status, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
+    assert!(out.stdout.contains("1 passed"), "stdout: {}", out.stdout);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `[project]`'s metadata keys are what `miku doc`'s index renders — before
+/// this they parsed into fields nothing read.
+#[test]
+fn doc_index_renders_project_metadata() {
+    let dir = scratch_dir("doc_meta");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name        = "documented"
+version     = "1.2.3"
+description = "A leek that fights politely."
+authors     = ["Ada Lovelace"]
+license     = "MIT"
+repository  = "https://example.invalid/documented"
+"#,
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 0;\n");
+
+    let out = miku(&["doc"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    let index = std::fs::read_to_string(dir.join("build/doc/index.html")).expect("index.html");
+    assert!(
+        index.contains("A leek that fights politely."),
+        "description missing:\n{index}"
+    );
+    assert!(index.contains("Ada Lovelace"), "author missing:\n{index}");
+    assert!(index.contains("MIT"), "license missing:\n{index}");
+    assert!(
+        index.contains("https://example.invalid/documented"),
+        "repository missing:\n{index}"
+    );
+    assert!(index.contains("v1.2.3"), "version missing:\n{index}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

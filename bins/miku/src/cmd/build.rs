@@ -96,7 +96,7 @@ pub fn run(
 
 /// AOT-compile the project to a standalone native executable. The output path
 /// is `--out-dir` if given, else `[backend.native].out_dir`, else
-/// `<project root>/<project name>`.
+/// `[backend.native].out`, else `<project root>/<project name>`.
 fn emit_native(
     project: &Project,
     result: &leek_pipeline::Run<'_>,
@@ -108,23 +108,39 @@ fn emit_native(
         .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
     let input = result.input();
     let settings = project.manifest.backend.native.clone().unwrap_or_default();
-    let out = pick_out_dir(
-        project,
-        args.out_dir.as_deref(),
-        &settings,
-        project.root.join(&project.manifest.project.name),
-    );
+    let out = native_out_path(project, args.out_dir.as_deref(), &settings);
+    // `out` may name a path in a directory that does not exist yet
+    // (`out = "bin/app"`); the linker will not create it.
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
 
     let mut opts = leek_backend_native::NativeOptions::release()
         .with_lang(input.version_byte, input.strict)
         // A standalone binary runs unbounded — no per-turn op budget.
         .with_op_limit(u64::MAX);
-    if let Some(depth) = settings.max_call_depth {
-        opts.max_call_depth = depth;
-    }
+    crate::util::apply_native_settings(&mut opts, &project.manifest);
     leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, quiet)
         .with_context(|| format!("compiling native executable to {}", out.display()))?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Where the standalone native executable goes: [`pick_out_dir`]'s
+/// `--out-dir` / `out_dir` precedence, with `[backend.native].out` — the
+/// single-file spelling — ahead of the `<root>/<name>` default. A relative
+/// `out` resolves against the project root, like every other manifest path.
+fn native_out_path(
+    project: &Project,
+    cli_out_dir: Option<&Path>,
+    settings: &leek_manifest::BackendSettings,
+) -> std::path::PathBuf {
+    let default = match settings.out.as_deref() {
+        Some(p) if p.is_absolute() => p.to_path_buf(),
+        Some(p) => project.root.join(p),
+        None => project.root.join(&project.manifest.project.name),
+    };
+    pick_out_dir(project, cli_out_dir, settings, default)
 }
 
 /// Emit desugared official LeekScript source for the project. Writes
@@ -223,4 +239,101 @@ fn emit_java(
         eprintln!("wrote {}", java_path.display());
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_out_path;
+    use leek_project::Project;
+    use std::path::{Path, PathBuf};
+
+    /// A throwaway project on disk — `Project` keeps a private index, so it
+    /// can only be built by discovery.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str, backend_native: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "miku-out-path-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("src")).expect("scratch dir");
+            std::fs::write(
+                root.join("Miku.toml"),
+                format!("[project]\nname = \"demo\"\nversion = \"0.1.0\"\n{backend_native}"),
+            )
+            .expect("write manifest");
+            std::fs::write(root.join("src/main.leek"), "return 1;\n").expect("write entry");
+            Self(root)
+        }
+
+        fn project(&self) -> Project {
+            Project::discover(Some(&self.0.join("Miku.toml"))).expect("discover")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn settings(p: &Project) -> leek_manifest::BackendSettings {
+        p.manifest.backend.native.clone().unwrap_or_default()
+    }
+
+    #[test]
+    fn defaults_to_the_project_name_at_the_root() {
+        let s = Scratch::new("default", "");
+        let p = s.project();
+        assert_eq!(
+            native_out_path(&p, None, &settings(&p)),
+            p.root.join("demo")
+        );
+    }
+
+    #[test]
+    fn a_relative_manifest_out_resolves_against_the_root() {
+        let s = Scratch::new(
+            "relative",
+            "[backend.native]\nenable = true\nout = \"bin/app\"\n",
+        );
+        let p = s.project();
+        assert_eq!(
+            native_out_path(&p, None, &settings(&p)),
+            p.root.join("bin/app")
+        );
+    }
+
+    #[test]
+    fn an_absolute_manifest_out_is_taken_as_is() {
+        let s = Scratch::new(
+            "absolute",
+            "[backend.native]\nenable = true\nout = \"/elsewhere/app\"\n",
+        );
+        let p = s.project();
+        assert_eq!(
+            native_out_path(&p, None, &settings(&p)),
+            PathBuf::from("/elsewhere/app")
+        );
+    }
+
+    #[test]
+    fn out_dir_and_the_cli_flag_both_win_over_out() {
+        let s = Scratch::new(
+            "precedence",
+            "[backend.native]\nenable = true\nout = \"bin/app\"\nout_dir = \"dist/app\"\n",
+        );
+        let p = s.project();
+        assert_eq!(
+            native_out_path(&p, None, &settings(&p)),
+            p.root.join("dist/app")
+        );
+        assert_eq!(
+            native_out_path(&p, Some(Path::new("cli/out")), &settings(&p)),
+            p.root.join("cli/out")
+        );
+    }
 }

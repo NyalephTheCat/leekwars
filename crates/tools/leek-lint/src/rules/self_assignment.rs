@@ -6,17 +6,19 @@ use leek_diagnostics::{Applicability, Diagnostic, Suggestion, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct SelfAssignment;
 
-static META: LintMeta = LintMeta {
-    name: "self-assignment",
-    code: codes::SELF_ASSIGNMENT,
-    group: LintGroup::Correctness,
-    description: "assignment of a value to itself — has no effect",
-};
+declare_lint!(
+    SelfAssignment,
+    "self-assignment",
+    codes::SELF_ASSIGNMENT,
+    Correctness,
+    "assignment of a value to itself — has no effect"
+);
 
 impl LintPass for SelfAssignment {
     fn meta(&self) -> &'static LintMeta {

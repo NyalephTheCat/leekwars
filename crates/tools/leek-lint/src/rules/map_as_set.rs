@@ -29,20 +29,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{BinaryOp, Callee, DefId, Expr, ExprKind, Literal, NameRef, Stmt};
 
 use super::{for_each_expr_deep_in_stmts, for_each_stmt};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{Body, LintCx, LintMeta, LintPass};
 
-pub struct MapAsSet {
-    /// Target language version; the lint is silent below 4.
-    pub version: u8,
-}
+#[derive(Default)]
+pub struct MapAsSet;
 
-static META: LintMeta = LintMeta {
-    name: "map-as-set",
-    code: codes::MAP_AS_SET,
-    group: LintGroup::Nursery,
-    description: "map whose values are all `true` — a set stores the keys without the dummy values",
-};
+declare_lint!(
+    MapAsSet,
+    "map-as-set",
+    codes::MAP_AS_SET,
+    Nursery,
+    "map whose values are all `true` — a set stores the keys without the dummy values"
+);
 
 /// Builtins that read a map the way a set would be read.
 const SET_SHAPED_CALLS: &[&str] = &[
@@ -60,7 +59,7 @@ impl LintPass for MapAsSet {
     }
 
     fn check_body(&mut self, cx: &mut LintCx<'_, '_>, body: &Body<'_>) {
-        if self.version < 4 {
+        if cx.version < 4 {
             return;
         }
         let mut findings = Vec::new();
@@ -179,7 +178,7 @@ mod tests {
     use leek_syntax::Version;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        lint_one(MapAsSet { version: 4 }, src)
+        lint_one(MapAsSet, src)
     }
 
     #[test]
@@ -234,7 +233,7 @@ mod tests {
     #[test]
     fn silent_below_v4() {
         let d = lint_one_v(
-            MapAsSet { version: 3 },
+            MapAsSet,
             "function f(cells) {\n  var seen = [:]\n  for (var c in cells) {\n    seen[c] = true\n  }\n  return mapSize(seen)\n}\n",
             Version::V3,
         );

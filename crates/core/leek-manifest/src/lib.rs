@@ -1,8 +1,9 @@
 //! `Miku.toml` — Leekscript project manifest.
 //!
 //! Single source of truth for the schema documented in
-//! `doc/manifest.md`. Used by `miku` (workspace tool), `leekc`
-//! (`--fmt-config`), `leek-fmt`, the linter, and the LSP.
+//! `bins/miku/README.md` ("The `Miku.toml` schema"). Used by `miku`
+//! (workspace tool), `leekc` (`--fmt-config`), `leek-fmt`, the linter, and
+//! the LSP.
 //!
 //! ## Validation rules
 //!
@@ -35,5 +36,5 @@ pub use format::{
 };
 pub use types::{
     BackendKind, BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest,
-    PathsTable, ProjectTable, TestTable,
+    NativeOptLevel, PathsTable, ProjectTable, TestTable,
 };

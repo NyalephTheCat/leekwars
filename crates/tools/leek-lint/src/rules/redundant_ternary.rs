@@ -7,21 +7,24 @@
 //!   rewrite depends on `cond` already being boolean).
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes, diag};
-use leek_hir::{Expr, ExprKind, Literal};
+use leek_hir::{Expr, ExprKind};
 use leek_span::Span;
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use super::util::bool_lit;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct RedundantTernary;
 
-static META: LintMeta = LintMeta {
-    name: "redundant-ternary",
-    code: codes::REDUNDANT_TERNARY,
-    group: LintGroup::Complexity,
-    description: "ternary with identical arms or boolean-literal arms",
-};
+declare_lint!(
+    RedundantTernary,
+    "redundant-ternary",
+    codes::REDUNDANT_TERNARY,
+    Complexity,
+    "ternary with identical arms or boolean-literal arms"
+);
 
 impl LintPass for RedundantTernary {
     fn meta(&self) -> &'static LintMeta {
@@ -38,13 +41,6 @@ impl LintPass for RedundantTernary {
                 cx.emit(boolean_ternary(e.span));
             }
         }
-    }
-}
-
-fn bool_lit(e: &Expr) -> Option<bool> {
-    match &e.kind {
-        ExprKind::Literal(Literal::Bool(b)) => Some(*b),
-        _ => None,
     }
 }
 

@@ -4,17 +4,19 @@
 use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind, UnaryOp};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct NegatedComparison;
 
-static META: LintMeta = LintMeta {
-    name: "negated-comparison",
-    code: codes::NEGATED_COMPARISON,
-    group: LintGroup::Style,
-    description: "`!(a == b)` reads more clearly as `a != b`",
-};
+declare_lint!(
+    NegatedComparison,
+    "negated-comparison",
+    codes::NEGATED_COMPARISON,
+    Style,
+    "`!(a == b)` reads more clearly as `a != b`"
+);
 
 impl LintPass for NegatedComparison {
     fn meta(&self) -> &'static LintMeta {

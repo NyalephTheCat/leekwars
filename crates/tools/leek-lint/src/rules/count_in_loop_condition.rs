@@ -19,20 +19,22 @@ use leek_hir::{Callee, Expr, ExprKind, NameRef, Stmt};
 
 use super::structural::{expr_key, has_side_effect};
 use super::{for_each_expr, for_each_expr_deep, for_each_stmt};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct CountInLoopCondition;
 
 /// Size/length builtins that are pure reads worth hoisting.
 const SIZE_BUILTINS: &[&str] = &["count", "mapSize", "setSize", "length"];
 
-static META: LintMeta = LintMeta {
-    name: "count-in-loop-condition",
-    code: codes::COUNT_IN_LOOP_CONDITION,
-    group: LintGroup::Nursery,
-    description: "`count(...)` re-evaluated by every loop iteration — hoist it to save ops",
-};
+declare_lint!(
+    CountInLoopCondition,
+    "count-in-loop-condition",
+    codes::COUNT_IN_LOOP_CONDITION,
+    Nursery,
+    "`count(...)` re-evaluated by every loop iteration — hoist it to save ops"
+);
 
 impl LintPass for CountInLoopCondition {
     fn meta(&self) -> &'static LintMeta {

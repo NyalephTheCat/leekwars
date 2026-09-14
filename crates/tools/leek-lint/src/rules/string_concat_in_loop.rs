@@ -25,7 +25,7 @@ use leek_hir::{BinaryOp, Expr, ExprKind, Literal, Stmt};
 
 use super::structural::expr_key;
 use super::{for_each_expr, for_each_expr_deep, for_each_stmt};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
 #[derive(Default)]
@@ -35,12 +35,13 @@ pub struct StringConcatInLoop {
     reported: HashSet<(u32, u32)>,
 }
 
-static META: LintMeta = LintMeta {
-    name: "string-concat-in-loop",
-    code: codes::STRING_CONCAT_IN_LOOP,
-    group: LintGroup::Nursery,
-    description: "string built by `+=` in a loop — collect parts and `join` once instead",
-};
+declare_lint!(
+    StringConcatInLoop,
+    "string-concat-in-loop",
+    codes::STRING_CONCAT_IN_LOOP,
+    Nursery,
+    "string built by `+=` in a loop — collect parts and `join` once instead"
+);
 
 impl LintPass for StringConcatInLoop {
     fn meta(&self) -> &'static LintMeta {

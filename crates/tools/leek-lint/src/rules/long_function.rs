@@ -12,21 +12,23 @@
 use leek_diagnostics::{codes, diag};
 
 use super::for_each_stmt;
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct LongFunction;
 
 /// Statement-count threshold. Roughly the 75-line mark for typical
 /// Leekscript (one statement per line plus braces and blanks).
 const MAX_STMTS: usize = 60;
 
-static META: LintMeta = LintMeta {
-    name: "long-function",
-    code: codes::LONG_FUNCTION,
-    group: LintGroup::Pedantic,
-    description: "function body with very many statements — split it into helpers",
-};
+declare_lint!(
+    LongFunction,
+    "long-function",
+    codes::LONG_FUNCTION,
+    Pedantic,
+    "function body with very many statements — split it into helpers"
+);
 
 impl LintPass for LongFunction {
     fn meta(&self) -> &'static LintMeta {

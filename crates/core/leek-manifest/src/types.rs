@@ -21,7 +21,6 @@ pub struct Manifest {
 pub struct ProjectTable {
     pub name: String,
     pub version: String,
-    pub edition: Option<String>,
     /// Default `@version` for sources that omit the pragma. 1..=4.
     pub language: u8,
     /// Default `@strict` for sources.
@@ -39,7 +38,6 @@ impl ProjectTable {
         Self {
             name,
             version,
-            edition: None,
             language: 4,
             strict: false,
             entry: PathBuf::from("src/main.leek"),
@@ -88,8 +86,10 @@ pub struct BackendTable {
 impl BackendTable {
     /// Which backend `miku run` / `miku build` (no flag) should use.
     ///
-    /// If exactly one backend has `default = true`, that wins. Otherwise
-    /// falls back to the first enabled backend in the order
+    /// The backend marked `default = true` wins. The parser rejects a
+    /// manifest that marks two of them, or that marks a disabled backend
+    /// default, so at most one match reaches here. With no `default`, falls
+    /// back to the first *enabled* backend in the order
     /// java → jar → native → wasm → leekscript.
     pub fn default_kind(&self) -> Option<BackendKind> {
         let entries: [(BackendKind, &Option<BackendSettings>); 5] = [
@@ -99,6 +99,14 @@ impl BackendTable {
             (BackendKind::Wasm, &self.wasm),
             (BackendKind::LeekScript, &self.leekscript),
         ];
+        debug_assert!(
+            entries
+                .iter()
+                .filter(|(_, slot)| slot.as_ref().is_some_and(|s| s.is_default))
+                .count()
+                <= 1,
+            "the parser rejects two `default = true` backends"
+        );
         for (kind, slot) in &entries {
             if let Some(s) = slot
                 && s.is_default
@@ -169,18 +177,23 @@ pub struct BackendSettings {
     /// Output directory override. Where each backend writes its
     /// artifacts; interpretation is backend-specific.
     pub out_dir: Option<PathBuf>,
-    /// Single-file output (e.g. `[backend.jar].out`).
+    /// Single-file output path. `[backend.native].out` names the standalone
+    /// executable `miku build` writes; a relative path resolves against the
+    /// project root.
     pub out: Option<PathBuf>,
     /// `[backend.java].emit_lines` — emit a `.lines` sidecar.
     pub emit_lines: bool,
-    /// `[backend.java].java_version` (clean mode).
-    pub java_version: Option<u32>,
-    /// `[backend.jar].main_class`.
+    /// `[backend.jar].main_class`. Parsed, then reported as
+    /// [`IgnoredKey`](crate::ManifestWarningKind::IgnoredKey): the jar
+    /// backend is not implemented.
     pub main_class: Option<String>,
-    /// `[backend.native].target`.
+    /// `[backend.native].target`. Parsed, then reported as
+    /// [`IgnoredKey`](crate::ManifestWarningKind::IgnoredKey): the native
+    /// backend compiles for the host only.
     pub target: Option<String>,
-    /// `[backend.native].opt_level`.
-    pub opt_level: Option<u8>,
+    /// `[backend.native].opt_level` — the level the AOT and JIT compilers
+    /// optimize at. `None` keeps the backend's own default.
+    pub opt_level: Option<NativeOptLevel>,
     /// `[backend.native].max_call_depth` — nested user-function calls allowed
     /// before a run fails with `STACKOVERFLOW` (`None`: the backend default).
     pub max_call_depth: Option<u32>,
@@ -190,6 +203,40 @@ pub struct BackendSettings {
 pub enum JavaMode {
     Exact,
     Clean,
+}
+
+/// `[backend.native].opt_level` — spelled the same way as `leekc`'s
+/// `--opt-level` value enum so the two front-ends agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeOptLevel {
+    /// No optimization (debug-friendly).
+    None,
+    /// Optimize for speed.
+    Speed,
+    /// Optimize for speed and code size.
+    SpeedAndSize,
+}
+
+impl NativeOptLevel {
+    /// The manifest spelling, and what the error message lists.
+    pub const NAMES: &'static [&'static str] = &["none", "speed", "speed-and-size"];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "none" => NativeOptLevel::None,
+            "speed" => NativeOptLevel::Speed,
+            "speed-and-size" => NativeOptLevel::SpeedAndSize,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NativeOptLevel::None => "none",
+            NativeOptLevel::Speed => "speed",
+            NativeOptLevel::SpeedAndSize => "speed-and-size",
+        }
+    }
 }
 
 /// `[lint]` — severity overrides applied on top of the catalog defaults,
@@ -234,23 +281,19 @@ impl LintTable {
 }
 
 /// `[test]` — runner configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TestTable {
-    /// Per-test timeout as a free-form duration string (e.g. "5s").
-    /// `None` means no explicit timeout; the runner picks a default.
-    pub timeout: Option<String>,
+    /// Per-test budget in *operations* — the unit the runner enforces (the
+    /// JIT counts ops; there is no wall clock). A per-file
+    /// `// miku-test: timeout <ops>` annotation overrides it, and `None`
+    /// falls back to the backend's default budget.
+    pub timeout: Option<u64>,
+    /// Parsed, then reported as
+    /// [`IgnoredKey`](crate::ManifestWarningKind::IgnoredKey): the runner is
+    /// sequential (leekwars#133 — `Pipeline` / `Run` are `!Send`). The
+    /// default is `false` so the struct stops asserting something untrue.
     pub parallel: bool,
     pub junit_xml: Option<PathBuf>,
-}
-
-impl Default for TestTable {
-    fn default() -> Self {
-        Self {
-            timeout: None,
-            parallel: true,
-            junit_xml: None,
-        }
-    }
 }
 
 /// `[fight]` — defaults for `miku fight`.

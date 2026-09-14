@@ -23,20 +23,19 @@ use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
-pub struct ManualRangeCheck {
-    /// Target language version; the lint is silent below 4.
-    pub version: u8,
-}
+#[derive(Default)]
+pub struct ManualRangeCheck;
 
-static META: LintMeta = LintMeta {
-    name: "manual-range-check",
-    code: codes::MANUAL_RANGE_CHECK,
-    group: LintGroup::Nursery,
-    description: "two comparisons testing a range — LeekScript 4 intervals say `x in [a..b]`",
-};
+declare_lint!(
+    ManualRangeCheck,
+    "manual-range-check",
+    codes::MANUAL_RANGE_CHECK,
+    Nursery,
+    "two comparisons testing a range — LeekScript 4 intervals say `x in [a..b]`"
+);
 
 impl LintPass for ManualRangeCheck {
     fn meta(&self) -> &'static LintMeta {
@@ -44,7 +43,7 @@ impl LintPass for ManualRangeCheck {
     }
 
     fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
-        if self.version < 4 {
+        if cx.version < 4 {
             return;
         }
         let ExprKind::Binary(op, lhs, rhs) = &e.kind else {
@@ -156,7 +155,7 @@ mod tests {
     use leek_syntax::Version;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        lint_one(ManualRangeCheck { version: 4 }, src)
+        lint_one(ManualRangeCheck, src)
     }
 
     #[test]
@@ -205,7 +204,7 @@ mod tests {
     #[test]
     fn silent_below_v4() {
         let d = lint_one_v(
-            ManualRangeCheck { version: 1 },
+            ManualRangeCheck,
             "function f(x) {\n  if (0 <= x && x < 10) { return 1 }\n  return 0\n}\n",
             Version::V1,
         );

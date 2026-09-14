@@ -8,7 +8,7 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
 #[derive(Default)]
@@ -20,12 +20,13 @@ pub struct DuplicateCondition {
     chain_links: HashSet<(u32, u32)>,
 }
 
-static META: LintMeta = LintMeta {
-    name: "duplicate-condition",
-    code: codes::DUPLICATE_CONDITION,
-    group: LintGroup::Correctness,
-    description: "`else if` testing a condition an earlier arm already tested — never runs",
-};
+declare_lint!(
+    DuplicateCondition,
+    "duplicate-condition",
+    codes::DUPLICATE_CONDITION,
+    Correctness,
+    "`else if` testing a condition an earlier arm already tested — never runs"
+);
 
 impl LintPass for DuplicateCondition {
     fn meta(&self) -> &'static LintMeta {

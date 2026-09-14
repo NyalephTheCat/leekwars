@@ -34,17 +34,19 @@ use std::collections::HashSet;
 use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{ForStmt, ForeachStmt, Stmt, VarDecl};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct ShadowedBinding;
 
-static META: LintMeta = LintMeta {
-    name: "shadowed-binding",
-    code: codes::SHADOWED_BINDING,
-    group: LintGroup::Style,
-    description: "binding that shadows an outer binding with the same name",
-};
+declare_lint!(
+    ShadowedBinding,
+    "shadowed-binding",
+    codes::SHADOWED_BINDING,
+    Style,
+    "binding that shadows an outer binding with the same name"
+);
 
 impl LintPass for ShadowedBinding {
     fn meta(&self) -> &'static LintMeta {

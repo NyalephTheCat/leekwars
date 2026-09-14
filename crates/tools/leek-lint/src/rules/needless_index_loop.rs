@@ -22,17 +22,20 @@ use leek_hir::{BinaryOp, DefId, Expr, ExprKind, Literal, NameRef, PostfixOp, Stm
 
 use super::structural::{expr_key, has_side_effect};
 use super::{for_each_expr_deep, for_each_stmt};
-use crate::LintGroup;
+use super::util::{is_counter, step_is_increment};
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct NeedlessIndexLoop;
 
-static META: LintMeta = LintMeta {
-    name: "needless-index-loop",
-    code: codes::NEEDLESS_INDEX_LOOP,
-    group: LintGroup::Pedantic,
-    description: "counting loop whose index only reads `arr[i]` — use `for (var x in arr)`",
-};
+declare_lint!(
+    NeedlessIndexLoop,
+    "needless-index-loop",
+    codes::NEEDLESS_INDEX_LOOP,
+    Pedantic,
+    "counting loop whose index only reads `arr[i]` — use `for (var x in arr)`"
+);
 
 impl LintPass for NeedlessIndexLoop {
     fn meta(&self) -> &'static LintMeta {
@@ -98,24 +101,6 @@ fn cond_is_upper_bound(cond: Option<&Expr>, counter: DefId) -> bool {
         &cond.kind,
         ExprKind::Binary(BinaryOp::Lt, lhs, _) if is_counter(lhs, counter)
     )
-}
-
-/// `i++`, `++i`, or `i += 1`.
-fn step_is_increment(step: Option<&Expr>, counter: DefId) -> bool {
-    let Some(step) = step else { return false };
-    match &step.kind {
-        ExprKind::Postfix(PostfixOp::PostInc, e) | ExprKind::Unary(UnaryOp::PreInc, e) => {
-            is_counter(e, counter)
-        }
-        ExprKind::Binary(BinaryOp::AddAssign, lhs, rhs) => {
-            is_counter(lhs, counter) && matches!(&rhs.kind, ExprKind::Literal(Literal::Int(1)))
-        }
-        _ => false,
-    }
-}
-
-fn is_counter(e: &Expr, counter: DefId) -> bool {
-    matches!(&e.kind, ExprKind::Name(NameRef::Local(d)) if *d == counter)
 }
 
 #[derive(Default)]
