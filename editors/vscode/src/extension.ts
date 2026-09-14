@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import {
   LanguageClient,
   LanguageClientOptions,
+  Location as LspLocation,
+  Position as LspPosition,
   ServerOptions,
   TransportKind,
 } from 'vscode-languageclient/node';
@@ -20,9 +22,9 @@ function buildClient(): LanguageClient {
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: 'file', language: 'leek' }],
-    synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher('**/*.leek'),
-    },
+    // No `synchronize.fileEvents` watcher here: the server registers its
+    // own `**/*.leek` watcher dynamically in `initialized`, and having
+    // both made VS Code report every disk change twice.
     // Host-environment function libraries (e.g. "leekwars" for the
     // leek-wars-generator fight functions, or a path to a .lib file). The
     // server registers their functions so they aren't flagged as undefined.
@@ -92,6 +94,28 @@ class LeekDebugConfigurationProvider implements vscode.DebugConfigurationProvide
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  // The "N references" code lens resolves to this command. It is
+  // client-side on purpose — only the editor can open a peek view — and
+  // the server deliberately does not advertise it in
+  // `executeCommandProvider`, so nothing else claims the id.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'leek.showReferences',
+      (uri: string, position: LspPosition, locations: LspLocation[]) => {
+        const converter = client?.protocol2CodeConverter;
+        if (!converter) {
+          return;
+        }
+        void vscode.commands.executeCommand(
+          'editor.action.showReferences',
+          vscode.Uri.parse(uri),
+          converter.asPosition(position),
+          locations.map((l) => converter.asLocation(l)),
+        );
+      },
+    ),
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand('leek.restartServer', async () => {
       try {

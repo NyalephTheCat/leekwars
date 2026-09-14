@@ -187,6 +187,7 @@
     }
   },
   "scripts": {
+    "typecheck": "tsc --noEmit",
     "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
     "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
     "package": "npm run compile && vsce package --no-yarn --skip-license"

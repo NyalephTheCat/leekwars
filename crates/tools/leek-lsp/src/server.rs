@@ -244,7 +244,12 @@ impl LanguageServer for LeekLanguageServer {
                 // the capability via the standard field. A newer
                 // lsp-types version closes this gap.
                 code_lens_provider: Some(lsp::CodeLensOptions {
-                    resolve_provider: Some(false),
+                    // The "N references" lens arrives without a command
+                    // and gets its count (and the `Location[]` the peek
+                    // view needs) in `code_lens_resolve` — a
+                    // program-wide occurrence search per function is far
+                    // too much for a request the editor fires on scroll.
+                    resolve_provider: Some(true),
                 }),
                 color_provider: Some(lsp::ColorProviderCapability::Simple(true)),
                 declaration_provider: Some(lsp::DeclarationCapability::Simple(true)),
@@ -295,20 +300,16 @@ impl LanguageServer for LeekLanguageServer {
                 ),
                 // Ask the client to send `willRenameFiles` for `.leek`
                 // files so we can rewrite `include(...)` references as
-                // part of the rename.
+                // part of the rename, and `didRenameFiles` afterwards so
+                // the workspace can carry the moved file's state over.
+                // Without the second registration the client never sends
+                // it and `did_rename_files` is unreachable — a rename
+                // reaches us only as the watcher's delete + create.
                 workspace: Some(lsp::WorkspaceServerCapabilities {
                     workspace_folders: None,
                     file_operations: Some(lsp::WorkspaceFileOperationsServerCapabilities {
-                        will_rename: Some(lsp::FileOperationRegistrationOptions {
-                            filters: vec![lsp::FileOperationFilter {
-                                scheme: Some("file".into()),
-                                pattern: lsp::FileOperationPattern {
-                                    glob: "**/*.leek".into(),
-                                    matches: Some(lsp::FileOperationPatternKind::File),
-                                    options: None,
-                                },
-                            }],
-                        }),
+                        will_rename: Some(leek_file_filter()),
+                        did_rename: Some(leek_file_filter()),
                         ..Default::default()
                     }),
                 }),
@@ -577,10 +578,22 @@ impl LanguageServer for LeekLanguageServer {
         &self,
         params: lsp::ExecuteCommandParams,
     ) -> Result<Option<serde_json::Value>> {
-        let ws = self.state.lock().await;
-        Ok(guard("execute_command", || {
-            execute_command::handle(&ws, &params.command, &params.arguments)
-        }))
+        let result = {
+            let ws = self.state.lock().await;
+            guard("execute_command", || {
+                execute_command::handle(&ws, &params.command, &params.arguments)
+            })
+        };
+        // A command that answers with a plain string (`leek.showComplexity`,
+        // reached from its code lens) has nowhere to render: the editor
+        // discards an `executeCommand` result it did not ask for. Push it
+        // as a notification so the click actually shows something.
+        if let Some(serde_json::Value::String(message)) = &result {
+            self.client
+                .show_message(lsp::MessageType::INFO, message)
+                .await;
+        }
+        Ok(result)
     }
 
     async fn diagnostic(
@@ -736,6 +749,15 @@ impl LanguageServer for LeekLanguageServer {
         let uri = params.text_document.uri;
         let ws = self.state.lock().await;
         Ok(guard("code_lens", || code_lens::handle(&ws, &uri)))
+    }
+
+    async fn code_lens_resolve(&self, params: lsp::CodeLens) -> Result<lsp::CodeLens> {
+        let ws = self.state.lock().await;
+        // On a panic — or on a lens we can no longer resolve, e.g. the
+        // document changed underneath it — hand the lens back unchanged
+        // rather than failing the request.
+        let unresolved = params.clone();
+        Ok(guard("code_lens_resolve", || code_lens::resolve(&ws, params)).unwrap_or(unresolved))
     }
 
     async fn document_color(
@@ -938,43 +960,86 @@ impl LanguageServer for LeekLanguageServer {
     }
 
     async fn did_rename_files(&self, params: lsp::RenameFilesParams) {
-        let mut ws = self.state.lock().await;
-        for f in &params.files {
-            if let (Ok(old), Ok(new)) = (lsp::Url::parse(&f.old_uri), lsp::Url::parse(&f.new_uri)) {
-                eprintln!("leek-lsp: didRename {old} -> {new}");
-                ws.rename_file(&old, &new);
+        let open = {
+            let mut ws = self.state.lock().await;
+            for f in &params.files {
+                if let (Ok(old), Ok(new)) =
+                    (lsp::Url::parse(&f.old_uri), lsp::Url::parse(&f.new_uri))
+                {
+                    eprintln!("leek-lsp: didRename {old} -> {new}");
+                    ws.rename_file(&old, &new);
+                }
             }
-        }
+            open_documents(&ws)
+        };
+        self.republish(open).await;
     }
 
     async fn did_change_watched_files(&self, params: lsp::DidChangeWatchedFilesParams) {
-        let mut ws = self.state.lock().await;
-        for change in params.changes {
-            match change.typ {
-                lsp::FileChangeType::DELETED => {
-                    eprintln!("leek-lsp: watched delete {}", change.uri);
-                    ws.remove_file(&change.uri);
-                }
-                lsp::FileChangeType::CREATED => {
-                    // A new file appeared on disk; fold it into the
-                    // project index if we have one.
-                    if let Ok(path) = change.uri.to_file_path()
-                        && let Some(parent) = path.parent()
-                    {
-                        ws.index_project_at(parent);
+        let open = {
+            let mut ws = self.state.lock().await;
+            for change in params.changes {
+                match change.typ {
+                    lsp::FileChangeType::DELETED => {
+                        eprintln!("leek-lsp: watched delete {}", change.uri);
+                        // Drops the project's copy of the file and keeps
+                        // any open buffer for it editable.
+                        ws.remove_from_disk(&change.uri);
+                    }
+                    lsp::FileChangeType::CREATED => {
+                        // A new file appeared on disk; fold it into the
+                        // root that owns it, if any.
+                        ws.register_new_file(&change.uri);
+                    }
+                    _ => {
+                        // CHANGED: refresh from disk unless the editor owns
+                        // the buffer (then `didChange` is authoritative).
+                        ws.reload_from_disk(&change.uri);
                     }
                 }
-                _ => {
-                    // CHANGED: refresh from disk unless the editor owns
-                    // the buffer (then `didChange` is authoritative).
-                    ws.reload_from_disk(&change.uri);
-                }
             }
-        }
+            open_documents(&ws)
+        };
+        self.republish(open).await;
     }
 }
 
+/// The `.leek`-files filter both file-operation registrations use.
+fn leek_file_filter() -> lsp::FileOperationRegistrationOptions {
+    lsp::FileOperationRegistrationOptions {
+        filters: vec![lsp::FileOperationFilter {
+            scheme: Some("file".into()),
+            pattern: lsp::FileOperationPattern {
+                glob: "**/*.leek".into(),
+                matches: Some(lsp::FileOperationPatternKind::File),
+                options: None,
+            },
+        }],
+    }
+}
+
+/// URIs of every open buffer — the documents a disk-side event has to
+/// republish diagnostics for.
+fn open_documents(ws: &Workspace) -> Vec<lsp::Url> {
+    ws.docs.keys().cloned().collect()
+}
+
 impl LeekLanguageServer {
+    /// Republish diagnostics for a batch of documents after a disk-side
+    /// event (a watched change, a rename) moved the class union or an
+    /// include closure under them.
+    ///
+    /// Open buffers only, and once per batch rather than once per
+    /// change: an indexed-only file has nothing published to refresh,
+    /// and a branch switch can rewrite hundreds of them. Takes the URIs
+    /// by value so the caller can drop the workspace lock first —
+    /// `publish_diagnostics` takes it again itself.
+    async fn republish(&self, uris: Vec<lsp::Url>) {
+        for uri in uris {
+            self.publish_diagnostics(uri).await;
+        }
+    }
+
     /// Run the pipeline through the lint target and publish the resulting
     /// diagnostics. Each `publish` replaces whatever was published
     /// before for this URI.

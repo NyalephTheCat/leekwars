@@ -2,18 +2,23 @@
 //! can invoke directly.
 //!
 //! Currently registered:
-//! - `leek.showReferences` — wraps the editor's
-//!   `editor.action.showReferences` with a (uri, position) pair.
-//!   Bound to the "N references" code lens.
 //! - `leek.showComplexity` — returns the full ops formula for a
 //!   function as a string. Bound to the "Complexity: O(...)" lens.
 //! - `leek.analyze` — returns per-function complexity records for
 //!   the current document, mirroring `miku analyze`.
 //!
+//! `leek.showReferences` — the command the "N references" code lens
+//! resolves to — is deliberately *not* here. It is a client-side
+//! command (the VS Code extension turns it into
+//! `editor.action.showReferences`); advertising it would make
+//! vscode-languageclient register a proxy under the same id and collide
+//! with the extension's own registration.
+//!
 //! Result type is `serde_json::Value` so the client receives a
-//! tagged JSON payload. The bare-server response (this is plain
-//! `tower-lsp::Result<Option<Value>>`) is what the editor can
-//! display or pass to its UI.
+//! tagged JSON payload. A plain-string answer is additionally pushed to
+//! the user as a `window/showMessage` by the server method — an editor
+//! discards an `executeCommand` result it did not ask for, so a lens
+//! click would otherwise show nothing.
 
 use leek_complexity::analyze_file;
 use leek_hir::pipeline::HirArtifact;
@@ -23,23 +28,14 @@ use tower_lsp::lsp_types as lsp;
 use crate::workspace::Workspace;
 
 /// The set of commands we advertise. Listed in `executeCommandProvider`.
-pub const COMMANDS: &[&str] = &["leek.showReferences", "leek.showComplexity", "leek.analyze"];
+pub const COMMANDS: &[&str] = &["leek.showComplexity", "leek.analyze"];
 
 pub fn handle(ws: &Workspace, command: &str, args: &[Json]) -> Option<Json> {
     match command {
-        "leek.showReferences" => Some(json_args_passthrough(args)),
         "leek.showComplexity" => show_complexity(ws, args),
         "leek.analyze" => analyze(ws, args),
         _ => None,
     }
-}
-
-/// `leek.showReferences (uri, position)` is just a forwarder — the
-/// client's `editor.action.showReferences` does the heavy lifting.
-/// We echo the args back as the response so the client wrapper can
-/// pass them straight through.
-fn json_args_passthrough(args: &[Json]) -> Json {
-    Json::Array(args.to_vec())
 }
 
 /// `leek.showComplexity (uri, function_name)` → returns the ops
