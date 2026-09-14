@@ -17,10 +17,20 @@
 //! than a bare line of prose. See [`ManifestErrorKind`] for what the parser
 //! distinguishes.
 //!
-//! Several tables are recognized but **not interpreted** in v0.1:
-//! `[lsp]`, `[bench]`, `[experimental]`, `[profiles]`, `[workspace]`,
-//! `[toolchain]`. They parse without errors so older manifests work,
-//! but the corresponding behavior is deferred.
+//! `[experimental]` is the one exception to the warning rule: its keys name
+//! language features, so a key naming none is a [`ManifestError`] rather than
+//! a warning that would leave the feature quietly off.
+//!
+//! ## Tables
+//!
+//! Interpreted: `[project]`, `[paths]`, `[backend.*]`, `[lint]`, `[format]`,
+//! `[test]`, `[fight]`, `[experimental]`.
+//!
+//! Recognized but **not interpreted** in v0.1: `[lsp]`, `[bench]`,
+//! `[profiles]`, `[profile]`, `[workspace]`, `[toolchain]`. They parse without
+//! errors so older manifests work, but the corresponding behavior is deferred
+//! and using one raises a
+//! [`DeferredTable`](ManifestWarningKind::DeferredTable) warning.
 
 mod discover;
 mod error;
@@ -35,6 +45,6 @@ pub use format::{
     OperatorPosition, QuoteStyle, Semicolons, TrailingComma,
 };
 pub use types::{
-    BackendKind, BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest,
-    NativeOptLevel, PathsTable, ProjectTable, TestTable,
+    BackendKind, BackendSettings, BackendTable, ExperimentalTable, FightTable, JavaMode, LintTable,
+    Manifest, NativeOptLevel, PathsTable, ProjectTable, TestTable,
 };

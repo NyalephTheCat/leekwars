@@ -359,11 +359,122 @@ pub struct FeatureFlags {
     pub enums: bool,
 }
 
+/// One flag of [`FeatureFlags`], as data: its name, the environment variable
+/// that switches it on, and a projection to the field it sets.
+///
+/// The table exists so the three places that have to agree about the flag set
+/// cannot drift apart: [`FeatureFlags::from_env`] reads it, `Miku.toml`'s
+/// `[experimental]` parser accepts exactly [`name`](Self::name) as its keys,
+/// and a `--verbose` invocation prints those same names back.
+#[derive(Clone, Copy)]
+pub struct FeatureFlagField {
+    /// The flag's name — the `[experimental]` key in `Miku.toml`, and what a
+    /// `--verbose` invocation prints. Spelled as the struct field is, so the
+    /// two views of a flag read the same.
+    pub name: &'static str,
+    /// The environment variable whose presence (any value, `0` included)
+    /// switches the flag on.
+    pub env: &'static str,
+    /// Projection to the flag's field, for reading it and for setting it.
+    pub get: fn(&mut FeatureFlags) -> &mut bool,
+}
+
+impl std::fmt::Debug for FeatureFlagField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The projection is a code pointer with no useful rendering; the two
+        // strings are the whole identity of a field.
+        f.debug_struct("FeatureFlagField")
+            .field("name", &self.name)
+            .field("env", &self.env)
+            .finish_non_exhaustive()
+    }
+}
+
 impl FeatureFlags {
+    /// Every flag, in declaration order.
+    pub const FIELDS: &'static [FeatureFlagField] = &[
+        FeatureFlagField {
+            name: "function_signatures",
+            env: "LEEK_EXPERIMENTAL_FN_SIGNATURES",
+            get: |f| &mut f.function_signatures,
+        },
+        FeatureFlagField {
+            name: "generic_syntax",
+            env: "LEEK_EXPERIMENTAL_GENERIC_SYNTAX",
+            get: |f| &mut f.generic_syntax,
+        },
+        FeatureFlagField {
+            name: "generics",
+            env: "LEEK_EXPERIMENTAL_GENERICS",
+            get: |f| &mut f.generics,
+        },
+        FeatureFlagField {
+            name: "overloads",
+            env: "LEEK_EXPERIMENTAL_FN_OVERLOADS",
+            get: |f| &mut f.overloads,
+        },
+        FeatureFlagField {
+            name: "prelude",
+            env: "LEEK_EXPERIMENTAL_PRELUDE",
+            get: |f| &mut f.prelude,
+        },
+        FeatureFlagField {
+            name: "types",
+            env: "LEEK_EXPERIMENTAL_TYPES",
+            get: |f| &mut f.types,
+        },
+        FeatureFlagField {
+            name: "interfaces",
+            env: "LEEK_EXPERIMENTAL_INTERFACES",
+            get: |f| &mut f.interfaces,
+        },
+        FeatureFlagField {
+            name: "enums",
+            env: "LEEK_EXPERIMENTAL_ENUMS",
+            get: |f| &mut f.enums,
+        },
+    ];
+
     /// All features off — the default, non-experimental behavior.
     #[must_use]
     pub fn none() -> Self {
         Self::default()
+    }
+
+    /// The flag named `name`, or `None` when no flag is spelled that way.
+    #[must_use]
+    pub fn field(name: &str) -> Option<&'static FeatureFlagField> {
+        Self::FIELDS.iter().find(|f| f.name == name)
+    }
+
+    /// Whether `field` is on in `self`.
+    #[must_use]
+    pub fn get(mut self, field: &FeatureFlagField) -> bool {
+        *(field.get)(&mut self)
+    }
+
+    /// The names of the flags that are on, in [`FIELDS`](Self::FIELDS) order.
+    /// Empty for the default, non-experimental flag set.
+    #[must_use]
+    pub fn active_names(self) -> Vec<&'static str> {
+        Self::FIELDS
+            .iter()
+            .filter(|f| self.get(f))
+            .map(|f| f.name)
+            .collect()
+    }
+
+    /// Every flag that is on in either set.
+    ///
+    /// This is the composition rule for the two places flags come from — a
+    /// project's `[experimental]` table and the `LEEK_EXPERIMENTAL_*`
+    /// variables — because neither source can spell "off":
+    /// [`from_env`](Self::from_env) reports an unset variable and a variable
+    /// set to `false` identically, so anything but a union would let an
+    /// ordinary invocation silently erase what the manifest asked for.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        Self::from_bits(self.to_bits() | other.to_bits())
     }
 
     /// Read the flags from the `LEEK_EXPERIMENTAL_*` environment variables. The
@@ -371,17 +482,13 @@ impl FeatureFlags {
     /// boundary and thread the result, rather than reading env deep in a pass.
     #[must_use]
     pub fn from_env() -> Self {
-        let on = |k: &str| std::env::var_os(k).is_some();
-        Self {
-            function_signatures: on("LEEK_EXPERIMENTAL_FN_SIGNATURES"),
-            generic_syntax: on("LEEK_EXPERIMENTAL_GENERIC_SYNTAX"),
-            generics: on("LEEK_EXPERIMENTAL_GENERICS"),
-            overloads: on("LEEK_EXPERIMENTAL_FN_OVERLOADS"),
-            prelude: on("LEEK_EXPERIMENTAL_PRELUDE"),
-            types: on("LEEK_EXPERIMENTAL_TYPES"),
-            interfaces: on("LEEK_EXPERIMENTAL_INTERFACES"),
-            enums: on("LEEK_EXPERIMENTAL_ENUMS"),
+        let mut out = Self::none();
+        for field in Self::FIELDS {
+            if std::env::var_os(field.env).is_some() {
+                *(field.get)(&mut out) = true;
+            }
         }
+        out
     }
 
     /// Pack into a `u8` bitmask. Lets the salsa pipeline inputs carry the flags
@@ -562,5 +669,66 @@ mod tests {
         assert_eq!(table.line_col(2), LineCol { line: 2, col: 1 });
         assert_eq!(table.line_col(3), LineCol { line: 2, col: 2 });
         assert_eq!(table.line_col(5), LineCol { line: 3, col: 1 });
+    }
+
+    #[test]
+    fn every_feature_flag_has_a_row_in_the_field_table() {
+        // Exhaustive destructuring on purpose: a flag added to `FeatureFlags`
+        // without a `FIELDS` row stops this test *compiling*, which is the
+        // only way the manifest keys, the env vars and the `--verbose` report
+        // can be kept from drifting apart.
+        let FeatureFlags {
+            function_signatures,
+            generic_syntax,
+            generics,
+            overloads,
+            prelude,
+            types,
+            interfaces,
+            enums,
+        } = FeatureFlags::none();
+        let declared = [
+            ("function_signatures", function_signatures),
+            ("generic_syntax", generic_syntax),
+            ("generics", generics),
+            ("overloads", overloads),
+            ("prelude", prelude),
+            ("types", types),
+            ("interfaces", interfaces),
+            ("enums", enums),
+        ];
+        assert_eq!(declared.len(), FeatureFlags::FIELDS.len());
+        for ((name, _), field) in declared.iter().zip(FeatureFlags::FIELDS) {
+            assert_eq!(*name, field.name);
+            assert_eq!(FeatureFlags::field(field.name).map(|f| f.name), Some(*name));
+            assert!(field.env.starts_with("LEEK_EXPERIMENTAL_"));
+            // The projection reaches its own field and no other.
+            let mut flags = FeatureFlags::none();
+            *(field.get)(&mut flags) = true;
+            assert_eq!(flags.active_names(), vec![field.name]);
+            assert!(flags.get(field));
+        }
+        assert!(FeatureFlags::field("no_such_feature").is_none());
+        assert!(FeatureFlags::none().active_names().is_empty());
+    }
+
+    #[test]
+    fn union_keeps_every_flag_either_side_switched_on() {
+        let manifest = FeatureFlags {
+            enums: true,
+            ..FeatureFlags::none()
+        };
+        let env = FeatureFlags {
+            types: true,
+            ..FeatureFlags::none()
+        };
+        assert_eq!(
+            manifest.union(env).active_names(),
+            vec!["types", "enums"],
+            "in FIELDS order, not argument order"
+        );
+        // A default (all-off) env set cannot erase what the manifest asked
+        // for — the reason the composition is a union at all.
+        assert_eq!(manifest.union(FeatureFlags::none()), manifest);
     }
 }

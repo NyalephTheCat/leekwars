@@ -172,7 +172,7 @@ fn run_one(
     // file's `Input` — and so every span it raises — has to carry.
     let (pipeline, source) = leek_session::file_pipeline_shared(project, path, config, interner)?;
     let (src, text) = project.pipeline_input(source, path)?;
-    let input = Input::from(src);
+    let input = Input::from_source_with_flags(src, project.feature_flags());
     let annotations = parse_annotations(&text);
     if !annotations.problems.is_empty() {
         return Ok(TestOutcome::Fail(format!(

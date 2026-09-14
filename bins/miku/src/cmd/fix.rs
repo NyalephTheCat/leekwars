@@ -57,7 +57,7 @@ pub fn run(
         let source = SourceId::new(next_source).unwrap();
         let (src, text) = project.pipeline_input(source, path)?;
         let pipeline = leek_session::file_pipeline(&project, path, source, &config)?;
-        let result = pipeline.run(Input::from(src));
+        let result = pipeline.run(Input::from_source_with_flags(src, project.feature_flags()));
 
         if has_compile_error(&reporter, result.diagnostics()) {
             leek_session::report(&result, &text, &path.display().to_string(), &reporter);

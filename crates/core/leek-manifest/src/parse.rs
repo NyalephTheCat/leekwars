@@ -13,10 +13,10 @@ use crate::error::{
 };
 use crate::format::FormatOptions;
 use crate::types::{
-    BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest, NativeOptLevel,
-    PathsTable, ProjectTable, TestTable,
+    BackendSettings, BackendTable, ExperimentalTable, FightTable, JavaMode, LintTable, Manifest,
+    NativeOptLevel, PathsTable, ProjectTable, TestTable,
 };
-use leek_span::Span;
+use leek_span::{FeatureFlags, Span};
 use std::path::PathBuf;
 use toml_edit::{Item, TableLike};
 
@@ -40,10 +40,13 @@ pub(crate) const KNOWN_TOP_LEVEL: &[&str] = &[
 ];
 
 /// Tables that we accept syntactically but do not act on in v0.1.
+///
+/// `[experimental]` used to be here. It is now read — its keys become the
+/// run's [`FeatureFlags`] (leekwars#206) — so it stays in
+/// [`KNOWN_TOP_LEVEL`] and no longer warns as deferred.
 const DEFERRED_TOP_LEVEL: &[&str] = &[
     "lsp",
     "bench",
-    "experimental",
     "profiles",
     "profile",
     "workspace",
@@ -118,6 +121,11 @@ pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), Manifes
         Some(v) => parse_fight(table_val(v, "fight")?, &mut warnings)?,
     };
 
+    let experimental = match root.get("experimental") {
+        None => ExperimentalTable::none(),
+        Some(v) => parse_experimental(table_val(v, "experimental")?)?,
+    };
+
     Ok((
         Manifest {
             project,
@@ -127,6 +135,7 @@ pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), Manifes
             format,
             test,
             fight,
+            experimental,
         },
         warnings,
     ))
@@ -150,6 +159,8 @@ fn parse_project(
         "description",
         "license",
         "repository",
+        "libraries",
+        "fold_constants",
     ];
     warn_unknown(tbl, "project", KNOWN, warnings);
 
@@ -188,6 +199,37 @@ fn parse_project(
     }
     if let Some(v) = tbl.get("repository") {
         out.repository = Some(string_val(v, "project.repository")?);
+    }
+    if let Some(v) = tbl.get("libraries") {
+        out.libraries = string_array(v, "project.libraries")?;
+    }
+    if let Some(v) = tbl.get("fold_constants") {
+        out.fold_constants = bool_val(v, "project.fold_constants")?;
+    }
+    Ok(out)
+}
+
+/// `[experimental]` — one boolean per opt-in language feature.
+///
+/// Unlike every other table, an unrecognized key here is an **error**, not a
+/// [`UnknownField`](ManifestWarningKind::UnknownField) warning. The keys name
+/// language features, and `[experimental] generic = true` (for `generics`)
+/// otherwise compiles the project with the feature off and nothing but a
+/// warning to say the request went nowhere — the same reason rustc rejects an
+/// unknown `#![feature(…)]` outright. Forward-compatibility, the reason
+/// unknown keys warn elsewhere, is not a promise `[experimental]` makes.
+fn parse_experimental(tbl: &dyn TableLike) -> Result<ExperimentalTable, ManifestError> {
+    let mut out = ExperimentalTable::none();
+    for (key, item) in tbl.iter() {
+        let field = FeatureFlags::field(key).ok_or_else(|| {
+            ManifestError::at(
+                key_span(tbl, key),
+                ManifestErrorKind::UnknownFeature {
+                    key: key.to_string(),
+                },
+            )
+        })?;
+        *(field.get)(&mut out) = bool_val(item, &format!("experimental.{key}"))?;
     }
     Ok(out)
 }
@@ -812,6 +854,166 @@ mod tests {
             warnings
                 .iter()
                 .any(|w| w.to_string().contains("[workspace]"))
+        );
+    }
+
+    #[test]
+    fn project_libraries_and_fold_constants_round_trip() {
+        let (m, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            libraries = ["leekwars", "libs/host.lib"]
+            fold_constants = true
+            "#,
+        );
+        assert_eq!(m.project.libraries, ["leekwars", "libs/host.lib"]);
+        assert!(m.project.fold_constants);
+        assert!(w.is_empty(), "warnings: {w:?}");
+    }
+
+    #[test]
+    fn project_libraries_default_to_none_and_no_folding() {
+        let (m, _) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            "#,
+        );
+        assert!(m.project.libraries.is_empty());
+        assert!(!m.project.fold_constants);
+    }
+
+    #[test]
+    fn project_libraries_must_be_strings() {
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            libraries = [7]
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::WrongType { key, .. }
+                if key == "project.libraries[0]"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn every_experimental_key_round_trips_on_its_own_flag() {
+        // One manifest per feature, so a key wired to the wrong field shows
+        // up as the wrong flag rather than being hidden by a neighbour.
+        for field in FeatureFlags::FIELDS {
+            let src = format!(
+                r#"
+                [project]
+                name = "demo"
+                version = "0.1.0"
+                [experimental]
+                {} = true
+                "#,
+                field.name
+            );
+            let (m, w) = parse_ok(&src);
+            assert_eq!(
+                m.experimental.active_names(),
+                vec![field.name],
+                "`{}` set the wrong flag",
+                field.name
+            );
+            assert!(w.is_empty(), "{}: warnings: {w:?}", field.name);
+        }
+    }
+
+    #[test]
+    fn experimental_defaults_to_every_feature_off_and_false_stays_off() {
+        let (m, _) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            "#,
+        );
+        assert_eq!(m.experimental, FeatureFlags::none());
+
+        let (m, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [experimental]
+            enums = false
+            types = true
+            "#,
+        );
+        assert_eq!(m.experimental.active_names(), vec!["types"]);
+        assert!(w.is_empty(), "warnings: {w:?}");
+    }
+
+    /// `[experimental]` is read now, so it must not also announce itself as a
+    /// table this toolchain ignores.
+    #[test]
+    fn experimental_no_longer_warns_as_a_deferred_table() {
+        let (_, warnings) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [experimental]
+            enums = true
+            "#,
+        );
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert!(!DEFERRED_TOP_LEVEL.contains(&"experimental"));
+        assert!(KNOWN_TOP_LEVEL.contains(&"experimental"));
+    }
+
+    #[test]
+    fn an_unknown_experimental_key_is_an_error_not_a_warning() {
+        // A misspelled feature would otherwise compile with the feature off.
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [experimental]
+            generic = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::UnknownFeature { key } if key == "generic"),
+            "{err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("experimental.generic"), "{text}");
+        assert!(
+            text.contains("generics"),
+            "the message lists what exists: {text}"
+        );
+    }
+
+    #[test]
+    fn an_experimental_key_must_be_a_boolean() {
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [experimental]
+            enums = "yes"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::WrongType { key, .. }
+                if key == "experimental.enums"),
+            "{err:?}"
         );
     }
 
