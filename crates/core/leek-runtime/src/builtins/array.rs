@@ -176,9 +176,12 @@ pub(crate) fn dispatch_array(
                 .iter()
                 .find(|(_, v)| v.loose_eq(&args[1]))
                 .map_or(Value::Null, |(k, _)| k.clone()),
+            // `StringClass.indexOf` answers in UTF-16 positions, which is
+            // what `jstr::index_of16` returns; `str::find` answers in
+            // *bytes*, and the two only agree while the haystack is ASCII.
             Value::String(s) => {
                 if let Value::String(needle) = &args[1]
-                    && let Some(i) = s.find(needle.as_str())
+                    && let Some(i) = crate::jstr::index_of16(s, needle, 0)
                 {
                     Value::Int(crate::len_as_int(i))
                 } else {
@@ -216,30 +219,23 @@ pub(crate) fn dispatch_array(
                         .map_or(Value::Int(-1), |i| Value::Int(crate::len_as_int(i) + from))
                 }
             }
+            // Both `from` and the answer are UTF-16 positions, the ones
+            // `length` and `charAt` count in. `jstr::index_of16` carries
+            // Java's empty-needle rule (a match at `from`, clamped to the
+            // end of the haystack); the negative-`from` wrap is ours, not
+            // Java's — upstream reads `from` as an `int` and `String
+            // .indexOf` floors it at 0 — and it is kept as it was, counting
+            // back from the end in code units.
             Value::String(s) => {
                 if let Value::String(needle) = &args[1] {
-                    let chars: Vec<char> = s.chars().collect();
-                    let needle_chars: Vec<char> = needle.chars().collect();
                     let from = args[2].as_int().unwrap_or(0);
                     let from = crate::clamp_index(if from < 0 {
-                        from + crate::len_as_int(chars.len())
+                        from + crate::len_as_int(crate::jstr::len16(s))
                     } else {
                         from
                     });
-                    if needle_chars.is_empty() {
-                        Value::Int(crate::len_as_int(from.min(chars.len())))
-                    } else {
-                        let mut found = None;
-                        if from <= chars.len() {
-                            for i in from..=chars.len().saturating_sub(needle_chars.len()) {
-                                if chars[i..i + needle_chars.len()] == needle_chars[..] {
-                                    found = Some(i);
-                                    break;
-                                }
-                            }
-                        }
-                        found.map_or(Value::Int(-1), |i| Value::Int(crate::len_as_int(i)))
-                    }
+                    crate::jstr::index_of16(s, needle, from)
+                        .map_or(Value::Int(-1), |i| Value::Int(crate::len_as_int(i)))
                 } else {
                     Value::Null
                 }

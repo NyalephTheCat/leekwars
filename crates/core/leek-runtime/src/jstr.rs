@@ -53,6 +53,22 @@ pub fn unit_at(s: &str, index: usize) -> Option<u16> {
     }
 }
 
+/// The whole string as its UTF-16 code units — the view Java indexes.
+///
+/// [`unit_at`] answers one position; this materialises every position, for
+/// the callers that walk the string with a stride (`a[start:end:step]`) and
+/// so cannot re-scan per index. Reassembling a slice of the result with
+/// [`String::from_utf16_lossy`] is what turns a cut surrogate pair into
+/// `U+FFFD`, the same way [`substring16`] does.
+#[must_use]
+pub fn units16(s: &str) -> Vec<u16> {
+    if s.is_ascii() {
+        s.as_bytes().iter().map(|&b| u16::from(b)).collect()
+    } else {
+        s.encode_utf16().collect()
+    }
+}
+
 /// Java `String.substring(int, int)` — the code units in `[start, end)`.
 ///
 /// `None` for the ranges Java rejects with `StringIndexOutOfBounds`:
@@ -141,7 +157,7 @@ fn byte_offset_at_or_after(s: &str, units: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{code_point_at, index_of16, len16, substring16, unit_at};
+    use super::{code_point_at, index_of16, len16, substring16, unit_at, units16};
 
     /// The ASCII fast path and the general path must never disagree. Running
     /// both over the same ASCII inputs is what keeps the shortcut honest.
@@ -219,5 +235,16 @@ mod tests {
         assert_eq!(index_of16("abc", "", 1), Some(1));
         assert_eq!(index_of16("abc", "", 9), Some(3));
         assert_eq!(index_of16("abc", "a", 9), None);
+    }
+
+    #[test]
+    fn units16_is_the_same_view_unit_at_reads_one_position_of() {
+        for s in ["", "abc", "héllo", "a😀b", "日本"] {
+            let units = units16(s);
+            assert_eq!(units.len(), len16(s), "units16({s:?}) length");
+            for (i, &u) in units.iter().enumerate() {
+                assert_eq!(unit_at(s, i), Some(u), "units16({s:?})[{i}]");
+            }
+        }
     }
 }

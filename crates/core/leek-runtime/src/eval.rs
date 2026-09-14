@@ -41,17 +41,15 @@ pub fn slice(base: &Value, start: Option<i64>, end: Option<i64>, step: Option<f6
                 Some(0) => Some(1),
                 other => other,
             };
-            if s.is_ascii() {
-                let bytes = s.as_bytes();
-                let len = crate::len_as_int(bytes.len());
-                let sliced = slice_seq(bytes, len, start, end, step);
-                Value::String(Rc::new(String::from_utf8_lossy(&sliced).into_owned()))
-            } else {
-                let units: Vec<u16> = s.encode_utf16().collect();
-                let len = crate::len_as_int(units.len());
-                let sliced = slice_seq(&units, len, start, end, step);
-                Value::String(Rc::new(String::from_utf16_lossy(&sliced)))
-            }
+            // A stride means random access, so the unit view is materialised
+            // rather than re-scanned per index; `jstr::units16` is that view,
+            // and the ASCII shortcut lives inside it with all the others.
+            // Reassembling lossily is how a stride that cuts a surrogate pair
+            // yields `U+FFFD`, exactly as `jstr::substring16` does.
+            let units = crate::jstr::units16(s);
+            let len = crate::len_as_int(units.len());
+            let sliced = slice_seq(&units, len, start, end, step);
+            Value::String(Rc::new(String::from_utf16_lossy(&sliced)))
         }
         Value::Interval(iv) => slice_interval(iv, start, end, step),
         _ => Value::Null,
