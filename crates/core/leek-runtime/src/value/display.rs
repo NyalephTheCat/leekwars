@@ -126,7 +126,7 @@ pub(super) fn loose_eq_inner(
         }
         (Value::ClassRef(a, _), Value::ClassRef(b, _)) => a == b,
         (Value::BuiltinClass(a), Value::BuiltinClass(b)) => a == b,
-        // Functions compare by identity: same user DefId, same
+        // Functions compare by identity: same user `FnId`, same
         // builtin name, same lambda Rc, or same (function_idx,
         // receiver-identity) for bound methods.
         (Value::Function(a), Value::Function(b)) => match (a, b) {

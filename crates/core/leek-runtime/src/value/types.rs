@@ -9,9 +9,25 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use leek_hir::DefId;
-
 use super::display::key_repr;
+
+/// Identifies a user-defined class inside the program being run.
+///
+/// An opaque handle minted by whoever loads the program — the runtime
+/// never dereferences it, it only stores and compares it. Both the
+/// interpreter and the native backend use the class's HIR `DefId.0`,
+/// but nothing here depends on that: the loader picks the numbering
+/// and is the only side allowed to interpret it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ClassId(pub u32);
+
+/// Identifies a top-level user function inside the program being run.
+///
+/// Same contract as [`ClassId`] — an opaque loader-minted handle. Kept
+/// as a separate type so a class id can never be passed where a
+/// function id is expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FnId(pub u32);
 
 /// All runtime value shapes. Cheap to clone — composites are
 /// shared via `Rc`.
@@ -40,14 +56,14 @@ pub enum Value {
     Set(Rc<RefCell<SetData>>),
     /// Object literal — string-keyed records (insertion order).
     Object(Rc<RefCell<ObjectData>>),
-    /// Class instance. `class` is the class's `DefId`; fields are
+    /// Class instance. `class` is the class's [`ClassId`]; fields are
     /// stored inline so two refs share state.
     Instance(Rc<RefCell<Instance>>),
     /// Class-name reference — `class A {} return A` returns this.
-    /// Carries both the `DefId` (for method/field lookup) and the
+    /// Carries both the [`ClassId`] (for method/field lookup) and the
     /// source name (so `Display` can produce `<class A>` without
     /// reaching back into the program table).
-    ClassRef(DefId, Rc<String>),
+    ClassRef(ClassId, Rc<String>),
     /// Reference to one of the built-in classes (`Array`, `Map`,
     /// `Set`, `Object`, `Integer`, `Real`, `String`, …). Stringified
     /// as `<class Name>`. Callable as a constructor:
@@ -58,7 +74,7 @@ pub enum Value {
     /// variants store the open/closed bit.
     Interval(Rc<IntervalValue>),
     /// First-class function value. Either a user-defined function
-    /// (referenced by `DefId`), a captured lambda body, or a bound
+    /// (referenced by [`FnId`]), a captured lambda body, or a bound
     /// method.
     Function(Function),
     /// `super` expression inside a method body. Behaves like the
@@ -87,8 +103,8 @@ pub struct SuperValue {
 
 #[derive(Debug, Clone)]
 pub struct Instance {
-    pub class: DefId,
-    /// Class name kept alongside the `DefId` so `Display` can
+    pub class: ClassId,
+    /// Class name kept alongside the [`ClassId`] so `Display` can
     /// render `ClassName {…}` without a back-reference to the HIR.
     pub class_name: String,
     pub fields: ObjectData,
@@ -382,9 +398,9 @@ impl FromIterator<Value> for SetData {
 /// case to a different path.
 #[derive(Debug, Clone)]
 pub enum Function {
-    /// Top-level user function. Body lookup is by `DefId` into
-    /// `HirFile::defs`.
-    User(DefId),
+    /// Top-level user function. Body lookup is by the [`FnId`] the
+    /// loader registered for it.
+    User(FnId),
     /// Lambda capture. We snapshot the captured locals at lambda
     /// creation time so subsequent edits don't affect the closure
     /// (matches Leekscript value-capture semantics).

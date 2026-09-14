@@ -8,6 +8,7 @@
 //! error) live on, so a missed reset shows up only on the *second* run — which
 //! no other test in this crate performs.
 
+use leek_backend_native::ids::fn_id;
 use leek_backend_native::{NativeError, NativeOptions, ops_used, run, run_call};
 use leek_hir::{Def, DefId, HirFile};
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
@@ -43,7 +44,7 @@ fn hook_value(hir: &HirFile, name: &str) -> Value {
         .find_map(|(i, def)| match def {
             Def::Function(f) if f.name == name && f.params.is_empty() => u32::try_from(i)
                 .ok()
-                .map(|id| Value::Function(Function::User(DefId(id)))),
+                .map(|id| Value::Function(Function::User(fn_id(DefId(id))))),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no zero-arg top-level function `{name}`"))

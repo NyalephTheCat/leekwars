@@ -6,6 +6,7 @@ use super::{
     resolve_instance_method_value, resolve_static_field, resolve_static_method_value, rvalue_name,
     types, unsupported,
 };
+use crate::ids::{class_id, fn_id};
 
 /// Op cost charged per literal "slot" at construction (an array element, a
 /// map key or value, a set member, an interval endpoint). Upstream charges
@@ -103,7 +104,10 @@ impl Tx<'_, '_> {
             // receiver). The class identity is known at compile time, so box
             // it once into a leaked handle (like a string literal).
             Rvalue::ClassRef(def_id, name) => {
-                let v = leek_runtime::Value::ClassRef(*def_id, std::rc::Rc::new(name.clone()));
+                let v = leek_runtime::Value::ClassRef(
+                    class_id(*def_id),
+                    std::rc::Rc::new(name.clone()),
+                );
                 let ptr = crate::runtime::box_value(v) as i64;
                 Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref))
             }
@@ -112,7 +116,7 @@ impl Tx<'_, '_> {
             // (`USER_FN_IDX` → uniform body), so the function is uniform-
             // compiled + registered in `define_program`.
             Rvalue::FunctionRef(def_id) => {
-                let v = leek_runtime::Value::Function(leek_runtime::Function::User(*def_id));
+                let v = leek_runtime::Value::Function(leek_runtime::Function::User(fn_id(*def_id)));
                 let ptr = crate::runtime::box_value(v) as i64;
                 Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref))
             }
@@ -240,7 +244,10 @@ impl Tx<'_, '_> {
                 && let Some(pdef) = c.parent_def
                 && let Some(pc) = self.program.class(pdef)
             {
-                let v = leek_runtime::Value::ClassRef(pdef, std::rc::Rc::new(pc.name.clone()));
+                let v = leek_runtime::Value::ClassRef(
+                    class_id(pdef),
+                    std::rc::Rc::new(pc.name.clone()),
+                );
                 let ptr = crate::runtime::box_value(v) as i64;
                 return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
             }
@@ -293,7 +300,7 @@ impl Tx<'_, '_> {
             if let Some(idx) = resolve_static_method_value(self.program, &cls, name)
                 && let Some(def) = self.program.functions[idx].def_id
             {
-                let v = leek_runtime::Value::Function(leek_runtime::Function::User(def));
+                let v = leek_runtime::Value::Function(leek_runtime::Function::User(fn_id(def)));
                 let ptr = crate::runtime::box_value(v) as i64;
                 return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
             }
@@ -305,7 +312,7 @@ impl Tx<'_, '_> {
             if let Some(idx) = resolve_instance_method_value(self.program, &cls, name)
                 && let Some(def) = self.program.functions[idx].def_id
             {
-                let v = leek_runtime::Value::Function(leek_runtime::Function::User(def));
+                let v = leek_runtime::Value::Function(leek_runtime::Function::User(fn_id(def)));
                 let ptr = crate::runtime::box_value(v) as i64;
                 return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
             }
@@ -583,7 +590,7 @@ impl Tx<'_, '_> {
                     .or_else(|| resolve_instance_method_value(self.program, &cls, name))
                     && let Some(def) = self.program.functions[idx].def_id
                 {
-                    let v = leek_runtime::Value::Function(leek_runtime::Function::User(def));
+                    let v = leek_runtime::Value::Function(leek_runtime::Function::User(fn_id(def)));
                     let ptr = crate::runtime::box_value(v) as i64;
                     return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
                 }
