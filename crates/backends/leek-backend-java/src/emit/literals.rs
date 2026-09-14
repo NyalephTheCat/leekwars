@@ -1,7 +1,6 @@
 use leek_hir::Literal;
 use std::fmt::Write as _;
 
-use super::escape_string;
 impl super::Emitter<'_> {
     pub(crate) fn write_literal(&self, buf: &mut String, lit: &Literal, parens_if_negative: bool) {
         match lit {
@@ -35,7 +34,7 @@ impl super::Emitter<'_> {
             }
             Literal::String(s) => {
                 buf.push('"');
-                buf.push_str(&escape_string(s, self.opts.version_byte() >= 2));
+                buf.push_str(&leek_text::escape_java(s, self.opts.escape_mode()));
                 buf.push('"');
             }
             // Upstream `LeekBigInteger` codegen:

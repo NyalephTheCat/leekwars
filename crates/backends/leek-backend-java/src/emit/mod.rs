@@ -20,6 +20,7 @@ use leek_hir::{
     BinaryOp, Callee, Def, Expr, ExprKind, HirFile, Literal, NameRef, PostfixOp, Stmt, UnaryOp,
 };
 use leek_span::Span;
+use leek_text::EscapeMode;
 use leek_types::Type;
 use std::fmt::Write as _;
 
@@ -549,7 +550,10 @@ impl<'a> Emitter<'a> {
             let path = if self.opts.source_path.is_empty() {
                 String::new()
             } else {
-                escape_string(&self.opts.source_path, true)
+                // The AI's source path is emitter metadata, not a program
+                // string: it is never read back by Leekscript semantics, so
+                // it escapes the modern way whatever the file's `@version`.
+                leek_text::escape_java(&self.opts.source_path, EscapeMode::V2Plus)
             };
             self.writer.add_line(&format!(
                 "protected String getAIString() {{ return \"{path}\";}}"
@@ -1731,18 +1735,4 @@ fn stmt_has_own_break(s: &Stmt) -> bool {
 
 pub(crate) fn is_terminator(s: &Stmt) -> bool {
     matches!(s, Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_))
-}
-
-pub(crate) fn escape_string(s: &str, v2plus: bool) -> String {
-    // Shared codec — see `leek_text::escape_java`. Translates Leek
-    // literal text into a Java string literal body: v1 keeps the
-    // historical `\"` → `\\"` behaviour, v2+ emits the modern escape;
-    // non-ASCII becomes `\uXXXX` (surrogate pairs for supplementary
-    // chars) so the emitted Java source is pure ASCII.
-    let mode = if v2plus {
-        leek_text::EscapeMode::V2Plus
-    } else {
-        leek_text::EscapeMode::V1
-    };
-    leek_text::escape_java(s, mode)
 }

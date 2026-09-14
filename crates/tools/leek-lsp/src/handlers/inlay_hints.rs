@@ -24,8 +24,8 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = SyntaxNode::new_root(green.clone());
 
-    let from_offset = position_to_offset_local(doc, range.start);
-    let to_offset = position_to_offset_local(doc, range.end);
+    let from_offset = doc.pos_map().to_offset(range.start);
+    let to_offset = doc.pos_map().to_offset(range.end);
 
     let mut out: Vec<lsp::InlayHint> = Vec::new();
     for sym in &resolve_art.table.symbols {
@@ -91,10 +91,6 @@ pub fn resolve(mut hint: lsp::InlayHint) -> lsp::InlayHint {
         }));
     }
     hint
-}
-
-fn position_to_offset_local(doc: &crate::documents::DocHandle, pos: lsp::Position) -> Option<u32> {
-    crate::util::position::position_to_offset(doc.pos_map(), pos)
 }
 
 /// Byte range of the initializer expression for the declaration whose

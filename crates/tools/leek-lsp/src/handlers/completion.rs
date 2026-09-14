@@ -41,7 +41,7 @@
 
 use leek_resolver::SymbolKind;
 use leek_resolver::builtins::{BUILTIN_CONSTANTS, BUILTIN_FNS, BUILTINS, FINAL_BUILTIN_FIELDS};
-use leek_syntax::{SyntaxKind, SyntaxNode};
+use leek_syntax::{SyntaxKind, SyntaxNode, is_ident_continue};
 use tower_lsp::lsp_types as lsp;
 
 use super::member::{class_name_of_type, class_parent_name_of, find_class_decl_by_name};
@@ -209,41 +209,50 @@ fn user_documentation(ws: &Workspace, data: &ResolveData) -> Option<String> {
 /// to find its `ClassInstance(N)` etc.).
 fn member_receiver(text: &str, offset: u32) -> Option<(&str, u32)> {
     let off = offset as usize;
-    if off == 0 || off > text.len() {
+    if off == 0 {
         return None;
     }
-    let before = &text[..off];
-    // Strip trailing identifier chars that the user has already
-    // started typing (the partial member name).
-    let partial_len = before
-        .as_bytes()
-        .iter()
-        .rev()
-        .take_while(|b| is_ident_byte(**b))
-        .count();
-    let before = &before[..before.len() - partial_len];
-    let trimmed = before.trim_end();
+    // `get` rather than `&text[..off]`: a client can send a position that
+    // lands mid-character, and slicing there would panic and take down the
+    // whole completion request.
+    let before = text.get(..off)?;
+
+    // Strip the partial member name the user has already typed.
+    let partial_len = trailing_ident_len(before);
+    let trimmed = before[..before.len() - partial_len].trim_end();
     if !trimmed.ends_with('.') {
         return None;
     }
-    let after_dot = trimmed.len();
-    let bytes = trimmed.as_bytes();
-    let mut end = after_dot - 1; // index of '.'
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    let mut start = end;
-    while start > 0 && is_ident_byte(bytes[start - 1]) {
-        start -= 1;
-    }
+
+    // Back over the `.`, then over any space between it and the receiver.
+    let end = trimmed.len() - '.'.len_utf8();
+    let end = end - trailing_len(&trimmed[..end], |c| c.is_whitespace());
+    let start = end - trailing_ident_len(&trimmed[..end]);
     if start == end {
         return None;
     }
     Some((&trimmed[start..end], leek_span::offset(start)))
 }
 
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+/// Byte length of the run of identifier characters ending `s`.
+///
+/// Uses the lexer's own predicate, so the receiver the LSP resolves is the
+/// one the compiler would tokenize. An ASCII-only test used to live here, and
+/// it truncated every Latin-1 identifier: `créature.` resolved against
+/// `ature`, and no member ever completed.
+fn trailing_ident_len(s: &str) -> usize {
+    trailing_len(s, is_ident_continue)
+}
+
+/// Byte length of the trailing run of chars satisfying `pred`. Summing
+/// `len_utf8` keeps the result on a character boundary, which a byte-wise
+/// scan does not.
+fn trailing_len(s: &str, pred: impl Fn(char) -> bool) -> usize {
+    s.chars()
+        .rev()
+        .take_while(|c| pred(*c))
+        .map(char::len_utf8)
+        .sum()
 }
 
 fn member_items(
@@ -864,6 +873,48 @@ mod tests {
             lsp::CompletionResponse::Array(v) => v,
             lsp::CompletionResponse::List(l) => l.items,
         }
+    }
+
+    /// The receiver scan must agree with the lexer, which accepts the
+    /// Latin-1 letters. An ASCII-only scan stopped at the `é` and handed the
+    /// type lookup `ature` instead of `créature`, so no member completed.
+    #[test]
+    fn latin_1_receiver_is_not_truncated() {
+        let text = "var créature = []\ncréature.";
+        let off = u32::try_from(text.len()).unwrap();
+        assert_eq!(
+            member_receiver(text, off).map(|(name, _)| name),
+            Some("créature")
+        );
+    }
+
+    /// The partial member name the user is mid-way through typing is Latin-1
+    /// aware too, on both sides of the dot.
+    #[test]
+    fn latin_1_partial_member_is_stripped_whole() {
+        let text = "créature.éveil";
+        let off = u32::try_from(text.len()).unwrap();
+        let (name, start) = member_receiver(text, off).unwrap();
+        assert_eq!(name, "créature");
+        assert_eq!(start, 0);
+    }
+
+    /// A position that lands inside a multi-byte character must return `None`
+    /// rather than panic and take the whole request down with it.
+    #[test]
+    fn an_offset_off_a_char_boundary_is_rejected() {
+        let text = "créature.";
+        assert_eq!(member_receiver(text, 4), None);
+    }
+
+    #[test]
+    fn space_around_the_dot_still_finds_the_receiver() {
+        let text = "créature . ";
+        let off = u32::try_from(text.len()).unwrap();
+        assert_eq!(
+            member_receiver(text, off).map(|(name, _)| name),
+            Some("créature")
+        );
     }
 
     #[test]
