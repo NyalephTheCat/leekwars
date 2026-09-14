@@ -46,6 +46,9 @@ cargo xtask check-toolchain
 step "layer check (cargo xtask check-layers)"
 cargo xtask check-layers
 
+step "error-convention check (cargo xtask check-errors)"
+cargo xtask check-errors
+
 step "generated-artifact check (cargo xtask check-artifacts)"
 cargo xtask check-artifacts
 

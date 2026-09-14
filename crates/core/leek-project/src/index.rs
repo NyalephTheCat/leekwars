@@ -8,18 +8,49 @@ use leek_span::pragma::LanguageSettings;
 use leek_span::{LineTable, SourceId};
 
 /// Error discovering or indexing a project.
+///
+/// The manifest half keeps the [`ManifestError`](leek_manifest::ManifestError)
+/// whole — with its span — so a caller that has a reporter can still render a
+/// caret in `Miku.toml` instead of receiving a flattened sentence.
 #[derive(Debug)]
-pub struct ProjectError {
-    pub message: String,
+pub enum ProjectError {
+    /// The project's `Miku.toml` could not be found, read, or understood.
+    Manifest(leek_manifest::ManifestError),
+    /// A source file could not be read.
+    Io { path: PathBuf, message: String },
+    /// The current directory could not be determined, so discovery had
+    /// nowhere to start looking for a manifest.
+    Cwd { message: String },
 }
 
 impl std::fmt::Display for ProjectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        match self {
+            ProjectError::Manifest(e) => e.fmt(f),
+            ProjectError::Io { path, message } => {
+                write!(f, "reading {}: {message}", path.display())
+            }
+            ProjectError::Cwd { message } => {
+                write!(f, "determining the current directory: {message}")
+            }
+        }
     }
 }
 
-impl std::error::Error for ProjectError {}
+impl std::error::Error for ProjectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ProjectError::Manifest(e) => Some(e),
+            ProjectError::Io { .. } | ProjectError::Cwd { .. } => None,
+        }
+    }
+}
+
+impl From<leek_manifest::ManifestError> for ProjectError {
+    fn from(err: leek_manifest::ManifestError) -> Self {
+        ProjectError::Manifest(err)
+    }
+}
 
 /// Canonical path → stable [`SourceId`] registry for `.leek` files.
 #[derive(Debug, Clone)]
@@ -37,7 +68,7 @@ pub struct ProjectIndex {
 
 impl ProjectIndex {
     pub fn discover(start: &Path) -> Result<Self, ProjectError> {
-        let loaded = discover(start).map_err(|e| ProjectError { message: e.message })?;
+        let loaded = discover(start)?;
         Ok(Self::from_manifest(loaded.root, &loaded.manifest))
     }
 
@@ -111,8 +142,9 @@ impl ProjectIndex {
 
     pub fn load_file(&mut self, path: &Path) -> Result<LoadedProjectFile, ProjectError> {
         let canonical = Self::canonicalize(path);
-        let text = std::fs::read_to_string(&canonical).map_err(|e| ProjectError {
-            message: format!("reading {}: {e}", canonical.display()),
+        let text = std::fs::read_to_string(&canonical).map_err(|e| ProjectError::Io {
+            path: canonical.clone(),
+            message: e.to_string(),
         })?;
         let source = self.source_for_path(&canonical);
         let lang = self.language_settings(&text);
@@ -411,10 +443,14 @@ mod tests {
         let mut index = v4_index(&dir);
         let missing = dir.join("nope.leek");
         let err = index.load_file(&missing).expect_err("missing file");
+        // The path is a field, not a substring to fish back out of prose.
+        let ProjectError::Io { path, .. } = &err else {
+            panic!("expected an IO error, got {err:?}");
+        };
+        assert!(path.ends_with("nope.leek"), "{}", path.display());
         assert!(
-            err.message.contains("nope.leek"),
-            "the message must name the file: {}",
-            err.message
+            err.to_string().contains("nope.leek"),
+            "the message must name the file: {err}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

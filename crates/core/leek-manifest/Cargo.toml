@@ -9,7 +9,10 @@ description = "Miku.toml manifest schema, parser, and project discovery for Leek
 [dependencies]
 leek-diagnostics = { workspace = true }
 leek-span        = { workspace = true }
-toml             = { version = "0.8", default-features = false, features = ["parse"] }
+# The span-preserving half of the `toml` crate the workspace already uses
+# (`toml` 0.8 depends on it), so this is a direct dep on a tree node that is
+# already there, not a new dependency.
+toml_edit        = { workspace = true }
 
 [lints]
 workspace = true

@@ -80,11 +80,16 @@ fn fight_example_manifest_parses() {
     assert_eq!(fight.jobs, Some(4));
 
     // No key of the `[fight]` table may be unknown to this toolchain.
-    let fight_warnings: Vec<&str> = load
+    let fight_warnings: Vec<&leek_manifest::ManifestWarning> = load
         .warnings
         .iter()
-        .map(|w| w.message.as_str())
-        .filter(|m| m.contains("fight."))
+        .filter(|w| {
+            matches!(
+                &w.kind,
+                leek_manifest::ManifestWarningKind::UnknownField { table, .. }
+                    if table == "fight"
+            )
+        })
         .collect();
     assert!(
         fight_warnings.is_empty(),

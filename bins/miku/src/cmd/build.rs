@@ -23,8 +23,8 @@ pub fn run(
     environment: Option<&std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    for w in &project.warnings {
-        eprintln!("warning: {w}");
+    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+        return Ok(ExitCode::from(1));
     }
 
     let backend = resolve_backend(&project.manifest, args.backend.as_deref())?;

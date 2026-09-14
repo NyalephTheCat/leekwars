@@ -29,8 +29,8 @@ pub fn run(
     quiet: bool,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    for w in &project.warnings {
-        eprintln!("warning: {w}");
+    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+        return Ok(ExitCode::from(1));
     }
 
     let mut sources = project.walk_sources();

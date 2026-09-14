@@ -69,6 +69,44 @@ If you reach for an upward dependency, the abstraction you want usually belongs
 in a lower layer (or behind a trait that a lower layer defines and a higher one
 implements).
 
+## Error handling
+
+Libraries return **typed errors**; only the outermost layer flattens them into
+prose. Concretely, four rules:
+
+**1. A library crate returns a hand-written enum**, with a manual
+`impl Display` and `impl std::error::Error`. Not `thiserror`: these enums run
+four to eight variants, the workspace already hand-writes them
+(`leek_resolver::folder::LoadError`, `leek_backend_native::NativeError`), and
+the external dependency list is deliberately small. The enum's variants carry
+the *facts* — the offending key, the path, the line — not a pre-rendered
+sentence, so a caller can match on what went wrong instead of grepping a
+string.
+
+**2. An error with a source location implements
+[`leek_diagnostics::IntoDiagnostic`]** and carries a `leek_span::Span` plus a
+catalog `Code`. The span is the point of the exercise; the enum is only its
+carrier. `leek_manifest::ManifestError` and `leek_resolver::IncludeError` are
+the reference shapes. An error that genuinely has no source — a `.lib` catalog
+line, a filesystem failure — deliberately does *not* implement the trait, and
+says so in a doc comment so the omission reads as a decision.
+
+**3. `anyhow` is for `bins/`, `xtask/` and `crates/testing/` only.** It must
+not appear in the public signature of anything under `crates/{core, frontend,
+middle, db, backends, game, tools}`: a library that returns `anyhow::Error`
+has thrown away the distinction its caller needs. `cargo xtask check-errors`
+enforces this over the `cargo metadata` graph, with the remaining violations
+listed in [`xtask/error-allowlist.txt`](../xtask/error-allowlist.txt). Like
+the layer allowlist it may only shrink.
+
+**4. `Result<_, String>` is banned**, except where a third-party API mandates
+it. There is exactly one sanctioned exception today: clap's `value_parser`
+signature (`bins/leekc/src/cli.rs`, `parse_version`), which clap defines as
+`fn(&str) -> Result<T, String>`.
+
+A stringly-typed error is not "typed in name only" progress either: a struct
+with a single `message: String` field is the same error, wearing a hat.
+
 ## The compilation pipeline
 
 A `.leek` program flows down the layers:
@@ -145,6 +183,8 @@ drift. The scripts live in [`tools/`](../tools/):
 - `game-item-extract.sh` — weapon/chip catalogs (see above).
 - `builtin-extract.sh` / `game-builtin-extract.sh` — builtin function tables.
 - `cargo xtask check-layers` ([`xtask/`](../xtask/)) — the layering rule.
+- `cargo xtask check-errors` ([`xtask/`](../xtask/)) — the error convention:
+  no `anyhow` in a library layer.
 - `cargo xtask check-toolchain` ([`xtask/`](../xtask/)) — the Rust pin is an
   exact release and matches the advertised MSRV.
 - `cargo xtask check-artifacts` ([`xtask/`](../xtask/)) — generated output

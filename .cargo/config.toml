@@ -1,4 +1,5 @@
 [alias]
-# Repository automation: `cargo xtask check-layers` / `check-toolchain`,
+# Repository automation: `cargo xtask check-layers` / `check-errors` /
+# `check-toolchain`,
 # see xtask/src/main.rs.
 xtask = "run --package xtask --quiet --"

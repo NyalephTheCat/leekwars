@@ -40,8 +40,12 @@ use leek_project::Project;
 
 pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    for w in &project.warnings {
-        eprintln!("warning: {w}");
+    if leek_driver::report_manifest(
+        &project,
+        leek_diagnostics::ColorWhen::Auto,
+        leek_diagnostics::MessageFormat::Human,
+    ) {
+        return Ok(ExitCode::from(1));
     }
 
     let out_root = args.out_dir.clone().unwrap_or_else(|| project.doc_dir());

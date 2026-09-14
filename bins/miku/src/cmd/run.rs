@@ -20,8 +20,8 @@ pub fn run(
     _quiet: bool,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    for w in &project.warnings {
-        eprintln!("warning: {w}");
+    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+        return Ok(ExitCode::from(1));
     }
 
     resolve_run_backend(args.backend.as_deref())?;

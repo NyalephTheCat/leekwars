@@ -199,10 +199,38 @@ pub struct LintTable {
     pub deny: Vec<String>,
     pub warn: Vec<String>,
     pub allow: Vec<String>,
+    /// Byte spans of the `deny` array's elements, positionally aligned with
+    /// [`deny`](Self::deny). The reporter points at the element that named an
+    /// unknown code rather than at the whole `[lint]` table. Empty when the
+    /// manifest came from somewhere with no document to span (a test that
+    /// builds a `LintTable` by hand); an element may be `None` when the
+    /// document had no span for it.
+    pub deny_spans: Vec<Option<leek_span::Span>>,
+    /// Spans for [`warn`](Self::warn); see [`deny_spans`](Self::deny_spans).
+    pub warn_spans: Vec<Option<leek_span::Span>>,
+    /// Spans for [`allow`](Self::allow); see [`deny_spans`](Self::deny_spans).
+    pub allow_spans: Vec<Option<leek_span::Span>>,
     /// `lint.pedantic = true` — run the strictness lints.
     pub pedantic: bool,
     /// `lint.nursery = true` — run the teaching lints.
     pub nursery: bool,
+}
+
+impl LintTable {
+    /// The span recorded for `raw` in whichever of the three lists holds it.
+    /// `None` when the entry isn't there, or the document had no span for it.
+    pub fn span_for(&self, raw: &str) -> Option<leek_span::Span> {
+        for (entries, spans) in [
+            (&self.deny, &self.deny_spans),
+            (&self.warn, &self.warn_spans),
+            (&self.allow, &self.allow_spans),
+        ] {
+            if let Some(i) = entries.iter().position(|e| e == raw) {
+                return spans.get(i).copied().flatten();
+            }
+        }
+        None
+    }
 }
 
 /// `[test]` — runner configuration.

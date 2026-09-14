@@ -2,6 +2,7 @@
 //! `.cargo/config.toml`).
 
 mod artifacts;
+mod errors;
 mod layers;
 mod toolchain;
 
@@ -11,6 +12,7 @@ const USAGE: &str = "usage: cargo xtask <task>
 
 tasks:
   check-artifacts  check generated output stays untracked and ignored
+  check-errors     keep `anyhow` out of the library layers (see docs/architecture.md)
   check-layers     enforce the crate layering rule (see docs/architecture.md)
   check-toolchain  check the Rust pin and the advertised MSRV agree";
 
@@ -18,6 +20,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("check-artifacts") => artifacts::run(),
+        Some("check-errors") => errors::run(),
         Some("check-layers") => layers::run(),
         Some("check-toolchain") => toolchain::run(),
         Some("-h" | "--help") => {

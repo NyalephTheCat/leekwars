@@ -1,0 +1,36 @@
+# Library crates that still depend on `anyhow`, accepted by
+# `cargo xtask check-errors`.
+#
+# One crate per line: `<crate> -> <dependency>: <justification>`.
+# `#` starts a comment line.
+#
+# The convention is in "Error handling" in docs/architecture.md: a library
+# crate returns a hand-written enum, and `anyhow` belongs to `bins/`, `xtask/`
+# and `crates/testing/`, where an error's last job is to be printed.
+#
+# This list must only shrink. The check fails on an entry whose crate no longer
+# depends on `anyhow`, so remove the line in the same change that drops the
+# dependency. Do not add entries to get a new `anyhow` past the gate.
+
+# `pipeline_for` and `file_pipeline` return `anyhow::Result` because they fold
+# together a recipe error, a manifest error and an IO error. Fix: a
+# `DriverError` enum over the three. `reporter_for` is already typed.
+leek-driver -> anyhow: pipeline construction folds three error kinds into one
+
+# `BackendError` exists but the registry's `emit`/`link` entry points return
+# `anyhow::Result` around it.
+leek-backends -> anyhow: registry entry points wrap the typed BackendError
+
+# `NativeError` exists (options.rs) but the JIT and object-file paths still
+# reach for `anyhow` around it — and `NativeError::Compile(String)` throws away
+# every MIR diagnostic but the first. Tracked as its own change, because
+# retyping it rewrites every native skip reason and those are the input to the
+# test-driver's failure ratchet.
+leek-backend-native -> anyhow: NativeError needs to carry diagnostics first
+
+# Scenario loading (TOML + IO + validation) and the fight runner.
+leek-scenario -> anyhow: scenario load/run errors not yet enumerated
+
+# The debug adapter's handlers return `anyhow::Result` straight into the DAP
+# response encoder, which only wants a message.
+leek-dap -> anyhow: DAP handlers answer the protocol with a message

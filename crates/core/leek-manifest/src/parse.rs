@@ -1,69 +1,28 @@
 //! TOML parsing for `Miku.toml`.
 //!
-//! Hand-rolled over `toml::Value` rather than serde-derived so we can
-//! emit per-key warnings instead of hard-failing on unknown fields.
+//! Hand-rolled over `toml_edit`'s immutable document rather than
+//! serde-derived so we can emit per-key warnings instead of hard-failing on
+//! unknown fields — and so every error can point at the key or value that
+//! caused it. `toml_edit::ImDocument` is the span-preserving half of the
+//! `toml` crate the workspace already depends on: it keeps each `Key` and
+//! `Item`'s byte range, which is what turns "unknown key `fight.worker_count`"
+//! into a caret under `worker_count`.
 
+use crate::error::{
+    ManifestError, ManifestErrorKind, ManifestWarning, ManifestWarningKind, span_of,
+};
 use crate::format::FormatOptions;
 use crate::types::{
     BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest, PathsTable,
     ProjectTable, TestTable,
 };
+use leek_span::Span;
 use std::path::PathBuf;
-
-/// Hard parse failure — invalid TOML, missing required field, unknown
-/// top-level key, or a typed field with the wrong shape.
-#[derive(Debug, Clone)]
-pub struct ManifestError {
-    pub message: String,
-}
-
-impl ManifestError {
-    fn new(msg: impl Into<String>) -> Self {
-        Self {
-            message: msg.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for ManifestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ManifestError {}
-
-impl From<ManifestError> for leek_diagnostics::Diagnostic {
-    fn from(err: ManifestError) -> Self {
-        leek_diagnostics::convert::manifest_error(err.message)
-    }
-}
-
-/// Soft warning — unknown key inside a known table, or a deferred
-/// table that was used. Surfaced so editors can show squiggles but
-/// non-fatal so older toolchains can still load newer manifests.
-#[derive(Debug, Clone)]
-pub struct ManifestWarning {
-    pub message: String,
-}
-
-impl ManifestWarning {
-    fn new(msg: impl Into<String>) -> Self {
-        Self {
-            message: msg.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for ManifestWarning {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
+use toml_edit::{Item, TableLike};
 
 /// Top-level table names we recognize. Anything outside this set is
 /// an error.
-const KNOWN_TOP_LEVEL: &[&str] = &[
+pub(crate) const KNOWN_TOP_LEVEL: &[&str] = &[
     "project",
     "paths",
     "backend",
@@ -92,95 +51,71 @@ const DEFERRED_TOP_LEVEL: &[&str] = &[
 ];
 
 pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), ManifestError> {
-    let doc: toml::Value =
-        toml::from_str(s).map_err(|e| ManifestError::new(format!("Miku.toml: {e}")))?;
-    let root = doc
-        .as_table()
-        .ok_or_else(|| ManifestError::new("Miku.toml: top level must be a table"))?;
+    let doc = toml_edit::ImDocument::parse(s).map_err(|e| {
+        ManifestError::at(
+            span_of(e.span()),
+            ManifestErrorKind::Toml {
+                message: e.to_string(),
+            },
+        )
+    })?;
+    let root: &dyn TableLike = doc.as_table();
 
     let mut warnings = Vec::new();
 
-    for (key, _) in root {
-        if !KNOWN_TOP_LEVEL.contains(&key.as_str()) {
-            return Err(ManifestError::new(format!(
-                "Miku.toml: unknown top-level key `{key}` (expected one of: {})",
-                KNOWN_TOP_LEVEL.join(", ")
-            )));
+    for (key, _) in root.iter() {
+        if !KNOWN_TOP_LEVEL.contains(&key) {
+            return Err(ManifestError::at(
+                key_span(root, key),
+                ManifestErrorKind::UnknownTopLevelKey {
+                    key: key.to_string(),
+                },
+            ));
         }
     }
     for deferred in DEFERRED_TOP_LEVEL {
-        if root.contains_key(*deferred) {
-            warnings.push(ManifestWarning::new(format!(
-                "Miku.toml: `[{deferred}]` is parsed but not yet interpreted in this toolchain"
-            )));
+        if root.contains_key(deferred) {
+            warnings.push(ManifestWarning::at(
+                key_span(root, deferred),
+                ManifestWarningKind::DeferredTable { name: deferred },
+            ));
         }
     }
 
-    let project_tbl = root
-        .get("project")
-        .ok_or_else(|| ManifestError::new("Miku.toml: missing required table `[project]`"))?
-        .as_table()
-        .ok_or_else(|| ManifestError::new("Miku.toml: `project` must be a table"))?;
+    let project_item = root.get("project").ok_or_else(|| {
+        ManifestError::detached(ManifestErrorKind::MissingTable { name: "project" })
+    })?;
+    let project_tbl = table_val(project_item, "project")?;
     let project = parse_project(project_tbl, &mut warnings)?;
 
     let paths = match root.get("paths") {
         None => PathsTable::default(),
-        Some(v) => {
-            let tbl = v
-                .as_table()
-                .ok_or_else(|| ManifestError::new("Miku.toml: `paths` must be a table"))?;
-            parse_paths(tbl, &mut warnings)?
-        }
+        Some(v) => parse_paths(table_val(v, "paths")?, &mut warnings)?,
     };
 
     let backend = match root.get("backend") {
         None => BackendTable::default(),
-        Some(v) => {
-            let tbl = v
-                .as_table()
-                .ok_or_else(|| ManifestError::new("Miku.toml: `backend` must be a table"))?;
-            parse_backend(tbl, &mut warnings)?
-        }
+        Some(v) => parse_backend(table_val(v, "backend")?, &mut warnings)?,
     };
 
     let lint = match root.get("lint") {
         None => LintTable::default(),
-        Some(v) => {
-            let tbl = v
-                .as_table()
-                .ok_or_else(|| ManifestError::new("Miku.toml: `lint` must be a table"))?;
-            parse_lint(tbl, &mut warnings)?
-        }
+        Some(v) => parse_lint(table_val(v, "lint")?, &mut warnings)?,
     };
 
     let format = match root.get("format") {
         None => FormatOptions::default(),
-        Some(v) => {
-            let tbl = v
-                .as_table()
-                .ok_or_else(|| ManifestError::new("Miku.toml: `format` must be a table"))?;
-            FormatOptions::from_toml_table(tbl).map_err(ManifestError::new)?
-        }
+        Some(v) => FormatOptions::from_toml_table(table_val(v, "format")?)?,
     };
 
     let test = match root.get("test") {
         None => TestTable::default(),
-        Some(v) => {
-            let tbl = v
-                .as_table()
-                .ok_or_else(|| ManifestError::new("Miku.toml: `test` must be a table"))?;
-            parse_test(tbl, &mut warnings)?
-        }
+        Some(v) => parse_test(table_val(v, "test")?, &mut warnings)?,
     };
 
     let fight = match root.get("fight") {
         None => FightTable::default(),
-        Some(v) => {
-            let tbl = v
-                .as_table()
-                .ok_or_else(|| ManifestError::new("Miku.toml: `fight` must be a table"))?;
-            parse_fight(tbl, &mut warnings)?
-        }
+        Some(v) => parse_fight(table_val(v, "fight")?, &mut warnings)?,
     };
 
     Ok((
@@ -198,7 +133,7 @@ pub(crate) fn parse(s: &str) -> Result<(Manifest, Vec<ManifestWarning>), Manifes
 }
 
 fn parse_project(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<ProjectTable, ManifestError> {
     const KNOWN: &[&str] = &[
@@ -225,9 +160,14 @@ fn parse_project(
     if let Some(v) = tbl.get("language") {
         let n = int_val(v, "project.language")?;
         if !(1..=4).contains(&n) {
-            return Err(ManifestError::new(format!(
-                "Miku.toml: project.language must be 1..=4, got {n}"
-            )));
+            return Err(ManifestError::at(
+                item_span(v),
+                ManifestErrorKind::BadValue {
+                    key: "project.language".to_string(),
+                    expected: "1..=4".to_string(),
+                    got: Some(n.to_string()),
+                },
+            ));
         }
         out.language = u8::try_from(n).expect("validated to 1..=4 above");
     }
@@ -253,7 +193,7 @@ fn parse_project(
 }
 
 fn parse_paths(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<PathsTable, ManifestError> {
     const KNOWN: &[&str] = &["src", "tests", "benches", "build"];
@@ -269,7 +209,7 @@ fn parse_paths(
         out.benches = PathBuf::from(string_val(v, "paths.benches")?);
     }
     if let Some(v) = tbl.get("build") {
-        out.build = build_dir_val(string_val(v, "paths.build")?.as_str())?;
+        out.build = build_dir_val(&string_val(v, "paths.build")?, item_span(v))?;
     }
     Ok(out)
 }
@@ -277,14 +217,19 @@ fn parse_paths(
 /// `paths.build` names the directory `miku clean` deletes wholesale, so
 /// it must stay a relative path *inside* the project: no absolute paths,
 /// no `..`, no bare `.`.
-fn build_dir_val(raw: &str) -> Result<PathBuf, ManifestError> {
+fn build_dir_val(raw: &str, span: Option<Span>) -> Result<PathBuf, ManifestError> {
     let path = PathBuf::from(raw);
     let mut components = path.components();
     let ok = components.next().is_some_and(|c| is_plain(&c)) && components.all(|c| is_plain(&c));
     if !ok {
-        return Err(ManifestError::new(format!(
-            "Miku.toml: paths.build must be a relative path inside the project, got `{raw}`"
-        )));
+        return Err(ManifestError::at(
+            span,
+            ManifestErrorKind::BadValue {
+                key: "paths.build".to_string(),
+                expected: "a relative path inside the project".to_string(),
+                got: Some(format!("`{raw}`")),
+            },
+        ));
     }
     Ok(path)
 }
@@ -294,20 +239,17 @@ fn is_plain(component: &std::path::Component<'_>) -> bool {
 }
 
 fn parse_backend(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<BackendTable, ManifestError> {
     const KNOWN: &[&str] = &["java", "jar", "native", "wasm", "leekscript"];
     warn_unknown(tbl, "backend", KNOWN, warnings);
     let mut out = BackendTable::default();
-    for (key, val) in tbl {
-        let kind = key.as_str();
+    for (kind, val) in tbl.iter() {
         if !KNOWN.contains(&kind) {
             continue;
         }
-        let sub = val.as_table().ok_or_else(|| {
-            ManifestError::new(format!("Miku.toml: `backend.{kind}` must be a table"))
-        })?;
+        let sub = table_val(val, &format!("backend.{kind}"))?;
         let settings = parse_backend_settings(sub, kind, warnings)?;
         match kind {
             "java" => out.java = Some(settings),
@@ -322,7 +264,7 @@ fn parse_backend(
 }
 
 fn parse_backend_settings(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     kind: &str,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<BackendSettings, ManifestError> {
@@ -354,18 +296,25 @@ fn parse_backend_settings(
             "exact" => JavaMode::Exact,
             "clean" => JavaMode::Clean,
             other => {
-                return Err(ManifestError::new(format!(
-                    "Miku.toml: {scope}.mode must be \"exact\" or \"clean\", got {other:?}"
-                )));
+                return Err(ManifestError::at(
+                    item_span(v),
+                    ManifestErrorKind::BadValue {
+                        key: format!("{scope}.mode"),
+                        expected: "\"exact\" or \"clean\"".to_string(),
+                        got: Some(format!("{other:?}")),
+                    },
+                ));
             }
         });
     }
     if let Some(v) = tbl.get("java_version") {
         let n = int_val(v, &format!("{scope}.java_version"))?;
         out.java_version = Some(u32::try_from(n).map_err(|_| {
-            ManifestError::new(format!(
-                "Miku.toml: {scope}.java_version must be non-negative"
-            ))
+            bad_value(
+                v,
+                format!("{scope}.java_version"),
+                "non-negative".to_string(),
+            )
         })?);
     }
     if let Some(v) = tbl.get("emit_lines") {
@@ -385,24 +334,26 @@ fn parse_backend_settings(
     }
     if let Some(v) = tbl.get("opt_level") {
         let n = int_val(v, &format!("{scope}.opt_level"))?;
-        out.opt_level = Some(u8::try_from(n).map_err(|_| {
-            ManifestError::new(format!("Miku.toml: {scope}.opt_level must be 0..=255"))
-        })?);
+        out.opt_level = Some(
+            u8::try_from(n)
+                .map_err(|_| bad_value(v, format!("{scope}.opt_level"), "0..=255".to_string()))?,
+        );
     }
     if let Some(v) = tbl.get("max_call_depth") {
         let n = int_val(v, &format!("{scope}.max_call_depth"))?;
         out.max_call_depth = Some(u32::try_from(n).map_err(|_| {
-            ManifestError::new(format!(
-                "Miku.toml: {scope}.max_call_depth must be 0..={}",
-                u32::MAX
-            ))
+            bad_value(
+                v,
+                format!("{scope}.max_call_depth"),
+                format!("0..={}", u32::MAX),
+            )
         })?);
     }
     Ok(out)
 }
 
 fn parse_lint(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<LintTable, ManifestError> {
     const KNOWN: &[&str] = &["deny", "warn", "allow", "pedantic", "nursery"];
@@ -410,12 +361,15 @@ fn parse_lint(
     let mut out = LintTable::default();
     if let Some(v) = tbl.get("deny") {
         out.deny = string_array(v, "lint.deny")?;
+        out.deny_spans = string_array_spans(v);
     }
     if let Some(v) = tbl.get("warn") {
         out.warn = string_array(v, "lint.warn")?;
+        out.warn_spans = string_array_spans(v);
     }
     if let Some(v) = tbl.get("allow") {
         out.allow = string_array(v, "lint.allow")?;
+        out.allow_spans = string_array_spans(v);
     }
     if let Some(v) = tbl.get("pedantic") {
         out.pedantic = bool_val(v, "lint.pedantic")?;
@@ -427,7 +381,7 @@ fn parse_lint(
 }
 
 fn parse_test(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<TestTable, ManifestError> {
     const KNOWN: &[&str] = &["timeout", "parallel", "junit_xml"];
@@ -446,7 +400,7 @@ fn parse_test(
 }
 
 fn parse_fight(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<FightTable, ManifestError> {
     const KNOWN: &[&str] = &["default_scenario", "scenarios_dir", "reports_dir", "jobs"];
@@ -464,75 +418,156 @@ fn parse_fight(
     if let Some(v) = tbl.get("jobs") {
         let n = int_val(v, "fight.jobs")?;
         if n < 1 {
-            return Err(ManifestError::new(format!(
-                "Miku.toml: fight.jobs must be >= 1, got {n}"
-            )));
+            return Err(ManifestError::at(
+                item_span(v),
+                ManifestErrorKind::BadValue {
+                    key: "fight.jobs".to_string(),
+                    expected: ">= 1".to_string(),
+                    got: Some(n.to_string()),
+                },
+            ));
         }
-        out.jobs = Some(u32::try_from(n).map_err(|_| {
-            ManifestError::new(format!("Miku.toml: fight.jobs must be 1..={}", u32::MAX))
-        })?);
+        out.jobs =
+            Some(u32::try_from(n).map_err(|_| {
+                bad_value(v, "fight.jobs".to_string(), format!("1..={}", u32::MAX))
+            })?);
     }
     Ok(out)
 }
 
 // ---- helpers ----
 
+/// The span of `key`'s *name* in `tbl` — what a "this key is wrong" error
+/// underlines. `None` for a table the document synthesized (dotted keys).
+fn key_span(tbl: &dyn TableLike, key: &str) -> Option<Span> {
+    tbl.get_key_value(key).and_then(|(k, _)| span_of(k.span()))
+}
+
+/// The span of a *value* — what a "this value is wrong" error underlines.
+fn item_span(item: &Item) -> Option<Span> {
+    span_of(item.span())
+}
+
+/// A [`ManifestErrorKind::BadValue`] at `item`, for the range checks whose
+/// message shows no value.
+fn bad_value(item: &Item, key: String, expected: String) -> ManifestError {
+    ManifestError::at(
+        item_span(item),
+        ManifestErrorKind::BadValue {
+            key,
+            expected,
+            got: None,
+        },
+    )
+}
+
 fn warn_unknown(
-    tbl: &toml::value::Table,
+    tbl: &dyn TableLike,
     scope: &str,
     known: &[&str],
     warnings: &mut Vec<ManifestWarning>,
 ) {
-    for (key, _) in tbl {
-        if !known.contains(&key.as_str()) {
-            warnings.push(ManifestWarning::new(format!(
-                "Miku.toml: unknown key `{scope}.{key}` (ignored)"
-            )));
+    for (key, _) in tbl.iter() {
+        if !known.contains(&key) {
+            warnings.push(ManifestWarning::at(
+                key_span(tbl, key),
+                ManifestWarningKind::UnknownField {
+                    table: scope.to_string(),
+                    key: key.to_string(),
+                },
+            ));
         }
     }
 }
 
-fn expect_string(
-    tbl: &toml::value::Table,
-    scope: &str,
-    key: &str,
-) -> Result<String, ManifestError> {
+fn expect_string(tbl: &dyn TableLike, scope: &str, key: &str) -> Result<String, ManifestError> {
     let v = tbl.get(key).ok_or_else(|| {
-        ManifestError::new(format!("Miku.toml: missing required key `{scope}.{key}`"))
+        // The table is present but the key is not, so the table header is the
+        // closest thing to point at.
+        ManifestError::detached(ManifestErrorKind::MissingKey {
+            key: format!("{scope}.{key}"),
+        })
     })?;
     string_val(v, &format!("{scope}.{key}"))
 }
 
-fn string_val(v: &toml::Value, scope: &str) -> Result<String, ManifestError> {
-    v.as_str()
+/// A table or inline table. `as_table_like` covers both spellings —
+/// `[backend.java]` and `backend = { java = { … } }` — the way
+/// `toml::Value::as_table` used to.
+pub(crate) fn table_val<'a>(item: &'a Item, key: &str) -> Result<&'a dyn TableLike, ManifestError> {
+    item.as_table_like().ok_or_else(|| {
+        ManifestError::at(
+            item_span(item),
+            ManifestErrorKind::NotATable {
+                key: key.to_string(),
+            },
+        )
+    })
+}
+
+pub(crate) fn string_val(item: &Item, key: &str) -> Result<String, ManifestError> {
+    item.as_str()
         .map(std::string::ToString::to_string)
-        .ok_or_else(|| ManifestError::new(format!("Miku.toml: {scope} must be a string")))
+        .ok_or_else(|| wrong_type(item, key, "a string"))
 }
 
-fn int_val(v: &toml::Value, scope: &str) -> Result<i64, ManifestError> {
-    v.as_integer()
-        .ok_or_else(|| ManifestError::new(format!("Miku.toml: {scope} must be an integer")))
+pub(crate) fn int_val(item: &Item, key: &str) -> Result<i64, ManifestError> {
+    item.as_integer()
+        .ok_or_else(|| wrong_type(item, key, "an integer"))
 }
 
-fn bool_val(v: &toml::Value, scope: &str) -> Result<bool, ManifestError> {
-    v.as_bool()
-        .ok_or_else(|| ManifestError::new(format!("Miku.toml: {scope} must be a boolean")))
+pub(crate) fn bool_val(item: &Item, key: &str) -> Result<bool, ManifestError> {
+    item.as_bool()
+        .ok_or_else(|| wrong_type(item, key, "a boolean"))
 }
 
-fn string_array(v: &toml::Value, scope: &str) -> Result<Vec<String>, ManifestError> {
-    let arr = v
+pub(crate) fn wrong_type(item: &Item, key: &str, expected: &'static str) -> ManifestError {
+    ManifestError::at(
+        item_span(item),
+        ManifestErrorKind::WrongType {
+            key: key.to_string(),
+            expected,
+        },
+    )
+}
+
+fn string_array(item: &Item, key: &str) -> Result<Vec<String>, ManifestError> {
+    let arr = item
         .as_array()
-        .ok_or_else(|| ManifestError::new(format!("Miku.toml: {scope} must be an array")))?;
+        .ok_or_else(|| wrong_type(item, key, "an array"))?;
     let mut out = Vec::with_capacity(arr.len());
-    for (i, item) in arr.iter().enumerate() {
-        out.push(string_val(item, &format!("{scope}[{i}]"))?);
+    for (i, value) in arr.iter().enumerate() {
+        out.push(
+            value
+                .as_str()
+                .map(std::string::ToString::to_string)
+                .ok_or_else(|| {
+                    ManifestError::at(
+                        span_of(value.span()),
+                        ManifestErrorKind::WrongType {
+                            key: format!("{key}[{i}]"),
+                            expected: "a string",
+                        },
+                    )
+                })?,
+        );
     }
     Ok(out)
+}
+
+/// Per-element spans for a string array, positionally aligned with
+/// [`string_array`]'s output. `[lint]` keeps these so an unknown lint code can
+/// be reported at the array element that named it rather than at the table.
+fn string_array_spans(item: &Item) -> Vec<Option<Span>> {
+    item.as_array()
+        .map(|arr| arr.iter().map(|v| span_of(v.span())).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ManifestErrorKind;
 
     fn parse_ok(s: &str) -> (Manifest, Vec<ManifestWarning>) {
         parse(s).expect("manifest should parse")
@@ -594,14 +629,22 @@ mod tests {
                 "#
             );
             let err = parse(&src).unwrap_err();
-            assert!(err.message.contains("paths.build"), "{bad}: {err:?}");
+            assert!(
+                matches!(&err.kind, ManifestErrorKind::BadValue { key, .. } if key == "paths.build"),
+                "{bad}: {err:?}"
+            );
+            assert!(err.to_string().contains("paths.build"), "{bad}: {err}");
         }
     }
 
     #[test]
     fn missing_project_table_errors() {
         let err = parse("").unwrap_err();
-        assert!(err.message.contains("project"));
+        assert!(matches!(
+            err.kind,
+            ManifestErrorKind::MissingTable { name: "project" }
+        ));
+        assert!(err.to_string().contains("project"));
     }
 
     #[test]
@@ -614,7 +657,11 @@ mod tests {
             x = 1
         "#;
         let err = parse(src).unwrap_err();
-        assert!(err.message.contains("moonbeam"));
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::UnknownTopLevelKey { key } if key == "moonbeam"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("moonbeam"));
     }
 
     #[test]
@@ -627,7 +674,12 @@ mod tests {
         "#;
         let (_, warnings) = parse_ok(src);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].message.contains("project.future_knob"));
+        assert!(matches!(
+            &warnings[0].kind,
+            ManifestWarningKind::UnknownField { table, key }
+                if table == "project" && key == "future_knob"
+        ));
+        assert!(warnings[0].to_string().contains("project.future_knob"));
     }
 
     #[test]
@@ -640,7 +692,15 @@ mod tests {
             members = ["a"]
         "#;
         let (_, warnings) = parse_ok(src);
-        assert!(warnings.iter().any(|w| w.message.contains("[workspace]")));
+        assert!(warnings.iter().any(|w| matches!(
+            w.kind,
+            ManifestWarningKind::DeferredTable { name: "workspace" }
+        )));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.to_string().contains("[workspace]"))
+        );
     }
 
     #[test]
@@ -673,6 +733,40 @@ mod tests {
             m.backend.default_kind(),
             Some(crate::types::BackendKind::Java)
         );
+    }
+
+    #[test]
+    fn inline_tables_parse_like_headers() {
+        // `as_table_like` has to cover the inline spelling too — the old
+        // `toml::Value::as_table` did, and a manifest is allowed to use it.
+        let src = r#"
+            project = { name = "demo", version = "0.1.0" }
+            backend = { java = { enable = true, java_version = 21 } }
+        "#;
+        let (m, warnings) = parse_ok(src);
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert_eq!(m.project.name, "demo");
+        let j = m.backend.java.as_ref().unwrap();
+        assert!(j.enable);
+        assert_eq!(j.java_version, Some(21));
+    }
+
+    #[test]
+    fn dotted_keys_parse_like_headers() {
+        // A dotted key synthesizes its parent table, which has no span. The
+        // value still does, so the error is not span-less.
+        let src = r#"
+            project.name = "demo"
+            project.version = "0.1.0"
+            fight.jobs = 0
+        "#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::BadValue { key, .. } if key == "fight.jobs"),
+            "{err:?}"
+        );
+        let span = err.span.expect("the value itself has a span");
+        assert_eq!(&src[span.start as usize..span.end as usize], "0");
     }
 
     #[test]
@@ -724,6 +818,21 @@ mod tests {
     }
 
     #[test]
+    fn lint_entries_keep_their_spans() {
+        let src = r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [lint]
+            deny = ["L0006", "L0007"]
+        "#;
+        let (m, _) = parse_ok(src);
+        assert_eq!(m.lint.deny_spans.len(), 2);
+        let span = m.lint.deny_spans[1].expect("array elements have spans");
+        assert_eq!(&src[span.start as usize..span.end as usize], "\"L0007\"");
+    }
+
+    #[test]
     fn fight_table_defaults() {
         let (m, w) = parse_ok(
             r#"
@@ -772,7 +881,12 @@ mod tests {
         let (m, warnings) = parse_ok(src);
         assert_eq!(m.fight.reports_dir, PathBuf::from("out/fights"));
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].message.contains("fight.worker_count"));
+        assert!(matches!(
+            &warnings[0].kind,
+            ManifestWarningKind::UnknownField { table, key }
+                if table == "fight" && key == "worker_count"
+        ));
+        assert!(warnings[0].to_string().contains("fight.worker_count"));
     }
 
     #[test]
@@ -785,7 +899,11 @@ mod tests {
             jobs = 0
         "#;
         let err = parse(src).unwrap_err();
-        assert!(err.message.contains("fight.jobs"), "{}", err.message);
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::BadValue { key, .. } if key == "fight.jobs"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("fight.jobs"), "{err}");
     }
 
     #[test]
@@ -798,7 +916,15 @@ mod tests {
             default_scenario = 3
         "#;
         let err = parse(src).unwrap_err();
-        assert!(err.message.contains("fight.default_scenario"), "{err}");
+        assert!(
+            matches!(
+                &err.kind,
+                ManifestErrorKind::WrongType { key, expected: "a string" }
+                    if key == "fight.default_scenario"
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("fight.default_scenario"), "{err}");
     }
 
     #[test]
@@ -811,7 +937,14 @@ mod tests {
             reports_dir = 3
         "#;
         let err = parse(src).unwrap_err();
-        assert!(err.message.contains("fight.reports_dir"), "{}", err.message);
+        assert!(
+            matches!(
+                &err.kind,
+                ManifestErrorKind::WrongType { key, .. } if key == "fight.reports_dir"
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("fight.reports_dir"), "{err}");
     }
 
     #[test]

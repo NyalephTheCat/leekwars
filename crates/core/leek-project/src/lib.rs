@@ -6,7 +6,6 @@ pub use index::{LoadedProjectFile, ProjectError, ProjectIndex, walk_leek_files};
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use leek_manifest::{Manifest, ManifestLoad, ManifestWarning};
 use leek_span::SourceId;
 
@@ -23,19 +22,30 @@ pub struct SourceInput {
 pub struct Project {
     pub manifest: Manifest,
     pub root: PathBuf,
+    /// The `Miku.toml` this project was loaded from — the label above a
+    /// manifest diagnostic's snippet.
+    pub manifest_path: PathBuf,
+    /// The manifest's text, so manifest diagnostics can render against it.
+    pub manifest_text: String,
     pub warnings: Vec<ManifestWarning>,
     index: ProjectIndex,
 }
 
 impl Project {
-    pub fn discover(manifest_path: Option<&Path>) -> Result<Self> {
+    /// Load the project's manifest, by path or by walking up from the cwd.
+    ///
+    /// The manifest failure comes back whole — spans included — so a caller
+    /// with a reporter can render it against `Miku.toml`; `bins/` front-ends
+    /// that only want a message `?` it into `anyhow` and get the `Display`.
+    pub fn discover(manifest_path: Option<&Path>) -> Result<Self, ProjectError> {
         let load = if let Some(p) = manifest_path {
             leek_manifest::load_from(p)
         } else {
-            let cwd = std::env::current_dir().context("determining current directory")?;
+            let cwd = std::env::current_dir().map_err(|e| ProjectError::Cwd {
+                message: e.to_string(),
+            })?;
             leek_manifest::discover(&cwd)
-        }
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }?;
         Ok(Self::from_load(load))
     }
 
@@ -44,6 +54,8 @@ impl Project {
         Self {
             manifest: load.manifest,
             root: load.root,
+            manifest_path: load.path,
+            manifest_text: load.text,
             warnings: load.warnings,
             index,
         }
@@ -127,9 +139,11 @@ impl Project {
         &self,
         source_id: SourceId,
         path: &Path,
-    ) -> Result<(SourceInput, String)> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    ) -> Result<(SourceInput, String), ProjectError> {
+        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
         let lang = self.index.language_settings(&text);
         Ok((
             SourceInput {
