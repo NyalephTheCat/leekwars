@@ -44,3 +44,44 @@ fn newly_supported_builtins_match_interpreter() {
         );
     }
 }
+
+/// The names the runtime dispatches under two spellings, plus the two it
+/// answers with null. Each of these used to fail the *whole program* with
+/// `unsupported: builtin X` (#188); `tests/builtin_dispatch_parity.rs` stops
+/// the list from drifting again, and this checks the values that come out.
+#[test]
+fn alias_named_builtins_run_and_match_their_twin() {
+    let cases: &[(&str, &str)] = &[
+        ("return stringRepeat(\"ab\", 3)", "\"ababab\""),
+        ("return stringCharCodeAt(\"abc\", 1)", "98"),
+        ("return getDate()", "0"),
+        ("return getTime()", "0"),
+        ("return print(\"x\")", "null"),
+        ("return println(\"x\")", "null"),
+        (
+            "var s = arrayToSet([1, 2, 3])\nvar out = []\nsetForEach(s, function(v) { push(out, v) })\nreturn count(out)",
+            "3",
+        ),
+    ];
+    for (src, expected) in cases {
+        let got = native(&format!("// @version: 4\n{src}\n"));
+        assert_eq!(
+            &got, expected,
+            "native `{src}` = {got:?}, expected {expected:?}"
+        );
+    }
+
+    // The values above are measured here, not sourced from upstream, so the
+    // load-bearing assertion is this one: the two spellings of one runtime
+    // operation have to produce the same thing, whatever it is.
+    for (a, b) in [
+        ("repeat(\"ab\", 3)", "stringRepeat(\"ab\", 3)"),
+        ("charCodeAt(\"abc\", 1)", "stringCharCodeAt(\"abc\", 1)"),
+        ("getDate()", "getTime()"),
+        ("getOperations()", "getInstructionsCount()"),
+    ] {
+        let left = native(&format!("// @version: 4\nreturn {a}\n"));
+        let right = native(&format!("// @version: 4\nreturn {b}\n"));
+        assert_eq!(left, right, "`{a}` and `{b}` are the same operation");
+    }
+}
