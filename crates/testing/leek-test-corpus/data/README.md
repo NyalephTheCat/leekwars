@@ -13,6 +13,11 @@ known-bad lists (#197) have been worked off to nothing and both suites gate
 on a plain assertion instead. See [Formatter ratchet](#formatter-ratchet)
 below.
 
+`parse-known-failures.tsv` — the parser's known-bad list over the upstream
+fixtures upstream's **own** suite enables. Two rows today, both open parser
+gaps under epic R7 (#351). See [Parser gate scope and
+ratchet](#parser-gate-scope-and-ratchet) below.
+
 `reference.tsv` — the official-LeekScript reference dataset (value + ops +
 generated Java per case). **No build touches it** (#148): `build.rs` neither
 regenerates nor embeds it, and its readers (`leek-backend-java`'s parity
@@ -144,6 +149,74 @@ mis-parsed (there is no `|x|` length-operator production in the grammar, so
 the `|` lands in an `ErrorNode` and `< 1000 {…}` becomes a set literal) and it
 is still laid out wrongly. Adding that production is a separate parser
 feature, and no row watches it any more.
+
+## Parser gate scope and ratchet
+
+`tests/parser_fixtures.rs` asserts two things about the 101 upstream `.leek`
+files, at two different scopes, and the difference is the point:
+
+- **every** file round-trips byte for byte through the green tree. Not
+  scoped, not negotiable — the formatter and the LSP see whatever a user
+  opens;
+- the files **upstream's own JUnit suite runs** parse with no lexer, pragma
+  or parser diagnostic at all.
+
+The second one used to be asked of all 101, and reported *38 failures* — on
+`main`, through the gate, for as long as anyone had been reading it. Most of
+those 38 are not gaps. The fixture tree belongs to the standalone `leekscript`
+language submodule, not to the Leek Wars generator's AI corpus, and a good
+part of it is written in language the Leek Wars dialect does not have:
+`1m`/`5m` bignum literals (`code/pow5.leek`, `code/fact1000.leek`,
+`code/primes_gmp.leek`, `code/product_*.leek`), `match` with a `..` wildcard
+arm (`code/match.leek`), `let` declarations (`code/array.leek`,
+`code/fibonacci_v12.leek`), `$`-prefixed dynamic operators, `{k: v}` object
+literals. "Close the parser gap" is not a coherent goal for any of them.
+
+Upstream has already decided which fixtures it stands behind, one call site at
+a time, in `src/test/java/test/Test*.java`: `DISABLED_file(…)` and
+commented-out lines switch a fixture off, live `file(…)` / `file_v1(…)` /
+`file_v2_(…)` / `file_v3(…)` / `file_v4_(…)` calls switch it on. `build.rs`
+extracts exactly those call sites (`src/extract.rs`, the same scan that
+produces the JUnit manifest) into `OUT_DIR/enabled_fixtures.txt`, and
+`leek_test_corpus::upstream_enabled_fixtures()` reads them back — **45 of
+101** today. Deriving it rather than listing it here is what makes a submodule
+bump move the scope instead of rotting it, and
+`the_enabled_fixture_set_is_derived_and_plausible` fails if the derived set
+ever names a file that does not exist or comes back implausibly small (an
+uninitialised submodule embeds an empty set, which would gate on nothing).
+
+Two of the 45 still fail, and those **are** gaps. They are tracked in
+`parse-known-failures.tsv`, one `id<TAB>kind<TAB>detail` row each, in the same
+format as the formatter and `leek-bench` lists:
+
+| Fixture | Diagnostics | The gap |
+|---|---|---|
+| `code/french.leek` | `W0005` ×1 | the file ends inside an unterminated `/* …` block comment. Upstream's `LexicalParser.tryParseComments` runs to end of input and says nothing; this lexer warns. |
+| `code/french.min.leek` | `E0100` ×16 | minified LeekScript omits the comma between call arguments and array elements (`split('…' ' ')`, `[T ' ' x[d] …]`). Upstream's `readArray` / `readMap` / function-call loops treat `VIRG` as optional; this parser requires it. |
+
+The gate is the **diff** against that file, and unlike the formatter's ratchet
+all three buckets fail the build:
+
+- a fixture that fails and is **not** listed — a parser regression;
+- a **listed fixture that now parses cleanly** — the gap was closed and the
+  row was left behind, so the file has started lying. The list can only
+  shrink;
+- a listed fixture whose **diagnostics moved** — still broken, but the row no
+  longer describes it.
+
+The last two are informational in `fmt_ratchet` for a good reason that does
+not apply here: those details came out of `javac` and a JDK bump can reword
+hundreds at once. These are our own diagnostics, and there are two of them.
+
+Rewrite the file after a deliberate change with:
+
+```bash
+LEEK_PARSE_WRITE_KNOWN_FAILURES=1 cargo test -p leek-test-corpus --test parser_fixtures
+```
+
+A missing or empty file is an error, not an empty allow-list — same rule, and
+same reasoning, as `src/fmt_ratchet.rs`. When the last row goes, delete the
+file *and* the ratchet in `tests/parser_fixtures.rs` together.
 
 ## CI
 

@@ -2,12 +2,15 @@
 
 pub mod extract;
 pub mod fmt_ratchet;
+pub mod parse_ratchet;
 pub mod reference;
 
 pub use fmt_ratchet::{
     FmtFailure, FmtRatchet, FmtRatchetDiff, KIND_NOT_IDEMPOTENT, KIND_UNSAFE, KIND_UNSAFE_REFORMAT,
     diff_fmt_ratchet, first_difference,
 };
+
+pub use parse_ratchet::{ParseFailure, ParseRatchet, ParseRatchetDiff, diff_parse_ratchet};
 
 pub use leek_test_driver::{
     CaseAudit, CaseChecks, CasePlan, CheckKind, Expectation, Manifest, MultiReport, SuiteBackend,
@@ -17,6 +20,7 @@ pub use leek_test_driver::{
     cases, checks, run,
 };
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -29,6 +33,36 @@ pub fn embedded_manifest() -> &'static Manifest {
         const BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/upstream_cases.toml"));
         toml::from_str(std::str::from_utf8(BYTES).expect("upstream_cases.toml must be utf-8"))
             .expect("malformed embedded upstream_cases.toml")
+    })
+}
+
+/// Fixture ids the **upstream JUnit suite itself runs**, extracted at
+/// build time from its `file(…)` / `file_v1(…)` / `file_v2_(…)` /
+/// `file_v3(…)` / `file_v4_(…)` call sites (see
+/// [`extract::enabled_fixtures`]) into `OUT_DIR/enabled_fixtures.txt`.
+///
+/// The fixture tree is the standalone **`leekscript` language**
+/// submodule's, not the Leek Wars generator's AI corpus, and upstream
+/// switches most of it off: `DISABLED_file(…)` and commented-out call
+/// sites cover the bignum-literal, `match`-statement and other
+/// standalone-language programs that the Leek Wars dialect this
+/// toolchain implements does not have. Sweeping those for a *clean
+/// parse* would gate on a language nobody is building, so the
+/// clean-parse property in `tests/parser_fixtures.rs` is scoped to this
+/// set — derived, not hand-listed, so that a submodule bump moves it.
+///
+/// Ids are relative to [`upstream_fixtures_dir`] with forward slashes,
+/// the same spelling [`fixture_id`] produces, so the two can be
+/// intersected directly.
+pub fn upstream_enabled_fixtures() -> &'static BTreeSet<String> {
+    static CACHE: OnceLock<BTreeSet<String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        const TEXT: &str = include_str!(concat!(env!("OUT_DIR"), "/enabled_fixtures.txt"));
+        TEXT.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
     })
 }
 
@@ -123,6 +157,12 @@ pub fn baseline_path() -> PathBuf {
 /// [`fmt_ratchet`] and `tests/fmt_roundtrip.rs`.
 pub fn fmt_known_failures_path(suite: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("data/fmt-known-failures-{suite}.tsv"))
+}
+
+/// The parser's known-bad list over [`upstream_enabled_fixtures`]. See
+/// [`parse_ratchet`] and `tests/parser_fixtures.rs`.
+pub fn parse_known_failures_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("data/parse-known-failures.tsv")
 }
 
 pub fn suite_backends() -> Vec<SuiteBackend> {
