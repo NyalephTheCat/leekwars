@@ -30,7 +30,7 @@ use leek_diagnostics::{Diagnostic, IntoDiagnostic, codes, diag};
 use leek_lexer::lex;
 use leek_span::paths::canonical_or_normalized;
 use leek_span::{SourceId, Span};
-use leek_syntax::{SyntaxKind, Version, parse_pragmas};
+use leek_syntax::{SyntaxKind, SyntaxNode, Version, parse_pragmas};
 
 use crate::folder::{Folder, IncludeError, LoadedFile};
 
@@ -312,6 +312,140 @@ fn included_version(text: &str, entry_version: Version) -> Version {
     // included file's own pragma diagnostics are not reported here.
     let (pragmas, _diags) = parse_pragmas(text, SourceId::new(1).unwrap());
     pragmas.effective_version(entry_version)
+}
+
+// ---- Include-site expansion, shared by the passes that walk ASTs ----
+
+/// One file of a multi-file pass, in the owned form
+/// [`IncludeExpander`] keeps. Rowan nodes are reference-counted, so
+/// cloning a root out of the caller's parse costs a refcount bump and
+/// frees the expander from the caller's lifetimes.
+#[derive(Debug, Clone)]
+pub struct ExpandUnit {
+    /// Canonical path — the key `resolved` lookups use.
+    pub path: PathBuf,
+    /// The file's `SourceFile` syntax node.
+    pub root: SyntaxNode,
+    pub source: SourceId,
+    pub version: Version,
+}
+
+/// What an `include("name")` site expands to: the included file's
+/// syntax root plus the source id and version its spans and
+/// version-dependent analysis must follow.
+#[derive(Debug, Clone)]
+pub struct Expansion {
+    pub root: SyntaxNode,
+    pub source: SourceId,
+    pub version: Version,
+}
+
+impl Expansion {
+    /// The included file's full source text. Computed on demand — only
+    /// the passes that read doc comments need it.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.root.text().to_string()
+    }
+}
+
+/// Drives `include(...)` as inline expansion for a pass that walks the
+/// ASTs rather than rewriting them.
+///
+/// Upstream's `include` is textual splicing, so every pass with an
+/// execution order — lowering, resolution, type checking — must enter an
+/// included file *at its include site*, in the state live there, rather
+/// than in include-graph order (#118, #339). The three passes share this
+/// one expander so they cannot drift on the rules:
+///
+/// - A file expands at most once, at the first site that reaches it, so a
+///   diamond include doesn't run its main block twice.
+/// - The entry counts as already expanded from the start. A cycle's back
+///   edge lands in `resolved` before [`build_include_graph`] detects the
+///   cycle, so an AST-driven walker without that seed recurses forever.
+/// - A name that resolves to nothing (a missing file, already reported by
+///   the graph walk) expands to nothing.
+pub struct IncludeExpander {
+    /// `(includer_canonical, include_name)` → included canonical path,
+    /// from [`build_include_graph`].
+    resolved: BTreeMap<(PathBuf, String), PathBuf>,
+    /// Every unit of the run, keyed by canonical path.
+    units: BTreeMap<PathBuf, ExpandUnit>,
+    /// Files whose main block has already been expanded.
+    already: BTreeSet<PathBuf>,
+    /// Include stack; the back is the file being walked right now, which
+    /// is the key `resolved` lookups use.
+    stack: Vec<PathBuf>,
+}
+
+impl IncludeExpander {
+    /// Arm expansion for a run whose entry file is `entry_path`.
+    #[must_use]
+    pub fn new(
+        entry_path: &Path,
+        units: impl IntoIterator<Item = ExpandUnit>,
+        resolved: BTreeMap<(PathBuf, String), PathBuf>,
+    ) -> Self {
+        Self {
+            resolved,
+            units: units.into_iter().map(|u| (u.path.clone(), u)).collect(),
+            already: std::iter::once(entry_path.to_path_buf()).collect(),
+            stack: vec![entry_path.to_path_buf()],
+        }
+    }
+
+    /// Re-root the stack at `path`, for walking that file's own function
+    /// and class bodies: include sites inside them resolve relative to
+    /// the file they are written in, not to whatever the main walk last
+    /// entered.
+    pub fn set_current(&mut self, path: &Path) {
+        self.stack.clear();
+        self.stack.push(path.to_path_buf());
+    }
+
+    /// Enter `include("name")` as written in the file currently on top
+    /// of the stack.
+    ///
+    /// Returns the unit to walk and pushes it on the stack — the caller
+    /// must call [`leave`](Self::leave) when it is done with it. `None`
+    /// when the name resolves to nothing, the file has already been
+    /// expanded, or it is not part of this run.
+    pub fn enter(&mut self, name: &str) -> Option<Expansion> {
+        let current = self.stack.last()?.clone();
+        let path = self.resolved.get(&(current, name.to_string()))?.clone();
+        if !self.already.insert(path.clone()) {
+            return None;
+        }
+        let unit = self.units.get(&path)?;
+        let expansion = Expansion {
+            root: unit.root.clone(),
+            source: unit.source,
+            version: unit.version,
+        };
+        self.stack.push(path);
+        Some(expansion)
+    }
+
+    /// Leave the file the matching [`enter`](Self::enter) returned.
+    pub fn leave(&mut self) {
+        self.stack.pop();
+    }
+}
+
+/// The name in an `include("…")` statement, spelled as the key
+/// [`IncludeGraphResult::resolved`] is built with.
+///
+/// Quotes are stripped without unescaping, matching the token scan the
+/// graph walk itself uses — the two must agree or a site looks up a key
+/// that was never inserted.
+#[must_use]
+pub fn include_name(include_stmt: &SyntaxNode) -> Option<String> {
+    let token = include_stmt
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|t| t.kind() == SyntaxKind::StringLiteral)?;
+    let text = token.text();
+    (text.len() >= 2).then(|| text[1..text.len() - 1].to_string())
 }
 
 #[cfg(test)]

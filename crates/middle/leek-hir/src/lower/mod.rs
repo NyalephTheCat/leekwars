@@ -14,11 +14,12 @@
 //! - No desugaring yet — compound assigns, postfix ops, and `for`
 //!   loops keep their source shape so backends can preserve them.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{self, AstNode, Stmt as AstStmt};
+use leek_resolver::include_graph::{ExpandUnit, IncludeExpander};
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken, Version};
 use leek_types::Type;
@@ -216,27 +217,17 @@ pub fn lower_files(
     // Arm include expansion for passes 2 and 3. Without a graph
     // (`resolved_includes == None`, the prelude path) the lowerer keeps
     // emitting `Stmt::Include` exactly as the single-file entries do.
-    lo.include_ctx = resolved_includes.map(|resolved| IncludeCtx {
-        resolved: resolved.clone(),
-        units: units
-            .iter()
-            .map(|u| {
-                (
-                    u.path.to_path_buf(),
-                    IncludeUnit {
-                        root: u.ast.syntax().clone(),
-                        source: u.source,
-                        version: u.version,
-                        text: u.ast.syntax().text().to_string(),
-                    },
-                )
-            })
-            .collect(),
-        // The entry is "already expanded" from the start: a cycle edge
-        // back to it (the include graph inserts the edge before it
-        // detects the cycle) must not re-enter the entry's main block.
-        already: std::iter::once(entry.path.to_path_buf()).collect(),
-        stack: vec![entry.path.to_path_buf()],
+    lo.include_ctx = resolved_includes.map(|resolved| {
+        IncludeExpander::new(
+            entry.path,
+            units.iter().map(|u| ExpandUnit {
+                path: u.path.to_path_buf(),
+                root: u.ast.syntax().clone(),
+                source: u.source,
+                version: u.version,
+            }),
+            resolved.clone(),
+        )
     });
 
     // Pass 2: lower the entry's main block in source order, expanding
@@ -259,7 +250,7 @@ pub fn lower_files(
         if let Some(ctx) = lo.include_ctx.as_mut() {
             // Include sites inside this unit's bodies resolve relative
             // to this unit.
-            ctx.stack = vec![unit.path.to_path_buf()];
+            ctx.set_current(unit.path);
         }
         for child in unit.ast.syntax().children() {
             if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
@@ -271,36 +262,6 @@ pub fn lower_files(
     }
 
     (lo.out, lo.diagnostics)
-}
-
-/// One file of a multi-file lowering, in the owned form [`IncludeCtx`]
-/// keeps: rowan nodes are reference-counted, so cloning the root out of a
-/// [`LowerUnit`] costs a refcount bump and frees the lowerer from the
-/// unit slice's lifetime.
-struct IncludeUnit {
-    /// The file's `SourceFile` syntax node.
-    root: SyntaxNode,
-    source: SourceId,
-    version: Version,
-    /// Full source text, for [`Lowerer::source_text`].
-    text: String,
-}
-
-/// Everything [`Lowerer`] needs to expand an `include("name")` site into
-/// the included file's main-block statements while it lowers.
-pub(crate) struct IncludeCtx {
-    /// `(includer_canonical, include_name)` → included canonical path,
-    /// from `leek_resolver::include_graph::build_include_graph`.
-    resolved: BTreeMap<(PathBuf, String), PathBuf>,
-    /// Every unit of the lowering, keyed by canonical path.
-    units: BTreeMap<PathBuf, IncludeUnit>,
-    /// Files whose main block has already been expanded. A second site
-    /// reaching one of these expands to nothing (the diamond rule), and
-    /// it is what stops an include cycle from recursing forever.
-    already: BTreeSet<PathBuf>,
-    /// Include stack; the back is the file currently being lowered, which
-    /// is the key `resolved` lookups use.
-    stack: Vec<PathBuf>,
 }
 
 pub(crate) struct Lowerer {
@@ -340,7 +301,7 @@ pub(crate) struct Lowerer {
     /// Include graph for a multi-file lowering. `Some` makes every
     /// `include(...)` statement expand inline at its site; `None` (the
     /// single-file and prelude entries) keeps it as a `Stmt::Include`.
-    pub(crate) include_ctx: Option<IncludeCtx>,
+    pub(crate) include_ctx: Option<IncludeExpander>,
 }
 
 #[derive(Default)]
@@ -433,7 +394,7 @@ impl Lowerer {
     /// Lower the top-level main-block statements of the `SourceFile` node
     /// `root` (everything but function and class declarations) into `out`.
     ///
-    /// With an [`IncludeCtx`] armed, an `include(...)` among those children
+    /// With an [`IncludeExpander`] armed, an `include(...)` among those children
     /// expands here, so `out` ends up holding the included file's
     /// statements at the site rather than a `Stmt::Include`.
     fn lower_main_children(&mut self, root: &SyntaxNode, out: &mut Vec<Stmt>) {
@@ -457,28 +418,9 @@ impl Lowerer {
     /// didn't resolve (the include-graph builder already reported that),
     /// or when the file has been expanded at an earlier site.
     pub(crate) fn expand_include(&mut self, name: &str, out: &mut Vec<Stmt>) {
-        let Some(ctx) = self.include_ctx.as_mut() else {
+        let Some(expansion) = self.include_ctx.as_mut().and_then(|ctx| ctx.enter(name)) else {
             return;
         };
-        let Some(current) = ctx.stack.last().cloned() else {
-            return;
-        };
-        let Some(path) = ctx.resolved.get(&(current, name.to_string())).cloned() else {
-            return;
-        };
-        if !ctx.already.insert(path.clone()) {
-            return;
-        }
-        let Some(unit) = ctx.units.get(&path) else {
-            return;
-        };
-        let (root, source, version, text) = (
-            unit.root.clone(),
-            unit.source,
-            unit.version,
-            unit.text.clone(),
-        );
-        ctx.stack.push(path);
 
         // Spans, version-dependent lowering and doc comments follow the
         // included file while its statements interleave with ours.
@@ -487,16 +429,16 @@ impl Lowerer {
             self.version,
             std::mem::take(&mut self.source_text),
         );
-        self.source = source;
-        self.version = version;
-        self.source_text = text;
-        self.lower_main_children(&root, out);
+        self.source = expansion.source;
+        self.version = expansion.version;
+        self.source_text = expansion.text();
+        self.lower_main_children(&expansion.root, out);
         self.source = saved.0;
         self.version = saved.1;
         self.source_text = saved.2;
 
         if let Some(ctx) = self.include_ctx.as_mut() {
-            ctx.stack.pop();
+            ctx.leave();
         }
     }
 

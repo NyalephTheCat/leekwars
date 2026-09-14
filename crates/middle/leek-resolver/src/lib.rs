@@ -23,12 +23,15 @@
 //! - [`checks`] — assignment / l-value / privacy / final-field checks
 //! - [`util`] — pure AST helpers and constants
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{AstNode, ClassDecl, FnDecl, SourceFile, Stmt};
 use leek_span::SourceId;
-use leek_syntax::Version;
+use leek_syntax::{SyntaxNode, Version};
+
+use crate::include_graph::{ExpandUnit, IncludeExpander};
 
 pub mod builtins;
 mod checks;
@@ -116,21 +119,46 @@ pub fn resolve_collecting(
     r.into_result()
 }
 
+/// One file of a multi-file resolve, with the canonical path the
+/// include graph keyed its `resolved` map by.
+#[derive(Debug, Clone, Copy)]
+pub struct FileUnit<'a> {
+    pub ast: &'a SourceFile,
+    pub source: SourceId,
+    pub version: Version,
+    pub path: &'a Path,
+}
+
 /// Resolve several source files as one Leekscript program.
 ///
 /// `files` must be ordered so included files precede the entry file. The
 /// resolver shares one top-level scope across the whole slice, while keeping
 /// each file's source id/version when walking its spans and diagnostics.
 /// This is the semantic half of filesystem `include(...)` resolution.
+///
+/// `resolved_includes` is `(includer_canonical, include_name)` →
+/// `included_canonical`, built by
+/// [`include_graph::build_include_graph`]. With it, main statements are
+/// resolved in **execution order** — the entry's children in source
+/// order, with each `include("name")` site expanding into the included
+/// file's main statements right there, in the scope live at the site —
+/// exactly as [`leek_hir::lower_files`](../leek_hir/fn.lower_files.html)
+/// does (#118). Without it (`None`) main statements fall back to walking
+/// the slice in order, which is what a caller with no include graph
+/// wants.
+///
+/// Functions and classes are forward-declared program-wide either way:
+/// cross-file go-to-definition depends on it.
 pub fn resolve_collecting_files(
-    files: &[(&SourceFile, SourceId, Version)],
+    files: &[FileUnit<'_>],
+    resolved_includes: Option<&BTreeMap<(PathBuf, String), PathBuf>>,
     opts: Options,
 ) -> ResolveResult {
-    let Some((_, source, version)) = files.last().copied() else {
+    let Some(entry) = files.last() else {
         return ResolveResult::default();
     };
-    let mut r = Resolver::new(source, version, opts);
-    r.resolve_files(files);
+    let mut r = Resolver::new(entry.source, entry.version, opts);
+    r.resolve_files(files, resolved_includes);
     r.into_result()
 }
 
@@ -267,6 +295,21 @@ pub(crate) struct Resolver {
     /// True inside a class constructor body — constructors are
     /// permitted to assign to `final` fields via `this`.
     pub(crate) in_constructor: bool,
+
+    // ---- Multi-file context ----
+    /// Armed for a multi-file resolve with an include graph. Turns
+    /// [`Stmt::Include`] into inline expansion of the included file's
+    /// main statements, in the scope live at the site. `None` for
+    /// single-file resolves, which keep emitting nothing for an
+    /// `include(...)`.
+    pub(crate) include_expander: Option<IncludeExpander>,
+    /// Span of the terminator (`return`/`break`/`continue`) that ended
+    /// the main statement list, if one has been seen and not yet
+    /// reported on. Resolver state rather than a walk-local so it
+    /// crosses an include boundary — under textual splicing a `return`
+    /// in an included file makes the statements after the include site
+    /// dead code.
+    pub(crate) terminated_at: Option<leek_span::Span>,
 }
 
 impl Resolver {
@@ -310,6 +353,8 @@ impl Resolver {
             in_class: false,
             current_class: None,
             in_constructor: false,
+            include_expander: None,
+            terminated_at: None,
         }
     }
 
@@ -323,20 +368,73 @@ impl Resolver {
         self.pop_scope();
     }
 
-    fn resolve_files(&mut self, files: &[(&SourceFile, SourceId, Version)]) {
+    fn resolve_files(
+        &mut self,
+        files: &[FileUnit<'_>],
+        resolved_includes: Option<&BTreeMap<(PathBuf, String), PathBuf>>,
+    ) {
         // One shared top-level scope makes declarations from included files
         // visible to the entry file and to every other file in the closure.
         self.push_scope();
-        for (file, source, version) in files {
-            self.source = *source;
-            self.version = *version;
-            self.declare_file(file);
+        for unit in files {
+            self.source = unit.source;
+            self.version = unit.version;
+            self.declare_file(unit.ast);
         }
-        for (file, source, version) in files {
-            self.source = *source;
-            self.version = *version;
-            self.resolve_file_contents(file);
+
+        let Some(entry) = files.last() else {
+            self.pop_scope();
+            return;
+        };
+
+        // Arm include expansion. Without a graph the pass keeps its old
+        // shape: every file's main statements in slice order.
+        self.include_expander = resolved_includes.map(|resolved| {
+            IncludeExpander::new(
+                entry.path,
+                files.iter().map(|u| ExpandUnit {
+                    path: u.path.to_path_buf(),
+                    root: u.ast.syntax().clone(),
+                    source: u.source,
+                    version: u.version,
+                }),
+                resolved.clone(),
+            )
+        });
+
+        // Main statements, in execution order. With an expander armed
+        // that is the entry's children alone — every other file is
+        // reached through its include site. This runs *before* function
+        // and class bodies so a top-level include wins the first-site
+        // race against one nested in a body, the precedence #395
+        // established and `lower_files` keeps.
+        self.terminated_at = None;
+        if self.include_expander.is_some() {
+            self.source = entry.source;
+            self.version = entry.version;
+            self.resolve_main_children(entry.ast.syntax());
+        } else {
+            for unit in files {
+                self.source = unit.source;
+                self.version = unit.version;
+                self.terminated_at = None;
+                self.resolve_main_children(unit.ast.syntax());
+            }
         }
+        self.terminated_at = None;
+
+        // Function and class bodies for every file. Bodies open a
+        // function scope, so the order they run in relative to the main
+        // walk can't leak main-block locals into them.
+        for unit in files {
+            self.source = unit.source;
+            self.version = unit.version;
+            if let Some(expander) = self.include_expander.as_mut() {
+                expander.set_current(unit.path);
+            }
+            self.resolve_file_defs(unit.ast);
+        }
+        self.include_expander = None;
         self.pop_scope();
     }
 
@@ -402,6 +500,74 @@ impl Resolver {
         // Final pass: anchor class references in type-annotation
         // positions. Runs while the file scope (holding every class
         // symbol) is still on the stack so name lookups succeed.
+        self.record_type_ref_classes(file.syntax());
+    }
+
+    /// Resolve one file's main-block children — everything that is not a
+    /// function or class declaration — in source order.
+    ///
+    /// With an [`IncludeExpander`] armed, an `include(...)` reached from
+    /// here (at top level or nested inside a block) expands into the
+    /// included file's own main children, walked in the scope live at the
+    /// site. Termination tracking lives on the resolver rather than this
+    /// frame so a `return` in an included file still makes the statements
+    /// after the include site dead code, as textual splicing does.
+    pub(crate) fn resolve_main_children(&mut self, root: &SyntaxNode) {
+        for child in root.children() {
+            match child.kind() {
+                leek_syntax::SyntaxKind::FnDecl | leek_syntax::SyntaxKind::ClassDecl => {}
+                _ => {
+                    let Some(stmt) = Stmt::cast(child) else {
+                        continue;
+                    };
+                    if let Stmt::Include(inc) = &stmt {
+                        // The site itself is not a statement under
+                        // splicing: the included file's own statements
+                        // join this list's termination tracking, so a
+                        // `return` in the included file makes what
+                        // follows the site dead code.
+                        self.expand_include(inc.syntax());
+                        continue;
+                    }
+                    // Captured before the walk: nothing else here can
+                    // set the flag, but reading it after keeps the
+                    // reader guessing.
+                    let after_terminator = self.terminated_at.is_some();
+                    self.resolve_stmt(&stmt);
+                    if after_terminator {
+                        self.err(
+                            codes::CANT_ADD_INSTRUCTION_AFTER_BREAK,
+                            self.node_span(stmt.syntax()),
+                            "cannot add instruction after a terminator (return/break/continue)"
+                                .to_string(),
+                        );
+                        self.terminated_at = None;
+                    } else if crate::statements::is_block_terminator(&stmt) {
+                        self.terminated_at = Some(self.node_span(stmt.syntax()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve one file's function and class bodies, then anchor its
+    /// type-annotation class references.
+    fn resolve_file_defs(&mut self, file: &SourceFile) {
+        for child in file.syntax().children() {
+            match child.kind() {
+                leek_syntax::SyntaxKind::FnDecl => {
+                    if let Some(fn_decl) = FnDecl::cast(child) {
+                        self.resolve_fn_body(&fn_decl);
+                    }
+                }
+                leek_syntax::SyntaxKind::ClassDecl => {
+                    if let Some(cls) = ClassDecl::cast(child) {
+                        self.resolve_class(&cls);
+                    }
+                }
+                _ => {}
+            }
+        }
         self.record_type_ref_classes(file.syntax());
     }
 }

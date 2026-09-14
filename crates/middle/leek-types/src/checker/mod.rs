@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use leek_diagnostics::Diagnostic;
+use leek_resolver::include_graph::IncludeExpander;
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -103,6 +104,11 @@ pub(crate) struct Checker {
     /// Checked against [`interfaces`](Self::interfaces) and consulted
     /// (through the `extends` chain) by interface assignability.
     pub(crate) class_implements: HashMap<String, Vec<String>>,
+    /// Armed for a multi-file check with an include graph. Turns
+    /// `Stmt::Include` into inline expansion of the included file's main
+    /// statements, in the state live at the site — the same rules the
+    /// resolver and the HIR lowerer use (#118).
+    pub(crate) include_expander: Option<IncludeExpander>,
 }
 
 /// Declared members of an experimental `interface Name { … }` — what an
@@ -164,6 +170,7 @@ impl Checker {
             type_aliases: HashMap::new(),
             interfaces: HashMap::new(),
             class_implements: HashMap::new(),
+            include_expander: None,
         }
     }
 

@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-use leek_span::SourceId;
+use leek_resolver::FileUnit;
+use leek_resolver::include_graph::{ExpandUnit, IncludeExpander};
 use leek_syntax::Version;
 
 use super::prelude::*;
@@ -101,19 +103,59 @@ impl Checker {
 
     /// Type-check an include closure as one program. Declarations and
     /// signatures are collected from every file before any body is checked;
-    /// then bodies run in include order so included top-level bindings are
-    /// available to the entry file.
-    pub(crate) fn check_files(&mut self, files: &[(&SourceFile, SourceId, Version)]) {
-        for (file, source, version) in files {
-            self.source = *source;
-            self.version = *version;
-            self.prepare_file(file);
+    /// then main statements run in **execution order** — the entry's, with
+    /// every `include("name")` site expanding into the included file's main
+    /// statements right there — and function and class bodies afterwards.
+    ///
+    /// Without `resolved_includes` there is no include graph to order by, so
+    /// main statements fall back to slice order.
+    pub(crate) fn check_files(
+        &mut self,
+        files: &[FileUnit<'_>],
+        resolved_includes: Option<&BTreeMap<(PathBuf, String), PathBuf>>,
+    ) {
+        for unit in files {
+            self.source = unit.source;
+            self.version = unit.version;
+            self.prepare_file(unit.ast);
         }
-        for (file, source, version) in files {
-            self.source = *source;
-            self.version = *version;
-            self.check_file_body(file);
+
+        let Some(entry) = files.last() else { return };
+
+        self.include_expander = resolved_includes.map(|resolved| {
+            IncludeExpander::new(
+                entry.path,
+                files.iter().map(|u| ExpandUnit {
+                    path: u.path.to_path_buf(),
+                    root: u.ast.syntax().clone(),
+                    source: u.source,
+                    version: u.version,
+                }),
+                resolved.clone(),
+            )
+        });
+
+        if self.include_expander.is_some() {
+            self.source = entry.source;
+            self.version = entry.version;
+            self.check_main_children(entry.ast.syntax());
+        } else {
+            for unit in files {
+                self.source = unit.source;
+                self.version = unit.version;
+                self.check_main_children(unit.ast.syntax());
+            }
         }
+
+        for unit in files {
+            self.source = unit.source;
+            self.version = unit.version;
+            if let Some(expander) = self.include_expander.as_mut() {
+                expander.set_current(unit.path);
+            }
+            self.check_file_defs(unit.ast);
+        }
+        self.include_expander = None;
     }
 
     fn prepare_file(&mut self, file: &SourceFile) {
@@ -193,6 +235,67 @@ impl Checker {
                     }
                 }
             }
+        }
+    }
+
+    /// Check one file's main-block children — everything that is not a
+    /// function or class declaration — in source order. An `include(...)`
+    /// reached from here expands inline when an expander is armed.
+    pub(crate) fn check_main_children(&mut self, root: &leek_syntax::SyntaxNode) {
+        for child in root.children() {
+            match child.kind() {
+                SyntaxKind::FnDecl | SyntaxKind::ClassDecl => {}
+                _ => {
+                    if let Some(stmt) = Stmt::cast(child) {
+                        self.check_stmt(&stmt);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check one file's function and class bodies.
+    fn check_file_defs(&mut self, file: &SourceFile) {
+        for child in file.syntax().children() {
+            match child.kind() {
+                SyntaxKind::FnDecl => {
+                    if let Some(fn_decl) = FnDecl::cast(child) {
+                        self.check_fn_body(&fn_decl);
+                    }
+                }
+                SyntaxKind::ClassDecl => {
+                    if let Some(cls) = ClassDecl::cast(child) {
+                        self.check_class(&cls);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Check an `include("name")` site as inline expansion of the
+    /// included file's main statements. A no-op without an armed
+    /// expander, for a name that resolves to nothing, and for a file an
+    /// earlier site already expanded.
+    pub(crate) fn expand_include(&mut self, include_stmt: &leek_syntax::SyntaxNode) {
+        let Some(name) = leek_resolver::include_graph::include_name(include_stmt) else {
+            return;
+        };
+        let Some(expansion) = self
+            .include_expander
+            .as_mut()
+            .and_then(|expander| expander.enter(&name))
+        else {
+            return;
+        };
+        let saved = (self.source, self.version);
+        self.source = expansion.source;
+        self.version = expansion.version;
+        self.check_main_children(&expansion.root);
+        self.source = saved.0;
+        self.version = saved.1;
+        if let Some(expander) = self.include_expander.as_mut() {
+            expander.leave();
         }
     }
 

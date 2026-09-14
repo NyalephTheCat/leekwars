@@ -178,18 +178,27 @@ pub fn check_collecting(
 /// checker state exposes top-level variables, function signatures, classes,
 /// and member types across the include closure while preserving each file's
 /// source id for expression spans and diagnostics.
+///
+/// `resolved_includes` is the include graph's `(includer, name)` →
+/// `included` map. With it, main statements are checked in execution
+/// order, entering each included file at its `include(...)` site, so the
+/// order top-level variable types are recorded matches upstream's textual
+/// splicing (#118). `None` falls back to slice order.
 pub fn check_collecting_files(
-    files: &[(&SourceFile, SourceId, Version)],
+    files: &[leek_resolver::FileUnit<'_>],
+    resolved_includes: Option<
+        &std::collections::BTreeMap<(std::path::PathBuf, String), std::path::PathBuf>,
+    >,
     opts: Options,
 ) -> TypeCheckResult {
-    let Some((_, source, version)) = files.last().copied() else {
+    let Some(entry) = files.last() else {
         return TypeCheckResult::default();
     };
-    let mut c = checker::Checker::new(source, version, opts);
+    let mut c = checker::Checker::new(entry.source, entry.version, opts);
     if opts.seed_library || opts.experimental_prelude {
         c.seed_library_signatures();
     }
-    c.check_files(files);
+    c.check_files(files, resolved_includes);
     finish_checker(c)
 }
 
