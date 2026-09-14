@@ -159,8 +159,10 @@ pub fn fmt_known_failures_path(suite: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("data/fmt-known-failures-{suite}.tsv"))
 }
 
-/// The parser's known-bad list over [`upstream_enabled_fixtures`]. See
-/// [`parse_ratchet`] and `tests/parser_fixtures.rs`.
+/// Where the parser's known-bad list over [`upstream_enabled_fixtures`]
+/// would live. Nothing writes it today — #351 closed the last two rows
+/// and `tests/parser_fixtures.rs` went back to a plain assertion. See
+/// [`parse_ratchet`].
 pub fn parse_known_failures_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("data/parse-known-failures.tsv")
 }

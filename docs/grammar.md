@@ -417,10 +417,10 @@ BlockCommentChar ::
 - **Line comments** run to (but do not include) the end of line.
 - **Block comments** are **not nestable**: the first `*/` closes the comment
   regardless of any intervening `/*`. An unterminated block comment extends to
-  `EOF` and raises `BLOCK_COMMENT_NOT_CLOSED`. That is a *warning*, not an
-  error: `LexicalParser.tryParseComments` accepts the unterminated form
-  silently, and upstream AI fixtures rely on it to comment out a trailing
-  block of code.
+  `EOF` and is **not** a diagnostic — `LexicalParser.tryParseComments` runs off
+  the end of the input and says nothing, and upstream AI fixtures rely on that
+  to comment out a trailing block of code (`code/french.leek`). Everything
+  after the `/*` is simply not compiled.
 - **v1 quirk:** in v1 only, `/*/` is a complete block comment.
 - There is no distinct doc-comment token; documentation comments are ordinary
   line/block comments.
@@ -924,8 +924,10 @@ PostfixOp :
     'as' Type                                     (* cast *)
 
 ArgList :
-    Expr ( ',' Expr )*
+    Expr ( ','? Expr )* ','?
 ```
+
+The comma between arguments is **optional** (§8.5): `f(a b)` is `f(a, b)`.
 
 Member/field names after `.` and `?.` may be any identifier *or* keyword
 (e.g. `obj.class`, `obj.if`); stricter checking happens in the resolver.
@@ -1018,11 +1020,11 @@ CollectionLiteral :
 
 ArrayLiteral :
     '[' ']'
-    '[' Expr ( ',' Expr | Expr )* ']'
+    '[' Expr ( ','? Expr )* ','? ']'
 
 MapLiteral :
     '[' ':' ']'
-    '[' Expr ':' Expr ( ',' Expr ':' Expr )* ']'
+    '[' Expr ':' Expr ( ','? Expr ':' Expr )* ','? ']'
 
 ObjectLiteral :
     '{' '}'
@@ -1033,7 +1035,7 @@ SetLiteral :
 
 MapAngle :
     '<' ':' '>'
-    '<' Expr ':' Expr ( ',' Expr ':' Expr )* '>'
+    '<' Expr ':' Expr ( ','? Expr ':' Expr )* '>'
 
 SetAngle :
     '<' '>'
@@ -1048,15 +1050,32 @@ Discrimination rules:
 
 - `[` opens an **array**, a **map** (`[k: v, …]`, with the special empty form
   `[:]`), or an **interval** (§8.6), decided by whether a top-level `:` or `..`
-  appears before the matching `]`.
+  appears before the matching `]`. A `:` that closes a pending ternary `?` does
+  not count, so `[c ? a : b]` is a one-element array while `[c ? a : b : v]` is
+  a map — matching upstream, which reads the whole first expression and only
+  then looks at the token in front of it.
 - `{` opens an **object** (`{k: v, …}`) when the first separator is `:`, else a
-  **set** (`{a, b, c}`). Commas between object entries are optional.
+  **set** (`{a, b, c}`).
 - `< … >` is the **legacy** map/set syntax (`<k: v>` map, `<a, b>` set, with
   empty forms `<:>` and `<>`). While parsing an angle collection, `>` is treated
   as the closer rather than the greater-than operator.
-- In v1, array elements may be separated by spaces instead of commas.
 - A set element may be a range `a..b`, which expands to the inclusive integer set
   (`{1..3}` ≡ `{1, 2, 3}`).
+
+**The separator is optional.** Between call arguments, array elements, map
+entries and object entries the comma may simply be left out: `[1 2 3]` is
+`[1, 2, 3]` and `split('a b' ' ')` is a two-argument call. Upstream's element
+loops run until the closing token and skip a `VIRG` only when one happens to
+be there (`WordCompiler.java:1787` for call arguments, `readArray` :2214,
+`readMap` :2183), and minified Leek Wars AIs are written that way
+(`code/french.min.leek`). Two consequences worth stating:
+
+- **Precedence decides where an element ends**, since each one is a whole
+  expression: `[a -b]` is the *single* element `a - b`, not `a` and `-b`, and
+  `f(x -y)` is a one-argument call. Writing two needs the comma.
+- The set literals (`{a, b}` / `<a, b>`) still *require* it here — upstream's
+  `readSet` makes it optional, but `<` has no opening-token guard on this side,
+  so a missing `>` would swallow the file. Open gap, tracked under #351.
 
 ### 8.6 Interval literals
 

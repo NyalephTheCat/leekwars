@@ -1311,3 +1311,122 @@ fn every_parse_roots_at_source_file() {
         );
     }
 }
+
+// ---- #351: the separator between list elements is optional ----
+//
+// Upstream's call-argument loop, `readArray` and `readMap` all run
+// until the closing token and skip a comma only when one happens to be
+// there (`WordCompiler.java:1787`, `:2214`, `:2183`), so a minified
+// source that leaves the commas out is not malformed — it is the same
+// program. `code/french.min.leek` is written that way throughout.
+
+#[test]
+fn call_arguments_need_no_comma() {
+    assert_round_trip("var x = split('a b' ' ');");
+    let (node, _) = parse_str("var x = split('a b' ' ');");
+    let tree = dump(&node);
+    assert_eq!(
+        tree.matches("LiteralExpr").count(),
+        2,
+        "expected two arguments, tree:\n{tree}"
+    );
+}
+
+#[test]
+fn array_elements_need_no_comma() {
+    assert_round_trip("var a = [1 2 3];");
+    let (node, _) = parse_str("var a = [1 2 3];");
+    let tree = dump(&node);
+    assert!(tree.contains("ArrayExpr"), "{tree}");
+    assert_eq!(
+        tree.matches("LiteralExpr").count(),
+        3,
+        "expected three elements, tree:\n{tree}"
+    );
+}
+
+#[test]
+fn map_entries_need_no_comma() {
+    assert_round_trip("var m = [1: 'a' 2: 'b'];");
+    let (node, _) = parse_str("var m = [1: 'a' 2: 'b'];");
+    let tree = dump(&node);
+    assert!(tree.contains("MapExpr"), "{tree}");
+    assert_eq!(
+        tree.matches("LiteralExpr").count(),
+        4,
+        "expected two entries, tree:\n{tree}"
+    );
+}
+
+/// The elements of a comma-free list are separated by *precedence*, not
+/// by a token: each one is a whole expression, so a `-` that could be
+/// binary is binary. `[a -b]` is the single element `a - b`, exactly as
+/// upstream reads it — `readExpression` folds the `-` in before the
+/// element ends. Writing two elements requires the comma (or a unary
+/// form the previous element cannot absorb, like `[a (-b)]`).
+#[test]
+fn a_minus_between_comma_free_elements_binds_as_binary() {
+    let (node, diags) = parse_str("var a = [x -y];");
+    assert!(diags.is_empty(), "{diags:?}");
+    let tree = dump(&node);
+    assert!(tree.contains("BinaryExpr"), "{tree}");
+    assert!(!tree.contains("UnaryExpr"), "{tree}");
+
+    let (call, diags) = parse_str("f(x -y);");
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(dump(&call).contains("BinaryExpr"), "{}", dump(&call));
+
+    // With the comma it is two elements again.
+    let (two, diags) = parse_str("var a = [x, -y];");
+    assert!(diags.is_empty(), "{diags:?}");
+    let tree = dump(&two);
+    assert!(tree.contains("UnaryExpr"), "{tree}");
+}
+
+/// A ternary's `:` must not turn a one-element array into a map. The
+/// bracket look-ahead pairs each `:` with a pending `?` the way
+/// upstream's "read the whole first expression, then look" does.
+#[test]
+fn a_ternary_element_does_not_make_an_array_a_map() {
+    let (node, diags) = parse_str("var a = [c ? 1 : 2];");
+    assert!(diags.is_empty(), "{diags:?}");
+    let tree = dump(&node);
+    assert!(tree.contains("ArrayExpr"), "{tree}");
+    assert!(!tree.contains("MapExpr"), "{tree}");
+
+    // …and a map whose key *is* a ternary still reads as a map: its
+    // second `:` has no `?` left to pair with.
+    let (map, diags) = parse_str("var m = [c ? 1 : 2: 'v'];");
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(dump(&map).contains("MapExpr"), "{}", dump(&map));
+}
+
+/// The comma being optional must not turn a genuinely broken list into
+/// a diagnostic per token: the element production reports the token it
+/// cannot start from once, and the rest of the list is swallowed into
+/// an `ErrorNode` silently (#351 — this used to emit 15).
+#[test]
+fn a_malformed_list_reports_exactly_once() {
+    for text in ["var a = [1 ; 2];", "f(1 ; 2);", "var m = [1: 'a' 2];"] {
+        let (node, diags) = parse_str(text);
+        assert_eq!(node.text().to_string(), text, "round-trip mismatch");
+        assert_eq!(diags.len(), 1, "for {text:?}: {diags:?}");
+    }
+}
+
+/// …but a list whose closer is missing altogether must not swallow the
+/// rest of the file looking for one: the recovery scan is depth-aware,
+/// so the statements after it still parse.
+#[test]
+fn an_unclosed_list_does_not_swallow_what_follows() {
+    let text = "var a = f(1 ; var b = 2; var c = 3;";
+    let (node, diags) = parse_str(text);
+    assert_eq!(node.text().to_string(), text, "round-trip mismatch");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let tree = dump(&node);
+    assert_eq!(
+        tree.matches("VarDeclStmt").count(),
+        3,
+        "the later declarations must survive, tree:\n{tree}"
+    );
+}
