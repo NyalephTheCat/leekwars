@@ -131,6 +131,94 @@ fn collect_off_regions(root: &SyntaxNode) -> Vec<std::ops::Range<u32>> {
     out
 }
 
+/// Collect the *option* pragmas (`set` / `push` / `pop` / `next`)
+/// that precede `offset`, in document order, each paired with the
+/// byte range of the comment that carried it.
+///
+/// Same walk shape as [`collect_off_regions`]: every comment token
+/// under `root`, in document order, run through [`parse_fmt_pragma`].
+/// `off` / `on` / `skip` and plain comments are dropped — off-regions
+/// are already turned into verbatim ranges by [`collect_off_regions`],
+/// and `skip` is decided per-node by [`format::is_fmt_skipped`].
+///
+/// Used by [`format_range`] to replay the settings a whole-document
+/// format would have accumulated on its way to the target (#203).
+fn pragmas_before(root: &SyntaxNode, offset: u32) -> Vec<(std::ops::Range<u32>, FmtPragma)> {
+    root.descendants_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+        .filter(|tok| {
+            matches!(
+                tok.kind(),
+                SyntaxKind::LineComment | SyntaxKind::BlockComment
+            ) && u32::from(tok.text_range().end()) <= offset
+        })
+        .map(|tok| {
+            let range = u32::from(tok.text_range().start())..u32::from(tok.text_range().end());
+            (range, parse_fmt_pragma(tok.text()))
+        })
+        .filter(|(_, p)| {
+            matches!(
+                p,
+                FmtPragma::Set(..) | FmtPragma::Push(..) | FmtPragma::Pop | FmtPragma::Next(..)
+            )
+        })
+        .collect()
+}
+
+/// End offset of the last significant (non-trivia) token that ends
+/// at or before `offset` — the point past which only whitespace and
+/// comments separate a pragma from the target.
+///
+/// `0` when there is no such token (the target is the first thing in
+/// the file), which lets every preceding pragma count as adjacent.
+fn last_significant_end_before(root: &SyntaxNode, offset: u32) -> u32 {
+    root.descendants_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+        .filter(|tok| !tok.kind().is_trivia() && u32::from(tok.text_range().end()) <= offset)
+        .map(|tok| u32::from(tok.text_range().end()))
+        .last()
+        .unwrap_or(0)
+}
+
+/// Split `pragmas` into the ones to replay as persistent state and
+/// the `// fmt: next` overrides that actually reach the target.
+///
+/// `next` is scoped to exactly one following item, so only the run of
+/// `next` pragmas that no code separates from the target applies —
+/// `barrier` is [`last_significant_end_before`] the target, and the
+/// sibling walkers likewise hold a `next` across trivia and hand it
+/// to the first real item they reach. Every earlier `next` was
+/// consumed by whatever item followed it; replaying those would
+/// silently re-target this range, so they stay in the prefix, where
+/// [`format::apply_pragma_to_ctx`] discards them.
+///
+/// Returns `(prefix, overrides)` with `overrides` in document order,
+/// matching the order the sibling walkers push them in — several
+/// `next` pragmas stack onto the same following item.
+fn split_trailing_next(
+    pragmas: &[(std::ops::Range<u32>, FmtPragma)],
+    barrier: u32,
+) -> (&[(std::ops::Range<u32>, FmtPragma)], Vec<(String, String)>) {
+    let mut cut = pragmas.len();
+    while cut > 0 {
+        let (range, FmtPragma::Next(..)) = &pragmas[cut - 1] else {
+            break;
+        };
+        if range.start < barrier {
+            break;
+        }
+        cut -= 1;
+    }
+    let overrides = pragmas[cut..]
+        .iter()
+        .filter_map(|(_, p)| match p {
+            FmtPragma::Next(k, v) => Some((k.clone(), v.clone())),
+            _ => None,
+        })
+        .collect();
+    (&pragmas[..cut], overrides)
+}
+
 /// Recognized formatter pragmas.
 ///
 /// Pragma syntax (in a `// …` or `/* … */` comment):
@@ -353,13 +441,36 @@ pub fn format_range(
 
     // Reuse the global ctx-install path so off-regions and pragmas
     // still apply. Format ONLY this subtree.
+    //
+    // A whole-document format reaches the target having already
+    // walked every `// fmt:` comment in front of it, so its options
+    // are whatever the user's pragmas made them. A range format
+    // starts at the target, so it has to replay those pragmas first
+    // or on-type and range formatting disagree with the document
+    // format about the user's own settings (#203).
+    let pragmas = pragmas_before(&root, target_start);
+    let barrier = last_significant_end_before(&root, target_start);
+    let (replay, next_overrides) = split_trailing_next(&pragmas, barrier);
     let ctx = format::FmtCtx {
         opts: opts.clone(),
         opts_stack: Vec::new(),
         off_regions: collect_off_regions(&root),
     };
     let raw = format::with_ctx_set(ctx, || {
-        let doc = format::fmt_node(&target);
+        // Document order: a later `set` beats an earlier one, and
+        // `push` / `pop` pairs nest the way the walkers nest them.
+        // A `Next` left in the prefix is one an earlier item already
+        // consumed; `apply_pragma_to_ctx` drops it, which is exactly
+        // the "discard, don't apply" this needs.
+        for (_, p) in replay {
+            format::apply_pragma_to_ctx(p);
+        }
+        let doc = format::fmt_node_with_next_overrides(&target, &next_overrides);
+        // Same shape as the sibling walkers: snapshot the options the
+        // replay landed on so print-time settings (`indent`,
+        // `indent_style`, `max_line_length`) reach the printer, which
+        // is otherwise handed the unmodified `opts`.
+        let doc = format::wrap_with_active_opts(doc);
         apply_line_ending(printer::print(&doc, version, opts), opts.line_ending)
     });
 
