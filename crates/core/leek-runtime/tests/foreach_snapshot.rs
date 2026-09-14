@@ -2,7 +2,8 @@
 //! *flat* — one `Value` per element, no `[key, value]` pair — so its accessors
 //! are the whole contract its shape has. These tests pin what each source
 //! kind yields, that keys stay aligned with values, and that a positional
-//! source keys by position.
+//! source keys by position. A string is not one of the source kinds: it is
+//! not iterable at all (#268).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -79,17 +80,19 @@ fn an_object_iterates_fields_keyed_by_name() {
     );
 }
 
+/// Upstream's `AI.isIterable` (`AI.java:1801-1807`) lists only the array /
+/// map / set / interval shapes, and `ForeachBlock.java:148` skips the whole
+/// walk when it says no — so a `foreach` over a string runs its body zero
+/// times (#268). The non-ASCII case guards the regression specifically: the
+/// old arm walked `as_bytes()`, so `"a😀b"` used to yield six mojibake
+/// one-char strings.
 #[test]
-fn a_string_iterates_one_char_strings_keyed_by_position() {
-    let s = Value::String(Rc::new("abc".into()));
-    assert_eq!(
-        walk(&s),
-        [
-            ("0".into(), "\"a\"".into()),
-            ("1".into(), "\"b\"".into()),
-            ("2".into(), "\"c\"".into())
-        ]
-    );
+fn a_string_is_not_iterable() {
+    for src in ["abc", "a\u{1F600}b"] {
+        let s = Value::String(Rc::new(src.into()));
+        assert_eq!(foreach_len(&make_foreach_iter(&s)), 0, "{src:?}");
+        assert!(walk(&s).is_empty(), "{src:?}");
+    }
 }
 
 #[test]

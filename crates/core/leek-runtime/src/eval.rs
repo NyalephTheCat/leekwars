@@ -135,15 +135,15 @@ const FOREACH_VALUES: usize = 0;
 const FOREACH_KEYS: usize = 1;
 
 /// Snapshot `v` into foreach-iteration state. Arrays iterate by index, maps
-/// by entry, strings by byte position, intervals by unit step, sets by
-/// element (synthetic integer keys), objects/instances by field order.
-/// Non-iterables yield an empty snapshot (0 iterations).
+/// by entry, intervals by unit step, sets by element (synthetic integer
+/// keys), objects/instances by field order. Non-iterables — a *string*
+/// among them — yield an empty snapshot (0 iterations).
 ///
 /// The state holds the iterated values *flat* — one `Value` per element, no
 /// per-element `[key, value]` pair — plus, for keyed sources (map / object /
 /// instance), a parallel array of keys built in the same traversal. A
-/// positional source (array / set / string / interval) stores no keys: its
-/// key is the position, produced on demand by [`foreach_key_at`].
+/// positional source (array / set / interval) stores no keys: its key is
+/// the position, produced on demand by [`foreach_key_at`].
 ///
 /// Both halves are packed into one `Value` so the compiler can hold the
 /// iteration state in a single slot. The packing is private to this module;
@@ -184,11 +184,17 @@ pub fn make_foreach_iter(v: &Value) -> Value {
                 values.push(val.clone());
             }
         }
-        Value::String(s) => values.extend(
-            s.as_bytes()
-                .iter()
-                .map(|b| Value::String(Rc::new((*b as char).to_string()))),
-        ),
+        // A string is not iterable, so it snapshots to nothing (#268).
+        // Upstream's `AI.isIterable` (`AI.java:1801-1807`) admits only
+        // `LegacyArrayLeekValue` / `ArrayLeekValue` / `MapLeekValue` /
+        // `SetLeekValue` / `IntervalLeekValue`, and both loop forms wrap
+        // the whole walk in `if (isIterable(ar)) { … }`
+        // (`ForeachBlock.java:148`, `ForeachKeyBlock.java:191`), so the
+        // body of a `foreach` over a string never runs. The static side
+        // agrees: `Type.STRING` is a plain `Type` (`Type.java:29`), whose
+        // `isIterable` and `canBeIterable` (`Type.java:355`, `Type.java:359`)
+        // both answer false.
+        Value::String(_) => {}
         Value::Interval(iv) => {
             if let (Some(start), Some(end)) = (iv.start, iv.end) {
                 let lo = if iv.start_inclusive {
