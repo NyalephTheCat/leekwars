@@ -1,0 +1,29 @@
+[package]
+name        = "leek-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The query façade: one salsa database and every tracked query under a single import path."
+
+[dependencies]
+# Owns the database itself — `Db`, `LeekDb`, `SourceFile`, `ProjectFile`.
+# This crate sits *above* `leek-pipeline`, never below: the pass crates write
+# their queries against `leek_pipeline::salsa::Db`, so the opposite edge would
+# be a cycle.
+leek-pipeline    = { workspace = true, features = ["salsa"] }
+# Every pass crate that ships a tracked query, each with its own `salsa`
+# feature on so the query exists to re-export. No tools-layer crate appears
+# here: `leek-fmt`'s `format_query` stays in `leek-fmt`, which depends *down*
+# on this crate, because db -> tools is a layering breach.
+leek-syntax      = { workspace = true, features = ["salsa"] }
+leek-lexer       = { workspace = true, features = ["salsa"] }
+leek-parser      = { workspace = true, features = ["salsa"] }
+leek-resolver    = { workspace = true, features = ["salsa"] }
+leek-types       = { workspace = true, features = ["salsa"] }
+leek-hir         = { workspace = true, features = ["salsa"] }
+leek-mir         = { workspace = true, features = ["salsa"] }
+leek-complexity  = { workspace = true, features = ["salsa"] }
+
+[lints]
+workspace = true
