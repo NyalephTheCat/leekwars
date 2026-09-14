@@ -64,6 +64,16 @@ impl LowerStmt for Lowerer {
             AstStmt::Continue(_) => Stmt::Continue(span),
             AstStmt::Include(inc) => {
                 let path = include_path(inc).unwrap_or_default();
+                if self.include_ctx.is_some() {
+                    // Boxed statement position (`if (c) include("x");`, an
+                    // unbraced loop body): there is no list to expand into,
+                    // so the included main block becomes a block. Leaving it
+                    // unbraced would put only its first statement under the
+                    // branch.
+                    let mut stmts = Vec::new();
+                    self.expand_include(&path, &mut stmts);
+                    return Stmt::Block(Block { stmts, span });
+                }
                 Stmt::Include(IncludeStmt { path, span })
             }
             AstStmt::Import(imp) => {
@@ -93,6 +103,15 @@ impl Lowerer {
     /// produces multiple HIR statements that share the surrounding
     /// scope.
     pub(crate) fn lower_stmt_flat(&mut self, stmt: &AstStmt, out: &mut Vec<Stmt>) {
+        if let AstStmt::Include(inc) = stmt {
+            // Statement-list position: the included main block splices in
+            // flat, exactly as upstream's textual include does.
+            if self.include_ctx.is_some() {
+                let path = include_path(inc).unwrap_or_default();
+                self.expand_include(&path, out);
+                return;
+            }
+        }
         if let AstStmt::VarDecl(v) = stmt {
             // `global x = init` at file top level: declare `x` as a
             // real `Def::Global` so functions defined elsewhere can
@@ -426,7 +445,10 @@ impl Lowerer {
                 let mut body = Vec::new();
                 for cc in child.children() {
                     if let Some(st) = AstStmt::cast(cc) {
-                        body.push(self.lower_stmt(&st));
+                        // Flat: an arm is a statement *list*, so `var a, b`
+                        // and an `include(...)` both splice into it rather
+                        // than collapsing to one statement.
+                        self.lower_stmt_flat(&st, &mut body);
                     }
                 }
                 arms.push(SwitchArm { case, body });
