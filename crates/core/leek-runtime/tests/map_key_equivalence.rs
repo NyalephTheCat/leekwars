@@ -1,21 +1,28 @@
-//! `MapKey` vs `key_repr` equivalence (RT-02, #239).
+//! `MapKey` canonicalisation (RT-02 #239, RT-01 #267).
 //!
-//! Maps and sets key on [`MapKey`] instead of on the canonical string
+//! Maps and sets key on [`MapKey`], and the relation it defines has
+//! two halves that need different oracles.
+//!
+//! For **primitives** it is the same relation the canonical string
 //! [`key_repr`] builds, so the two must agree *exactly*: for every
-//! pair of values, `MapKey::of(a) == MapKey::of(b)` iff
+//! pair of primitive values, `MapKey::of(a) == MapKey::of(b)` iff
 //! `key_repr(a) == key_repr(b)`. A single disagreement silently
 //! merges or splits map entries, and the damage is data-dependent
 //! rather than a compile error — hence the exhaustive pairwise sweep
 //! over an adversarial corpus, with `key_repr` kept as the oracle.
+//!
+//! For **composites** there is no string oracle any more, and that is
+//! the fix rather than a gap: upstream keys arrays, maps, sets,
+//! objects, instances, intervals and functions by object identity
+//! (`ArrayLeekValue.java:1093-1101`), so two structurally-equal
+//! arrays are two keys while `key_repr` renders them the same. Those
+//! are asserted directly below.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use leek_runtime::{
-    Function, IntervalValue, MapData, MapKey, ObjectData, SetData, SuperValue, Value,
-    big_from_decimal, key_repr,
-};
+use leek_runtime::{MapKey, Value, big_from_decimal, key_repr};
 
 fn s(t: &str) -> Value {
     Value::String(Rc::new(t.to_string()))
@@ -25,36 +32,12 @@ fn arr(items: Vec<Value>) -> Value {
     Value::Array(Rc::new(RefCell::new(items)))
 }
 
-fn interval(a: f64, b: f64) -> Value {
-    Value::Interval(Rc::new(IntervalValue {
-        start: Some(a),
-        end: Some(b),
-        start_inclusive: true,
-        end_inclusive: true,
-        integer_typed: true,
-        start_is_int: true,
-        end_is_int: true,
-        start_forces_real: false,
-        end_forces_real: false,
-    }))
-}
-
-/// Values chosen to attack every way the two canonicalisations could
-/// drift apart: each primitive arm's boundary values, strings that
-/// mimic another arm's `key_repr` prefix, `big_integer` against the
-/// same integer, NaN payloads, signed zero, two structurally-equal
-/// composites built independently, and the cell/`super` wrappers
-/// whose `Display` peels to the value inside.
-fn corpus() -> Vec<(&'static str, Value)> {
-    let mut m = MapData::new();
-    m.insert(Value::Int(1), s("a"));
-
-    let mut set = SetData::new();
-    set.insert(Value::Int(1));
-
-    let mut obj = ObjectData::new();
-    obj.set("a", Value::Int(1));
-
+/// Primitive values chosen to attack every way the two
+/// canonicalisations could drift apart: each primitive arm's boundary
+/// values, strings that mimic another arm's `key_repr` prefix,
+/// `big_integer` against the same integer, NaN payloads and signed
+/// zero.
+fn primitive_corpus() -> Vec<(&'static str, Value)> {
     vec![
         ("null", Value::Null),
         ("true", Value::Bool(true)),
@@ -102,52 +85,12 @@ fn corpus() -> Vec<(&'static str, Value)> {
             "big huge",
             Value::BigInt(Rc::new(big_from_decimal("123456789012345678901234567890"))),
         ),
-        ("array empty", arr(vec![])),
-        ("array [1,2]", arr(vec![Value::Int(1), Value::Int(2)])),
-        // Structurally equal but a different `Rc`: still one key,
-        // because canonicalisation is by rendered content.
-        ("array [1,2] again", arr(vec![Value::Int(1), Value::Int(2)])),
-        ("array [1]", arr(vec![Value::Int(1)])),
-        ("map {1:a}", Value::Map(Rc::new(RefCell::new(m)))),
-        ("set {1}", Value::Set(Rc::new(RefCell::new(set)))),
-        ("object {a:1}", Value::Object(Rc::new(RefCell::new(obj)))),
-        ("interval 1..2", interval(1.0, 2.0)),
-        ("interval 1..3", interval(1.0, 3.0)),
-        ("builtin class Array", Value::BuiltinClass("Array")),
-        ("builtin class Map", Value::BuiltinClass("Map")),
-        (
-            "function sum",
-            Value::Function(Function::Builtin("sum".to_string())),
-        ),
-        // Cells and `super` render as the value inside, so they key
-        // as that value's *bare* form — `Cell(5)` is "5", not "i:5".
-        ("cell null", Value::Cell(Rc::new(RefCell::new(Value::Null)))),
-        ("cell 5", Value::Cell(Rc::new(RefCell::new(Value::Int(5))))),
-        (
-            "cell 5.0",
-            Value::Cell(Rc::new(RefCell::new(Value::Real(5.0)))),
-        ),
-        ("cell \"x\"", Value::Cell(Rc::new(RefCell::new(s("x"))))),
-        (
-            "super null",
-            Value::Super(Box::new(SuperValue {
-                parent_class: "A".to_string(),
-                receiver: Rc::new(Value::Null),
-            })),
-        ),
-        (
-            "super 5",
-            Value::Super(Box::new(SuperValue {
-                parent_class: "A".to_string(),
-                receiver: Rc::new(Value::Int(5)),
-            })),
-        ),
     ]
 }
 
 #[test]
-fn map_key_matches_key_repr_on_every_pair() {
-    let corpus = corpus();
+fn map_key_matches_key_repr_on_every_primitive_pair() {
+    let corpus = primitive_corpus();
     for (na, a) in &corpus {
         for (nb, b) in &corpus {
             let typed = MapKey::of(a) == MapKey::of(b);
@@ -173,7 +116,7 @@ fn map_key_hashes_agree_with_key_repr_classes() {
     // whole corpus through a `HashSet` and comparing the number of
     // distinct buckets against the number of distinct `key_repr`
     // strings.
-    let corpus = corpus();
+    let corpus = primitive_corpus();
     let typed: HashSet<MapKey> = corpus.iter().map(|(_, v)| MapKey::of(v)).collect();
     let strings: HashSet<String> = corpus.iter().map(|(_, v)| key_repr(v)).collect();
     assert_eq!(typed.len(), strings.len());
@@ -220,4 +163,92 @@ fn known_upstream_distinctions_survive() {
     // A string spelled like a canonical prefix is still a string.
     distinct(s("i:5"), Value::Int(5));
     distinct(s("b:true"), Value::Bool(true));
+}
+
+#[test]
+fn structurally_equal_composites_are_two_keys() {
+    // The half `key_repr` can no longer arbitrate: upstream's
+    // `equals` on a composite is `object == this`, so two arrays that
+    // render identically are still two keys.
+    let a = arr(vec![Value::Int(1), Value::Int(2)]);
+    let b = arr(vec![Value::Int(1), Value::Int(2)]);
+    assert_eq!(key_repr(&a), key_repr(&b), "the two should render alike");
+    assert_ne!(MapKey::of(&a), MapKey::of(&b));
+
+    // …and the same `Rc`, however many `Value` handles point at it,
+    // is one key.
+    let alias = a.clone();
+    assert_eq!(MapKey::of(&a), MapKey::of(&alias));
+
+    // Which also means the key survives a mutation of the contents,
+    // where a rendered key would have moved.
+    let before_key = MapKey::of(&a);
+    let before_text = key_repr(&a);
+    if let Value::Array(inner) = &a {
+        inner.borrow_mut().push(Value::Int(3));
+    }
+    assert_ne!(
+        before_text,
+        key_repr(&a),
+        "the mutation should have moved the rendered form"
+    );
+    assert_eq!(before_key, MapKey::of(&a));
+    assert_eq!(MapKey::of(&a), MapKey::of(&alias));
+}
+
+#[test]
+fn a_cell_keys_as_the_value_inside() {
+    // Cells are pure storage, not a value the language hands out, so
+    // they carry no identity of their own.
+    let cell = Value::Cell(Rc::new(RefCell::new(Value::Int(5))));
+    assert_eq!(MapKey::of(&cell), MapKey::of(&Value::Int(5)));
+    assert_ne!(MapKey::of(&cell), MapKey::of(&s("5")));
+
+    let null_cell = Value::Cell(Rc::new(RefCell::new(Value::Null)));
+    assert_eq!(MapKey::of(&null_cell), MapKey::of(&Value::Null));
+
+    // A cell wrapping a composite peels to that composite's identity,
+    // not to a second one.
+    let a = arr(vec![Value::Int(1)]);
+    let boxed = Value::Cell(Rc::new(RefCell::new(a.clone())));
+    assert_eq!(MapKey::of(&boxed), MapKey::of(&a));
+}
+
+#[test]
+fn super_keys_as_its_receiver() {
+    let receiver = arr(vec![Value::Int(1)]);
+    let sup = Value::Super(Box::new(leek_runtime::SuperValue {
+        parent_class: "A".to_string(),
+        receiver: Rc::new(receiver.clone()),
+    }));
+    assert_eq!(MapKey::of(&sup), MapKey::of(&receiver));
+}
+
+#[test]
+fn class_references_key_per_class_not_per_value() {
+    // A `ClassRef` is rebuilt at every evaluation site, while
+    // upstream has one `ClassLeekValue` per class — so the id, not
+    // the `Rc`, is the identity.
+    let id = leek_runtime::ClassId(7);
+    let a = Value::ClassRef(id, Rc::new("A".to_string()));
+    let b = Value::ClassRef(id, Rc::new("A".to_string()));
+    assert_eq!(MapKey::of(&a), MapKey::of(&b));
+    assert_ne!(
+        MapKey::of(&a),
+        MapKey::of(&Value::ClassRef(
+            leek_runtime::ClassId(8),
+            Rc::new("B".to_string())
+        ))
+    );
+
+    assert_eq!(
+        MapKey::of(&Value::BuiltinClass("Array")),
+        MapKey::of(&Value::BuiltinClass("Array"))
+    );
+    assert_ne!(
+        MapKey::of(&Value::BuiltinClass("Array")),
+        MapKey::of(&Value::BuiltinClass("Map"))
+    );
+    // A class reference never collides with the string of its name.
+    assert_ne!(MapKey::of(&a), MapKey::of(&s("A")));
 }

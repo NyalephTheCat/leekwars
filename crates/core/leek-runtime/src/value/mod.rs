@@ -8,5 +8,5 @@ pub(crate) mod types;
 
 pub use bigint::*;
 pub use display::*;
-pub use key::MapKey;
+pub use key::{FnKey, MapKey};
 pub use types::*;
