@@ -28,6 +28,20 @@ use crate::{FormatOptions, IndentStyle};
 /// quadratic.
 const FRAGMENT_CAP: usize = 64;
 
+/// How many doc nodes past the end of a group [`fits`] will measure
+/// before answering from the budget it has counted so far.
+///
+/// Measuring the rest of the line is unbounded work in principle — the
+/// stack it walks holds the whole remainder of the document — so, like
+/// [`FRAGMENT_CAP`], this is a stated cap rather than a guess at a
+/// typical size. In practice the walk ends long before it: the first
+/// line break past the group ends the line and the measurement, and
+/// every statement is followed by one, so the cap only bounds a
+/// pathological document that puts hundreds of nodes after a group on
+/// a single line. Reaching it answers from the budget, which is what
+/// running out of document does too.
+const REST_NODE_CAP: usize = 256;
+
 /// Characters an identifier, keyword or number is built from. Two of
 /// them either side of a boundary can merge into one token
 /// (`not` + `true` → `nottrue`).
@@ -310,7 +324,11 @@ pub fn print(doc: &Doc, version: Version, opts: &FormatOptions) -> String {
                 stack.push(Frame::Doc(new_lvl, mode, inner));
             }
             Doc::Group(inner) => {
-                let chose = if fits(inner, active.max_line_length.saturating_sub(col)) {
+                // `stack` is the rest of the document: what the printer
+                // will emit after this group, and so part of the line
+                // the group has to fit on.
+                let width = active.max_line_length.saturating_sub(col);
+                let chose = if fits(inner, &stack, width) {
                     Mode::Flat
                 } else {
                     Mode::Break
@@ -367,25 +385,78 @@ fn newline(out: &mut String, lvl: usize, opts: &FormatOptions) -> usize {
     }
 }
 
-/// Cheap "does this doc fit in `width` columns when flat?" check.
+/// Take the next *document* frame from the printer's work stack,
+/// stepping backwards from `*next` and skipping the frames that carry
+/// no doc (the `PopOptions` sentinels). The stack is LIFO, so reading
+/// it back to front reads the document forwards — the order [`fits`]
+/// has to measure the rest of the line in.
+fn next_rest_doc<'d>(rest: &[Frame<'d>], next: &mut usize) -> Option<(Mode, &'d Doc)> {
+    while *next > 0 {
+        *next -= 1;
+        if let Frame::Doc(_, mode, doc) = &rest[*next] {
+            return Some((*mode, *doc));
+        }
+    }
+    None
+}
+
+/// Does the group `doc` fit in `width` columns when printed flat —
+/// *including* whatever the printer will put after it on the same line?
 ///
-/// Walks the head of the doc in flat mode, counting characters, and
-/// answers "no" as soon as `width` is exceeded.
+/// Walks the group's own content in flat mode counting characters, then
+/// keeps counting through `rest`, the printer's remaining work stack,
+/// until something ends the line. Measuring that rest is what keeps
+/// output inside `max_line_length`: the `;` closing a `var` statement,
+/// the `) {` closing an `if` header and the trailing operand of a
+/// binary expression all sit outside the group they follow, so a group
+/// measured on its own can be chosen flat and then overflow by exactly
+/// those few columns (#199).
 ///
-/// A [`Doc::HardLine`] or [`Doc::BlankLine`] anywhere inside also
-/// answers "no", and that is not a heuristic: flat mode has no effect
-/// on either node — the printer emits their newline whatever mode it
-/// is in — so a group containing one cannot be printed on a single
-/// line however much room is left. A block-bodied lambda or a nested
-/// block inside an argument list is exactly that case; choosing
-/// `Mode::Flat` for its group would join the argument separators onto
-/// one line around a body that still breaks (#199).
-fn fits(doc: &Doc, width: usize) -> bool {
+/// The rest is measured with each frame's *recorded* mode rather than
+/// flat — those frames already had their layout decided — and that is
+/// also what ends the walk: a [`Doc::Line`]/[`Doc::SoftLine`] in break
+/// mode, or any [`Doc::HardLine`]/[`Doc::BlankLine`], ends the line, so
+/// the budget was never exhausted and the group does fit. Failing that,
+/// [`REST_NODE_CAP`] bounds the walk.
+///
+/// Inside the group's own content a [`Doc::HardLine`] or
+/// [`Doc::BlankLine`] instead answers "no", and that is not a
+/// heuristic: flat mode has no effect on either node — the printer
+/// emits their newline whatever mode it is in — so a group containing
+/// one cannot be printed on a single line however much room is left. A
+/// block-bodied lambda or a nested block inside an argument list is
+/// exactly that case; choosing `Mode::Flat` for its group would join
+/// the argument separators onto one line around a body that still
+/// breaks (#199).
+fn fits(doc: &Doc, rest: &[Frame<'_>], width: usize) -> bool {
     let mut budget = isize::try_from(width).unwrap_or(isize::MAX);
     let mut stack: Vec<(Mode, &Doc)> = vec![(Mode::Flat, doc)];
-    while let Some((mode, d)) = stack.pop() {
+    // Where `next_rest_doc` resumes, and whether the walk has left the
+    // group's own content. `in_rest` only ever turns on: the rest is
+    // entered when `stack` runs dry, so everything pushed after that
+    // came out of the rest too.
+    let mut next = rest.len();
+    let mut in_rest = false;
+    let mut rest_nodes: usize = 0;
+    loop {
         if budget < 0 {
             return false;
+        }
+        let Some((mode, d)) = stack.pop() else {
+            // The group's own content is measured; carry on through
+            // what the printer will emit after it on the same line.
+            let Some(frame) = next_rest_doc(rest, &mut next) else {
+                break;
+            };
+            in_rest = true;
+            stack.push(frame);
+            continue;
+        };
+        if in_rest {
+            rest_nodes += 1;
+            if rest_nodes > REST_NODE_CAP {
+                break;
+            }
         }
         match d {
             Doc::Nil => {}
@@ -398,7 +469,10 @@ fn fits(doc: &Doc, width: usize) -> bool {
                 Mode::Flat => {}
                 Mode::Break => return true,
             },
-            Doc::HardLine | Doc::BlankLine => return false,
+            // Past the group its newline ends the line — and the
+            // measurement — with the budget intact; inside the group it
+            // means the group can never be a single line.
+            Doc::HardLine | Doc::BlankLine => return in_rest,
             Doc::Indent(_, inner) => stack.push((mode, inner)),
             Doc::Group(inner) => stack.push((Mode::Flat, inner)),
             Doc::IfBreak { flat, broken } => {

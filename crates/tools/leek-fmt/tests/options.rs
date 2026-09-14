@@ -97,6 +97,47 @@ fn a_group_containing_a_block_bodied_lambda_breaks() {
     );
 }
 
+/// The whole promise of `max_line_length`: no output line is wider
+/// than it.
+fn assert_lines_within(out: &str, max: usize) {
+    for line in out.lines() {
+        let width = line.chars().count();
+        assert!(
+            width <= max,
+            "line {line:?} is {width} columns, over the {max}-column limit, in: {out:?}"
+        );
+    }
+}
+
+/// A group is hardly ever the whole line. `var result = compute(alpha,
+/// beta, gamma)` is exactly 40 columns, so the initialiser's group fit
+/// its 40-column budget — and the `;` the printer then emitted after it
+/// landed in column 41 (#199). The group has to be measured with the
+/// rest of the line, not on its own.
+#[test]
+fn a_var_initialiser_leaves_room_for_its_semicolon() {
+    let mut o = opts();
+    o.max_line_length = 40;
+    let out = fmt_with(&o, "var result = compute(alpha, beta, gamma);\n");
+    assert_lines_within(&out, o.max_line_length);
+    assert_eq!(out, fmt_with(&o, &out), "must be idempotent, got: {out:?}");
+}
+
+/// Same defect through an `if` header, where what follows the condition
+/// group is `) {`: `if (alpha && beta && gamma && delta` is exactly 35
+/// columns, and the three the header still needed took it to 38 (#199).
+#[test]
+fn an_if_condition_leaves_room_for_its_closing_paren_and_brace() {
+    let mut o = opts();
+    o.max_line_length = 35;
+    let out = fmt_with(
+        &o,
+        "if (alpha && beta && gamma && delta) {\n    debug(alpha);\n}\n",
+    );
+    assert_lines_within(&out, o.max_line_length);
+    assert_eq!(out, fmt_with(&o, &out), "must be idempotent, got: {out:?}");
+}
+
 #[test]
 fn max_blank_lines_zero_collapses_all() {
     let mut o = opts();
