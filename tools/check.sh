@@ -63,10 +63,10 @@ cargo xtask check-fmt-idiom
 step "generated-artifact check (cargo xtask check-artifacts)"
 cargo xtask check-artifacts
 
-# Generated weapon/chip catalogs must match the upstream JSON (skipped when
-# the official-generator submodule isn't checked out).
+# Generated weapon/chip/bulb catalogs must match the upstream JSON (skipped
+# when the official-generator submodule isn't checked out).
 if [[ -d official-generator/leek-wars-generator/data ]]; then
-  step "weapon/chip catalog drift (tools/game-item-extract.sh --check)"
+  step "item catalog drift (tools/game-item-extract.sh --check)"
   tools/game-item-extract.sh --check
 fi
 

@@ -148,8 +148,9 @@ A `.leek` program flows down the layers:
 The `game/` crates implement the LeekWars game offline:
 
 - `leek-game-runtime` is the turn-by-turn fight engine, including the
-  **generated** weapon and chip catalogs
-  (`src/weapons_gen.rs`, `src/chips_gen.rs`). These are extracted from the
+  **generated** weapon, chip and bulb catalogs
+  (`src/weapons_gen.rs`, `src/chips_gen.rs`, `src/official_items_gen.rs`).
+  These are extracted from the
   upstream generator's JSON by [`tools/game-item-extract.sh`](../tools/game-item-extract.sh);
   CI runs it with `--check` to guard against drift, so regenerate with
   `--write` when the upstream data changes.
@@ -181,7 +182,7 @@ The user-facing surface lives in [`bins/`](../bins/) (each has its own README):
 Several artifacts are **generated and committed**, with CI checking they don't
 drift. The scripts live in [`tools/`](../tools/):
 
-- `game-item-extract.sh` — weapon/chip catalogs (see above).
+- `game-item-extract.sh` — weapon/chip/bulb catalogs (see above).
 - `builtin-extract.sh` / `game-builtin-extract.sh` — builtin function tables.
 - `cargo xtask check-layers` ([`xtask/`](../xtask/)) — the layering rule.
 - `cargo xtask check-errors` ([`xtask/`](../xtask/)) — the error convention:
