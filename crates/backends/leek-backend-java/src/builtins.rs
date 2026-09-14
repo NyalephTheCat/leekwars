@@ -86,105 +86,64 @@ impl Builtin {
 /// the receiver-method overloads in `ArrayLeekValue` / etc. accept
 /// `Object` for value parameters, so the coercion logic that's used
 /// for `NumberClass.abs` doesn't apply.
+///
+/// **Rows are sorted by name** — [`lookup`] binary-searches them, so an
+/// insertion in the wrong place would make that name unfindable. The
+/// value class tells you which family a row belongs to (`Array`, `Map`,
+/// `Set`, `Interval`); `receiver_table_is_sorted` guards the ordering.
 const RECEIVER_TABLE: &[(&str, &str, &str)] = &[
-    // ─── Array ────────────────────────────────────────────────────────
-    ("push", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("pushAll", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("unshift", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("shift", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("pop", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("insert", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("remove", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("removeElement", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayRemoveAll", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("count", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("join", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("sort", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("shuffle", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("search", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("inArray", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("reverse", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayMin", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayMax", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("sum", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("average", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("fill", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("isEmpty", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("subArray", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arraySlice", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayMap", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayChunk", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayClear", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayConcat", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayEvery", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("arrayFilter", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("arrayFind", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("arrayFlatten", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("arrayFoldLeft", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("arrayFoldRight", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayPartition", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayIter", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayConcat", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arraySort", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arraySome", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayEvery", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayGet", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayRandom", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("arrayFrequencies", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayChunk", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayUnique", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("arrayClear", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayGet", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayIter", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayMap", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayMax", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayMin", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayPartition", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayRandom", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayRemoveAll", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arraySlice", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arraySome", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arraySort", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("arrayToSet", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("arrayUnique", "ArrayLeekValue", "LegacyArrayLeekValue"),
     ("assocReverse", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    // ─── Map (v4 only; v1–v3 Maps lower to LegacyArrayLeekValue) ─────
-    ("mapSize", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapIsEmpty", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapClear", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapGet", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapValues", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapKeys", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapIter", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapMap", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapSum", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapAverage", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapMin", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapMax", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapSearch", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapContains", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapContainsKey", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapRemove", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapRemoveAll", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapReplace", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapReplaceAll", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapFill", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapEvery", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapSome", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapFold", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapFilter", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapMerge", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapPut", "MapLeekValue", "LegacyArrayLeekValue"),
-    ("mapPutAll", "MapLeekValue", "LegacyArrayLeekValue"),
     ("assocSort", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("keySort", "ArrayLeekValue", "LegacyArrayLeekValue"),
-    ("removeKey", "MapLeekValue", "LegacyArrayLeekValue"),
-    // ─── Set (v4 only — but emit the cast either way; v1–v3 won't
-    //          parse `<a,b,c>` so these can only appear at v4) ─────────
-    ("setPut", "SetLeekValue", "SetLeekValue"),
-    ("setRemove", "SetLeekValue", "SetLeekValue"),
-    ("setClear", "SetLeekValue", "SetLeekValue"),
-    ("setContains", "SetLeekValue", "SetLeekValue"),
-    ("setSize", "SetLeekValue", "SetLeekValue"),
-    ("setIsEmpty", "SetLeekValue", "SetLeekValue"),
-    ("setIsSubsetOf", "SetLeekValue", "SetLeekValue"),
-    ("setUnion", "SetLeekValue", "SetLeekValue"),
-    ("setIntersection", "SetLeekValue", "SetLeekValue"),
-    ("setDifference", "SetLeekValue", "SetLeekValue"),
-    ("setDisjunction", "SetLeekValue", "SetLeekValue"),
-    ("setFilter", "SetLeekValue", "SetLeekValue"),
-    ("setToArray", "SetLeekValue", "SetLeekValue"),
-    // ─── Interval ────────────────────────────────────────────────────
-    ("intervalMin", "IntervalLeekValue", "IntervalLeekValue"),
-    ("intervalMax", "IntervalLeekValue", "IntervalLeekValue"),
-    ("intervalSize", "IntervalLeekValue", "IntervalLeekValue"),
-    ("intervalIsEmpty", "IntervalLeekValue", "IntervalLeekValue"),
+    ("average", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("count", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("fill", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("inArray", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("insert", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("intervalAverage", "IntervalLeekValue", "IntervalLeekValue"),
+    ("intervalCombine", "IntervalLeekValue", "IntervalLeekValue"),
+    ("intervalContains", "IntervalLeekValue", "IntervalLeekValue"),
+    (
+        "intervalIntersection",
+        "IntervalLeekValue",
+        "IntervalLeekValue",
+    ),
     (
         "intervalIsBounded",
+        "IntervalLeekValue",
+        "IntervalLeekValue",
+    ),
+    ("intervalIsClosed", "IntervalLeekValue", "IntervalLeekValue"),
+    ("intervalIsEmpty", "IntervalLeekValue", "IntervalLeekValue"),
+    (
+        "intervalIsLeftBounded",
+        "IntervalLeekValue",
+        "IntervalLeekValue",
+    ),
+    (
+        "intervalIsLeftClosed",
         "IntervalLeekValue",
         "IntervalLeekValue",
     ),
@@ -194,47 +153,87 @@ const RECEIVER_TABLE: &[(&str, &str, &str)] = &[
         "IntervalLeekValue",
     ),
     (
-        "intervalIsLeftBounded",
-        "IntervalLeekValue",
-        "IntervalLeekValue",
-    ),
-    ("intervalIsClosed", "IntervalLeekValue", "IntervalLeekValue"),
-    (
         "intervalIsRightClosed",
         "IntervalLeekValue",
         "IntervalLeekValue",
     ),
-    (
-        "intervalIsLeftClosed",
-        "IntervalLeekValue",
-        "IntervalLeekValue",
-    ),
-    ("intervalContains", "IntervalLeekValue", "IntervalLeekValue"),
-    ("intervalAverage", "IntervalLeekValue", "IntervalLeekValue"),
-    (
-        "intervalIntersection",
-        "IntervalLeekValue",
-        "IntervalLeekValue",
-    ),
-    ("intervalCombine", "IntervalLeekValue", "IntervalLeekValue"),
+    ("intervalMax", "IntervalLeekValue", "IntervalLeekValue"),
+    ("intervalMin", "IntervalLeekValue", "IntervalLeekValue"),
+    ("intervalSize", "IntervalLeekValue", "IntervalLeekValue"),
     ("intervalToArray", "IntervalLeekValue", "IntervalLeekValue"),
     ("intervalToSet", "IntervalLeekValue", "IntervalLeekValue"),
+    ("isEmpty", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("join", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("keySort", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("mapAverage", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapClear", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapContains", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapContainsKey", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapEvery", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapFill", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapFilter", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapFold", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapGet", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapIsEmpty", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapIter", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapKeys", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapMap", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapMax", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapMerge", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapMin", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapPut", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapPutAll", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapRemove", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapRemoveAll", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapReplace", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapReplaceAll", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapSearch", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapSize", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapSome", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapSum", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("mapValues", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("pop", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("push", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("pushAll", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("remove", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("removeElement", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("removeKey", "MapLeekValue", "LegacyArrayLeekValue"),
+    ("reverse", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("search", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("setClear", "SetLeekValue", "SetLeekValue"),
+    ("setContains", "SetLeekValue", "SetLeekValue"),
+    ("setDifference", "SetLeekValue", "SetLeekValue"),
+    ("setDisjunction", "SetLeekValue", "SetLeekValue"),
+    ("setFilter", "SetLeekValue", "SetLeekValue"),
+    ("setIntersection", "SetLeekValue", "SetLeekValue"),
+    ("setIsEmpty", "SetLeekValue", "SetLeekValue"),
+    ("setIsSubsetOf", "SetLeekValue", "SetLeekValue"),
+    ("setPut", "SetLeekValue", "SetLeekValue"),
+    ("setRemove", "SetLeekValue", "SetLeekValue"),
+    ("setSize", "SetLeekValue", "SetLeekValue"),
+    ("setToArray", "SetLeekValue", "SetLeekValue"),
+    ("setUnion", "SetLeekValue", "SetLeekValue"),
+    ("shift", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("shuffle", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("sort", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("subArray", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("sum", "ArrayLeekValue", "LegacyArrayLeekValue"),
+    ("unshift", "ArrayLeekValue", "LegacyArrayLeekValue"),
 ];
 
 /// Look up `name` and return its dispatch shape + arg-coercion hint.
 /// `None` for unknown names — caller falls back to a bare AI-instance
 /// call.
 pub fn lookup(name: &str) -> Option<Builtin> {
-    for &(n, v4_class, legacy_class) in RECEIVER_TABLE {
-        if n == name {
-            return Some(Builtin {
-                dispatch: Dispatch::Receiver {
-                    v4_class,
-                    legacy_class,
-                },
-                prefer_long: false,
-            });
-        }
+    if let Ok(idx) = RECEIVER_TABLE.binary_search_by_key(&name, |&(n, _, _)| n) {
+        let (_, v4_class, legacy_class) = RECEIVER_TABLE[idx];
+        return Some(Builtin {
+            dispatch: Dispatch::Receiver {
+                v4_class,
+                legacy_class,
+            },
+            prefer_long: false,
+        });
     }
     if let Some(row) = leek_builtins::lookup_java(name) {
         return Some(Builtin {
@@ -245,4 +244,41 @@ pub fn lookup(name: &str) -> Option<Builtin> {
         });
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dispatch, RECEIVER_TABLE, lookup};
+
+    /// [`lookup`] binary-searches [`RECEIVER_TABLE`], so a row inserted
+    /// out of order silently stops resolving. Strict `<` also rejects a
+    /// name listed twice.
+    #[test]
+    fn receiver_table_is_sorted() {
+        for pair in RECEIVER_TABLE.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "RECEIVER_TABLE must stay sorted by name for the binary search in \
+                 lookup(): {:?} precedes {:?}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+    }
+
+    /// Every authored row is reachable through the binary search.
+    #[test]
+    fn every_receiver_row_is_found() {
+        for &(name, v4_class, legacy_class) in RECEIVER_TABLE {
+            let found = lookup(name).unwrap_or_else(|| panic!("{name} not found"));
+            assert!(
+                matches!(
+                    found.dispatch,
+                    Dispatch::Receiver { v4_class: v4, legacy_class: legacy }
+                        if v4 == v4_class && legacy == legacy_class
+                ),
+                "{name} resolved to the wrong dispatch shape"
+            );
+        }
+    }
 }

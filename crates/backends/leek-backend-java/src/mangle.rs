@@ -17,103 +17,102 @@ use std::fmt::Write as _;
 
 use crate::options::Options;
 
-/// Java reserved words / restricted identifiers we must avoid in
-/// clean mode. Kept small — the prefix system in exact mode already
-/// avoids them. List per JLS §3.9, with the modern restricted ids.
-const JAVA_KEYWORDS: &[&str] = &[
-    "abstract",
-    "assert",
-    "boolean",
-    "break",
-    "byte",
-    "case",
-    "catch",
-    "char",
-    "class",
-    "const",
-    "continue",
-    "default",
-    "do",
-    "double",
-    "else",
-    "enum",
-    "extends",
-    "final",
-    "finally",
-    "float",
-    "for",
-    "goto",
-    "if",
-    "implements",
-    "import",
-    "instanceof",
-    "int",
-    "interface",
-    "long",
-    "native",
-    "new",
-    "package",
-    "private",
-    "protected",
-    "public",
-    "return",
-    "short",
-    "static",
-    "strictfp",
-    "super",
-    "switch",
-    "synchronized",
-    "this",
-    "throw",
-    "throws",
-    "transient",
-    "try",
-    "void",
-    "volatile",
-    "while",
-    "yield",
-    "record",
-    "sealed",
-    "permits",
-    "var",
-    "true",
-    "false",
-    "null",
-];
-
+/// True for a Java reserved word / restricted identifier we must avoid
+/// in clean mode. Kept small — the prefix system in exact mode already
+/// avoids them. Spellings per JLS §3.9, with the modern restricted ids.
 fn is_java_keyword(s: &str) -> bool {
-    JAVA_KEYWORDS.contains(&s)
+    matches!(
+        s,
+        "abstract"
+            | "assert"
+            | "boolean"
+            | "break"
+            | "byte"
+            | "case"
+            | "catch"
+            | "char"
+            | "class"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extends"
+            | "final"
+            | "finally"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "implements"
+            | "import"
+            | "instanceof"
+            | "int"
+            | "interface"
+            | "long"
+            | "native"
+            | "new"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "return"
+            | "short"
+            | "static"
+            | "strictfp"
+            | "super"
+            | "switch"
+            | "synchronized"
+            | "this"
+            | "throw"
+            | "throws"
+            | "transient"
+            | "try"
+            | "void"
+            | "volatile"
+            | "while"
+            | "yield"
+            | "record"
+            | "sealed"
+            | "permits"
+            | "var"
+            | "true"
+            | "false"
+            | "null"
+    )
 }
 
-/// Names live on the generated `AI` superclass (or imported statics)
-/// that the emitter targets. Stripping the `f_`/`u_` prefix off a
-/// user identifier with the same spelling would shadow them.
-const RUNTIME_RESERVED: &[&str] = &[
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "mod",
-    "pow",
-    "neg",
-    "ops",
-    "increaseRAM",
-    "decreaseRAM",
-    "equals_equals",
-    "notequals_equals",
-    "compare",
-    "concat",
-    "clone",
-    "bool",
-    "this",
-    "super",
-    "session",
-    "runIA",
-    "staticInit",
-];
-
+/// True when the bare name would shadow something that lives on the
+/// generated `AI` superclass (or its imported statics). Stripping the
+/// `f_`/`u_` prefix off a user identifier with the same spelling would
+/// hide the runtime member.
 fn collides_with_runtime(s: &str) -> bool {
-    RUNTIME_RESERVED.contains(&s)
+    matches!(
+        s,
+        "add"
+            | "sub"
+            | "mul"
+            | "div"
+            | "mod"
+            | "pow"
+            | "neg"
+            | "ops"
+            | "increaseRAM"
+            | "decreaseRAM"
+            | "equals_equals"
+            | "notequals_equals"
+            | "compare"
+            | "concat"
+            | "clone"
+            | "bool"
+            | "this"
+            | "super"
+            | "session"
+            | "runIA"
+            | "staticInit"
+    )
 }
 
 /// Strip characters that can't appear in a Java identifier, escaping
