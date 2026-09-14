@@ -125,9 +125,11 @@ fn collect_off_regions(root: &SyntaxNode) -> Vec<std::ops::Range<u32>> {
 ///   sibling only, then restore. Multiple `next` pragmas stack and
 ///   all apply to the same following item.
 ///
-/// All pragma comments are suppressed from formatter output —
-/// users don't want their `// fmt: …` markers reformatted *and*
-/// preserved as content.
+/// Pragma comments survive into the output like any other comment.
+/// Dropping them would make formatting non-idempotent — the second
+/// run would no longer see the `// fmt: off` that protected a region
+/// on the first — and [`check_equivalence`] treats a lost pragma as
+/// the lost comment it is.
 ///
 /// **Which keys take effect in pragmas:** all
 /// [`FormatOptions`] fields work per-region. Build-time options

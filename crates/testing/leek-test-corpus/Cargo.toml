@@ -25,6 +25,11 @@ leek-syntax         = { workspace = true }
 toml                = { workspace = true }
 anyhow              = { workspace = true }
 
+# Dev-only, and deliberately so: the corpus is where the formatter meets
+# real programs (`tests/fmt_roundtrip.rs`), but nothing here builds on it.
+[dev-dependencies]
+leek-fmt = { workspace = true }
+
 # Single binary (`src/main.rs`, auto-detected by Cargo); subcommands
 # replace the former one-binary-per-task layout. See `src/main.rs`.
 

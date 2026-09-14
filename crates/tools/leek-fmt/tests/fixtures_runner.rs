@@ -7,10 +7,14 @@
 //! 2. Compare byte-for-byte to the `.out` file (snapshot test).
 //! 3. Format the resulting output again and check equality
 //!    (idempotence).
+//!
+//! Every format here goes through the equivalence safety net, so a
+//! fixture that loses a comment or changes the parse tree fails even
+//! when its `.out` snapshot was updated to match.
 
 use std::path::PathBuf;
 
-use leek_fmt::{FormatOptions, format_source};
+use leek_fmt::{FormatOptions, format_source_checked};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -19,12 +23,13 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn fmt(src: &str) -> String {
-    format_source(
+    format_source_checked(
         src,
         SourceId::new(1).unwrap(),
         Version::V4,
         &FormatOptions::default(),
     )
+    .unwrap_or_else(|e| panic!("equivalence check failed for {src:?}: {e}"))
 }
 
 fn discover_fixtures() -> Vec<(PathBuf, PathBuf)> {

@@ -96,19 +96,17 @@ fn format_item_sequence_bounded(node: &SyntaxNode, allow_blanks: bool, skip_brac
                 pending += count_newlines(t.text());
             }
             NodeOrToken::Token(t) if is_trivia(&t) => {
-                // `// fmt: …` pragma comments mutate state but
-                // shouldn't appear in the output. The newline-budget
-                // (`pending`) for the next real item carries through
-                // unchanged so blank-line preservation still works
-                // even with pragmas in between.
+                // `// fmt: …` pragma comments mutate state *and* stay
+                // in the output like any other comment: a dropped
+                // `// fmt: off` marker would leave the next run free to
+                // reformat the region it was protecting.
                 let pragma = crate::parse_fmt_pragma(t.text());
-                if let crate::FmtPragma::Next(k, v) = &pragma {
-                    pending_next.push((k.clone(), v.clone()));
-                    continue;
-                }
-                if pragma != crate::FmtPragma::None {
-                    apply_pragma_to_ctx(&pragma);
-                    continue;
+                match &pragma {
+                    crate::FmtPragma::None => {}
+                    // `Next` is scoped to the following item, so the
+                    // walker holds it rather than applying it now.
+                    crate::FmtPragma::Next(k, v) => pending_next.push((k.clone(), v.clone())),
+                    p => apply_pragma_to_ctx(p),
                 }
                 let is_doc = is_doc_comment(t.text());
                 leading.push((comment_doc(&t), pending, is_doc));

@@ -15,6 +15,13 @@ use leek_syntax::pipeline::version_from_byte;
 use crate::FormatOptions;
 
 /// Formatter output: the rendered source text.
+///
+/// **Unverified.** The step formats; it does not run the safety net.
+/// Every consumer that writes this text to a file, an editor buffer or
+/// stdout must call [`check_equivalence`](crate::check_equivalence)
+/// against the input text first and refuse the output on error — the
+/// contract `miku fmt`, `leekc --emit fmt` and the LSP formatting
+/// handlers all honor.
 #[derive(Debug, Clone)]
 pub struct FormattedArtifact(pub Arc<String>);
 impl Artifact for FormattedArtifact {}

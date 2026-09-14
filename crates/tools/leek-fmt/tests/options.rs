@@ -162,6 +162,47 @@ function    also_weird(  y){return y;}
 }
 
 #[test]
+fn fmt_off_markers_survive_and_the_region_stays_off() {
+    // The markers are how the *next* run knows the region is off, so
+    // dropping them silently reformats it on run two (#367).
+    let src = "\
+function ok() { return 1; }
+// fmt: off
+function    weird(  x,y ){return x+y;}
+// fmt: on
+function nice() { return 2; }
+";
+    let once = fmt_with(&opts(), src);
+    assert!(once.contains("// fmt: off"), "`off` marker lost: {once:?}");
+    assert!(once.contains("// fmt: on"), "`on` marker lost: {once:?}");
+    let twice = fmt_with(&opts(), &once);
+    assert_eq!(once, twice, "off region reformatted on the second run");
+    assert!(
+        twice.contains("function    weird(  x,y ){return x+y;}"),
+        "off region not preserved on the second run: {twice:?}"
+    );
+}
+
+#[test]
+fn fmt_skip_marker_survives() {
+    let src = "// fmt-skip\nvar b   =   2;\n";
+    let once = fmt_with(&opts(), src);
+    assert!(once.contains("// fmt-skip"), "skip marker lost: {once:?}");
+    assert_eq!(once, fmt_with(&opts(), &once), "skip is not idempotent");
+}
+
+#[test]
+fn fmt_next_marker_survives() {
+    let src = "// fmt: next indent = 8\nfunction f() { return 1; }\n";
+    let once = fmt_with(&opts(), src);
+    assert!(
+        once.contains("// fmt: next indent = 8"),
+        "next marker lost: {once:?}"
+    );
+    assert_eq!(once, fmt_with(&opts(), &once), "next is not idempotent");
+}
+
+#[test]
 fn fmt_skip_applies_to_next_sibling_only() {
     let src = "\
 var a   =  1;
@@ -284,27 +325,34 @@ var b = 2;
 }
 
 #[test]
-fn pragma_comment_itself_is_hidden_from_output() {
+fn pragma_comment_itself_survives_in_output() {
+    // A consumed pragma is still a comment the user wrote: dropping it
+    // would make the next run format the file differently (#367).
     let src = "\
 // fmt: trailing_comma = always
 var x = 1;
 ";
     let out = fmt_with(&opts(), src);
     assert!(
-        !out.contains("// fmt:"),
-        "pragma comment should be suppressed: {out:?}"
+        out.contains("// fmt: trailing_comma = always"),
+        "pragma comment should be preserved: {out:?}"
     );
+    assert_eq!(out, fmt_with(&opts(), &out), "not idempotent: {out:?}");
 }
 
 #[test]
 fn quoted_and_unquoted_values_equivalent() {
-    // String enum values should accept both `tabs` and `"tabs"`.
+    // String enum values should accept both `tabs` and `"tabs"`. The
+    // pragma line itself is echoed verbatim, so compare what follows.
     let src_quoted = "// fmt: trailing_comma = \"always\"\nvar x = [\n  a,\n  b,\n  c\n];\n";
     let src_unquoted = "// fmt: trailing_comma = always\nvar x = [\n  a,\n  b,\n  c\n];\n";
-    assert_eq!(
-        fmt_with(&opts(), src_quoted),
-        fmt_with(&opts(), src_unquoted)
-    );
+    let body = |src: &str| {
+        fmt_with(&opts(), src)
+            .split_once('\n')
+            .map(|(_pragma, rest)| rest.to_owned())
+            .unwrap_or_default()
+    };
+    assert_eq!(body(src_quoted), body(src_unquoted));
 }
 
 #[test]

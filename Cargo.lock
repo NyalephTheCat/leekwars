@@ -1473,6 +1473,7 @@ dependencies = [
  "anyhow",
  "leek-backends",
  "leek-diagnostics",
+ "leek-fmt",
  "leek-lexer",
  "leek-manifest",
  "leek-parser",
