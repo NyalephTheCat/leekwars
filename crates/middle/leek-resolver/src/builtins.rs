@@ -9,8 +9,9 @@
 //! Long-term this should be auto-generated from upstream Java sources
 //! via a build script.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
+
+pub use leek_config::DynamicBuiltins;
 
 /// Metadata for a builtin function: arity range plus the minimum
 /// language version that exposes it. Functions missing from
@@ -717,16 +718,41 @@ pub fn find_library(name: &str) -> Option<&'static BuiltinLibrary> {
     BUILTIN_LIBRARIES.iter().find(|lib| lib.name == name)
 }
 
-#[derive(Default)]
-struct DynamicBuiltins {
-    names: HashSet<String>,
-    constants: HashSet<String>,
-    functions: HashMap<String, (u8, u8, u8)>,
-    libraries: HashMap<String, Vec<String>>,
+/// The process-global registry of builtins registered at runtime, as the
+/// one [`DynamicBuiltins`] shape every layer names (`leek_config`).
+///
+/// Held behind an `Arc` so [`snapshot_dynamic_builtins`] is a refcount bump
+/// rather than a deep copy of several hundred registered names, and so a
+/// snapshot handed to [`Options`](crate::Options) stays valid — and stays
+/// *fixed* — for the whole resolve that holds it. Registration writes
+/// copy-on-write through [`Arc::make_mut`], which only pays for a clone
+/// while some resolve is still holding an older snapshot; the ordinary case
+/// (register everything at startup, then compile) never clones.
+static DYNAMIC_BUILTINS: LazyLock<RwLock<Arc<DynamicBuiltins>>> =
+    LazyLock::new(|| RwLock::new(Arc::new(DynamicBuiltins::default())));
+
+/// Take the write lock and edit the process-global registry in place.
+fn edit_dynamic_builtins(edit: impl FnOnce(&mut DynamicBuiltins)) {
+    let mut dyns = DYNAMIC_BUILTINS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    edit(Arc::make_mut(&mut dyns));
 }
 
-static DYNAMIC_BUILTINS: LazyLock<RwLock<DynamicBuiltins>> =
-    LazyLock::new(|| RwLock::new(DynamicBuiltins::default()));
+/// Snapshot the process-global registry: one read lock, one refcount bump.
+///
+/// This is the only place the global is read on the resolve path. Callers
+/// that want a compile to see a *specific* registry — rather than whatever
+/// the process happens to have registered — build a [`DynamicBuiltins`] and
+/// hand it to [`Options::with_builtins`](crate::Options::with_builtins)
+/// instead of calling this.
+pub fn snapshot_dynamic_builtins() -> Arc<DynamicBuiltins> {
+    Arc::clone(
+        &DYNAMIC_BUILTINS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
 
 /// Register an additional builtin function at runtime.
 pub fn register_builtin_function(
@@ -736,31 +762,28 @@ pub fn register_builtin_function(
     min_version: u8,
 ) {
     let name = name.into();
-    let mut dyns = DYNAMIC_BUILTINS
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    dyns.functions
-        .insert(name.clone(), (min_args, max_args, min_version));
-    dyns.names.insert(name);
+    edit_dynamic_builtins(|dyns| {
+        dyns.functions
+            .insert(name.clone(), (min_args, max_args, min_version));
+        dyns.names.insert(name);
+    });
 }
 
 /// Register an additional builtin constant at runtime.
 pub fn register_builtin_constant(name: impl Into<String>) {
     let name = name.into();
-    let mut dyns = DYNAMIC_BUILTINS
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    dyns.constants.insert(name.clone());
-    dyns.names.insert(name);
+    edit_dynamic_builtins(|dyns| {
+        dyns.constants.insert(name.clone());
+        dyns.names.insert(name);
+    });
 }
 
 /// Register an additional builtin visible name at runtime.
 pub fn register_builtin_name(name: impl Into<String>) {
     let name = name.into();
-    let mut dyns = DYNAMIC_BUILTINS
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    dyns.names.insert(name);
+    edit_dynamic_builtins(|dyns| {
+        dyns.names.insert(name);
+    });
 }
 
 /// Register an additional importable library at runtime.
@@ -768,42 +791,59 @@ pub fn register_builtin_library(
     name: impl Into<String>,
     symbols: impl IntoIterator<Item = String>,
 ) {
-    let mut dyns = DYNAMIC_BUILTINS
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    dyns.libraries
-        .insert(name.into(), symbols.into_iter().collect());
+    edit_dynamic_builtins(|dyns| {
+        dyns.libraries
+            .insert(name.into(), symbols.into_iter().collect());
+    });
 }
 
-pub fn is_builtin_name(name: &str) -> bool {
+// ---- Registry-taking queries ----
+//
+// Each answers a question against an explicit `registry` instead of the
+// process-global one, so a resolve can be pinned to the registry it was
+// configured with. The `..._in` form is the real implementation; the bare
+// free function below it is the same query against
+// [`snapshot_dynamic_builtins`], kept so out-of-crate callers (the lint
+// rule, the HIR lowerer) compile unchanged.
+
+/// Whether `name` is visible as a builtin under `registry`.
+pub fn is_builtin_name_in(registry: &DynamicBuiltins, name: &str) -> bool {
     BUILTINS.contains(&name)
         || leek_builtins::is_java_builtin(name)
-        || DYNAMIC_BUILTINS
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .names
-            .contains(name)
+        || registry.names.contains(name)
 }
 
-pub fn is_builtin_constant(name: &str) -> bool {
-    BUILTIN_CONSTANTS.contains(&name)
-        || DYNAMIC_BUILTINS
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .constants
-            .contains(name)
+/// Whether `name` is an immutable builtin constant under `registry`.
+pub fn is_builtin_constant_in(registry: &DynamicBuiltins, name: &str) -> bool {
+    BUILTIN_CONSTANTS.contains(&name) || registry.constants.contains(name)
 }
 
-pub fn builtin_fn_meta(name: &str) -> Option<(u8, u8, u8)> {
+/// `name`'s `(min_args, max_args, min_version)` under `registry`, if known.
+pub fn builtin_fn_meta_in(registry: &DynamicBuiltins, name: &str) -> Option<(u8, u8, u8)> {
     if let Some(b) = BUILTIN_FNS.iter().find(|b| b.name == name) {
         return Some((b.min_args, b.max_args, b.min_version));
     }
-    DYNAMIC_BUILTINS
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .functions
-        .get(name)
-        .copied()
+    registry.functions.get(name).copied()
+}
+
+/// The symbols the importable library `name` exports under `registry`.
+pub fn library_symbols_in(registry: &DynamicBuiltins, name: &str) -> Option<Vec<String>> {
+    if let Some(lib) = find_library(name) {
+        return Some(lib.symbols.iter().map(|s| (*s).to_string()).collect());
+    }
+    registry.libraries.get(name).cloned()
+}
+
+pub fn is_builtin_name(name: &str) -> bool {
+    is_builtin_name_in(&snapshot_dynamic_builtins(), name)
+}
+
+pub fn is_builtin_constant(name: &str) -> bool {
+    is_builtin_constant_in(&snapshot_dynamic_builtins(), name)
+}
+
+pub fn builtin_fn_meta(name: &str) -> Option<(u8, u8, u8)> {
+    builtin_fn_meta_in(&snapshot_dynamic_builtins(), name)
 }
 
 /// Snapshot the dynamically-registered builtin functions as
@@ -831,15 +871,7 @@ pub fn dynamic_builtin_constants() -> Vec<String> {
 }
 
 pub fn library_symbols(name: &str) -> Option<Vec<String>> {
-    if let Some(lib) = find_library(name) {
-        return Some(lib.symbols.iter().map(|s| (*s).to_string()).collect());
-    }
-    DYNAMIC_BUILTINS
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .libraries
-        .get(name)
-        .cloned()
+    library_symbols_in(&snapshot_dynamic_builtins(), name)
 }
 
 #[cfg(test)]

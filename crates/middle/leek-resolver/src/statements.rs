@@ -432,7 +432,7 @@ impl Resolver {
             return;
         };
 
-        let Some(symbols) = crate::builtins::library_symbols(&path) else {
+        let Some(symbols) = crate::builtins::library_symbols_in(self.builtins(), &path) else {
             self.err(
                 codes::AI_NOT_EXISTING,
                 self.node_span(import.syntax()),

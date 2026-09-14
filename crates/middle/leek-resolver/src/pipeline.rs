@@ -276,11 +276,19 @@ pub fn resolve_query(
     // strict mode come from the salsa input (the settled `Input`). Reuse the
     // memoized pragma query instead of re-scanning the text.
     let pragmas = leek_syntax::pipeline::pragma_query(db, file).pragmas;
+    // The dynamically-registered builtins are still a process-global, and
+    // this reads it — untracked — from inside a tracked query. What changed
+    // is the *frequency*: one read here, at the top of the query body,
+    // instead of one lock per unresolved name during the walk. A later slice
+    // takes the registry off the salsa input instead, so registering a
+    // builtin invalidates the memo rather than being silently missed by it.
+    let builtins = crate::builtins::snapshot_dynamic_builtins();
     let opts = Options::from_settings(
         Some(&pragmas),
         leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db)),
         file.strict(db),
-    );
+    )
+    .with_builtins(builtins);
     let ResolveResult { diagnostics, table } = resolve_collecting(
         &ast,
         file.source(db),
