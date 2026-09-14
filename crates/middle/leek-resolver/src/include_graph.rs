@@ -27,6 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use leek_diagnostics::{Diagnostic, IntoDiagnostic, codes, diag};
 use leek_lexer::lex;
@@ -75,8 +76,15 @@ pub struct IncludeSite {
 pub struct ResolvedFile {
     pub source: SourceId,
     pub path: PathBuf,
-    pub text: String,
+    pub text: Arc<str>,
     pub version: Version,
+    /// The `class IDENT` names declared in this file, in declaration
+    /// order. A by-product of the include scan's lex (same text, same
+    /// source, same version), so callers that need the closure's class
+    /// set — the entry parse does, to recognise a lowercase class from
+    /// an included file as a type head — read it from here instead of
+    /// lexing every file a second time.
+    pub classes: Vec<String>,
 }
 
 impl ResolvedFile {
@@ -127,8 +135,9 @@ pub fn build_include_graph(
         ResolvedFile {
             source: entry_source,
             path: entry_canonical.clone(),
-            text: entry_text.to_string(),
+            text: Arc::from(entry_text),
             version: entry_version,
+            classes: Vec::new(),
         },
     );
 
@@ -155,11 +164,11 @@ pub fn build_include_graph(
             // which the caller passed down as `site`. Only the top-level
             // entry has no site; fall back to a zero span anchored on the
             // file's own source id there.
-            let file = files.get(&current).cloned();
-            if let Some(file) = file {
+            let source = files.get(&current).map(|f| f.source);
+            if let Some(source) = source {
                 diagnostics.push(diag!(
                     codes::CIRCULAR_INCLUDE,
-                    site.unwrap_or_else(|| Span::new(file.source, 0, 0)),
+                    site.unwrap_or_else(|| Span::new(source, 0, 0)),
                     "circular include involving `{}`",
                     current.display(),
                 ));
@@ -168,14 +177,17 @@ pub fn build_include_graph(
         }
         visiting.push(current.clone());
 
-        // Extract include names + their spans from this file.
+        // One lex for this file, at its own version: the `include(...)`
+        // calls to walk and the `class IDENT` names the closure's parse
+        // needs. Borrowing the entry rather than cloning it keeps the
+        // file's text out of the walk entirely.
         let file = files
-            .get(&current)
-            .cloned()
+            .get_mut(&current)
             .expect("file already inserted before walk");
-        let includes = extract_include_calls(&file);
+        let scan = scan_file(&file.text, file.source, file.version);
+        file.classes = scan.classes;
 
-        for inc in &includes {
+        for inc in &scan.includes {
             let loaded = folder.load(&current, &inc.name);
             match loaded {
                 Ok(LoadedFile { path, text }) => {
@@ -189,6 +201,7 @@ pub fn build_include_graph(
                                 path: path.clone(),
                                 text,
                                 version: ver,
+                                classes: Vec::new(),
                             },
                         );
                     }
@@ -273,17 +286,30 @@ struct IncludeCall {
     span: Span,
 }
 
-/// Token-level scan for `include("…")`. Uses the file's own
-/// `@version` pragma so v2's `and`-keyword case doesn't get
+/// What one lex of a file tells the walk: where it includes from and
+/// what classes it declares.
+struct FileScan {
+    includes: Vec<IncludeCall>,
+    classes: Vec<String>,
+}
+
+/// Token-level scan for `include("…")` and `class IDENT`. Uses the
+/// file's own `@version` pragma so v2's `and`-keyword case doesn't get
 /// mis-lexed. Returns the include names plus their string-literal
-/// spans for diagnostic reporting.
-fn extract_include_calls(file: &ResolvedFile) -> Vec<IncludeCall> {
-    let mut out: Vec<IncludeCall> = Vec::new();
-    let tokens = lex(&file.text, file.source, file.version);
+/// spans for diagnostic reporting, and the class names the closure's
+/// parse must know about.
+///
+/// The lexer's own diagnostics are deliberately dropped: every file
+/// this scan sees is lexed again by the parse that follows, and that
+/// parse reports them. Keeping them here would double every lex
+/// diagnostic in an included file.
+fn scan_file(text: &str, source: SourceId, version: Version) -> FileScan {
+    let mut includes: Vec<IncludeCall> = Vec::new();
+    let lexed = lex(text, source, version);
     // Walk a small state machine: KwInclude, LParen, StringLiteral,
     // optional RParen. Whitespace + comments are skipped via
     // `is_trivia`.
-    let mut iter = tokens.tokens.iter().filter(|t| !t.kind.is_trivia());
+    let mut iter = lexed.tokens.iter().filter(|t| !t.kind.is_trivia());
     while let Some(t) = iter.next() {
         if t.kind != SyntaxKind::KwInclude {
             continue;
@@ -297,14 +323,17 @@ fn extract_include_calls(file: &ResolvedFile) -> Vec<IncludeCall> {
         if let Some(s) = iter.next()
             && s.kind == SyntaxKind::StringLiteral
         {
-            let raw = &file.text[s.span.start as usize..s.span.end as usize];
+            let raw = &text[s.span.start as usize..s.span.end as usize];
             if raw.len() >= 2 {
                 let name = raw[1..raw.len() - 1].to_string();
-                out.push(IncludeCall { name, span: s.span });
+                includes.push(IncludeCall { name, span: s.span });
             }
         }
     }
-    out
+    FileScan {
+        includes,
+        classes: leek_parser::scan_class_names(text, &lexed.tokens),
+    }
 }
 
 /// An included file's version: its own explicit `@version` pragma,
