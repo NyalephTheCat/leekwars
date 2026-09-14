@@ -11,7 +11,7 @@ fn opts() -> FormatOptions {
 
 fn fmt_range(src: &str, start: u32, end: u32) -> Option<(std::ops::Range<u32>, String)> {
     let parsed = leek_parser::parse(src, SourceId::new(1).unwrap(), Version::V4);
-    format_range(&parsed.green, &opts(), start..end)
+    format_range(&parsed.green, Version::V4, &opts(), start..end)
 }
 
 /// Locate the byte offsets of `needle` in `haystack`. Panics if not

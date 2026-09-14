@@ -23,8 +23,12 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Parsed)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
 
-    let (target_range, replacement) =
-        leek_fmt::format_range(green, &ws.settings.format, start..end)?;
+    let (target_range, replacement) = leek_fmt::format_range(
+        green,
+        doc.source_file_version(&ws.db),
+        &ws.settings.format,
+        start..end,
+    )?;
 
     // If the replacement matches the original, no edit needed.
     // `target_range` comes from the green tree, which can desync from

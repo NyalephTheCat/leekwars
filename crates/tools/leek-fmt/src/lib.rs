@@ -38,7 +38,11 @@ use leek_syntax::language::GreenNode;
 use leek_syntax::{SyntaxKind, SyntaxNode, Version};
 
 /// Format a parsed green tree.
-pub fn format(green: &GreenNode, opts: &FormatOptions) -> String {
+///
+/// `version` is the language version the tree was parsed under; the
+/// printer re-lexes token boundaries with it to decide where a
+/// separator is required (#412).
+pub fn format(green: &GreenNode, version: Version, opts: &FormatOptions) -> String {
     let root = SyntaxNode::new_root(green.clone());
     let ctx = format::FmtCtx {
         opts: opts.clone(),
@@ -46,7 +50,7 @@ pub fn format(green: &GreenNode, opts: &FormatOptions) -> String {
         off_regions: collect_off_regions(&root),
     };
     let doc = format::with_ctx_set(ctx, || format::format_source_file(&root));
-    apply_line_ending(printer::print(&doc, opts), opts.line_ending)
+    apply_line_ending(printer::print(&doc, version, opts), opts.line_ending)
 }
 
 /// Normalize the output's line terminators per [`LineEnding`].
@@ -283,7 +287,7 @@ pub fn format_source(
     opts: &FormatOptions,
 ) -> String {
     let parsed = leek_parser::parse(text, source, version);
-    format(&parsed.green, opts)
+    format(&parsed.green, version, opts)
 }
 
 /// [`format_source`] followed by the [`check_equivalence`] safety net.
@@ -320,6 +324,7 @@ pub fn format_source_checked(
 /// `replacement`.
 pub fn format_range(
     green: &GreenNode,
+    version: Version,
     opts: &FormatOptions,
     range: std::ops::Range<u32>,
 ) -> Option<(std::ops::Range<u32>, String)> {
@@ -341,7 +346,7 @@ pub fn format_range(
     };
     let raw = format::with_ctx_set(ctx, || {
         let doc = format::fmt_node(&target);
-        apply_line_ending(printer::print(&doc, opts), opts.line_ending)
+        apply_line_ending(printer::print(&doc, version, opts), opts.line_ending)
     });
 
     let base_col = leading_column(&source, target_start as usize);

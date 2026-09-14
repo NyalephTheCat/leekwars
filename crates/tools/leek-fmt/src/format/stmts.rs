@@ -180,7 +180,31 @@ pub(super) fn format_class_body(node: &SyntaxNode) -> Doc {
                 between_newlines = 0;
                 leading.push(token_text(&t));
             }
-            NodeOrToken::Token(_) => {}
+            NodeOrToken::Token(t) => {
+                // A significant token the parser could not fold into a
+                // member — a modifier on a member it failed to
+                // classify, e.g. `class A { static for … }`. The
+                // parser bumps the modifier before deciding what the
+                // member is, so it stays a direct child of ClassBody.
+                // It is still the user's code: emit it like the block
+                // walker does (#414) rather than dropping it.
+                let gap = gap_before_leading.take().unwrap_or(between_newlines);
+                if saw_first {
+                    members.push(if gap >= 2 {
+                        crate::doc::blank_line()
+                    } else {
+                        hardline()
+                    });
+                }
+                prev_fnlike = false;
+                for c in leading.drain(..) {
+                    members.push(c);
+                    members.push(hardline());
+                }
+                members.push(token_text(&t));
+                saw_first = true;
+                between_newlines = 0;
+            }
             NodeOrToken::Node(child) => {
                 let fnlike = matches!(child.kind(), S::ClassMethod | S::ClassConstructor);
                 let gap = gap_before_leading.take().unwrap_or(between_newlines);

@@ -10,70 +10,9 @@ TestAnnotations.java::testMultipleAnnotations::0@v4	not-idempotent	line 1: @unus
 TestAnnotations.java::testMultipleAnnotations::1@v4	not-idempotent	line 1: @pure  @nodiscard function f() { => @pure   @nodiscard function f() {
 TestAnnotations.java::testMultipleAnnotations::2@v4	not-idempotent	line 1: @todo  @unused function stub() { => @todo   @unused function stub() {
 TestAnnotations.java::testPure::3@v4	not-idempotent	line 1: @pure  @unused function helper() { => @pure   @unused function helper() {
-TestArray.java::testArray_not_in::0@v4	unsafe	formatting would change token #3: `KwIn` becomes `[`
-TestArray.java::testArray_not_in::1@v4	unsafe	formatting would change token #3: `KwIn` becomes `[`
-TestArray.java::testArray_not_in::2@v4	unsafe	formatting would change token #3: `KwIn` becomes `[`
-TestArray.java::testArray_not_in::3@v4	unsafe	formatting would change token #3: `KwIn` becomes `[`
-TestArray.java::testArray_not_in::4@v4	unsafe	formatting would change token #5: `KwIn` becomes `[`
-TestArray.java::testArray_sort_2::8@v3	unsafe	formatting would change token #3: `KwStatic` becomes `staticArray`
-TestArray.java::testArray_sort_2::9@v3	unsafe	formatting would change token #3: `KwStatic` becomes `staticArray`
 TestArray.java::testRange_access::0@v1	unsafe	formatting would change token #13: `:` becomes `]`
 TestArray.java::testRange_access::0@v2	unsafe	formatting would change token #13: `:` becomes `]`
 TestArray.java::testRange_access::0@v3	unsafe	formatting would change token #13: `:` becomes `]`
-TestBoolean.java::testBoolean_operator_Not::0@v1	unsafe	formatting would change token #1: `KwNot` becomes `nottrue`
-TestBoolean.java::testBoolean_operator_Not::0@v2	unsafe	formatting would change token #1: `KwNot` becomes `nottrue`
-TestBoolean.java::testBoolean_operator_Not::1@v1	unsafe	formatting would change token #1: `KwNot` becomes `notfalse`
-TestBoolean.java::testBoolean_operator_Not::1@v2	unsafe	formatting would change token #1: `KwNot` becomes `notfalse`
-TestBoolean.java::testBoolean_operator_Not::2@v1	unsafe	formatting would change token #1: `KwNot` becomes `Nottrue`
-TestBoolean.java::testBoolean_operator_Not::2@v2	unsafe	formatting would change token #1: `KwNot` becomes `Nottrue`
-TestBoolean.java::testBoolean_operator_Not::3@v1	unsafe	formatting would change token #1: `KwNot` becomes `Notfalse`
-TestBoolean.java::testBoolean_operator_Not::3@v2	unsafe	formatting would change token #1: `KwNot` becomes `Notfalse`
-TestBoolean.java::testBoolean_operator_Not::4@v1	unsafe	formatting would change token #1: `KwNot` becomes `NOTtrue`
-TestBoolean.java::testBoolean_operator_Not::4@v2	unsafe	formatting would change token #1: `KwNot` becomes `NOTtrue`
-TestBoolean.java::testBoolean_operator_Not::5@v1	unsafe	formatting would change token #1: `KwNot` becomes `NOTfalse`
-TestBoolean.java::testBoolean_operator_Not::5@v2	unsafe	formatting would change token #1: `KwNot` becomes `NOTfalse`
-TestBoolean.java::testBoolean_operator_Not::6@v3	unsafe	formatting would change token #1: `KwNot` becomes `nottrue`
-TestBoolean.java::testBoolean_operator_Not::6@v4	unsafe	formatting would change token #1: `KwNot` becomes `nottrue`
-TestBoolean.java::testBoolean_operator_Not::7@v3	unsafe	formatting would change token #1: `KwNot` becomes `notfalse`
-TestBoolean.java::testBoolean_operator_Not::7@v4	unsafe	formatting would change token #1: `KwNot` becomes `notfalse`
-TestClass.java::testMethod_call_via_array_access_typed_param::0@v2	unsafe	formatting would change token #2: `KwPrivate` becomes `privateinteger`
-TestClass.java::testMethod_call_via_array_access_typed_param::0@v3	unsafe	formatting would change token #2: `KwPrivate` becomes `privateinteger`
-TestClass.java::testMethod_call_via_array_access_typed_param::0@v4	unsafe	formatting would change token #2: `KwPrivate` becomes `privateinteger`
-TestClass.java::testMethod_call_via_array_access_typed_param::1@v2	unsafe	formatting would change token #2: `KwPrivate` becomes `privateinteger`
-TestClass.java::testMethod_call_via_array_access_typed_param::1@v3	unsafe	formatting would change token #2: `KwPrivate` becomes `privateinteger`
-TestClass.java::testMethod_call_via_array_access_typed_param::1@v4	unsafe	formatting would change token #2: `KwPrivate` becomes `privateinteger`
-TestClass.java::testMethod_call_via_array_access_typed_param::2@v2	unsafe	formatting would change token #2: `KwPublic` becomes `publicreal`
-TestClass.java::testMethod_call_via_array_access_typed_param::2@v3	unsafe	formatting would change token #2: `KwPublic` becomes `publicreal`
-TestClass.java::testMethod_call_via_array_access_typed_param::2@v4	unsafe	formatting would change token #2: `KwPublic` becomes `publicreal`
-TestClass.java::testMethod_call_via_array_access_typed_param::3@v2	unsafe	formatting would change token #2: `KwPublic` becomes `publicstring`
-TestClass.java::testMethod_call_via_array_access_typed_param::3@v3	unsafe	formatting would change token #2: `KwPublic` becomes `publicstring`
-TestClass.java::testMethod_call_via_array_access_typed_param::3@v4	unsafe	formatting would change token #2: `KwPublic` becomes `publicstring`
-TestClass.java::testMethod_default_parameter_with_typed_class::0@v2	unsafe	formatting would change token #4: `KwPublic` becomes `publicvoid`
-TestClass.java::testMethod_default_parameter_with_typed_class::0@v3	unsafe	formatting would change token #4: `KwPublic` becomes `publicvoid`
-TestClass.java::testMethod_default_parameter_with_typed_class::0@v4	unsafe	formatting would change token #4: `KwPublic` becomes `publicvoid`
-TestClass.java::testMethod_default_parameter_with_typed_class::1@v2	unsafe	formatting would change token #5: `KwPublic` becomes `publicvoid`
-TestClass.java::testMethod_default_parameter_with_typed_class::1@v3	unsafe	formatting would change token #5: `KwPublic` becomes `publicvoid`
-TestClass.java::testMethod_default_parameter_with_typed_class::1@v4	unsafe	formatting would change token #5: `KwPublic` becomes `publicvoid`
-TestClass.java::testMethod_default_parameter_with_typed_class::2@v2	unsafe	formatting would change token #15: `KwPublic` becomes `publicinteger`
-TestClass.java::testMethod_default_parameter_with_typed_class::2@v3	unsafe	formatting would change token #15: `KwPublic` becomes `publicinteger`
-TestClass.java::testMethod_default_parameter_with_typed_class::2@v4	unsafe	formatting would change token #15: `KwPublic` becomes `publicinteger`
-TestEdgeCases.java::testValue_conversions::10@v4	unsafe	formatting would change token #2: `KwPublic` becomes `publicboolean`
-TestEdgeCases.java::testValue_conversions::11@v4	unsafe	formatting would change token #2: `KwPublic` becomes `publicboolean`
-TestFunction.java::testFunctionTypeEdgeCases::0@v1	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::0@v2	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::0@v3	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::0@v4	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::1@v2	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::1@v3	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::1@v4	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::3@v2	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::3@v3	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::3@v4	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::4@v3	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::4@v4	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::5@v2	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::5@v3	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testFunctionTypeEdgeCases::5@v4	unsafe	formatting would change token #1: `<` becomes `<=`
 TestFunction.java::testFunctions_Divide_Lambdas::12@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestFunction.java::testFunctions_Divide_Lambdas::13@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestFunction.java::testFunctions_Divide_Lambdas::13@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
@@ -118,45 +57,10 @@ TestFunction.java::testFunctions_Divide_Lambdas::8@v1	unsafe	formatting would ch
 TestFunction.java::testFunctions_Divide_Lambdas::8@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestFunction.java::testFunctions_Divide_Lambdas::8@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestFunction.java::testFunctions_Divide_Lambdas::8@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestFunction.java::testTypes::13@v1	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testTypes::14@v2	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testTypes::14@v3	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testTypes::14@v4	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testTypes::20@v2	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testTypes::20@v3	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testTypes::20@v4	unsafe	formatting would change token #4: `<` becomes `<=`
-TestFunction.java::testTypes::21@v1	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testTypes::22@v2	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testTypes::22@v3	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testTypes::22@v4	unsafe	formatting would change token #1: `<` becomes `<=`
-TestFunction.java::testTypes::3@v1	unsafe	formatting would change token #18: `<` becomes `<=`
-TestFunction.java::testTypes::3@v2	unsafe	formatting would change token #18: `<` becomes `<=`
-TestFunction.java::testTypes::3@v3	unsafe	formatting would change token #18: `<` becomes `<=`
-TestFunction.java::testTypes::3@v4	unsafe	formatting would change token #18: `<` becomes `<=`
 TestFunction.java::testWrong_number_of_arguments::0@v1	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestFunction.java::testWrong_number_of_arguments::0@v2	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestFunction.java::testWrong_number_of_arguments::0@v3	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
 TestFunction.java::testWrong_number_of_arguments::0@v4	unsafe	formatting would change the parse tree at step #3: enter CallExpr becomes enter LambdaExpr
-TestIf.java::testInit::19@v1	unsafe	formatting would change token #7: `KwNot` becomes `not2`
-TestIf.java::testInit::19@v2	unsafe	formatting would change token #7: `KwNot` becomes `not2`
-TestIf.java::testInit::19@v3	unsafe	formatting would change token #7: `KwNot` becomes `not2`
-TestIf.java::testInit::19@v4	unsafe	formatting would change token #7: `KwNot` becomes `not2`
-TestIf.java::testInit::20@v1	unsafe	formatting would change token #7: `KwNot` becomes `not1`
-TestIf.java::testInit::20@v2	unsafe	formatting would change token #7: `KwNot` becomes `not1`
-TestIf.java::testInit::20@v3	unsafe	formatting would change token #7: `KwNot` becomes `not1`
-TestIf.java::testInit::20@v4	unsafe	formatting would change token #7: `KwNot` becomes `not1`
-TestIf.java::testInit::21@v1	unsafe	formatting would change token #5: `KwNot` becomes `nota`
-TestIf.java::testInit::21@v2	unsafe	formatting would change token #5: `KwNot` becomes `nota`
-TestIf.java::testInit::21@v3	unsafe	formatting would change token #5: `KwNot` becomes `nota`
-TestIf.java::testInit::21@v4	unsafe	formatting would change token #5: `KwNot` becomes `nota`
-TestLoops.java::testFor_loops::9@v1	unsafe	formatting would change token #4: `<` becomes `<=`
-TestLoops.java::testFor_loops::9@v2	unsafe	formatting would change token #4: `<` becomes `<=`
-TestLoops.java::testFor_loops::9@v3	unsafe	formatting would change token #4: `<` becomes `<=`
-TestLoops.java::testFor_loops::9@v4	unsafe	formatting would change token #4: `<` becomes `<=`
-TestMap.java::testMap_not_in::0@v4	unsafe	formatting would change token #14: `KwIn` becomes `a`
-TestMap.java::testMap_not_in::1@v4	unsafe	formatting would change token #14: `KwIn` becomes `a`
-TestNarrowing.java::testNarrowing_function_argument_after_null_check_strict::2@v4	unsafe	formatting would change token #4: `KwStatic` becomes `staticCell`
-TestNarrowing.java::testNarrowing_function_argument_after_null_check_strict::3@v4	unsafe	formatting would change token #17: `KwStatic` becomes `staticCell`
 TestNumber.java::testLexicalErrors::7@v1	unsafe	formatting would change token #1: `'` becomes `'\n`
 TestNumber.java::testLexicalErrors::7@v2	unsafe	formatting would change token #1: `'` becomes `'\n`
 TestNumber.java::testLexicalErrors::7@v3	unsafe	formatting would change token #1: `'` becomes `'\n`
@@ -165,31 +69,6 @@ TestNumber.java::testLexicalErrors::8@v1	unsafe	formatting would change token #1
 TestNumber.java::testLexicalErrors::8@v2	unsafe	formatting would change token #1: `"` becomes `"\n`
 TestNumber.java::testLexicalErrors::8@v3	unsafe	formatting would change token #1: `"` becomes `"\n`
 TestNumber.java::testLexicalErrors::8@v4	unsafe	formatting would change token #1: `"` becomes `"\n`
-TestObject.java::run::11@v2	unsafe	formatting would change token #3: `12` becomes `12b`
-TestObject.java::run::11@v3	unsafe	formatting would change token #3: `12` becomes `12b`
-TestObject.java::run::11@v4	unsafe	formatting would change token #3: `12` becomes `12b`
-TestObject.java::run::12@v2	unsafe	formatting would change token #5: `2` becomes `2yo`
-TestObject.java::run::12@v3	unsafe	formatting would change token #5: `2` becomes `2yo`
-TestObject.java::run::12@v4	unsafe	formatting would change token #5: `2` becomes `2yo`
-TestObject.java::run::13@v2	unsafe	formatting would change token #3: `12` becomes `12b`
-TestObject.java::run::13@v3	unsafe	formatting would change token #3: `12` becomes `12b`
-TestObject.java::run::13@v4	unsafe	formatting would change token #3: `12` becomes `12b`
-TestObject.java::run::156@v2	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::156@v3	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::156@v4	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::157@v2	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::157@v3	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::157@v4	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::158@v3	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::158@v4	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::159@v3	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::159@v4	unsafe	formatting would change token #5: `<` becomes `<=`
-TestObject.java::run::218@v2	unsafe	formatting would change token #2: `KwStatic` becomes `staticboolean`
-TestObject.java::run::218@v3	unsafe	formatting would change token #2: `KwStatic` becomes `staticboolean`
-TestObject.java::run::218@v4	unsafe	formatting would change token #2: `KwStatic` becomes `staticboolean`
-TestObject.java::run::242@v2	unsafe	formatting would change token #2: `KwPublic` becomes `publicreal`
-TestObject.java::run::242@v3	unsafe	formatting would change token #2: `KwPublic` becomes `publicreal`
-TestObject.java::run::242@v4	unsafe	formatting would change token #2: `KwPublic` becomes `publicreal`
 TestObject.java::run::460@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::460@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::460@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
@@ -199,9 +78,6 @@ TestObject.java::run::461@v4	unsafe	formatting would change the parse tree at st
 TestObject.java::run::462@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::462@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::462@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::472@v2	unsafe	formatting would change token #3: `KwStatic` becomes `staticvoid`
-TestObject.java::run::472@v3	unsafe	formatting would change token #3: `KwStatic` becomes `staticvoid`
-TestObject.java::run::472@v4	unsafe	formatting would change token #3: `KwStatic` becomes `staticvoid`
 TestObject.java::run::473@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::473@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::473@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
@@ -259,34 +135,10 @@ TestObject.java::run::490@v4	unsafe	formatting would change the parse tree at st
 TestObject.java::run::491@v2	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::491@v3	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
 TestObject.java::run::491@v4	unsafe	formatting would change the parse tree at step #19: enter CallExpr becomes enter LambdaExpr
-TestObject.java::run::63@v2	unsafe	formatting would change token #2: `KwStatic` becomes `KwFor`
-TestObject.java::run::64@v2	unsafe	formatting would change token #2: `KwStatic` becomes `KwFor`
-TestObject.java::run::64@v3	unsafe	formatting would change token #2: `KwStatic` becomes `KwFor`
-TestObject.java::run::64@v4	unsafe	formatting would change token #2: `KwStatic` becomes `KwFor`
-TestObject.java::run::65@v2	unsafe	formatting would change token #2: `KwStatic` becomes `KwIf`
-TestObject.java::run::65@v3	unsafe	formatting would change token #2: `KwStatic` becomes `KwIf`
-TestObject.java::run::65@v4	unsafe	formatting would change token #2: `KwStatic` becomes `KwIf`
-TestObject.java::run::66@v2	unsafe	formatting would change token #2: `KwStatic` becomes `KwWhile`
-TestObject.java::run::66@v3	unsafe	formatting would change token #2: `KwStatic` becomes `KwWhile`
-TestObject.java::run::66@v4	unsafe	formatting would change token #2: `KwStatic` becomes `KwWhile`
-TestObject.java::run::67@v2	unsafe	formatting would change token #2: `KwStatic` becomes `KwVar`
-TestObject.java::run::67@v3	unsafe	formatting would change token #2: `KwStatic` becomes `KwVar`
-TestObject.java::run::67@v4	unsafe	formatting would change token #2: `KwStatic` becomes `KwVar`
-TestObject.java::run::68@v2	unsafe	formatting would change token #2: `KwStatic` becomes `KwThis`
-TestObject.java::run::68@v3	unsafe	formatting would change token #2: `KwStatic` becomes `KwThis`
-TestObject.java::run::68@v4	unsafe	formatting would change token #2: `KwStatic` becomes `KwThis`
-TestSet.java::testSet_not_in::0@v1	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_not_in::0@v2	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_not_in::0@v3	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_not_in::0@v4	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_not_in::1@v1	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_not_in::1@v2	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_not_in::1@v3	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_not_in::1@v4	unsafe	formatting would change token #10: `KwIn` becomes `i`
-TestSet.java::testSet_operator_EqualsEquals::4@v1	unsafe	formatting would change token #14: `<end of file>` becomes `>>>`
-TestSet.java::testSet_operator_EqualsEquals::4@v2	unsafe	formatting would change token #14: `<end of file>` becomes `>>>`
-TestSet.java::testSet_operator_EqualsEquals::4@v3	unsafe	formatting would change token #14: `<end of file>` becomes `>>>`
-TestSet.java::testSet_operator_EqualsEquals::4@v4	unsafe	formatting would change token #14: `<end of file>` becomes `>>>`
+TestSet.java::testSet_operator_EqualsEquals::4@v1	unsafe	formatting would change token #14: `<end of file>` becomes `>`
+TestSet.java::testSet_operator_EqualsEquals::4@v2	unsafe	formatting would change token #14: `<end of file>` becomes `>`
+TestSet.java::testSet_operator_EqualsEquals::4@v3	unsafe	formatting would change token #14: `<end of file>` becomes `>`
+TestSet.java::testSet_operator_EqualsEquals::4@v4	unsafe	formatting would change token #14: `<end of file>` becomes `>`
 TestString.java::testString_lexerEdgeCases::3@v1	unsafe	formatting would change token #1: `'unclosed` becomes `'unclosed\n`
 TestString.java::testString_lexerEdgeCases::3@v2	unsafe	formatting would change token #1: `'unclosed` becomes `'unclosed\n`
 TestString.java::testString_lexerEdgeCases::3@v3	unsafe	formatting would change token #1: `'unclosed` becomes `'unclosed\n`

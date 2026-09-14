@@ -83,7 +83,7 @@ fn run_format(cx: &Context<'_>, opts: &FormatOptions) -> String {
     // Direct path: prefer the green tree the Parse step already
     // produced; otherwise re-run `parse()` from raw text.
     let green = parse_or_reuse(cx);
-    crate::format(&green, opts)
+    crate::format(&green, version_from_byte(cx.version_byte()), opts)
 }
 
 fn parse_or_reuse(cx: &Context<'_>) -> GreenNode {
@@ -113,7 +113,8 @@ pub fn format_query(
     file: leek_pipeline::salsa::SourceFile,
 ) -> FormatQueryResult {
     let parsed = leek_parser::pipeline::parse_query(db, file);
-    let text = crate::format(&parsed.green, &FormatOptions::default());
+    let version = version_from_byte(file.version_byte(db));
+    let text = crate::format(&parsed.green, version, &FormatOptions::default());
     FormatQueryResult {
         text: Arc::new(text),
     }

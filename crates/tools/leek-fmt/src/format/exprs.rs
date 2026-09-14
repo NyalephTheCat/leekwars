@@ -29,17 +29,19 @@ pub(super) fn format_atom(node: &SyntaxNode) -> Doc {
 /// and groups so long expressions can break before the operator.
 pub(super) fn format_binary(node: &SyntaxNode) -> Doc {
     let mut lhs: Option<Doc> = None;
-    let mut op: Option<Doc> = None;
+    let mut op_parts: Vec<Doc> = Vec::new();
     let mut rhs: Option<Doc> = None;
 
     for el in node.children_with_tokens() {
         match el {
             NodeOrToken::Token(t) if is_trivia(&t) => {}
             NodeOrToken::Token(t) => {
-                // The op is the only non-trivia direct token child.
-                if op.is_none() {
-                    op = Some(token_text(&t));
-                }
+                // The operator can be more than one token: the parser
+                // bumps `not` and `in` separately for `a not in b`
+                // (#413), and `instanceof` follows the same shape.
+                // Keeping only the first silently changed the meaning
+                // of the program, so emit every operator token.
+                op_parts.push(token_text(&t));
             }
             NodeOrToken::Node(child) => {
                 if lhs.is_none() {
@@ -52,7 +54,13 @@ pub(super) fn format_binary(node: &SyntaxNode) -> Doc {
     }
 
     let lhs = lhs.unwrap_or_else(|| text(""));
-    let op = op.unwrap_or_else(|| text("?"));
+    // A multi-token operator stays one unbreakable unit: `not in`
+    // never wants a line break between its halves.
+    let op = if op_parts.is_empty() {
+        text("?")
+    } else {
+        crate::doc::join(&space(), op_parts)
+    };
     let rhs = rhs.unwrap_or_else(|| text(""));
 
     // Both layouts render identically when flat (`a + b`); they only
