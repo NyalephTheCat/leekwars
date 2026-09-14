@@ -21,6 +21,8 @@
 use std::io::{BufRead, BufReader, Read};
 use std::sync::{Arc, Mutex};
 
+use crate::lock::lock_unpoisoned;
+
 /// The message the transport most recently forwarded, parsed.
 ///
 /// One slot, not a queue: the request loop is single-threaded and answers one
@@ -33,19 +35,13 @@ pub(crate) struct RawMessages(Mutex<Option<serde_json::Value>>);
 
 impl RawMessages {
     fn record(&self, message: serde_json::Value) {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
+        *lock_unpoisoned(&self.0) = Some(message);
     }
 
     /// The `arguments` object of the request numbered `seq`, if that is the
     /// message the transport last forwarded.
     pub(crate) fn arguments(&self, seq: i64) -> Option<serde_json::Value> {
-        let message = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let message = lock_unpoisoned(&self.0);
         let message = message.as_ref()?;
         (message["seq"] == serde_json::json!(seq)).then(|| message["arguments"].clone())
     }

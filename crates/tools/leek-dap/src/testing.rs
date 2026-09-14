@@ -2,8 +2,10 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::lock::lock_unpoisoned;
 
 /// A `Write` sink the test can read back. The request loop needs the server's
 /// writer to be `Send + 'static`, so it can't borrow a local.
@@ -17,14 +19,13 @@ impl SharedOut {
 
     /// Everything written so far, as text.
     pub(crate) fn text(&self) -> String {
-        String::from_utf8(self.0.lock().expect("output lock poisoned").clone())
-            .expect("utf-8 output")
+        String::from_utf8(lock_unpoisoned(&self.0).clone()).expect("utf-8 output")
     }
 }
 
 impl Write for SharedOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("output lock poisoned").extend(buf);
+        lock_unpoisoned(&self.0).extend(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -136,10 +137,11 @@ pub(crate) fn project_with(name: &str, files: &[(&str, &str)]) -> PathBuf {
 /// them apart — `--test-threads=1` is not something CI passes.
 static DEBUG_SESSION: Mutex<()> = Mutex::new(());
 
-/// Take the debug-hook lock for the duration of a test. Poisoning is ignored:
-/// one failing test must not cascade into every later one.
+/// Take the debug-hook lock for the duration of a test. Poisoning is ignored,
+/// under the crate's one policy (see [`crate::lock`]): one failing test must
+/// not cascade into every later one.
 pub(crate) fn debug_session_guard() -> std::sync::MutexGuard<'static, ()> {
-    DEBUG_SESSION.lock().unwrap_or_else(PoisonError::into_inner)
+    lock_unpoisoned(&DEBUG_SESSION)
 }
 
 /// How long a client waits for a message it expects. Generous: the assertion

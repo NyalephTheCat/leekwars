@@ -34,8 +34,29 @@ pub(crate) fn source_ref(path: &std::path::Path) -> Source {
     }
 }
 
-/// Route a single request to its handler.
+/// Handle a single request, then check that the session survived it.
+///
+/// A panic under one of the debug controller's locks — in a handler here, or
+/// on the debuggee thread inside the hook — leaves that lock poisoned. The
+/// adapter recovers the guard instead of panicking a second time (see
+/// [`crate::lock`]), but the state behind it is whatever the panic left, so
+/// this ends the session with an error rather than answer the next
+/// `stackTrace` out of a half-built stack (#176).
 pub(crate) fn dispatch<R: Read, W: Write + Send + 'static>(
+    session: &mut Session,
+    server: &mut Server<R, W>,
+    req: Request,
+) -> anyhow::Result<Flow> {
+    let flow = route(session, server, req)?;
+    if session.debug_poisoned() {
+        lifecycle::end_poisoned_session(server)?;
+        return Ok(Flow::Shutdown);
+    }
+    Ok(flow)
+}
+
+/// Route a single request to its handler.
+fn route<R: Read, W: Write + Send + 'static>(
     session: &mut Session,
     server: &mut Server<R, W>,
     req: Request,

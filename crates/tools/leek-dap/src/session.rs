@@ -62,6 +62,16 @@ impl Session {
         }
     }
 
+    /// Whether the debug controller has taken a poisoned lock — a panic left
+    /// part of its state behind, so what it would report is not to be
+    /// trusted. The request loop ends the session on it; see
+    /// [`NativeDebugSession::poisoned`] and [`crate::handlers::dispatch`].
+    pub(crate) fn debug_poisoned(&self) -> bool {
+        self.native_debug
+            .as_ref()
+            .is_some_and(|debug| debug.poisoned())
+    }
+
     /// End the session: release the debuggee, uninstall the process-global
     /// debug hook, and wait for the worker to leave.
     ///

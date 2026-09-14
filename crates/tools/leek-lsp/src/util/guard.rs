@@ -10,8 +10,17 @@
 /// tower-lsp 0.20 does not catch handler panics: an unwind escaping a handler
 /// aborts the serve future and the process with it.
 ///
-/// `tokio::sync::Mutex` does not poison on panic, so a guard held across the
-/// caught unwind is released cleanly when it drops.
+/// Catching the unwind is only safe because nothing the handler was holding
+/// stays broken afterwards. `tokio::sync::Mutex` — the workspace lock — does
+/// not poison at all, so a guard held across the caught unwind is released
+/// cleanly when it drops. The process-wide `std::sync::Mutex`es a handler
+/// reaches *through* the pipeline do poison, and leek-prelude's registries
+/// used to `expect` on the next access — one contained panic then turned
+/// every later request into an empty result. Those recover the guard with
+/// `PoisonError::into_inner` now (#176, fixed in #487), the way
+/// leek-resolver's interner and builtin registry, leek-parser's header cache
+/// and leek-types' checker caches already did. The one still spelled `expect`
+/// is `leek_hir::fold`'s parsed fold map, which every lowering goes through.
 pub fn guard<T: Default>(label: &str, f: impl FnOnce() -> T) -> T {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(value) => value,
