@@ -510,7 +510,9 @@ pub(crate) fn lambda_outer_captures(
                     }
                 }
             }
-            _ => {}
+            // Listed rather than caught by `_` so a new `Stmt` variant
+            // that can hold a capture is a compile error here.
+            Stmt::Include(_) | Stmt::Import(_) | Stmt::Charge(_) => {}
         }
     }
     fn block_walk(
@@ -576,7 +578,15 @@ pub(crate) fn collect_inner_decls(
                     }
                 }
             }
-            _ => {}
+            // Listed rather than caught by `_` so a new `Stmt` variant
+            // that can declare a binding is a compile error here.
+            Stmt::Expr(_)
+            | Stmt::Return(_)
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Include(_)
+            | Stmt::Import(_)
+            | Stmt::Charge(_) => {}
         }
     }
     for s in &block.stmts {

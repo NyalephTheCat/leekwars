@@ -20,8 +20,8 @@
 //!    enclosing sequence. Only for analyses that hunt for bindings at
 //!    any lambda depth; pick between the two layers deliberately.
 //!
-//! 3. **Framework wiring**: the [`Hir`] node types are bound to
-//!    `leek_visit::tree` via [`Visitable`] / [`VisitableMut`] impls and
+//! 3. **Framework wiring**: the [`Block`] / [`Stmt`] / [`Expr`] node types
+//!    are bound to `leek_visit::tree` via [`Visitable`] / [`VisitableMut`] impls and
 //!    the [`HirVisitor`] / [`HirVisitorMut`] umbrella traits, so a
 //!    visitor reacts to only the node kinds it cares about and controls
 //!    descent with [`Flow`]. Unlike the shallow primitives, the

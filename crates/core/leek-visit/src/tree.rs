@@ -18,7 +18,7 @@
 //! once (e.g. `trait HirVisitor: Visit<Block> + Visit<Stmt> +
 //! Visit<Expr> {}`) with a blanket impl, so any type implementing all
 //! the `Visit<_>` parts is automatically a visitor for that IR. The
-//! [`umbrella!`] macro generates both.
+//! [`umbrella!`](crate::umbrella) macro generates both.
 //!
 //! ## Why a per-type `Visit<T>`
 //!
@@ -158,7 +158,7 @@ macro_rules! umbrella {
     };
 }
 
-/// Mutable mirror of [`umbrella!`].
+/// Mutable mirror of [`umbrella!`](crate::umbrella).
 #[macro_export]
 macro_rules! umbrella_mut {
     ($name:ident: $($node:ty),+ $(,)?) => {

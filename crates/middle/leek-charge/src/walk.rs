@@ -61,7 +61,17 @@ fn walk_stmt_recurse(s: &mut Stmt, opts: ChargeOpts) {
             }
         }
         Stmt::Block(b) => charge_block(b, opts),
-        _ => {}
+        // Listed rather than caught by `_` so a new `Stmt` variant that
+        // carries a body is a compile error here instead of silently
+        // going uncharged.
+        Stmt::Expr(_)
+        | Stmt::VarDecl(_)
+        | Stmt::Return(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Include(_)
+        | Stmt::Import(_)
+        | Stmt::Charge(_) => {}
     }
     // Lambdas are leaves to the normal expression walk, so their bodies are
     // never charged by the block/statement recursion above. Descend into any
