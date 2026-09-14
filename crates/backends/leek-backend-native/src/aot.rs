@@ -299,7 +299,12 @@ pub fn compile_to_executable(
     // Echoed whether or not the link succeeded, so `cc`'s warnings on the
     // generated C reach the user exactly as they did when stderr was inherited.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprint!("{stderr}");
+    // `cc`'s own diagnostics, passed through verbatim on the stream the child
+    // would have inherited. Terminal output, not a log record.
+    #[allow(clippy::print_stderr)]
+    {
+        eprint!("{stderr}");
+    }
     if !output.status.success() {
         return Err(link_failure(&stderr, &lib_dir));
     }
