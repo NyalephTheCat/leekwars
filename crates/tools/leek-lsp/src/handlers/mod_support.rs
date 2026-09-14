@@ -234,7 +234,69 @@ pub(crate) fn enclosing_class_name(root: &SyntaxNode, offset: u32) -> Option<Str
 /// The nearest `ClassDecl` ancestor of the smallest node covering
 /// `offset`, if any.
 fn enclosing_class_decl(root: &SyntaxNode, offset: u32) -> Option<SyntaxNode> {
-    // Descend to the smallest node covering `offset`.
+    let mut cur = Some(smallest_node_at(root, offset));
+    while let Some(n) = cur {
+        if n.kind() == SyntaxKind::ClassDecl {
+            return Some(n);
+        }
+        cur = n.parent();
+    }
+    None
+}
+
+/// Whether `sym` is declared *directly* in a class body — a field or a
+/// method — as opposed to a local or parameter declared inside a
+/// method, which is an ordinary scoped binding.
+///
+/// The resolver never fills [`Symbol::container`] (it declares methods
+/// as plain [`SymbolKind::Function`] and fields as
+/// [`SymbolKind::Field`] into the pushed class scope), so there is no
+/// semantic "is a member" signal and the answer has to come from the
+/// CST.
+///
+/// Used by the rename family to refuse member renames: member accesses
+/// (`this.x`, `obj.m()`) are never recorded as references, so any
+/// occurrence search over a member name is wrong in both directions —
+/// it misses every dotted use site and hits same-named top-level
+/// declarations. See leekwars#46; the sound fix needs the member-ref
+/// table from the resolver rework.
+pub(crate) fn symbol_is_class_member(root: &SyntaxNode, sym: &Symbol) -> bool {
+    // `Field` is only ever declared for a `ClassField`, so it needs no
+    // CST evidence — and stays right on a half-parsed buffer.
+    if sym.kind == SymbolKind::Field {
+        return true;
+    }
+    class_member_decl_at(root, sym.def_span.start).is_some()
+}
+
+/// The `ClassField` / `ClassMethod` / `ClassConstructor` (or, on a
+/// half-parsed buffer, `ClassBody` / `ClassDecl`) reached first when
+/// walking up from `offset`.
+///
+/// The walk stops at a `Block` or a `ParamList`, which mean the offset
+/// is a method-local or a method parameter: those are scoped bindings
+/// that rename correctly today and must not be refused.
+fn class_member_decl_at(root: &SyntaxNode, offset: u32) -> Option<SyntaxNode> {
+    let mut cur = Some(smallest_node_at(root, offset));
+    while let Some(n) = cur {
+        match n.kind() {
+            SyntaxKind::ClassField
+            | SyntaxKind::ClassMethod
+            | SyntaxKind::ClassConstructor
+            | SyntaxKind::ClassBody
+            | SyntaxKind::ClassDecl => return Some(n),
+            // Inside a method body or parameter list — a local or a
+            // param, not a member.
+            SyntaxKind::Block | SyntaxKind::ParamList => return None,
+            _ => cur = n.parent(),
+        }
+    }
+    None
+}
+
+/// The smallest node covering `offset`, found by descending from
+/// `root`. Returns `root` itself when no child covers the offset.
+fn smallest_node_at(root: &SyntaxNode, offset: u32) -> SyntaxNode {
     let mut node = root.clone();
     loop {
         let next = node.children().find(|c| {
@@ -243,18 +305,9 @@ fn enclosing_class_decl(root: &SyntaxNode, offset: u32) -> Option<SyntaxNode> {
         });
         match next {
             Some(child) => node = child,
-            None => break,
+            None => return node,
         }
     }
-    // Walk ancestors looking for an enclosing class.
-    let mut cur = Some(node);
-    while let Some(n) = cur {
-        if n.kind() == SyntaxKind::ClassDecl {
-            return Some(n);
-        }
-        cur = n.parent();
-    }
-    None
 }
 
 /// The identifier name at byte `offset`, if the cursor sits on a plain

@@ -1,10 +1,17 @@
 //! `textDocument/rename` — rename a symbol everywhere it's used.
+//!
+//! Class members (fields and methods) are **refused** rather than
+//! renamed: the resolver records no references for member names, so the
+//! occurrence search behind the edit is unsound in both directions. See
+//! [`refusal`](super::refusal) and leekwars#46.
 
 use std::collections::HashMap;
 
 use leek_span::Span;
+use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
+use crate::handlers::refusal::Refusable;
 use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
@@ -13,12 +20,25 @@ pub fn handle(
     uri: &lsp::Url,
     pos: lsp::Position,
     new_name: &str,
-) -> Option<lsp::WorkspaceEdit> {
-    let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+) -> Refusable<lsp::WorkspaceEdit> {
+    let Some(doc) = ws.doc(uri) else {
+        return Ok(None);
+    };
+    let Some(offset) = position_to_offset(doc.pos_map(), pos) else {
+        return Ok(None);
+    };
 
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
+    let Some(run) = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved) else {
+        return Ok(None);
+    };
+    let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
+        return Ok(None);
+    };
+    let table = &art.table;
+    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
+        return Ok(None);
+    };
+    let root = SyntaxNode::new_root(green.0.clone());
 
     // Rename a top-level symbol everywhere it's used across the program.
     // Top-level functions/classes/globals share one flat namespace
@@ -53,19 +73,37 @@ pub fn handle(
     let Some(target_id) = local_target else {
         // Not resolved locally — a *use* of a top-level symbol declared
         // in an `include`d file. Anchor on the declaration's file so the
-        // rename spans every includer.
-        let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-        let root = leek_syntax::SyntaxNode::new_root(green.clone());
-        let target = crate::handlers::cross_file_use_target(ws, uri, &root, offset)?;
-        return workspace_rename(&target.home_uri, &target.name, target.kind);
+        // rename spans every includer. No member check is needed here:
+        // `cross_file_use_target` rejects dotted member accesses and
+        // only matches top-level declarations.
+        let Some(target) = crate::handlers::cross_file_use_target(ws, uri, &root, offset) else {
+            return Ok(None);
+        };
+        return Ok(workspace_rename(
+            &target.home_uri,
+            &target.name,
+            target.kind,
+        ));
     };
+
+    // A class member: refuse rather than produce a wrong edit. Both the
+    // workspace path below (a method is a `Function`, so it would fan
+    // out over same-named free functions) and the single-file path (a
+    // field's `this.x` uses are not references) are unsound for members.
+    if let Some(sym) = table.symbol(target_id)
+        && crate::handlers::symbol_is_class_member(&root, sym)
+    {
+        let class = crate::handlers::enclosing_class_name(&root, sym.def_span.start)
+            .unwrap_or_else(|| "<anonymous>".to_string());
+        return Err(crate::handlers::refusal::member_rename(&sym.name, &class));
+    }
 
     // Locals/params/fields are file-scoped and stay single-file
     // (renaming them across files would be wrong).
     if let Some(sym) = table.symbol(target_id)
         && crate::handlers::is_workspace_global(sym.kind)
     {
-        return workspace_rename(uri, &sym.name, sym.kind);
+        return Ok(workspace_rename(uri, &sym.name, sym.kind));
     }
 
     let mut edits: Vec<lsp::TextEdit> = Vec::new();
@@ -91,9 +129,9 @@ pub fn handle(
 
     let mut changes = HashMap::new();
     changes.insert(uri.clone(), edits);
-    Some(lsp::WorkspaceEdit {
+    Ok(Some(lsp::WorkspaceEdit {
         changes: Some(changes),
         document_changes: None,
         change_annotations: None,
-    })
+    }))
 }

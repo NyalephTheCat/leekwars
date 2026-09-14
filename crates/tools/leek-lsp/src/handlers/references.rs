@@ -18,6 +18,8 @@ pub fn handle(
 
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
+    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
+    let root = leek_syntax::SyntaxNode::new_root(green.clone());
 
     // Program-wide occurrences of a top-level symbol → Locations,
     // honouring the `includeDeclaration` flag.
@@ -38,8 +40,16 @@ pub fn handle(
         // Top-level functions/classes/globals share one flat namespace
         // across `include`d files, so their references span the program.
         // Locals/params/fields are file-scoped — single-file path below.
+        //
+        // A method is also a `Function`, but its name is not in that
+        // namespace: fanning out would report every same-named free
+        // function as a reference to it. Members fall through to the
+        // single-file path, which returns a subset of the truth (the
+        // bare in-class uses) instead of a wrong superset — the sound
+        // answer needs member-aware search (leekwars#46).
         if let Some(sym) = table.symbol(target_id)
             && crate::handlers::is_workspace_global(sym.kind)
+            && !crate::handlers::symbol_is_class_member(&root, sym)
         {
             return Some(to_locs(uri, &sym.name, sym.kind));
         }
@@ -64,8 +74,6 @@ pub fn handle(
     // The cursor didn't resolve locally — it may be a *use* of a
     // top-level symbol declared in an `include`d file. Anchor the search
     // on the declaration's file so it spans every includer.
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = leek_syntax::SyntaxNode::new_root(green.clone());
     let target = crate::handlers::cross_file_use_target(ws, uri, &root, offset)?;
     Some(to_locs(&target.home_uri, &target.name, target.kind))
 }
