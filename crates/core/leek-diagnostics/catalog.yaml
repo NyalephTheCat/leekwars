@@ -135,3 +135,10 @@ lint:
   - { id: L0039, name: ManualRangeCheck, severity: hint }
   - { id: L0040, name: ArrayLiteralMembership, severity: hint }
   - { id: L0041, name: MapAsSet, severity: hint }
+
+backend:
+  # The native backend's own failures. `NativeError::Runtime` deliberately has
+  # no code: a trap happens while the compiled program is running, with no
+  # source construct to point at (see `NativeErrorKind::Runtime`).
+  - { id: E0600, name: NativeUnsupported, severity: error }
+  - { id: E0601, name: NativeCompileFailed, severity: error }

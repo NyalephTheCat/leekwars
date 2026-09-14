@@ -99,9 +99,10 @@ fn collect_target(
     pm: PosMap<'_>,
     source_file: SourceFile,
 ) -> Vec<lsp::Diagnostic> {
+    let labels = crate::diagnostics::LabelSources::from_workspace(ws);
     file_diagnostics(ws, uri, source_file)
         .iter()
-        .map(|d| to_lsp(d, pm, Some(uri)))
+        .map(|d| to_lsp(d, pm, Some(uri), &labels))
         .collect()
 }
 

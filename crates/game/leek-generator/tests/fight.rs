@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use leek_game_runtime::{EffectKind, GameHost}; // `life`/… accessors on `Fight`
 use leek_generator::{
-    ActiveEffect, AiError, DEFAULT_MAX_OPS_PER_TURN, Entity, Fight, FightRef, NativeError,
-    fight_options, run_ai, run_ai_with, run_fight, shared,
+    ActiveEffect, AiError, DEFAULT_MAX_OPS_PER_TURN, Entity, Fight, FightRef, fight_options,
+    run_ai, run_ai_with, run_fight, shared,
 };
 use leek_hir::{HirFile, lower_file_versioned};
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
@@ -937,7 +937,7 @@ fn turn_budget_trips_when_ops_reach_it_like_java() {
 
     let at_budget = run_ai_with(&fight(), &hir, &fight_options(4, false, used));
     assert!(
-        matches!(&at_budget, Err(NativeError::Runtime(code)) if code == "TOO_MUCH_OPERATIONS"),
+        matches!(&at_budget, Err(e) if e.runtime_code() == Some("TOO_MUCH_OPERATIONS")),
         "ops == budget must error, got {at_budget:?}"
     );
     run_ai_with(&fight(), &hir, &fight_options(4, false, used + 1))

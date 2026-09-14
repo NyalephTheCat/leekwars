@@ -23,7 +23,7 @@ mod render;
 pub mod report;
 mod suggest;
 
-pub use render::{Renderer, Style};
+pub use render::{Renderer, SingleSource, SourceEntry, SourceMap, Sources, Style};
 pub use report::{ColorWhen, LintLevelError, LintLevels, MessageFormat, Reporter, RunSource};
 pub use suggest::{best_match, suggest_similar};
 
@@ -317,11 +317,15 @@ pub trait IntoDiagnostic {
 // ---- Rendering helpers ----
 
 impl Diagnostic {
-    /// Render the diagnostic against a source-line table and the
-    /// file contents into a colored snippet. See [`Renderer`] for
+    /// Render the diagnostic against a single file's contents and
+    /// source-line table into a colored snippet. See [`Renderer`] for
     /// configuration.
+    ///
+    /// Spans belonging to *another* file — a label pointing into an
+    /// include — render no snippet here; use
+    /// [`Renderer::render`] with a [`Sources`] to resolve them.
     pub fn render(&self, source: &str, file: &str, lines: &LineTable) -> String {
-        Renderer::default().render(self, source, file, lines)
+        Renderer::default().render_single(self, source, file, lines)
     }
 }
 

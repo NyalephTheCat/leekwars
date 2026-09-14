@@ -202,6 +202,26 @@ fn redundant_boolean_fires_end_to_end() {
     assert_eq!(has_code(&diags, codes::REDUNDANT_BOOLEAN), 1);
 }
 
+/// The negating form builds a *two*-edit suggestion (`!(` before the
+/// operand, `)` in place of the ` == false` tail). The renderer used to
+/// preview only `edits.first()`, so the `help:` line showed
+/// `!(x == false` — unbalanced, and not what `miku fix` writes.
+#[test]
+fn redundant_boolean_preview_shows_the_whole_fix() {
+    let src = "function f(x) { return x == false; }\n";
+    let diags = lint_src(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == codes::REDUNDANT_BOOLEAN)
+        .expect("L0012 fires");
+    assert_eq!(diag.suggestions[0].edits.len(), 2, "two-edit fix");
+
+    let lines = leek_span::LineTable::new(src);
+    let rendered = diag.render(src, "main.leek", &lines);
+    assert!(rendered.contains("return !(x);"), "{rendered}");
+    assert!(!rendered.contains("!(x == false"), "{rendered}");
+}
+
 // ---- IdenticalOperands (L0014) ----
 
 #[test]

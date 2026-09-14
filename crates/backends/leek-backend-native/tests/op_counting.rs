@@ -244,8 +244,8 @@ fn op_budget_stops_a_runaway_loop() {
             .with_op_limit(10_000),
     );
     match out {
-        Err(leek_backend_native::NativeError::Runtime(c)) => {
-            assert_eq!(c, "TOO_MUCH_OPERATIONS");
+        Err(e) if e.runtime_code().is_some() => {
+            assert_eq!(e.reason(), "TOO_MUCH_OPERATIONS");
         }
         other => panic!("expected a runtime op-budget trip, got {other:?}"),
     }
@@ -268,7 +268,7 @@ fn budget_error_within_deadline(src: &'static str) -> String {
                 .with_op_limit(10_000),
         );
         let _ = tx.send(match out {
-            Err(leek_backend_native::NativeError::Runtime(c)) => c,
+            Err(e) if e.runtime_code().is_some() => e.message,
             Err(e) => format!("other error: {e}"),
             Ok(v) => format!("completed with {v}"),
         });

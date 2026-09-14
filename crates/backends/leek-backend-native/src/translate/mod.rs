@@ -1516,6 +1516,7 @@ pub fn translate_function(
             default_fill: &default_fill,
             object_locals: &object_locals,
             object_field_srcs: &object_field_srcs,
+            cur_span: leek_span::Span::synthetic(),
             pending_charge: 0,
         };
         // On function entry, push a shadow call frame.
@@ -1535,11 +1536,16 @@ pub fn translate_function(
         }
 
         for (i, stmt) in b.statements.iter().enumerate() {
-            // Debug safepoint: spill this function's named locals into the
-            // frame slot, then call out with (offset, descriptor, values) so
-            // a debugger can pause and inspect them.
-            if debug_hooks && let Some(span) = b.statement_spans.get(i) {
-                emit_dbg_safepoint(&mut tx, &dbg_frame, *span)?;
+            // `statement_spans` runs parallel to `statements`; it is what an
+            // `unsupported` raised inside `stmt` points at.
+            if let Some(span) = b.statement_spans.get(i) {
+                tx.cur_span = *span;
+                // Debug safepoint: spill this function's named locals into the
+                // frame slot, then call out with (offset, descriptor, values)
+                // so a debugger can pause and inspect them.
+                if debug_hooks {
+                    emit_dbg_safepoint(&mut tx, &dbg_frame, *span)?;
+                }
             }
             tx.stmt(stmt)?;
         }
@@ -1559,6 +1565,7 @@ pub fn translate_function(
             let leave = tx.imports.rt("leek_dbg_leave")?;
             tx.b.ins().call(leave, &[]);
         }
+        tx.cur_span = b.terminator_span;
         tx.terminator(b.id, &b.terminator)?;
     }
 
@@ -1589,6 +1596,10 @@ struct Imports {
 
 impl Imports {
     /// A required runtime shim's resolved import.
+    ///
+    /// The error is span-less on purpose: a missing shim means this
+    /// translator asked for an import it never declared, which is a bug in
+    /// the backend rather than anything in the user's source.
     fn rt(&self, sym: &str) -> Result<FuncRef, NativeError> {
         self.rt
             .get(sym)
@@ -1661,6 +1672,12 @@ struct Tx<'a, 'b> {
     /// Per object-literal local, the field → value-operand map (for skipping a
     /// field that holds a user class reference, which can't be runtime-built).
     object_field_srcs: &'a HashMap<LocalId, HashMap<String, Operand>>,
+    /// The MIR span of the statement (or terminator) being translated, so a
+    /// construct the backend cannot lower reports *where* it is. Set from
+    /// `statement_spans` before each statement — the lookup the debug-hook
+    /// safepoint already did, now done unconditionally because the error path
+    /// needs it too. `Span::synthetic()` until the first statement.
+    cur_span: leek_span::Span,
     /// Coalesced op-budget charge for the current basic block. Per-op
     /// `charge(n)` calls accumulate here instead of emitting a runtime call
     /// each; [`flush_charge`](Self::flush_charge) emits a single
@@ -1686,8 +1703,19 @@ mod emit_rvalue;
 mod emit_stmt;
 mod emit_value;
 
+/// An unsupported-construct error with no location — for the handful of
+/// sites outside a `Tx`, which have no statement to point at. Inside a `Tx`,
+/// use [`Tx::unsupported`], which attaches the current statement's span.
 fn unsupported(msg: impl Into<String>) -> NativeError {
-    NativeError::Unsupported(msg.into())
+    NativeError::unsupported(msg.into())
+}
+
+impl Tx<'_, '_> {
+    /// An unsupported-construct error pinned to the statement being
+    /// translated, so the user is told which line the backend choked on.
+    pub(super) fn unsupported(&self, msg: impl Into<String>) -> NativeError {
+        unsupported(msg).at(self.cur_span)
+    }
 }
 
 /// The result kind of a builtin call, if it's a scalar math builtin the
@@ -1950,7 +1978,7 @@ fn reject_null_result(main: &MirFunction, allow_void: bool) -> Result<(), Native
                 if matches!(main.locals[id.0 as usize].ty, Type::Any) {
                     any_null_return = true;
                 } else {
-                    return Err(unsupported("returns an uninitialized (null) local"));
+                    return Err(unsupported("returns an uninitialized (null) local").at(main.span));
                 }
             }
             Terminator::Return(Some(_)) => any_value_return = true,
@@ -1963,10 +1991,10 @@ fn reject_null_result(main: &MirFunction, allow_void: bool) -> Result<(), Native
     // null). A `=> integer`-typed function that also returns null is the
     // subtle coerce-null-to-0 case; keep skipping it.
     if any_value_return && any_null_return && scalar_valty(&main.return_ty).is_some() {
-        return Err(unsupported("mixed value / null result (typed return)"));
+        return Err(unsupported("mixed value / null result (typed return)").at(main.span));
     }
     if !any_value_return && !allow_void {
-        return Err(unsupported("null / void result"));
+        return Err(unsupported("null / void result").at(main.span));
     }
     Ok(())
 }

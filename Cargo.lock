@@ -999,7 +999,6 @@ dependencies = [
 name = "leek-backend-native"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "bumpalo",
  "cranelift",
  "cranelift-frontend",
@@ -1007,6 +1006,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "leek-diagnostics",
  "leek-hir",
  "leek-mir",
  "leek-parser",

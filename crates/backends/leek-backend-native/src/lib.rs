@@ -61,7 +61,8 @@ mod translate;
 pub use debug::{DebugHook, clear_debug_hook, frame_name, render_frame_vars, set_debug_hook};
 pub use game::{GameRuntime, set_game_runtime};
 pub use options::{
-    CodegenKey, DEFAULT_OP_BUDGET, NativeEmit, NativeError, NativeOptions, OptLevel,
+    CodegenKey, DEFAULT_OP_BUDGET, NativeEmit, NativeError, NativeErrorKind, NativeOptions,
+    OptLevel,
 };
 pub use runtime::ops_used;
 
@@ -176,16 +177,20 @@ struct Lowered {
 fn lower(hir: &HirFile, opts: &NativeOptions) -> Result<Lowered, NativeError> {
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
-        return Err(NativeError::Compile(format!(
-            "MIR lowering failed: {}",
-            first.message
-        )));
+        // Keep the whole set, not just the first: each lowering diagnostic
+        // has its own catalog code and its own span, and reporting one of
+        // three reveals the other two only after the user fixes this one.
+        let summary = format!("MIR lowering failed: {}", first.message);
+        let span = first.span;
+        return Err(NativeError::compile(summary)
+            .at(span)
+            .with_diagnostics(errs));
     }
     let main_idx = program
         .functions
         .iter()
         .position(|f| f.kind == leek_mir::ir::FunctionKind::Main)
-        .ok_or_else(|| NativeError::Compile("no main function".into()))?;
+        .ok_or_else(|| NativeError::compile("no main function"))?;
 
     let lang = Lang {
         version: opts.version,
@@ -259,7 +264,8 @@ fn compile_entry(
                 false,
                 false,
                 false,
-            )?;
+            )
+            .map_err(|e| e.in_fn(&main.name).or_span(main.span))?;
             Ok(NativeArtifact::Text(func.display().to_string()))
         }
         NativeEmit::Disasm => {
@@ -286,9 +292,10 @@ fn compile_entry(
                 false,
                 false,
                 false,
-            )?;
+            )
+            .map_err(|e| e.in_fn(&main.name).or_span(main.span))?;
             ctx.compile(isa.as_ref(), &mut Default::default())
-                .map_err(|e| NativeError::Compile(format!("{e:?}")))?;
+                .map_err(|e| NativeError::compile(format!("{e:?}")))?;
             let text = ctx
                 .compiled_code()
                 .and_then(|c| c.vcode.clone())
@@ -298,7 +305,7 @@ fn compile_entry(
         NativeEmit::Object(path) => {
             let isa = build_isa(opts)?;
             let ob = cranelift_object::ObjectBuilder::new(isa, "leek", default_libcall_names())
-                .map_err(|e| NativeError::Compile(e.to_string()))?;
+                .map_err(|e| NativeError::compile(e.to_string()))?;
             let mut module = cranelift_object::ObjectModule::new(ob);
             // Object emit isn't executed, so lambda addresses / the method
             // table aren't needed.
@@ -319,8 +326,8 @@ fn compile_entry(
             let bytes = module
                 .finish()
                 .emit()
-                .map_err(|e| NativeError::Compile(e.to_string()))?;
-            std::fs::write(path, bytes).map_err(|e| NativeError::Compile(e.to_string()))?;
+                .map_err(|e| NativeError::compile(e.to_string()))?;
+            std::fs::write(path, bytes).map_err(|e| NativeError::compile(e.to_string()))?;
             Ok(NativeArtifact::Object)
         }
         // Unreachable: handled at the top of this function, where the JIT
@@ -540,7 +547,7 @@ impl CompiledProgram {
         // computed value: the program errored.
         if let Some(code) = runtime::take_runtime_error() {
             drop(value);
-            return Err(NativeError::Runtime(code));
+            return Err(NativeError::runtime(code));
         }
         Ok(value)
     }
@@ -634,7 +641,7 @@ fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProg
     )?;
     module
         .finalize_definitions()
-        .map_err(|e| NativeError::Compile(e.to_string()))?;
+        .map_err(|e| NativeError::compile(e.to_string()))?;
     // Publish each lambda / bound-method's finalized address (+ param
     // count) so `call_value` / indirect calls can invoke them.
     let lambda_fns: HashMap<usize, (*const u8, usize)> = lambda_funcs
@@ -767,7 +774,7 @@ pub fn compile_object_with_meta(
 ) -> Result<aot_meta::AotMeta, NativeError> {
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
-        return Err(NativeError::Compile(format!(
+        return Err(NativeError::compile(format!(
             "MIR lowering failed: {}",
             first.message
         )));
@@ -776,7 +783,7 @@ pub fn compile_object_with_meta(
         .functions
         .iter()
         .position(|f| f.kind == leek_mir::ir::FunctionKind::Main)
-        .ok_or_else(|| NativeError::Compile("no main function".into()))?;
+        .ok_or_else(|| NativeError::compile("no main function"))?;
     let lang = Lang {
         version: opts.version,
         strict: opts.strict,
@@ -790,7 +797,7 @@ pub fn compile_object_with_meta(
 
     let isa = build_isa(opts)?;
     let ob = cranelift_object::ObjectBuilder::new(isa, "leek", default_libcall_names())
-        .map_err(|e| NativeError::Compile(e.to_string()))?;
+        .map_err(|e| NativeError::compile(e.to_string()))?;
     let mut module = cranelift_object::ObjectModule::new(ob);
     let (
         _main_id,
@@ -818,8 +825,8 @@ pub fn compile_object_with_meta(
     let bytes = module
         .finish()
         .emit()
-        .map_err(|e| NativeError::Compile(e.to_string()))?;
-    std::fs::write(obj_path, bytes).map_err(|e| NativeError::Compile(e.to_string()))?;
+        .map_err(|e| NativeError::compile(e.to_string()))?;
+    std::fs::write(obj_path, bytes).map_err(|e| NativeError::compile(e.to_string()))?;
 
     Ok(aot_meta::AotMeta::build(
         &program,
@@ -949,7 +956,7 @@ fn define_program<M: Module>(
     for (n, def_id) in reachable.defs.iter().enumerate() {
         let f = by_id
             .get(def_id)
-            .ok_or_else(|| NativeError::Compile("reachable fn missing".into()))?;
+            .ok_or_else(|| NativeError::compile("reachable fn missing"))?;
         let sig = translate::function_sig(f, lang, fn_rets, program)?;
         let mut clsig = module.make_signature();
         for p in &sig.params {
@@ -962,7 +969,7 @@ fn define_program<M: Module>(
         clsig.returns.push(AbiParam::new(sig.ret.cl_type()));
         let id = module
             .declare_function(&format!("leek_fn_{n}"), Linkage::Local, &clsig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         callees.insert(*def_id, (id, sig));
     }
     // Reachable `def_id`-less functions split into lambda bodies and field
@@ -989,7 +996,7 @@ fn define_program<M: Module>(
         clsig.returns.push(AbiParam::new(sig.ret.cl_type()));
         let id = module
             .declare_function(&format!("leek_finit_{idx}"), Linkage::Local, &clsig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         field_init_callees.insert(idx, (id, sig));
     }
 
@@ -1007,7 +1014,7 @@ fn define_program<M: Module>(
         let (sym, link) = uniform_symbol(external_uniform, "leek_lambda", idx);
         let id = module
             .declare_function(&sym, link, &clsig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         lambda_funcs.insert(idx, (id, f.params.len()));
     }
     // Constructor thunks compile with the same uniform `(argv, argc)` ABI so a
@@ -1021,7 +1028,7 @@ fn define_program<M: Module>(
         let (sym, link) = uniform_symbol(external_uniform, "leek_ctorthunk", idx);
         let id = module
             .declare_function(&sym, link, &clsig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         lambda_funcs.insert(idx, (id, f.params.len()));
     }
 
@@ -1044,10 +1051,12 @@ fn define_program<M: Module>(
     // `@`-by-ref params and closures that mutate captured variables need
     // `Value::Cell` sharing the handle model can't express — skip the whole
     // program rather than miscompile (read-only captures are unaffected).
-    if translate::needs_cell_semantics(program, &reachable_indices, &lambda_set, lang.version) {
-        return Err(NativeError::Unsupported(
-            "closure shared-mutation / @-by-reference parameter".into(),
-        ));
+    if let Some(gate) =
+        translate::needs_cell_semantics(program, &reachable_indices, &lambda_set, lang.version)
+    {
+        return Err(NativeError::unsupported(gate.what)
+            .at(gate.span)
+            .in_fn(&gate.function));
     }
     let (method_resolve, mut value_methods) =
         translate::method_value_info(program, &reachable_indices);
@@ -1092,7 +1101,7 @@ fn define_program<M: Module>(
         let (sym, link) = uniform_symbol(external_uniform, "leek_method", idx);
         let id = module
             .declare_function(&sym, link, &clsig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         method_funcs.insert(idx, (id, f.params.len()));
     }
 
@@ -1104,7 +1113,7 @@ fn define_program<M: Module>(
         .push(AbiParam::new(main_sig.ret.cl_type()));
     let main_id = module
         .declare_function("leek_main", Linkage::Export, &main_clsig)
-        .map_err(|e| NativeError::Compile(e.to_string()))?;
+        .map_err(|e| NativeError::compile(e.to_string()))?;
 
     // Phase 2: translate + define each function body.
     let define_one = |module: &mut M,
@@ -1147,10 +1156,15 @@ fn define_program<M: Module>(
             uniform,
             debug_hooks,
             link_game,
-        )?;
-        module
-            .define_function(fid, &mut ctx)
-            .map_err(|e| NativeError::Compile(e.to_string()))
+        )
+        // Function-level attribution: a site that had no statement span
+        // still gets the function's name and its declaration to point at.
+        .map_err(|e| e.in_fn(&f.name).or_span(f.span))?;
+        module.define_function(fid, &mut ctx).map_err(|e| {
+            NativeError::compile(e.to_string())
+                .in_fn(&f.name)
+                .at(f.span)
+        })
     };
 
     let dummy_sig = translate::FnSig {
@@ -1220,7 +1234,7 @@ fn build_isa(opts: &NativeOptions) -> Result<codegen::isa::OwnedTargetIsa, Nativ
     let mut fb = settings::builder();
     let set = |fb: &mut settings::Builder, k: &str, v: &str| -> Result<(), NativeError> {
         fb.set(k, v)
-            .map_err(|e| NativeError::Compile(format!("flag {k}={v}: {e}")))
+            .map_err(|e| NativeError::compile(format!("flag {k}={v}: {e}")))
     };
     set(&mut fb, "opt_level", opts.opt_level.cranelift_str())?;
     set(&mut fb, "enable_verifier", bool_str(opts.enable_verifier))?;
@@ -1230,10 +1244,10 @@ fn build_isa(opts: &NativeOptions) -> Result<codegen::isa::OwnedTargetIsa, Nativ
         bool_str(opts.preserve_frame_pointers),
     )?;
     let flags = settings::Flags::new(fb);
-    let builder = cranelift_native::builder().map_err(|e| NativeError::Compile(e.to_string()))?;
+    let builder = cranelift_native::builder().map_err(|e| NativeError::compile(e.to_string()))?;
     builder
         .finish(flags)
-        .map_err(|e| NativeError::Compile(e.to_string()))
+        .map_err(|e| NativeError::compile(e.to_string()))
 }
 
 fn bool_str(b: bool) -> &'static str {

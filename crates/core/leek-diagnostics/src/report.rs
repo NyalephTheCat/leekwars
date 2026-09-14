@@ -2,9 +2,9 @@
 
 use std::io::IsTerminal;
 
-use leek_span::LineTable;
+use leek_span::Span;
 
-use crate::{Code, Diagnostic, Renderer, Severity, SeverityConfig};
+use crate::{Code, Diagnostic, Renderer, Severity, SeverityConfig, Sources};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorWhen {
@@ -143,10 +143,15 @@ impl Reporter {
     }
 
     /// Like [`emit_run`](Self::emit_run), but with extra named sources
-    /// (included files) so a diagnostic raised in an included file
-    /// renders against *that* file's text and label instead of the
-    /// entry's. A diagnostic whose `SourceId` matches none of the
-    /// extras falls back to the entry text — the single-file behavior.
+    /// (included files) so a diagnostic raised in an included file — or a
+    /// *label* pointing into one — renders against that file's own text
+    /// and name instead of the entry's. A span whose `SourceId` matches no
+    /// registered source renders no snippet at all.
+    ///
+    /// The entry file's own `SourceId` is inferred from the diagnostics,
+    /// since this signature never carried it. Callers that know it (they
+    /// have the `Input`) should build a [`Sources`] and call
+    /// [`emit`](Self::emit) instead.
     pub fn emit_run_sources(
         &self,
         diagnostics: &[Diagnostic],
@@ -154,11 +159,32 @@ impl Reporter {
         file_label: &str,
         extra_sources: &[RunSource<'_>],
     ) -> bool {
-        let line_table = LineTable::new(source_text);
-        let extra_tables: Vec<LineTable> = extra_sources
-            .iter()
-            .map(|s| LineTable::new(s.text))
-            .collect();
+        let sources = run_sources(diagnostics, source_text, file_label, extra_sources);
+        self.emit(diagnostics, &sources)
+    }
+
+    /// Apply this reporter's lint levels and render every surviving
+    /// diagnostic against `sources`, returning the text [`emit`](Self::emit)
+    /// would print in [`MessageFormat::Human`].
+    ///
+    /// Split out from printing so callers — and tests asserting that a
+    /// diagnostic points at the right file and column — can inspect the
+    /// rendered form instead of capturing stderr.
+    pub fn render_all(&self, diagnostics: &[Diagnostic], sources: &Sources) -> String {
+        let mut out = String::new();
+        for diag in diagnostics {
+            let mut adjusted = diag.clone();
+            if !self.severity.apply_mut(&mut adjusted) {
+                continue;
+            }
+            out.push_str(&self.renderer.render(&adjusted, sources));
+        }
+        out
+    }
+
+    /// Emit `diagnostics` against `sources` in this reporter's format,
+    /// returning whether any survived at error level.
+    pub fn emit(&self, diagnostics: &[Diagnostic], sources: &Sources) -> bool {
         let mut had_error = false;
         for diag in diagnostics {
             let mut adjusted = diag.clone();
@@ -167,18 +193,7 @@ impl Reporter {
             }
             match self.format {
                 MessageFormat::Human => {
-                    let (text, label, table) = extra_sources
-                        .iter()
-                        .position(|s| s.source == adjusted.span.source)
-                        .map_or((source_text, file_label, &line_table), |i| {
-                            (
-                                extra_sources[i].text,
-                                extra_sources[i].label,
-                                &extra_tables[i],
-                            )
-                        });
-                    let rendered = self.renderer.render(&adjusted, text, label, table);
-                    eprint!("{rendered}");
+                    eprint!("{}", self.renderer.render(&adjusted, sources));
                 }
                 MessageFormat::Json => {
                     #[cfg(feature = "serde")]
@@ -199,6 +214,44 @@ impl Reporter {
         }
         had_error
     }
+}
+
+/// The [`Sources`] behind [`Reporter::emit_run_sources`]: every extra, plus
+/// the entry text under the entry's own `SourceId`.
+///
+/// That id is not a parameter of the old signature, so it is recovered from
+/// the diagnostics: the first span that belongs to neither an extra nor a
+/// sentinel. Registering the entry under a sentinel instead would put a
+/// caret at byte 0 of the entry file for every location-less diagnostic,
+/// which is the failure `Span::MANIFEST_SOURCE` exists to prevent.
+fn run_sources(
+    diagnostics: &[Diagnostic],
+    source_text: &str,
+    file_label: &str,
+    extra_sources: &[RunSource<'_>],
+) -> Sources {
+    let mut sources = Sources::new();
+    for extra in extra_sources {
+        sources.push(extra.source, extra.label, extra.text);
+    }
+    let entry_id = diagnostics
+        .iter()
+        .flat_map(|d| std::iter::once(d.span.source).chain(d.labels.iter().map(|l| l.span.source)))
+        .find(|id| {
+            *id != Span::SYNTHETIC_SOURCE
+                && *id != Span::MANIFEST_SOURCE
+                && !extra_sources.iter().any(|s| s.source == *id)
+        });
+    if let Some(id) = entry_id {
+        sources.push(id, file_label, source_text);
+    } else if diagnostics
+        .iter()
+        .any(|d| d.span.source == Span::MANIFEST_SOURCE)
+    {
+        // Manifest diagnostics: `source_text` *is* the manifest.
+        sources.push(Span::MANIFEST_SOURCE, file_label, source_text);
+    }
+    sources
 }
 
 fn should_color(when: ColorWhen) -> bool {
@@ -224,4 +277,76 @@ fn resolve_code(raw: &str) -> Result<Code, LintLevelError> {
         )
         .map(str::to_string),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SourceMap;
+    use leek_span::SourceId;
+
+    const NO_LINT: LintLevels<'static> = LintLevels {
+        deny: &[],
+        warn: &[],
+        allow: &[],
+    };
+
+    fn reporter() -> Reporter {
+        Reporter::new(ColorWhen::Never, MessageFormat::Human, NO_LINT).unwrap()
+    }
+
+    fn id(n: u32) -> SourceId {
+        SourceId::new(n).unwrap()
+    }
+
+    #[test]
+    fn render_all_points_a_label_at_the_included_file_it_belongs_to() {
+        let entry = "include('inc')\nvar x = 1\n";
+        let include = "var x = 2\n";
+        let sources = Sources::single(id(1), "main.leek", entry).with(id(2), "inc.leek", include);
+        let diag = Diagnostic::error(
+            crate::codes::REDECLARED_SYMBOL,
+            Span::new(id(1), 19, 20),
+            "`x` is already declared",
+        )
+        .with_label(Span::new(id(2), 4, 5), "first declared here");
+        let out = reporter().render_all(&[diag], &sources);
+        assert!(out.contains("--> main.leek:2:5"), "{out}");
+        assert!(out.contains("--> inc.leek:1:5"), "{out}");
+        assert!(out.contains("var x = 2"), "{out}");
+    }
+
+    #[test]
+    fn run_sources_recovers_the_entry_id_without_claiming_a_sentinel() {
+        let diags = [Diagnostic::error(
+            Code("E0200"),
+            Span::new(id(7), 0, 1),
+            "boom",
+        )];
+        let sources = run_sources(&diags, "abc\n", "main.leek", &[]);
+        assert!(sources.get(id(7)).is_some());
+        assert!(sources.get(Span::SYNTHETIC_SOURCE).is_none());
+
+        // Nothing but a synthetic span: the entry is not registered under
+        // the sentinel, so the diagnostic renders no misplaced caret.
+        let diags = [Diagnostic::error(Code("E0200"), Span::synthetic(), "boom")];
+        let sources = run_sources(&diags, "abc\n", "main.leek", &[]);
+        assert!(sources.is_empty());
+        let out = reporter().render_all(&diags, &sources);
+        assert!(!out.contains("-->"), "{out}");
+        assert!(!out.contains("abc"), "{out}");
+    }
+
+    #[test]
+    fn run_sources_registers_the_manifest_under_its_sentinel() {
+        let diags = [Diagnostic::error(
+            Code("E0200"),
+            Span::new(Span::MANIFEST_SOURCE, 0, 4),
+            "bad key",
+        )];
+        let sources = run_sources(&diags, "[lint]\n", "Miku.toml", &[]);
+        assert!(sources.get(Span::MANIFEST_SOURCE).is_some());
+        let out = reporter().render_all(&diags, &sources);
+        assert!(out.contains("--> Miku.toml:1:1"), "{out}");
+    }
 }

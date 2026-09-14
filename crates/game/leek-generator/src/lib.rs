@@ -204,11 +204,10 @@ pub struct AiError {
 
 impl AiError {
     fn new(turn: u32, entity: i64, err: &NativeError) -> Self {
-        let error = match err {
-            // The bare code, like the official log key, not "runtime error: …".
-            NativeError::Runtime(code) => code.clone(),
-            other => other.to_string(),
-        };
+        // The bare code, like the official log key, not "runtime error: …".
+        let error = err
+            .runtime_code()
+            .map_or_else(|| err.to_string(), str::to_string);
         Self {
             turn,
             entity,

@@ -4,7 +4,7 @@ use super::{
     Const, DefId, InstBuilder, LocalId, NativeError, Operand, Rvalue, SetElem, StackSlotData,
     StackSlotKind, Tx, ValTy, Value, class_reflect, coerce_target_ty, program_writes_global,
     resolve_instance_method_value, resolve_static_field, resolve_static_method_value, rvalue_name,
-    types, unsupported,
+    types,
 };
 use crate::ids::{class_id, fn_id};
 
@@ -149,7 +149,7 @@ impl Tx<'_, '_> {
                 let inst = self.b.ins().call(f, &[codev, boxed]);
                 Ok((self.b.inst_results(inst)[0], ValTy::Ref))
             }
-            other => Err(unsupported(format!("rvalue {}", rvalue_name(other)))),
+            other => Err(self.unsupported(format!("rvalue {}", rvalue_name(other)))),
         }
     }
 
@@ -319,10 +319,10 @@ impl Tx<'_, '_> {
                 return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
             }
             // Other class members aren't representable here — skip.
-            return Err(unsupported("class reference member access"));
+            return Err(self.unsupported("class reference member access"));
         }
         if self.var_tys[base.0 as usize] != ValTy::Ref {
-            return Err(unsupported("field of non-object"));
+            return Err(self.unsupported("field of non-object"));
         }
         // `obj.m` where `m` is a method (not a stored field) is a bound-method
         // value. It falls through to `leek_value_index`, which builds the
@@ -555,7 +555,7 @@ impl Tx<'_, '_> {
         bounds: &leek_mir::ir::SliceBounds,
     ) -> Result<(Value, ValTy), NativeError> {
         if self.var_tys[base.0 as usize] != ValTy::Ref {
-            return Err(unsupported("slice of non-composite"));
+            return Err(self.unsupported("slice of non-composite"));
         }
         let f = self.imports.rt("leek_slice")?;
         let (base_h, _) = self.local_value(base)?;
@@ -616,7 +616,7 @@ impl Tx<'_, '_> {
                     return Ok((self.b.ins().iconst(types::I64, ptr), ValTy::Ref));
                 }
             }
-            return Err(unsupported("class reference index (non-static-field)"));
+            return Err(self.unsupported("class reference index (non-static-field)"));
         }
         // Indexing a non-composite (`(5)[0]`) yields null — box the scalar
         // and let the shared `read_index` return null, matching the interp.

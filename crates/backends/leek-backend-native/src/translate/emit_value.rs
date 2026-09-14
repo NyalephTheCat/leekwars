@@ -2,7 +2,7 @@
 
 use super::{
     BinOp, Const, FloatCC, InstBuilder, IntCC, LocalId, NativeError, Operand, StackSlotData,
-    StackSlotKind, Tx, UnOp, ValTy, Value, const_pow_exp, is_const_zero, types, unsupported,
+    StackSlotKind, Tx, UnOp, ValTy, Value, const_pow_exp, is_const_zero, types,
 };
 
 impl Tx<'_, '_> {
@@ -224,7 +224,7 @@ impl Tx<'_, '_> {
             // int↔bool share the i64 repr.
             (ValTy::Int, ValTy::Bool) | (ValTy::Bool, ValTy::Int) => Ok(v),
             (ValTy::Real, ValTy::Int) => Ok(self.b.ins().fcvt_to_sint_sat(types::I64, v)),
-            (ValTy::Real, ValTy::Bool) => Err(unsupported("real → bool coercion")),
+            (ValTy::Real, ValTy::Bool) => Err(self.unsupported("real → bool coercion")),
             _ => Ok(v),
         }
     }
@@ -474,7 +474,7 @@ impl Tx<'_, '_> {
                 let fref = self
                     .imports
                     .pow_real
-                    .ok_or_else(|| unsupported("pow import not declared"))?;
+                    .ok_or_else(|| self.unsupported("pow import not declared"))?;
                 let a = self.coerce(a, lt, ValTy::Real)?;
                 let b = self.coerce(b, rt, ValTy::Real)?;
                 let inst = self.b.ins().call(fref, &[a, b]);
@@ -485,11 +485,11 @@ impl Tx<'_, '_> {
                     let fref = self
                         .imports
                         .pow_int
-                        .ok_or_else(|| unsupported("ipow import not declared"))?;
+                        .ok_or_else(|| self.unsupported("ipow import not declared"))?;
                     let inst = self.b.ins().call(fref, &[a, b]);
                     return Ok((self.b.inst_results(inst)[0], ValTy::Int));
                 }
-                _ => return Err(unsupported("integer ** with non-constant/large exponent")),
+                _ => return Err(self.unsupported("integer ** with non-constant/large exponent")),
             }
         }
 
@@ -525,7 +525,7 @@ impl Tx<'_, '_> {
                 BinOp::Le => return Ok(self.fcmp(FloatCC::LessThanOrEqual, a, b)),
                 BinOp::Gt => return Ok(self.fcmp(FloatCC::GreaterThan, a, b)),
                 BinOp::Ge => return Ok(self.fcmp(FloatCC::GreaterThanOrEqual, a, b)),
-                other => return Err(unsupported(format!("real binary op {other:?}"))),
+                other => return Err(self.unsupported(format!("real binary op {other:?}"))),
             };
             return Ok((v, ty));
         }
@@ -556,7 +556,7 @@ impl Tx<'_, '_> {
             BinOp::Le => return Ok(self.icmp(IntCC::SignedLessThanOrEqual, a, b)),
             BinOp::Gt => return Ok(self.icmp(IntCC::SignedGreaterThan, a, b)),
             BinOp::Ge => return Ok(self.icmp(IntCC::SignedGreaterThanOrEqual, a, b)),
-            other => return Err(unsupported(format!("binary op {other:?}"))),
+            other => return Err(self.unsupported(format!("binary op {other:?}"))),
         };
         Ok((v, ty))
     }
@@ -600,13 +600,13 @@ impl Tx<'_, '_> {
                     let inst = self.b.ins().call(f, &[code_v, v]);
                     return Ok((self.b.inst_results(inst)[0], ValTy::Ref));
                 }
-                _ => return Err(unsupported("unary operator on dynamic (boxed) value")),
+                _ => return Err(self.unsupported("unary operator on dynamic (boxed) value")),
             }
         }
         match op {
             UnOp::Neg if ty == ValTy::Real => Ok((self.b.ins().fneg(v), ValTy::Real)),
             UnOp::Neg => Ok((self.b.ins().ineg(v), ValTy::Int)),
-            UnOp::BitNot if ty == ValTy::Real => Err(unsupported("bitnot on real")),
+            UnOp::BitNot if ty == ValTy::Real => Err(self.unsupported("bitnot on real")),
             UnOp::BitNot => Ok((self.b.ins().bnot(v), ValTy::Int)),
             UnOp::Pos | UnOp::Ref => Ok((v, ty)),
             UnOp::Not => {

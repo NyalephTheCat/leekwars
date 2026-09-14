@@ -9,6 +9,7 @@ use super::{
     Callee, Const, DefId, HashMap, HashSet, LocalId, MirFunction, MirProgram, Operand, Place,
     Rvalue, SetElem, Statement, Terminator,
 };
+use leek_span::Span;
 
 /// The set of `program.functions` indices that are lambda bodies — i.e.
 /// referenced by some `MakeLambda { function_idx }`. A lambda defined
@@ -1092,12 +1093,27 @@ pub(super) fn byref_cells_threadable(
     true
 }
 
+/// Why the whole program is outside the native subset, and where.
+///
+/// `needs_cell_semantics` used to answer `bool`, which made the resulting
+/// error "closure shared-mutation / @-by-reference parameter" with nothing
+/// to point at — on a program of any size, that is not actionable. The
+/// offending declaration is known at the moment the gate trips, so return it.
+pub struct CellGate {
+    /// The `@x` parameter, or the reassignment, that needs cell semantics.
+    pub span: Span,
+    /// Human-readable description of the construct, for the error message.
+    pub what: &'static str,
+    /// The function the construct lives in.
+    pub function: String,
+}
+
 pub fn needs_cell_semantics(
     program: &MirProgram,
     reachable_indices: &[usize],
     lambda_set: &HashSet<usize>,
     version: u8,
-) -> bool {
+) -> Option<CellGate> {
     // A reassigned (or aliased-onward) `@x` by-ref parameter is handled via
     // cross-function `Value::Cell` threading when the program is threadable —
     // in **every** version. v1's deep-clone value semantics are preserved at the
@@ -1165,7 +1181,7 @@ pub fn needs_cell_semantics(
             } else {
                 0
             };
-            if f.params.iter().enumerate().any(|(pi, p)| {
+            if let Some(offender) = f.params.iter().enumerate().find(|&(pi, p)| {
                 let id = *p;
                 if !f.locals[id.0 as usize].is_by_ref {
                     return false;
@@ -1205,7 +1221,12 @@ pub fn needs_cell_semantics(
                 // still gates.
                 byref_param_needs_cell_v1(f, id)
             }) {
-                return true;
+                return Some(CellGate {
+                    span: f.locals[offender.1.0 as usize].span,
+                    what: "a `@` by-reference parameter that is reassigned, \
+                           captured, returned, or passed on",
+                    function: f.name.clone(),
+                });
             }
         }
         // (Formerly: a v1 gate on *any* reassignment of a captured shared local
@@ -1239,15 +1260,23 @@ pub fn needs_cell_semantics(
                 l.is_by_ref && f.params.contains(&id) && !noop.contains(&id) && !cell_threaded
             };
             for b in &f.blocks {
-                for s in &b.statements {
+                for (i, s) in b.statements.iter().enumerate() {
                     if let Statement::Assign(Place::Local(id), _) = s
                         && shares(*id)
                     {
-                        return true;
+                        return Some(CellGate {
+                            span: b
+                                .statement_spans
+                                .get(i)
+                                .copied()
+                                .unwrap_or(f.locals[id.0 as usize].span),
+                            what: "reassigning a `@` by-reference parameter",
+                            function: f.name.clone(),
+                        });
                     }
                 }
             }
         }
     }
-    false
+    None
 }

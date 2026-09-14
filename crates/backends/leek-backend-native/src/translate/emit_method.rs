@@ -3,7 +3,7 @@
 use super::{
     Const, DefId, DefaultArg, HashSet, InstBuilder, LocalId, NativeError, Operand, Tx, ValTy,
     Value, Visibility, builtin_ancestor, coerce_target_ty, const_default, fillable_default,
-    receiver_class, resolve_static_field, resolve_static_method, types, unsupported,
+    receiver_class, resolve_static_field, resolve_static_method, types,
 };
 
 impl Tx<'_, '_> {
@@ -16,7 +16,7 @@ impl Tx<'_, '_> {
         args: &[Operand],
     ) -> Result<(Value, ValTy), NativeError> {
         if self.lang.version < 2 {
-            return Err(unsupported("new (v1-3 value semantics)"));
+            return Err(self.unsupported("new (v1-3 value semantics)"));
         }
         // `new Array`/`new Map`/`new Set`/`new Object`/`new Integer(x)` etc.
         // — a builtin class, constructed via the shared
@@ -33,7 +33,7 @@ impl Tx<'_, '_> {
         // self`), so the resolved class data outlives the builder calls.
         let prog = self.program;
         let Some(c) = prog.class_by_name(class) else {
-            return Err(unsupported("new: unknown class"));
+            return Err(self.unsupported("new: unknown class"));
         };
         // `class A extends Array {}` (or Map/Set/Object) — upstream (and the
         // interpreter's `construct_user_class`) collapses the user class to the
@@ -50,7 +50,7 @@ impl Tx<'_, '_> {
                 let inst = self.b.ins().call(f, &[name, ptr, nc]);
                 return Ok((self.b.inst_results(inst)[0], ValTy::Ref));
             }
-            return Err(unsupported("new: class extends a non-collection builtin"));
+            return Err(self.unsupported("new: class extends a non-collection builtin"));
         }
         // A user `string()` method is a `Display`/`toString` override applied to
         // the *top-level* program result (mirroring the interpreter's
@@ -83,11 +83,11 @@ impl Tx<'_, '_> {
                 }
                 Some(fi) => {
                     let Some((fref, sig)) = self.imports.field_init_fns.get(&fi) else {
-                        return Err(unsupported("field-init not compiled"));
+                        return Err(self.unsupported("field-init not compiled"));
                     };
                     let (fref, sig) = (*fref, sig.clone());
                     if sig.params.len() != 1 {
-                        return Err(unsupported("field-init arity"));
+                        return Err(self.unsupported("field-init arity"));
                     }
                     let call_inst = self.b.ins().call(fref, &[this]);
                     let mut v = self.b.inst_results(call_inst)[0];
@@ -111,14 +111,14 @@ impl Tx<'_, '_> {
             && let Some(def) = prog.functions[ctor_idx].def_id
         {
             let Some((fref, sig)) = self.imports.user_fns.get(&def) else {
-                return Err(unsupported("constructor not compiled"));
+                return Err(self.unsupported("constructor not compiled"));
             };
             let (fref, sig) = (*fref, sig.clone());
             // params = `this` (Ref) + user params. Too many args (variadic)
             // isn't modeled.
             let user_params = sig.params.len() - 1;
             if args.len() > user_params {
-                return Err(unsupported("constructor variadic args"));
+                return Err(self.unsupported("constructor variadic args"));
             }
             let ctor_fn = &prog.functions[ctor_idx];
             if sig.has_defaults {
@@ -126,7 +126,7 @@ impl Tx<'_, '_> {
                 // hidden `argc` (= `this` + provided args).
                 for i in args.len()..user_params {
                     if fillable_default(ctor_fn, ctor_fn.params[i + 1]).is_none() {
-                        return Err(unsupported("constructor: omitted param without default"));
+                        return Err(self.unsupported("constructor: omitted param without default"));
                     }
                 }
                 let mut cl_args = Vec::with_capacity(sig.params.len() + 1);
@@ -157,9 +157,9 @@ impl Tx<'_, '_> {
                     } else if pty == ValTy::Ref {
                         self.operand(&Operand::Const(Const::Null))?
                     } else {
-                        return Err(unsupported(
-                            "constructor: omitted scalar param without default",
-                        ));
+                        return Err(
+                            self.unsupported("constructor: omitted scalar param without default")
+                        );
                     };
                     cl_args.push(self.coerce(v, t, pty)?);
                 }
@@ -312,7 +312,7 @@ impl Tx<'_, '_> {
             // `static_field_accesses` recognizing this call shape.
             if let Some((owner, fld)) = resolve_static_field(self.program, &cls, method) {
                 if !self.method_visible(owner, fld.visibility) {
-                    return Err(unsupported("static field (callable) not visible"));
+                    return Err(self.unsupported("static field (callable) not visible"));
                 }
                 let coerce = coerce_target_ty(&fld.ty);
                 let callee = self.static_field_get(owner, method, coerce)?;
@@ -328,7 +328,7 @@ impl Tx<'_, '_> {
             }
             // Otherwise an instance method used as a free function, etc. —
             // skip rather than miscompile.
-            return Err(unsupported("static method not found on class reference"));
+            return Err(self.unsupported("static method not found on class reference"));
         };
         // An inaccessible static method yields null (matching the interp).
         if let Some(owner) = self.program.functions[idx].owning_class
@@ -344,7 +344,7 @@ impl Tx<'_, '_> {
             return Ok(None);
         };
         if !self.imports.user_fns.contains_key(&def) {
-            return Err(unsupported("static method target not compiled"));
+            return Err(self.unsupported("static method target not compiled"));
         }
         Ok(Some(self.user_call(def, args)?))
     }
@@ -369,19 +369,19 @@ impl Tx<'_, '_> {
             return Ok(None);
         };
         let Some(vt) = prog.resolve_method(c, method, Some(args.len())) else {
-            return Err(unsupported("super method not found"));
+            return Err(self.unsupported("super method not found"));
         };
         // An inaccessible parent method through `super` is ambiguous between
         // the interp's null-dispatch and an actual call — skip rather than
         // risk a wrong result.
         if !self.method_visible(vt.owner, vt.visibility) {
-            return Err(unsupported("super method not visible"));
+            return Err(self.unsupported("super method not visible"));
         }
         let Some(def) = prog.functions[vt.function_idx].def_id else {
             return Ok(None);
         };
         let Some((fref, sig)) = self.imports.user_fns.get(&def) else {
-            return Err(unsupported("super method target not compiled"));
+            return Err(self.unsupported("super method target not compiled"));
         };
         let (fref, sig) = (*fref, sig.clone());
         if args.len() + 1 != sig.params.len() {
@@ -483,7 +483,7 @@ impl Tx<'_, '_> {
         let exact = self.new_classes.contains_key(&receiver);
         if !exact && self.overridden_below(c, method, args.len()) {
             if !matches!(vt.visibility, Visibility::Public) {
-                return Err(unsupported("virtual dispatch (non-public method)"));
+                return Err(self.unsupported("virtual dispatch (non-public method)"));
             }
             let (recv, recv_ty) = self.local_value(receiver)?;
             let recv = self.coerce(recv, recv_ty, ValTy::Ref)?;
@@ -512,7 +512,7 @@ impl Tx<'_, '_> {
             return Ok(None);
         };
         let Some((fref, sig)) = self.imports.user_fns.get(&def) else {
-            return Err(unsupported("method target not compiled"));
+            return Err(self.unsupported("method target not compiled"));
         };
         let (fref, sig) = (*fref, sig.clone());
         // params = `this` (Ref) + user params. Too many args (variadic) →
@@ -615,7 +615,7 @@ impl Tx<'_, '_> {
             && self.classref_locals.contains_key(l)
             && !self.classref_has_thunk(*l)
         {
-            return Err(unsupported("object field holds a class reference"));
+            return Err(self.unsupported("object field holds a class reference"));
         }
         let (callee, ct) = self.field(receiver, field)?;
         let callee = self.coerce(callee, ct, ValTy::Ref)?;

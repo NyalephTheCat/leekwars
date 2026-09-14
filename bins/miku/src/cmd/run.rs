@@ -37,6 +37,11 @@ pub fn run(
     if driver_run.had_error {
         return Ok(ExitCode::from(1));
     }
+    // The same source map the driver rendered the frontend diagnostics
+    // against, reused so a backend failure points at the same files.
+    let entry_label = project.entry_path().display().to_string();
+    let entry_text = std::fs::read_to_string(project.entry_path()).unwrap_or_default();
+    let sources = leek_driver::run_sources(&driver_run.run, &entry_text, &entry_label);
 
     let Some(hir) = driver_run.run.get::<HirArtifact>() else {
         eprintln!("miku: lowering produced no HIR");
@@ -55,8 +60,29 @@ pub fn run(
         }
         Ok(_) => unreachable!("Jit emit yields a Value"),
         Err(e) => {
-            eprintln!("error: {e}");
+            // `error: unsupported: switch on real` told the user nothing about
+            // *where*. Render it as a diagnostic instead: same codes, same
+            // caret, same `-->` header a frontend error gets.
+            report_native_error(&project, &e, &sources, color, format);
             Ok(ExitCode::from(1))
         }
+    }
+}
+
+/// Render a backend failure through the project's reporter, falling back to
+/// the plain one-line form if the reporter can't be built (a broken `[lint]`
+/// table, which `report_manifest` above has already complained about).
+fn report_native_error(
+    project: &Project,
+    err: &leek_backend_native::NativeError,
+    sources: &leek_diagnostics::Sources,
+    color: ColorWhen,
+    format: MessageFormat,
+) {
+    match leek_driver::reporter_for(project, color.into(), format.into()) {
+        Ok(reporter) => {
+            reporter.emit(&err.diagnostics(), sources);
+        }
+        Err(_) => eprintln!("error: {err}"),
     }
 }

@@ -9,7 +9,7 @@
 //! no other test in this crate performs.
 
 use leek_backend_native::ids::fn_id;
-use leek_backend_native::{NativeError, NativeOptions, ops_used, run, run_call};
+use leek_backend_native::{NativeOptions, ops_used, run, run_call};
 use leek_hir::{Def, DefId, HirFile};
 use leek_parser::{ast::AstNode, ast::SourceFile, parse};
 use leek_runtime::{Function, Value};
@@ -158,7 +158,9 @@ fn a_run_that_trips_the_op_budget_does_not_poison_the_next_run() {
     let clean = hir_v4("var x = 1 + 1\nreturn x\n");
 
     match run(&runaway, &opts().with_op_limit(10_000)) {
-        Err(NativeError::Runtime(code)) => assert_eq!(code, "TOO_MUCH_OPERATIONS"),
+        Err(e) if e.runtime_code().is_some() => {
+            assert_eq!(e.reason(), "TOO_MUCH_OPERATIONS");
+        }
         other => panic!("expected an op-budget trip, got {other:?}"),
     }
     assert_eq!(

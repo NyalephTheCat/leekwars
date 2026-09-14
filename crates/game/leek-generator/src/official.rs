@@ -99,7 +99,7 @@ fn harvest_run(
         Ok(_) => ops_used(),
         Err(e) => {
             log_ai_error(&mut state.borrow_mut(), acting, log_fid, e);
-            if matches!(e, NativeError::Runtime(_)) {
+            if e.runtime_code().is_some() {
                 ops_used()
             } else {
                 0
@@ -156,16 +156,16 @@ fn log_ai_error(state: &mut State, acting: usize, log_fid: usize, err: &NativeEr
     let entity_id = i64::try_from(acting).expect("fid fits in i64");
     state.actions.log(Action::AiError { entity_id });
     let null_message = || Some(serde_json::json!([null]));
-    let (key, params) = match err {
-        NativeError::Runtime(code) => match code.as_str() {
-            "TOO_MUCH_OPERATIONS" => (ERROR_TOO_MUCH_OPERATIONS, null_message()),
-            "ARRAY_OUT_OF_BOUND" => (ERROR_ARRAY_OUT_OF_BOUND, null_message()),
-            "STACKOVERFLOW" => (ERROR_STACKOVERFLOW, Some(serde_json::json!([]))),
-            other => (ERROR_AI_INTERRUPTED, Some(serde_json::json!([other]))),
-        },
-        other => (
+    let (key, params) = match err.runtime_code() {
+        Some("TOO_MUCH_OPERATIONS") => (ERROR_TOO_MUCH_OPERATIONS, null_message()),
+        Some("ARRAY_OUT_OF_BOUND") => (ERROR_ARRAY_OUT_OF_BOUND, null_message()),
+        Some("STACKOVERFLOW") => (ERROR_STACKOVERFLOW, Some(serde_json::json!([]))),
+        Some(other) => (ERROR_AI_INTERRUPTED, Some(serde_json::json!([other]))),
+        // Compile / unsupported: the whole `Display` form is the one param,
+        // as it was when this matched on the enum's other variants.
+        None => (
             ERROR_AI_INTERRUPTED,
-            Some(serde_json::json!([other.to_string()])),
+            Some(serde_json::json!([err.to_string()])),
         ),
     };
     state.add_system_log_json(log_fid, LOG_SERROR, key, params);

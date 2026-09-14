@@ -122,7 +122,7 @@ fn run_at(text: &str, version: u8, strict: bool) -> Run {
     }));
     match result {
         Ok(Ok(v)) => Run::Value(v),
-        Ok(Err(leek_backend_native::NativeError::Runtime(m))) => Run::RuntimeError(m),
+        Ok(Err(e)) if e.runtime_code().is_some() => Run::RuntimeError(e.message),
         Ok(Err(_)) => Run::Unsupported,
         Err(payload) => {
             let msg = payload

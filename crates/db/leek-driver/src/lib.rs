@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use leek_diagnostics::{ColorWhen, MessageFormat, Reporter};
+use leek_diagnostics::{ColorWhen, MessageFormat, Reporter, Sources};
 use leek_diagnostics::{LintLevelError, LintLevels};
 use leek_pipeline::{Input, Pipeline, Run, TimingSink};
 use leek_project::{Project, SourceInput};
@@ -62,27 +62,27 @@ pub fn run_with_reporter(
 /// When the pipeline resolved includes, diagnostics raised in included
 /// files render against those files' own text and path.
 pub fn report(run: &Run<'_>, source_text: &str, file_label: &str, reporter: &Reporter) -> bool {
-    match run.get::<leek_resolver::pipeline::IncludeGraphArtifact>() {
-        Some(graph) if !graph.includes.is_empty() => {
-            let labels: Vec<String> = graph
-                .includes
-                .iter()
-                .map(|inc| inc.path.display().to_string())
-                .collect();
-            let sources: Vec<leek_diagnostics::RunSource<'_>> = graph
-                .includes
-                .iter()
-                .zip(&labels)
-                .map(|(inc, label)| leek_diagnostics::RunSource {
-                    source: inc.source,
-                    text: &inc.text,
-                    label,
-                })
-                .collect();
-            reporter.emit_run_sources(run.diagnostics(), source_text, file_label, &sources)
+    let sources = run_sources(run, source_text, file_label);
+    reporter.emit(run.diagnostics(), &sources)
+}
+
+/// Every file `run`'s diagnostics may point into: the entry, under its own
+/// `SourceId` from the run's `Input`, plus each resolved include under the id
+/// the resolver re-parsed it with.
+///
+/// One map for the whole run, so a *label* pointing into an include resolves
+/// the same way a primary span does. Before this, the reporter picked one
+/// file per diagnostic from the primary's span and drew every label against
+/// it, which put a "previously declared here" caret on whatever line of the
+/// entry file happened to share the include's offset.
+pub fn run_sources(run: &Run<'_>, source_text: &str, file_label: &str) -> Sources {
+    let mut sources = Sources::single(run.input().source, file_label, source_text);
+    if let Some(graph) = run.get::<leek_resolver::pipeline::IncludeGraphArtifact>() {
+        for inc in &graph.includes {
+            sources.push(inc.source, inc.path.display().to_string(), inc.text.clone());
         }
-        _ => reporter.emit_run(run.diagnostics(), source_text, file_label),
     }
+    sources
 }
 
 /// The [`Reporter`] for `project`: the manifest's `[lint]` deny/warn/allow
@@ -123,18 +123,30 @@ pub fn report_manifest(project: &Project, color: ColorWhen, format: MessageForma
                 .cloned()
                 .map(leek_diagnostics::IntoDiagnostic::into_diagnostic)
                 .collect();
-            reporter.emit_run(&diagnostics, &project.manifest_text, &label)
+            reporter.emit(&diagnostics, &manifest_sources(project, &label))
         }
         Err(err) => {
             let plain = Reporter::new(color, format, NO_LINT_LEVELS)
                 .expect("the empty lint table resolves no codes");
-            plain.emit_run(
+            plain.emit(
                 &[lint_level_diagnostic(project, &err)],
-                &project.manifest_text,
-                &label,
+                &manifest_sources(project, &label),
             )
         }
     }
+}
+
+/// The manifest's text under [`Span::MANIFEST_SOURCE`](leek_span::Span::MANIFEST_SOURCE).
+///
+/// Named explicitly rather than left to the reporter's entry-file fallback:
+/// the sentinel is what keeps a manifest diagnostic from drawing its caret in
+/// `main.leek`, and a map that resolves it by accident would undo that.
+fn manifest_sources(project: &Project, label: &str) -> Sources {
+    Sources::single(
+        leek_span::Span::MANIFEST_SOURCE,
+        label,
+        project.manifest_text.clone(),
+    )
 }
 
 /// Severity overrides for a manifest whose `[lint]` table can't be trusted.
@@ -359,6 +371,67 @@ mod tests {
             Span::new(SourceId::new(1).unwrap(), 0, 0),
             "synthetic",
         )
+    }
+
+    /// A diagnostic raised inside an included file must render against
+    /// *that* file: its path in the `-->` header and its own line of
+    /// source under the caret. The reporter used to pick one file per
+    /// diagnostic and draw everything — labels included — against it.
+    #[test]
+    fn a_diagnostic_from_an_included_file_renders_against_that_file() {
+        let dir = scratch("include-render");
+        let main_path = dir.join("main.leek");
+        std::fs::write(&main_path, "include(\"inc\")\nvar kept = 1;\n").unwrap();
+        std::fs::write(
+            dir.join("inc.leek"),
+            "var helper = 1;\nvar broken = notDeclaredAnywhere;\n",
+        )
+        .unwrap();
+
+        let project = project_at(dir.clone(), "");
+        let source_id = SourceId::new(1).unwrap();
+        let config = DriverConfig::default();
+        let (src, text) = project.pipeline_input(source_id, &main_path).unwrap();
+        let pipeline = file_pipeline(&project, &main_path, source_id, &config).unwrap();
+        let run = pipeline.run(Input::from(src));
+        let label = main_path.display().to_string();
+
+        let sources = run_sources(&run, &text, &label);
+        let reporter = reporter_for(&project, ColorWhen::Never, MessageFormat::Human).unwrap();
+        let out = reporter.render_all(run.diagnostics(), &sources);
+
+        // Both files are registered, each under its own id, from one map.
+        let at = out
+            .find("inc.leek:2:")
+            .unwrap_or_else(|| panic!("no header pointing into the include:\n{out}"));
+        // The include's snippet block runs until the next file header.
+        let block = out[at..].split("  --> ").next().unwrap();
+        assert!(
+            block.contains("var broken = notDeclaredAnywhere;"),
+            "expected the include's own source line:\n{block}"
+        );
+        assert!(
+            !block.contains("var kept = 1;"),
+            "the entry's line 2 leaked into the include's snippet:\n{block}"
+        );
+        assert!(
+            out.contains("main.leek:2:"),
+            "the entry's own diagnostics still render:\n{out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The manifest's text is registered under the manifest sentinel, not
+    /// under whatever id happens to be first — a `Miku.toml` diagnostic
+    /// must never draw its caret in a `.leek` file.
+    #[test]
+    fn manifest_sources_uses_the_manifest_sentinel() {
+        let project = project("");
+        let sources = manifest_sources(&project, "Miku.toml");
+        assert!(
+            leek_diagnostics::SourceMap::get(&sources, leek_span::Span::MANIFEST_SOURCE).is_some()
+        );
+        assert!(leek_diagnostics::SourceMap::get(&sources, SourceId::new(1).unwrap()).is_none());
     }
 
     #[test]

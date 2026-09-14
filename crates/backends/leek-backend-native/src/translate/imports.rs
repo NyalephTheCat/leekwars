@@ -332,7 +332,7 @@ pub(super) fn declare_imports(
             }
             let id = m
                 .declare_function(sym, Linkage::Import, &sig)
-                .map_err(|e| NativeError::Compile(e.to_string()))?;
+                .map_err(|e| NativeError::compile(e.to_string()))?;
             imports
                 .rt
                 .insert(sym, m.declare_func_in_func(id, builder.func));
@@ -385,7 +385,7 @@ pub(super) fn declare_imports(
         sig.returns.push(AbiParam::new(ret));
         let id = module
             .declare_function(symbol, Linkage::Import, &sig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         Ok(module.declare_func_in_func(id, builder.func))
     };
 
@@ -518,7 +518,7 @@ pub(super) fn declare_imports(
             }
             let id = module
                 .declare_function(sym, Linkage::Import, &sig)
-                .map_err(|e| NativeError::Compile(e.to_string()))?;
+                .map_err(|e| NativeError::compile(e.to_string()))?;
             imports
                 .rt
                 .insert(sym, module.declare_func_in_func(id, builder.func));
@@ -534,7 +534,7 @@ pub(super) fn declare_imports(
         sig.params.push(AbiParam::new(types::I64));
         let id = module
             .declare_function("leek_dbg_safepoint", Linkage::Import, &sig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         imports.rt.insert(
             "leek_dbg_safepoint",
             module.declare_func_in_func(id, builder.func),
@@ -545,7 +545,7 @@ pub(super) fn declare_imports(
         enter_sig.params.push(AbiParam::new(types::I64));
         let enter_id = module
             .declare_function("leek_dbg_enter", Linkage::Import, &enter_sig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         imports.rt.insert(
             "leek_dbg_enter",
             module.declare_func_in_func(enter_id, builder.func),
@@ -555,7 +555,7 @@ pub(super) fn declare_imports(
         let leave_sig = module.make_signature();
         let leave_id = module
             .declare_function("leek_dbg_leave", Linkage::Import, &leave_sig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         imports.rt.insert(
             "leek_dbg_leave",
             module.declare_func_in_func(leave_id, builder.func),
@@ -570,7 +570,7 @@ pub(super) fn declare_imports(
         sig.returns.push(AbiParam::new(types::I64));
         let id = module
             .declare_function("leek_game_builtin", Linkage::Import, &sig)
-            .map_err(|e| NativeError::Compile(e.to_string()))?;
+            .map_err(|e| NativeError::compile(e.to_string()))?;
         imports.rt.insert(
             "leek_game_builtin",
             module.declare_func_in_func(id, builder.func),

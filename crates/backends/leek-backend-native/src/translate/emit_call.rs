@@ -4,7 +4,7 @@ use super::{
     Callee, Const, DefId, DefaultArg, FloatCC, InstBuilder, IntCC, LocalId, MathSig, MirFunction,
     NativeError, Operand, Place, Tx, ValTy, Value, byref_cell_params,
     byref_param_escape_threadable, const_default, const_eval_default, fillable_default,
-    is_dispatchable_builtin, is_generic_builtin, program_writes_global, types, unsupported,
+    is_dispatchable_builtin, is_generic_builtin, program_writes_global, types,
 };
 
 impl Tx<'_, '_> {
@@ -42,7 +42,7 @@ impl Tx<'_, '_> {
             matches!(a, Operand::Local(id)
                 if self.classref_locals.contains_key(id) && !self.classref_has_thunk(*id))
         }) {
-            return Err(unsupported("class reference passed as a call argument"));
+            return Err(self.unsupported("class reference passed as a call argument"));
         }
         let (res, res_ty) = match &call.callee {
             Callee::Builtin(name) => {
@@ -123,19 +123,19 @@ impl Tx<'_, '_> {
                     && let Some(def) = prog.functions[ctor_idx].def_id
                 {
                     let Some((fref, sig)) = self.imports.user_fns.get(&def) else {
-                        return Err(unsupported("super constructor not compiled"));
+                        return Err(self.unsupported("super constructor not compiled"));
                     };
                     let (fref, sig) = (*fref, sig.clone());
                     let user_params = sig.params.len() - 1;
                     if call.args.len() > user_params {
-                        return Err(unsupported("super constructor variadic args"));
+                        return Err(self.unsupported("super constructor variadic args"));
                     }
                     let ctor_fn = &prog.functions[ctor_idx];
                     let (this_v, this_t) = self.local_value(*this)?;
                     if sig.has_defaults {
                         for i in call.args.len()..user_params {
                             if fillable_default(ctor_fn, ctor_fn.params[i + 1]).is_none() {
-                                return Err(unsupported(
+                                return Err(self.unsupported(
                                     "super constructor: omitted param without default",
                                 ));
                             }
@@ -162,7 +162,7 @@ impl Tx<'_, '_> {
                             match const_default(ctor_fn, ctor_fn.params[i + 1]) {
                                 Some(c) => defaults.push(c),
                                 None => {
-                                    return Err(unsupported(
+                                    return Err(self.unsupported(
                                         "super constructor non-constant default arg",
                                     ));
                                 }
@@ -189,7 +189,7 @@ impl Tx<'_, '_> {
             // through the runtime, which invokes a lambda's JIT'd body.
             Callee::Indirect(local) => {
                 if self.var_tys[local.0 as usize] != ValTy::Ref {
-                    return Err(unsupported("indirect call on non-function value"));
+                    return Err(self.unsupported("indirect call on non-function value"));
                 }
                 let (callee, _) = self.local_value(*local)?;
                 // Pass cell-local args raw (as the shared cell handle) so the
@@ -264,7 +264,7 @@ impl Tx<'_, '_> {
             let inst = self.b.ins().call(f, &[name_h, ptr, nc]);
             Ok((self.b.inst_results(inst)[0], ValTy::Ref))
         } else {
-            Err(unsupported(format!("builtin {name}")))
+            Err(self.unsupported(format!("builtin {name}")))
         }
     }
 
@@ -282,7 +282,7 @@ impl Tx<'_, '_> {
             2 => "leek_builtin2",
             3 => "leek_builtin3",
             4 => "leek_builtin4",
-            n => return Err(unsupported(format!("{name}: arity {n} unsupported"))),
+            n => return Err(self.unsupported(format!("{name}: arity {n} unsupported"))),
         };
         let f = self.imports.rt(shim)?;
         let name_h = self.const_string(name)?;
@@ -368,7 +368,7 @@ impl Tx<'_, '_> {
         args: &[Operand],
     ) -> Result<(Value, ValTy), NativeError> {
         let Some((fref, sig)) = self.imports.user_fns.get(&def_id) else {
-            return Err(unsupported("call to unsupported function"));
+            return Err(self.unsupported("call to unsupported function"));
         };
         let fref = *fref;
         let sig = sig.clone();
@@ -393,7 +393,7 @@ impl Tx<'_, '_> {
         // that references earlier params or calls a function must run in the
         // callee's frame — skip those.
         if args.len() > sig.params.len() {
-            return Err(unsupported("user call: variadic arguments"));
+            return Err(self.unsupported("user call: variadic arguments"));
         }
         // `has_defaults`: the callee fills omitted defaulted params itself (via
         // the hidden `argc`). Every omitted param must carry a default (else
@@ -402,10 +402,10 @@ impl Tx<'_, '_> {
             let callee = self
                 .program
                 .function(def_id)
-                .ok_or_else(|| unsupported("user call: missing callee for defaults"))?;
+                .ok_or_else(|| self.unsupported("user call: missing callee for defaults"))?;
             for i in args.len()..sig.params.len() {
                 if fillable_default(callee, callee.params[i]).is_none() {
-                    return Err(unsupported("user call: omitted param without default"));
+                    return Err(self.unsupported("user call: omitted param without default"));
                 }
             }
             let mut cl_args = Vec::with_capacity(sig.params.len() + 1);
@@ -441,11 +441,13 @@ impl Tx<'_, '_> {
             let callee = self
                 .program
                 .function(def_id)
-                .ok_or_else(|| unsupported("user call: missing callee for defaults"))?;
+                .ok_or_else(|| self.unsupported("user call: missing callee for defaults"))?;
             for i in args.len()..sig.params.len() {
                 match self.param_default(callee, callee.params[i]) {
                     Some(d) => defaults.push(d),
-                    None => return Err(unsupported("user call: non-constant default argument")),
+                    None => {
+                        return Err(self.unsupported("user call: non-constant default argument"));
+                    }
                 }
             }
         }
@@ -504,7 +506,7 @@ impl Tx<'_, '_> {
         args: &[Operand],
     ) -> Result<(Value, ValTy), NativeError> {
         let Some(&(fref, sig)) = self.imports.named.get(name) else {
-            return Err(unsupported(format!("builtin {name}")));
+            return Err(self.unsupported(format!("builtin {name}")));
         };
         let arity = match sig {
             MathSig::RealToReal | MathSig::RealToInt => 1,
@@ -562,7 +564,7 @@ impl Tx<'_, '_> {
                 };
             }
             if matches!(args.first(), Some(Operand::Const(Const::Null))) {
-                return Err(unsupported(format!("{name}(null) — real/int result")));
+                return Err(self.unsupported(format!("{name}(null) — real/int result")));
             }
             // Runtime-charged via `charge_builtin_ops` in the shim.
             return self.generic_builtin(name, args);
@@ -594,7 +596,7 @@ impl Tx<'_, '_> {
                 let lt = self.b.ins().uextend(types::I64, lt);
                 Ok((self.b.ins().isub(gt, lt), ValTy::Int))
             }
-            _ => Err(unsupported(format!("builtin {name}"))),
+            _ => Err(self.unsupported(format!("builtin {name}"))),
         }
     }
 
@@ -606,7 +608,7 @@ impl Tx<'_, '_> {
         args: &[Operand],
     ) -> Result<(Value, ValTy), NativeError> {
         if args.len() != 2 {
-            return Err(unsupported("min/max: expected 2 args"));
+            return Err(self.unsupported("min/max: expected 2 args"));
         }
         let (a, at) = self.operand(&args[0])?;
         let (b, bt) = self.operand(&args[1])?;
@@ -652,7 +654,7 @@ impl Tx<'_, '_> {
         let count = self.imports.rt("leek_count")?;
         let (v, t) = match args.first() {
             Some(op) => self.operand(op)?,
-            None => return Err(unsupported("count: missing argument")),
+            None => return Err(self.unsupported("count: missing argument")),
         };
         let h = self.coerce(v, t, ValTy::Ref)?;
         let ver = self
@@ -667,7 +669,7 @@ impl Tx<'_, '_> {
     /// the interpreter.
     pub(super) fn push_call(&mut self, args: &[Operand]) -> Result<(Value, ValTy), NativeError> {
         if args.len() != 2 {
-            return Err(unsupported("push: expected 2 args"));
+            return Err(self.unsupported("push: expected 2 args"));
         }
         // Catalog cost (`push` → 2), as the Java emitter charges statically;
         // the shim adds the legacy per-insert cost on top for v1-3.
@@ -676,7 +678,7 @@ impl Tx<'_, '_> {
         let null = self.imports.rt("leek_box_null")?;
         let (arr, at) = self.operand(&args[0])?;
         if at != ValTy::Ref {
-            return Err(unsupported("push to non-array"));
+            return Err(self.unsupported("push to non-array"));
         }
         let (e, et) = self.operand(&args[1])?;
         let mut elem = self.coerce(e, et, ValTy::Ref)?;
