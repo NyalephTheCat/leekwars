@@ -1,0 +1,9 @@
+// Groups that end exactly on the default 100-column limit. What comes
+// after the group on the same line -- the `;`, the `) {` -- is what
+// overflows it, so each of these has to break one step earlier (#199).
+var summary = combineValues(alpha_one, beta_two, gamma_three, delta_four, epsilon_fives, zeta_sixes);
+// One column shorter, so the `;` still lands inside the limit: stays flat.
+var ok = combineValues(alpha_one, beta_two, gamma_three, delta_four, epsilon_fives, zeta_sixes);
+if (alpha_one && beta_two && gamma_three && delta_four && epsilon_five && zeta_sixteen && eta_sevens) {
+    debug(summary);
+}
