@@ -270,3 +270,163 @@ fn diamond_include_dedupes_main_splice() {
     // (via b's main after b's own include of a is deduped).
     assert_eq!(names, ["shared", "bonus"]);
 }
+
+// ---- include order == execution order (#118, #339) ----
+
+/// The `(name, init)` pairs of the merged main block's `var` declarations.
+fn main_var_decls(hir: &leek_hir::HirFile) -> Vec<(String, Option<ExprKind>)> {
+    hir.main
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::VarDecl(v) => Some((v.name.clone(), v.init.as_ref().map(|e| e.kind.clone()))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `DefId` of the merged main block's `var` named `name`.
+fn main_var_def(hir: &leek_hir::HirFile, name: &str) -> leek_hir::DefId {
+    hir.main
+        .iter()
+        .find_map(|s| match s {
+            Stmt::VarDecl(v) if v.name == name => Some(v.def),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no main-block `var {name}`"))
+}
+
+fn init_of(hir: &leek_hir::HirFile, name: &str) -> ExprKind {
+    main_var_decls(hir)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .and_then(|(_, init)| init)
+        .unwrap_or_else(|| panic!("no initializer for `{name}`"))
+}
+
+#[test]
+fn included_file_sees_includer_var_declared_above_include_site() {
+    // Textual splicing makes this `var cfg = 3; var got = cfg;`. The
+    // lowerer used to run every included main block *before* the entry's,
+    // so `cfg` was not in scope yet and `got`'s initializer resolved to
+    // `NameRef::Builtin("cfg")` — a name-keyed global read that never
+    // reaches the entry's main-block local. That is a miscompile, not a
+    // benign fallback.
+    let c = compile(
+        "/main.leek",
+        &[
+            ("/main.leek", "var cfg = 3\ninclude(\"a\")\n"),
+            ("/a.leek", "var got = cfg\n"),
+        ],
+    );
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    let cfg = main_var_def(&c.hir, "cfg");
+    assert_eq!(
+        init_of(&c.hir, "got"),
+        ExprKind::Name(leek_hir::NameRef::Local(cfg)),
+        "included file must see the includer's local declared above the site",
+    );
+}
+
+#[test]
+fn entry_does_not_see_included_var_before_include_site() {
+    // The reverse leak: an included file's top-level `var` used to be
+    // declared into the shared scope before *any* entry statement was
+    // lowered, so an entry statement above the include site resolved it.
+    let c = compile(
+        "/main.leek",
+        &[
+            ("/main.leek", "var early = late\ninclude(\"a\")\n"),
+            ("/a.leek", "var late = 1\n"),
+        ],
+    );
+    assert!(
+        !matches!(
+            init_of(&c.hir, "early"),
+            ExprKind::Name(leek_hir::NameRef::Local(_))
+        ),
+        "entry statement above the include site must not see the included local",
+    );
+}
+
+#[test]
+fn include_site_order_drives_declaration_order() {
+    // Declaration order used to follow the include graph's topological
+    // order (a before b, because b includes a), while run-time order
+    // followed the include sites (b's own statements, then a's). Under
+    // textual splicing the program is `var x = 1; var y = x;`.
+    let c = compile(
+        "/main.leek",
+        &[
+            ("/main.leek", "include(\"b\")\n"),
+            ("/b.leek", "var x = 1\ninclude(\"a\")\n"),
+            ("/a.leek", "var y = x\n"),
+        ],
+    );
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    let names: Vec<String> = main_var_decls(&c.hir).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["x", "y"], "declaration order follows include sites");
+    let x = main_var_def(&c.hir, "x");
+    assert_eq!(
+        init_of(&c.hir, "y"),
+        ExprKind::Name(leek_hir::NameRef::Local(x)),
+        "a sibling include must see the local declared before its include site",
+    );
+}
+
+#[test]
+fn same_file_included_from_two_sites_runs_once() {
+    // Logical-merge dedupe: the second site contributes nothing, and the
+    // body lands at the *first* site.
+    let c = compile(
+        "/main.leek",
+        &[
+            (
+                "/main.leek",
+                "include(\"a\")\nvar mid = 2\ninclude(\"a\")\n",
+            ),
+            ("/a.leek", "var shared = 1\n"),
+        ],
+    );
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    let names: Vec<String> = main_var_decls(&c.hir).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["shared", "mid"]);
+}
+
+#[test]
+fn included_main_block_with_control_flow_splices_in_order() {
+    // A whole main block — not just declarations — lands at the include
+    // site, in source order, with no `Stmt::Include` left behind.
+    let c = compile(
+        "/main.leek",
+        &[
+            (
+                "/main.leek",
+                "var before = 0\ninclude(\"a\")\nvar after = 9\n",
+            ),
+            (
+                "/a.leek",
+                "var n = 0\nif (true) { n = 1 }\nfor (var i = 0; i < 2; i++) { n = n + i }\n",
+            ),
+        ],
+    );
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    assert!(
+        !c.hir.main.iter().any(|s| matches!(s, Stmt::Include(_))),
+        "an include site survived lowering: {:?}",
+        c.hir.main
+    );
+    let shape: Vec<&'static str> = c
+        .hir
+        .main
+        .iter()
+        .map(|s| match s {
+            Stmt::VarDecl(_) => "var",
+            Stmt::If(_) => "if",
+            Stmt::For(_) => "for",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(shape, ["var", "var", "if", "for", "var"]);
+    let names: Vec<String> = main_var_decls(&c.hir).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["before", "n", "after"]);
+}

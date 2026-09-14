@@ -160,13 +160,18 @@ pub struct LowerUnit<'a> {
 /// Each unit is lowered at its **own** version (string-escape rules and
 /// other version-dependent lowering follow the file, not a v4 default).
 ///
-/// Semantics (per `doc/pipeline.md` §5.1.3):
-/// - Top-level declarations from every file are visible everywhere
-///   (forward-declared in include-graph order).
-/// - Each `Stmt::Include("name")` at run-time evaluates the included
-///   file's main-block statements at that position. Two includes of
-///   the same file are de-duplicated by the include graph itself, so
-///   the splicer sees each main block at most once.
+/// Semantics — `include` is *inline expansion*, matching upstream's
+/// textual splicing:
+/// - Top-level declarations (functions, classes, enums, `global`s) from
+///   every file are visible everywhere, forward-declared in include-graph
+///   order before anything is lowered.
+/// - Main-block statements are lowered in **execution order**: the entry's
+///   children in source order, and an `include("name")` site expands into
+///   the included file's main-block statements right there, in the scope
+///   that is live at the site. An included file therefore sees the locals
+///   its includer declared above the site, and only those (#118, #339).
+/// - A file expands at most once, at the first site that reaches it, so a
+///   diamond import doesn't double the body.
 ///
 /// The single returned `HirFile` is what every downstream consumer
 /// (resolver, type-checker, MIR, codegen) sees — no consumer needs
@@ -208,11 +213,54 @@ pub fn lower_files(
         lo.predeclare_globals(unit.ast);
     }
 
-    // Pass 2: lower function/class bodies for every file in the
-    // same order. Header functions are bodiless, so header units
-    // contribute nothing here.
+    // Arm include expansion for passes 2 and 3. Without a graph
+    // (`resolved_includes == None`, the prelude path) the lowerer keeps
+    // emitting `Stmt::Include` exactly as the single-file entries do.
+    lo.include_ctx = resolved_includes.map(|resolved| IncludeCtx {
+        resolved: resolved.clone(),
+        units: units
+            .iter()
+            .map(|u| {
+                (
+                    u.path.to_path_buf(),
+                    IncludeUnit {
+                        root: u.ast.syntax().clone(),
+                        source: u.source,
+                        version: u.version,
+                        text: u.ast.syntax().text().to_string(),
+                    },
+                )
+            })
+            .collect(),
+        // The entry is "already expanded" from the start: a cycle edge
+        // back to it (the include graph inserts the edge before it
+        // detects the cycle) must not re-enter the entry's main block.
+        already: std::iter::once(entry.path.to_path_buf()).collect(),
+        stack: vec![entry.path.to_path_buf()],
+    });
+
+    // Pass 2: lower the entry's main block in source order, expanding
+    // every `include(...)` site inline as it is reached. This runs
+    // *before* function bodies so a top-level include wins the
+    // first-site race against an include nested in a body — the
+    // precedence the splicer used to get from running the main walk
+    // first.
+    lo.enter_unit(&entry);
+    let mut main = Vec::new();
+    lo.lower_main_children(entry.ast.syntax(), &mut main);
+    lo.out.main = main;
+
+    // Pass 3: lower function/class bodies for every file. Header
+    // functions are bodiless, so header units contribute nothing here.
+    // Bodies open a function scope, so they never see main-block locals
+    // regardless of the order the two passes run in.
     for unit in &units {
         lo.enter_unit(unit);
+        if let Some(ctx) = lo.include_ctx.as_mut() {
+            // Include sites inside this unit's bodies resolve relative
+            // to this unit.
+            ctx.stack = vec![unit.path.to_path_buf()];
+        }
         for child in unit.ast.syntax().children() {
             if let Some(fn_decl) = ast::FnDecl::cast(child.clone()) {
                 lo.lower_function_body(&fn_decl);
@@ -222,192 +270,37 @@ pub fn lower_files(
         }
     }
 
-    // Pass 3: lower the main block of every file some `include` resolves
-    // to into a path-keyed map (header units are never included, so they
-    // contribute no main block). `Stmt::Include` sites are spliced by
-    // `splice_includes` once the per-file maps are complete.
-    let mut per_file_main: BTreeMap<PathBuf, Vec<Stmt>> = BTreeMap::new();
-    if let Some(resolved) = resolved_includes {
-        let included: BTreeSet<&Path> = resolved.values().map(PathBuf::as_path).collect();
-        for unit in includes.iter().filter(|u| included.contains(u.path)) {
-            lo.enter_unit(unit);
-            let mut main_stmts = Vec::new();
-            lo.lower_main_block(unit.ast, &mut main_stmts);
-            per_file_main.insert(unit.path.to_path_buf(), main_stmts);
-        }
-    }
-    lo.enter_unit(&entry);
-    let mut entry_main = Vec::new();
-    lo.lower_main_block(entry.ast, &mut entry_main);
-
-    // Splice. Walk the entry's main; each `Stmt::Include("name")`
-    // becomes the included file's already-lowered main statements
-    // (which themselves may have been spliced). Cycle detection
-    // happens at the include-graph layer; here we just dedupe by
-    // path so a diamond import doesn't double the body.
-    lo.out.main = match resolved_includes {
-        Some(resolved) => {
-            let mut already = BTreeSet::new();
-            let spliced = splice_includes(
-                entry_main,
-                entry.path,
-                &per_file_main,
-                resolved,
-                &mut already,
-            );
-            // Definition bodies were lowered in pass 2, before the
-            // per-file main blocks existed, so their include sites are
-            // spliced here rather than in the walk above.
-            let unit_paths: BTreeMap<SourceId, PathBuf> = units
-                .iter()
-                .map(|u| (u.source, u.path.to_path_buf()))
-                .collect();
-            splice_includes_in_defs(
-                &mut lo.out.defs,
-                &unit_paths,
-                &per_file_main,
-                resolved,
-                &mut already,
-            );
-            spliced
-        }
-        None => entry_main,
-    };
-
     (lo.out, lo.diagnostics)
 }
 
-fn splice_includes(
-    stmts: Vec<Stmt>,
-    current_path: &Path,
-    per_file_main: &BTreeMap<PathBuf, Vec<Stmt>>,
-    resolved: &BTreeMap<(PathBuf, String), PathBuf>,
-    already: &mut BTreeSet<PathBuf>,
-) -> Vec<Stmt> {
-    let mut out = Vec::with_capacity(stmts.len());
-    for stmt in stmts {
-        match stmt {
-            Stmt::Include(inc) => {
-                let included_path = resolved
-                    .get(&(current_path.to_path_buf(), inc.path.clone()))
-                    .cloned();
-                let Some(p) = included_path else {
-                    // Unresolved include — drop it. The diagnostic
-                    // was already emitted by the include-graph
-                    // builder.
-                    continue;
-                };
-                if !already.insert(p.clone()) {
-                    // Diamond: file already merged once. Logical-
-                    // merge semantics deduplicate.
-                    continue;
-                }
-                let Some(body) = per_file_main.get(&p).cloned() else {
-                    continue;
-                };
-                let spliced = splice_includes(body, &p, per_file_main, resolved, already);
-                out.extend(spliced);
-            }
-            mut other => {
-                splice_nested_includes(&mut other, current_path, per_file_main, resolved, already);
-                out.push(other);
-            }
-        }
-    }
-    out
+/// One file of a multi-file lowering, in the owned form [`IncludeCtx`]
+/// keeps: rowan nodes are reference-counted, so cloning the root out of a
+/// [`LowerUnit`] costs a refcount bump and frees the lowerer from the
+/// unit slice's lifetime.
+struct IncludeUnit {
+    /// The file's `SourceFile` syntax node.
+    root: SyntaxNode,
+    source: SourceId,
+    version: Version,
+    /// Full source text, for [`Lowerer::source_text`].
+    text: String,
 }
 
-/// Splice the `include(...)` sites nested *inside* `s`.
-///
-/// `include` is an ordinary statement in the grammar, so it parses inside a
-/// block, a branch, a loop body, or a switch arm. Walking only the entry's
-/// flat top-level list left those sites as `Stmt::Include` while the
-/// include graph merged the file's definitions anyway — the backend then
-/// emitted both the definitions and an `include("…")` referring to a file
-/// that was supposed to have been inlined, and the included file's own
-/// main-block statements were dropped on the floor.
-///
-/// Statement lists are spliced in place. A body that holds a *single*
-/// boxed statement (`if (c) include("x");`, an unbraced loop body) has no
-/// list to splice into, so the include expands to a `Stmt::Block`: an
-/// include's main block is usually more than one statement, and leaving it
-/// unbraced would put only the first under the branch. Nothing leaks out of
-/// that block that did not already stay in: every unit's main block is
-/// lowered in its own scope, so an included file's `var` is a local of that
-/// file either way.
-fn splice_nested_includes(
-    s: &mut Stmt,
-    current_path: &Path,
-    per_file_main: &BTreeMap<PathBuf, Vec<Stmt>>,
-    resolved: &BTreeMap<(PathBuf, String), PathBuf>,
-    already: &mut BTreeSet<PathBuf>,
-) {
-    match s {
-        Stmt::Block(b) => {
-            let stmts = std::mem::take(&mut b.stmts);
-            b.stmts = splice_includes(stmts, current_path, per_file_main, resolved, already);
-        }
-        Stmt::Switch(sw) => {
-            for arm in &mut sw.arms {
-                let body = std::mem::take(&mut arm.body);
-                arm.body = splice_includes(body, current_path, per_file_main, resolved, already);
-            }
-        }
-        // Everything else that carries statements carries them boxed, one
-        // apiece; `Stmt::Block` and `Stmt::Switch` are already handled, so
-        // this walk never revisits a list.
-        other => crate::visit::walk_stmt_child_stmts_mut(other, &mut |child| {
-            if matches!(child, Stmt::Include(_)) {
-                let span = child.span();
-                let taken = std::mem::replace(
-                    child,
-                    Stmt::Block(Block {
-                        stmts: Vec::new(),
-                        span,
-                    }),
-                );
-                let stmts =
-                    splice_includes(vec![taken], current_path, per_file_main, resolved, already);
-                *child = Stmt::Block(Block { stmts, span });
-            } else {
-                splice_nested_includes(child, current_path, per_file_main, resolved, already);
-            }
-        }),
-    }
-}
-
-/// Splice the `include(...)` sites inside emitted function, method, and
-/// constructor bodies, which pass 2 lowered before `per_file_main` existed.
-///
-/// `already` is the set the main-block splice filled: a file whose body has
-/// already run at top level merges to nothing here, the same rule a diamond
-/// import follows.
-fn splice_includes_in_defs(
-    defs: &mut [Def],
-    unit_paths: &BTreeMap<SourceId, PathBuf>,
-    per_file_main: &BTreeMap<PathBuf, Vec<Stmt>>,
-    resolved: &BTreeMap<(PathBuf, String), PathBuf>,
-    already: &mut BTreeSet<PathBuf>,
-) {
-    for def in defs {
-        let Some(path) = unit_paths.get(&def.span().source).cloned() else {
-            continue;
-        };
-        let bodies: Vec<&mut Block> = match def {
-            Def::Function(f) => f.body.iter_mut().collect(),
-            Def::Class(c) => c
-                .methods
-                .iter_mut()
-                .chain(&mut c.constructors)
-                .filter_map(|m| m.body.as_mut())
-                .collect(),
-            Def::Global(_) | Def::Local(_) => Vec::new(),
-        };
-        for body in bodies {
-            let stmts = std::mem::take(&mut body.stmts);
-            body.stmts = splice_includes(stmts, &path, per_file_main, resolved, already);
-        }
-    }
+/// Everything [`Lowerer`] needs to expand an `include("name")` site into
+/// the included file's main-block statements while it lowers.
+pub(crate) struct IncludeCtx {
+    /// `(includer_canonical, include_name)` → included canonical path,
+    /// from `leek_resolver::include_graph::build_include_graph`.
+    resolved: BTreeMap<(PathBuf, String), PathBuf>,
+    /// Every unit of the lowering, keyed by canonical path.
+    units: BTreeMap<PathBuf, IncludeUnit>,
+    /// Files whose main block has already been expanded. A second site
+    /// reaching one of these expands to nothing (the diamond rule), and
+    /// it is what stops an include cycle from recursing forever.
+    already: BTreeSet<PathBuf>,
+    /// Include stack; the back is the file currently being lowered, which
+    /// is the key `resolved` lookups use.
+    stack: Vec<PathBuf>,
 }
 
 pub(crate) struct Lowerer {
@@ -444,6 +337,10 @@ pub(crate) struct Lowerer {
     /// constructor bodies so bare references to field names can
     /// rewrite to `this.field`.
     pub(crate) class_ctx: Vec<ClassCtx>,
+    /// Include graph for a multi-file lowering. `Some` makes every
+    /// `include(...)` statement expand inline at its site; `None` (the
+    /// single-file and prelude entries) keeps it as a `Stmt::Include`.
+    pub(crate) include_ctx: Option<IncludeCtx>,
 }
 
 #[derive(Default)]
@@ -490,6 +387,7 @@ impl Lowerer {
             boundaries: vec![true],
             file_decls: HashMap::new(),
             class_ctx: Vec::new(),
+            include_ctx: None,
         }
     }
 
@@ -532,10 +430,14 @@ impl Lowerer {
         self.source_text = unit.ast.syntax().text().to_string();
     }
 
-    /// Lower `file`'s top-level main-block statements (everything but
-    /// function and class declarations) into `out`.
-    fn lower_main_block(&mut self, file: &ast::SourceFile, out: &mut Vec<Stmt>) {
-        for child in file.syntax().children() {
+    /// Lower the top-level main-block statements of the `SourceFile` node
+    /// `root` (everything but function and class declarations) into `out`.
+    ///
+    /// With an [`IncludeCtx`] armed, an `include(...)` among those children
+    /// expands here, so `out` ends up holding the included file's
+    /// statements at the site rather than a `Stmt::Include`.
+    fn lower_main_children(&mut self, root: &SyntaxNode, out: &mut Vec<Stmt>) {
+        for child in root.children() {
             if ast::FnDecl::cast(child.clone()).is_some()
                 || ast::ClassDecl::cast(child.clone()).is_some()
             {
@@ -544,6 +446,57 @@ impl Lowerer {
             if let Some(stmt) = AstStmt::cast(child) {
                 self.lower_stmt_flat(&stmt, out);
             }
+        }
+    }
+
+    /// Expand one `include("name")` site: append the included file's
+    /// main-block statements to `out`, lowered right here so they see
+    /// exactly the scope the site sees.
+    ///
+    /// Appends nothing when there is no include graph, when the name
+    /// didn't resolve (the include-graph builder already reported that),
+    /// or when the file has been expanded at an earlier site.
+    pub(crate) fn expand_include(&mut self, name: &str, out: &mut Vec<Stmt>) {
+        let Some(ctx) = self.include_ctx.as_mut() else {
+            return;
+        };
+        let Some(current) = ctx.stack.last().cloned() else {
+            return;
+        };
+        let Some(path) = ctx.resolved.get(&(current, name.to_string())).cloned() else {
+            return;
+        };
+        if !ctx.already.insert(path.clone()) {
+            return;
+        }
+        let Some(unit) = ctx.units.get(&path) else {
+            return;
+        };
+        let (root, source, version, text) = (
+            unit.root.clone(),
+            unit.source,
+            unit.version,
+            unit.text.clone(),
+        );
+        ctx.stack.push(path);
+
+        // Spans, version-dependent lowering and doc comments follow the
+        // included file while its statements interleave with ours.
+        let saved = (
+            self.source,
+            self.version,
+            std::mem::take(&mut self.source_text),
+        );
+        self.source = source;
+        self.version = version;
+        self.source_text = text;
+        self.lower_main_children(&root, out);
+        self.source = saved.0;
+        self.version = saved.1;
+        self.source_text = saved.2;
+
+        if let Some(ctx) = self.include_ctx.as_mut() {
+            ctx.stack.pop();
         }
     }
 

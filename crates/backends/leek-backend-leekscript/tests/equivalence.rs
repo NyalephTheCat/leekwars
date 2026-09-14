@@ -570,6 +570,10 @@ fn switch_arms() {
         "var x = 1; var r = 0; switch (x) { case 1: r = r + 1; case 2: r = r + 10; break; default: r = 100; } return r;",
     );
     check("var x = 7; var r = 0; switch (x) { case 1: r = 1; break; default: r = -1; } return r;");
+    // A switch arm is a statement *list*, so a multi-declarator `var`
+    // contributes one declaration apiece. Arms used to be lowered one
+    // statement at a time, which kept only the first declarator.
+    check("var x = 1; switch (x) { case 1: var a = 1, b = 2; return a + b; } return 0;");
 }
 
 #[test]
@@ -812,5 +816,51 @@ fn include_inside_a_function_body_is_spliced() {
     );
     assert_eq!(out.matches("function helper(").count(), 1, "{out}");
     assert_eq!(jit(&hir), "42");
+    check_hir(&hir, "");
+}
+
+#[test]
+fn included_file_reads_includer_local() {
+    // `include` is textual splicing, so this is `var cfg = 3; var got =
+    // cfg; return got;`. Every included main block used to be lowered
+    // before the entry's, so `cfg` wasn't in scope and `got`'s read became
+    // a by-name global lookup that never finds the entry's main-block
+    // local — the program returned null (#118).
+    let hir = lower_project(
+        "/main.leek",
+        &[
+            ("/main.leek", "var cfg = 3;\ninclude(\"a\")\nreturn got;\n"),
+            ("/a.leek", "var got = cfg;\n"),
+        ],
+        FeatureFlags::none(),
+    );
+    assert_eq!(
+        jit(&hir),
+        "3",
+        "included file lost sight of the includer's local"
+    );
+    check_hir(&hir, "");
+}
+
+#[test]
+fn nested_include_reads_sibling_local() {
+    // Declaration order used to come from the include graph's topological
+    // order (a, then b) while run-time order came from the include sites
+    // (b's `var x`, then a's body). Textual splicing gives `var x = 1; var
+    // y = x; return y;` (#339).
+    let hir = lower_project(
+        "/main.leek",
+        &[
+            ("/main.leek", "include(\"b\")\nreturn y;\n"),
+            ("/b.leek", "var x = 1;\ninclude(\"a\")\n"),
+            ("/a.leek", "var y = x;\n"),
+        ],
+        FeatureFlags::none(),
+    );
+    assert_eq!(
+        jit(&hir),
+        "1",
+        "sibling include lost sight of the local above its site"
+    );
     check_hir(&hir, "");
 }
