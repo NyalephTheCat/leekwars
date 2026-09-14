@@ -16,7 +16,9 @@ use crate::ir::{
 /// references (vs the `∞` symbol which leaves the formatting alone).
 pub(crate) fn expr_forces_real(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Name(NameRef::Builtin(n)) => n == "Infinity" || n == "INFINITY",
+        ExprKind::Name(NameRef::Builtin(n) | NameRef::Unresolved(n)) => {
+            n == "Infinity" || n == "INFINITY"
+        }
         ExprKind::Unary(_, inner) => expr_forces_real(inner),
         _ => false,
     }

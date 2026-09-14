@@ -406,6 +406,34 @@ fn o1_never_folds_a_global_a_body_writes() {
     }
 }
 
+/// `instanceof`'s right operand resolves to a `global` of that name (#53).
+/// Two things must hold at both O0 and O1: the operand reads the global's
+/// real value, and the O1 const-global propagation never folds a literal into
+/// that type position (`x instanceof 1` is not something a backend models).
+#[test]
+fn instanceof_against_a_global_agrees_at_o0_and_o1() {
+    for (src, want) in [
+        (
+            "class A {} global G = A var x = new A() return x instanceof G",
+            "true",
+        ),
+        (
+            "class A {} function f() { global G = A } f() var x = new A() return x instanceof G",
+            "true",
+        ),
+        // A literal-initialized global is a fold candidate on every other
+        // rule — only the `instanceof` use stops it.
+        ("global G = 1 var x = 1 return x instanceof G", "false"),
+        (
+            "var x = 1 var b = x instanceof G global G = 1 return [b, G]",
+            "[false, 1]",
+        ),
+    ] {
+        assert_eq!(jit(src), want, "O0: {src}");
+        assert_eq!(jit_o1(src), want, "O1: {src}");
+    }
+}
+
 #[test]
 fn strings() {
     // Literal (top-level strings render quoted, like the interpreter).

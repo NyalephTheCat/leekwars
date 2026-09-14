@@ -24,15 +24,18 @@ use crate::visit::{
     walk_stmt_child_stmts_mut,
 };
 
-/// Replace every `Name(Builtin(name))` whose `name` is a key in `values`
-/// with the corresponding literal, throughout `hir` (function bodies,
-/// class members + field inits, globals, and the main block). Returns the
-/// number of substitutions made.
+/// Replace every `Name(Builtin(name) | Unresolved(name))` whose `name` is a
+/// key in `values` with the corresponding literal, throughout `hir` (function
+/// bodies, class members + field inits, globals, and the main block). Returns
+/// the number of substitutions made.
 ///
-/// Only `NameRef::Builtin` is folded: those are the unresolved
-/// builtin/constant identifiers (a registered environment constant lowers
-/// to one). Locals, globals, functions, and classes are real bindings and
-/// are left untouched.
+/// Only the two name-keyed tags are folded: those are the identifiers no
+/// binding claims (a registered environment constant lowers to one). Locals,
+/// globals, functions, and classes are real bindings and are left untouched.
+///
+/// Both tags must match. Which of the two a fight constant gets depends on
+/// whether the `leekwars` library was registered before lowering ran, so
+/// `values` — not the tag — is the authority on what is a constant.
 pub fn fold_constants(hir: &mut HirFile, values: &HashMap<String, Literal>) -> usize {
     if values.is_empty() {
         return 0;
@@ -72,7 +75,8 @@ pub fn fold_constants(hir: &mut HirFile, values: &HashMap<String, Literal>) -> u
 }
 
 /// In-place constant-folding visitor. The only node it rewrites is a
-/// `Name(Builtin(name))` whose `name` is in `values`; everything else is
+/// `Name(Builtin(name) | Unresolved(name))` whose `name` is in `values`;
+/// everything else is
 /// left for the framework to recurse into. Substituting a literal prunes
 /// recursion (a literal has no children) via [`Flow::Skip`].
 struct ConstFolder<'a> {
@@ -82,7 +86,7 @@ struct ConstFolder<'a> {
 
 impl VisitMut<Expr> for ConstFolder<'_> {
     fn visit_mut(&mut self, e: &mut Expr) -> Flow {
-        if let ExprKind::Name(NameRef::Builtin(name)) = &e.kind
+        if let ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &e.kind
             && let Some(lit) = self.values.get(name)
         {
             e.kind = ExprKind::Literal(lit.clone());
@@ -241,11 +245,14 @@ impl ExprFolder {
                 _ => None,
             },
             // A call to a pure, cross-backend-deterministic builtin on constant
-            // arguments (`abs(-5)` → `5`). `NameRef::Builtin` means the resolver
-            // confirmed the stdlib function (a user redefinition resolves to
-            // `Function` instead), so this is safe.
+            // arguments (`abs(-5)` → `5`). Neither tag is a user binding (a
+            // user redefinition resolves to `Function` instead), and the fold
+            // table is keyed by name, so matching both is safe — an
+            // `Unresolved` name simply never hits an entry.
             ExprKind::Call(c) => match &c.callee {
-                Callee::Function(NameRef::Builtin(name)) => fold_builtin_call(name, &c.args),
+                Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) => {
+                    fold_builtin_call(name, &c.args)
+                }
                 _ => None,
             },
             _ => None,
@@ -858,9 +865,10 @@ fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
 ///   `main` statement whose initializer is a type-matched literal (so a
 ///   coercing slot like `global real G = 5` is left alone);
 /// - it is never assigned, incremented/decremented, `@`-referenced, passed as
-///   a call argument, or bound by a bare foreach anywhere — including inside
-///   lambda bodies (globals are accessed directly, not captured, so a lambda
-///   that only *reads* one is fine; one that *writes* it disqualifies);
+///   a call argument, used as an `instanceof` operand, or bound by a bare
+///   foreach anywhere — including inside lambda bodies (globals are accessed
+///   directly, not captured, so a lambda that only *reads* one is fine; one
+///   that *writes* it disqualifies);
 /// - its initializer provably runs before every read: `main` doesn't read it
 ///   before the initializing statement, and — when a function, method or
 ///   field initializer reads it — nothing before that statement can call into
@@ -868,13 +876,16 @@ fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
 ///   field initializer (run before `main`) disqualifies outright;
 /// - its name is never used as a [`NameRef::Builtin`] / [`NameRef::Unresolved`].
 ///
-/// The last rule is belt and braces. HIR now pre-declares every file-level
-/// `global` before it lowers any body (see `Lowerer::predeclare_globals`), so
-/// a use above its declaration resolves to `Global` and the `DefId` checks
-/// see it. The name rule stays until `Builtin` means a *real* builtin and
-/// everything else is `Unresolved` (#53): today a genuinely unresolved name
-/// is still tagged `Builtin`, and MIR keys such a write to a name-matched
-/// global. It only costs precision.
+/// The last rule is belt and braces, and is kept deliberately. Both of its
+/// preconditions for removal now hold: HIR pre-declares every file-level
+/// `global` before it lowers any body (`Lowerer::predeclare_globals`), so a
+/// use above its declaration resolves to `Global`; and `Builtin` now means a
+/// *real* builtin, with every other unclaimed name tagged `Unresolved`, so
+/// neither tag can name a candidate global — `resolve_class_or_builtin` was
+/// the last construction site that bypassed `file_decls`, and it no longer
+/// does. Deleting the rule is its own change (#53), kept out of the change
+/// that split the tags so that split stays observably inert. The rule costs
+/// only precision. The before-initializer ordering rule stays either way.
 pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
     // 1. Candidate globals from their top-level initializers in `main`, with
     //    the index of the initializing statement. A global declared more than
@@ -1013,6 +1024,17 @@ fn analyze_global_expr(e: &Expr, disq: &mut HashSet<DefId>) {
                 if let ExprKind::Name(NameRef::Global(d)) = &arg.kind {
                     disq.insert(*d);
                 }
+            }
+        }
+        // `x instanceof G` — the RHS is a *type* position, not a value one.
+        // Substituting the global's literal there produces `x instanceof 1`,
+        // which no backend models (the native one raises "unsupported: binary
+        // op Instanceof"). Before `resolve_class_or_builtin` learned about
+        // globals this could not arise, because the operand lowered to a
+        // by-name reference and the name rule disqualified it (#53).
+        ExprKind::Binary(BinaryOp::Instanceof, _, rhs) => {
+            if let ExprKind::Name(NameRef::Global(d)) = &rhs.kind {
+                disq.insert(*d);
             }
         }
         _ => {}
@@ -1299,7 +1321,11 @@ fn is_trivial_arg(e: &Expr) -> bool {
         &e.kind,
         ExprKind::Literal(_)
             | ExprKind::Name(
-                NameRef::Local(_) | NameRef::Global(_) | NameRef::This | NameRef::Builtin(_)
+                NameRef::Local(_)
+                    | NameRef::Global(_)
+                    | NameRef::This
+                    | NameRef::Builtin(_)
+                    | NameRef::Unresolved(_)
             )
     )
 }
@@ -1753,6 +1779,28 @@ mod tests {
     #[test]
     fn global_redeclared_in_lambda_body_is_not_propagated() {
         let mut hir = lower("global G = 1\nvar f = function() { global G = 2 }\nf()\nvar y = G\n");
+        assert_eq!(propagate_const_globals(&mut hir), 0);
+    }
+
+    #[test]
+    fn global_used_as_an_instanceof_operand_is_not_propagated() {
+        // `instanceof`'s RHS goes through `resolve_class_or_builtin`, which
+        // used to tag *every* non-class name `Builtin` — so the use reached
+        // the global only by name and the name rule disqualified it. It now
+        // resolves to `NameRef::Global`, so the `DefId` rules have to carry
+        // it: folding `G` into a type position yields `x instanceof 1`,
+        // which no backend models.
+        let mut hir = lower("global G = 1\nvar x = 1\nvar b = x instanceof G\nvar y = G\n");
+        let mut reads_global = false;
+        for_each_file_expr(&hir, &mut |e| {
+            if let ExprKind::Binary(BinaryOp::Instanceof, _, rhs) = &e.kind {
+                reads_global |= matches!(rhs.kind, ExprKind::Name(NameRef::Global(_)));
+            }
+        });
+        assert!(
+            reads_global,
+            "the `instanceof` operand must resolve to the global"
+        );
         assert_eq!(propagate_const_globals(&mut hir), 0);
     }
 

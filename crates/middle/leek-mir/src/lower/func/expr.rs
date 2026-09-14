@@ -37,7 +37,10 @@ impl FnLowerer<'_> {
                 // except on a builtin class reference (`Real.MIN_VALUE`),
                 // which the reference folds to a bare `getField(...)` with
                 // no ops wrapper.
-                if !matches!(&base.kind, ExprKind::Name(NameRef::Builtin(_))) {
+                if !matches!(
+                    &base.kind,
+                    ExprKind::Name(NameRef::Builtin(_) | NameRef::Unresolved(_))
+                ) {
                     self.push_stmt(Statement::Charge(1));
                 }
                 let base_local = self.lower_expr_to_local(base);
@@ -323,7 +326,12 @@ impl FnLowerer<'_> {
                 ));
                 Operand::Local(t)
             }
-            NameRef::Builtin(name) => {
+            // A name no binding claims, whether or not it really is a
+            // builtin. `BuiltinRef`'s unknown-name path reads the name-keyed
+            // global store and falls back to null (see the native backend's
+            // `leek_global_get` arm), which is what an unresolved name has
+            // always done here.
+            NameRef::Builtin(name) | NameRef::Unresolved(name) => {
                 let t = self.fresh_temp(ty.clone(), span);
                 self.push_stmt(Statement::Assign(
                     Place::Local(t),
@@ -371,14 +379,6 @@ impl FnLowerer<'_> {
                 ),
                 None => Operand::Const(Const::Null),
             },
-            NameRef::Unresolved(_) => {
-                let t = self.fresh_temp(ty.clone(), span);
-                self.push_stmt(Statement::Assign(
-                    Place::Local(t),
-                    Rvalue::Use(Operand::Const(Const::Null)),
-                ));
-                Operand::Local(t)
-            }
         }
     }
 
@@ -794,13 +794,15 @@ impl FnLowerer<'_> {
                 Place::Global(*def, name)
             }
             // Assignments to a builtin / function / class name
-            // (`abs = 2`) shadow the stdlib binding with a
-            // name-keyed global. The interpreter's name-keyed
-            // global store does the right thing on read too —
-            // `BuiltinRef` / `FunctionRef` / `ClassRef` check
-            // it first before falling back to the canonical
-            // stdlib value.
-            ExprKind::Name(NameRef::Builtin(name)) => Place::Global(DefId(0), name.clone()),
+            // (`abs = 2`), or to a name nothing declares (`zzz = 5`),
+            // shadow the stdlib binding with a name-keyed global.
+            // The interpreter's name-keyed global store does the
+            // right thing on read too — `BuiltinRef` / `FunctionRef`
+            // / `ClassRef` check it first before falling back to the
+            // canonical stdlib value.
+            ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) => {
+                Place::Global(DefId(0), name.clone())
+            }
             ExprKind::Name(NameRef::Function(def)) => {
                 let name = self
                     .hir
@@ -824,7 +826,10 @@ impl FnLowerer<'_> {
                 // Field access in l-value position keeps its 1-op static
                 // charge (`LeekObjectAccess.analyze` — the LHS expression's
                 // cost is part of the assignment's ops wrapper upstream).
-                if !matches!(&base.kind, ExprKind::Name(NameRef::Builtin(_))) {
+                if !matches!(
+                    &base.kind,
+                    ExprKind::Name(NameRef::Builtin(_) | NameRef::Unresolved(_))
+                ) {
                     self.push_stmt(Statement::Charge(1));
                 }
                 let base_local = self.lower_expr_to_local(base);
@@ -987,7 +992,10 @@ impl FnLowerer<'_> {
         let callee = match &call.callee {
             HirCallee::Function(name) => match name {
                 NameRef::Function(def) => Callee::Function(*def),
-                NameRef::Builtin(n) => Callee::Builtin(n.clone()),
+                // Both name-keyed tags dispatch by name; an unresolved
+                // callee keeps its name so the backends can emit the same
+                // by-name call (and the same diagnostic) they always did.
+                NameRef::Builtin(n) | NameRef::Unresolved(n) => Callee::Builtin(n.clone()),
                 NameRef::Local(def) => match self.local_map.get(def).copied() {
                     Some(id) => Callee::Indirect(id),
                     None => Callee::Builtin("?".into()),
@@ -1056,7 +1064,6 @@ impl FnLowerer<'_> {
                     ));
                     return Operand::Local(t);
                 }
-                NameRef::Unresolved(_) => Callee::Builtin("?".into()),
                 NameRef::Global(_) => {
                     // Calling a global value: read it, then call it
                     // indirectly.
@@ -1086,7 +1093,10 @@ impl FnLowerer<'_> {
                 // own lowering, leaving the flat 1 here). Builtin-class
                 // receivers (`Integer.parse(...)`) are exempt, like the
                 // `Field` arm.
-                if !matches!(&receiver.kind, ExprKind::Name(NameRef::Builtin(_))) {
+                if !matches!(
+                    &receiver.kind,
+                    ExprKind::Name(NameRef::Builtin(_) | NameRef::Unresolved(_))
+                ) {
                     self.push_stmt(Statement::Charge(1));
                 }
                 let recv = self.lower_expr_to_local(receiver);

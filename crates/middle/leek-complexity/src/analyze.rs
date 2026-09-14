@@ -514,7 +514,10 @@ impl Walker<'_> {
     fn call_cost(&self, c: &leek_hir::Call) -> CostExpr {
         let args_c = CostExpr::sum(c.args.iter().map(|a| self.walk_expr(a)).collect());
         match &c.callee {
-            Callee::Function(NameRef::Builtin(name)) => {
+            // Both name-keyed tags: the cost tables are keyed by name, and
+            // whether a library builtin lowers to `Builtin` or `Unresolved`
+            // depends on whether its library was registered before lowering.
+            Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) => {
                 let growth = self.builtin_growth(name, &c.args);
                 CostExpr::sum(vec![
                     CostExpr::Const(native::base_cost(name)),
