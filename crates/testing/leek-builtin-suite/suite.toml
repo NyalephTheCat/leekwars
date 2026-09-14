@@ -187,6 +187,58 @@ version = 4
 source = "return trim('  padded  ')"
 expect = { equals = '"padded"' }
 
+# --- `trim` and `number` follow their upstream methods (#335). ---
+
+[[tests]]
+id = "trim_uses_the_java_space_rule"
+builtin = "trim"
+version = 4
+# `StringClass.trim` is `string.trim()`, and `java.lang.String.trim()` strips
+# only characters `<= U+0020`. The ASCII spaces go; the two no-break spaces
+# (U+00A0) stay, where Rust's `str::trim` would have eaten all four. Measured
+# through `length` so the expectation holds no invisible characters.
+source = "return [length(trim('  x  ')), length(trim('\u00A0x\u00A0'))]"
+expect = { equals = "[1, 3]" }
+
+[[tests]]
+id = "number_of_a_boolean_is_zero"
+builtin = "number"
+version = 4
+# A `Boolean` is neither `instanceof Number` nor `instanceof String`, so
+# `ValueClass.number` falls through to its trailing `return 0l;`. `true` is
+# *not* 1.
+source = "return [number(true), number(false)]"
+expect = { equals = "[0, 0]" }
+
+[[tests]]
+id = "number_of_a_string_branches_on_the_dot"
+builtin = "number"
+version = 4
+# `ValueClass.number` reaches `Double.parseDouble` only when the string
+# contains a `.`; otherwise it is `Long.parseLong`, which rejects an
+# exponent. So `number('1e5')` is 0 — upstream-correct, not a gap.
+source = "return [number('12'), number('12.55'), number('1e5')]"
+expect = { equals = "[12, 12.55, 0]" }
+
+[[tests]]
+id = "number_of_an_unparsable_decimal_is_integer_zero"
+builtin = "number"
+version = 4
+# The dotted branch throws, and the `catch` falls to `return 0l;` — a
+# `long`. A real zero would display as `0.0`, so this row pins the type.
+source = "return number('1.5x')"
+expect = { equals = "0" }
+
+[[tests]]
+id = "number_of_a_big_integer_returns_it"
+builtin = "number"
+version = 4
+# `BigIntegerValue extends Number`, so the first `instanceof Number` test
+# hands it straight back. 2^63 is one past `i64::MAX`, so this answer can
+# only have come back as the big integer it went in as.
+source = "return number(9223372036854775808L)"
+expect = { equals = "9223372036854775808" }
+
 [[tests]]
 id = "map_iter_visits_every_entry"
 builtin = "mapIter"

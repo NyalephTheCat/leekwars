@@ -136,8 +136,14 @@ pub(crate) fn dispatch_string(name: &str, args: &[Value]) -> Option<Value> {
             (Value::String(s), Value::String(p)) => Value::Bool(s.ends_with(p.as_str())),
             _ => return None,
         },
+        // `trim(s)` — `StringClass.trim` is `return string.trim();`, so the
+        // method to match is `java.lang.String.trim()`, which strips only
+        // characters `<= U+0020`. Rust's `str::trim` strips every Unicode
+        // whitespace character instead, so it also ate a no-break space that
+        // upstream keeps: `trim("\u{00A0}x")` is `"\u{00A0}x"` upstream and
+        // was `"x"` here. `jstr::java_trim` is the narrow Java rule.
         ("trim", 1) => match &args[0] {
-            Value::String(s) => Value::String(Rc::new(s.trim().to_string())),
+            Value::String(s) => Value::String(Rc::new(crate::jstr::java_trim(s).to_string())),
             _ => return None,
         },
         ("repeat" | "stringRepeat", 2) => {
