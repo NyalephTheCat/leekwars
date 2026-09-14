@@ -478,6 +478,9 @@ fn square_mask(radius: i32) -> Vec<(i32, i32)> {
 /// `0.49999999999999994 + 0.5 == 1.0` but `Math.round` returns 0). Rust's
 /// `f64::round` is half-away-from-zero, which disagrees on negative ties.
 #[must_use]
+// This function *is* `Math.round`: `(int) Math.floor(a + 0.5)`, whose
+// narrowing is the semantics under test (see the JDK-8010430 case in
+// the tests below).
 #[allow(clippy::cast_possible_truncation)]
 pub fn java_round(a: f64) -> i32 {
     let floor = a.floor();
@@ -693,6 +696,9 @@ impl State {
                     return_entities.push(caster);
                 }
                 EffectType::Propagation => {
+                    // `(f64 …) as i32` is the reference engine's `(int)` cast on a computed
+                    // effect value — truncation toward zero is the behaviour being ported, not
+                    // an accident.
                     #[allow(clippy::cast_possible_truncation)]
                     {
                         propagate = params.value1 as i32;
@@ -732,6 +738,8 @@ impl State {
                         }
                         effect_targets.push((fid, aoe));
                     }
+                    // A target count — at most every entity in the fight — as the `int`
+                    // the effect-value formula multiplies by.
                     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                     let target_count = if multiplied {
                         effect_targets.len() as i32
@@ -931,6 +939,9 @@ impl State {
     /// `Effect.applyStartTurn(state)` — the per-turn tick of an active
     /// effect, run at its *target's* turn start (poison damages, heal-over-
     /// time heals; the default is a no-op).
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_wrap)]
     pub fn apply_start_turn_effect(&mut self, ei: usize) {
         match self.effects[ei].effect {
@@ -1078,6 +1089,12 @@ impl State {
     /// `Effect.createEffect(...)` — build one effect instance, run the
     /// remove-previous / apply / stack-merge / store pipeline. Returns the
     /// effect's computed `value`.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
+    // `(f64 …) as i32` is the reference engine's `(int)` cast on a computed
+    // effect value — truncation toward zero is the behaviour being ported, not
+    // an accident.
     #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     fn create_effect(
         &mut self,
@@ -1292,6 +1309,9 @@ impl State {
             // (NOT Math.round), no stat scaling, ×targetCount; reduce the
             // target's effects, then log `[306, fid, value]`.
             EffectType::Debuff => {
+                // `(f64 …) as i32` is the reference engine's `(int)` cast on a computed
+                // effect value — truncation toward zero is the behaviour being ported, not
+                // an accident.
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     inst.value = ((params.value1 + jet * params.value2)
@@ -1327,6 +1347,9 @@ impl State {
             // effect (the state set is rebuilt from live effects, so expiry/
             // removal drops it).
             EffectType::AddState => {
+                // `(f64 …) as i32` is the reference engine's `(int)` cast on a computed
+                // effect value — truncation toward zero is the behaviour being ported, not
+                // an accident.
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     inst.value = params.value1 as i32;
@@ -1555,6 +1578,9 @@ impl State {
             // `(int)` cast, ×targetCount) but reduces EVERY effect, even
             // IRREDUCTIBLE ones.
             EffectType::TotalDebuff => {
+                // `(f64 …) as i32` is the reference engine's `(int)` cast on a computed
+                // effect value — truncation toward zero is the behaviour being ported, not
+                // an accident.
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     inst.value = ((params.value1 + jet * params.value2)
@@ -1609,6 +1635,9 @@ impl State {
             // then life tops up to keep the ratio with NO heal action
             // (`addLife` is statistics-only there).
             EffectType::MultiplyStats => {
+                // `(f64 …) as i32` is the reference engine's `(int)` cast on a computed
+                // effect value — truncation toward zero is the behaviour being ported, not
+                // an accident.
                 #[allow(clippy::cast_possible_truncation)]
                 let factor = params.value1 as i32;
                 if factor > 1 {
@@ -1761,6 +1790,9 @@ impl State {
     /// `ActionHeal` (Java logs even a 0 heal) and add the life. `turns != 0`
     /// only computes the per-turn value here — the healing ticks in
     /// [`State::apply_start_turn_effect`].
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_wrap)]
     fn apply_effect_heal(
         &mut self,
@@ -1801,6 +1833,9 @@ impl State {
     /// (even 0), bumps `totalLife` (a plain field in Java — the increase is
     /// PERMANENT, expiry never reverts it since the stored effect carries no
     /// stats) and heals by the same amount.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_wrap)]
     fn apply_effect_vitality(
         &mut self,
@@ -1831,6 +1866,9 @@ impl State {
     /// Same shield/clamp/erosion/return tail as `EffectDamage`, except: the
     /// INVINCIBLE zero happens BEFORE the return damage is computed (so an
     /// invincible target reflects nothing), and there is NO life steal.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     fn apply_effect_life_damage(
         &mut self,
@@ -1902,6 +1940,9 @@ impl State {
     /// `EffectDamage.apply(state)` — the full direct-damage pipeline:
     /// strength/power scaling, shields, life clamp, erosion, life steal
     /// (wisdom), and damage return.
+    // `fid as i64` / `cell as i32` for an action-log record: a fid is an index
+    // into `fighters` (a fight holds tens of entities, not billions) and a cell
+    // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
     fn apply_effect_damage(
         &mut self,

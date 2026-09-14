@@ -28,6 +28,8 @@ pub const DEFAULT_FREQUENCY: i64 = 100;
 /// fighters; every team must be non-empty. Returns entity ids in play order,
 /// consuming exactly `teams.len()` `getDouble()` draws like the reference.
 #[must_use]
+// A frequency stat as `f64`: small enough that the widening is exact,
+// and the reference does the same division in `double`.
 #[allow(clippy::cast_precision_loss)]
 pub fn compute_start_order(teams: &[Vec<(i64, i64)>], rng: &mut OfficialRng) -> Vec<i64> {
     // Sort entities inside each team on their frequency (descending; Rust's

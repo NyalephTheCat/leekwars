@@ -375,6 +375,9 @@ impl GameHost for Fight {
             e.absolute_shield + e.effect_sum(EffectKind::AbsoluteShield)
         })
     }
+    // The standard 53-bit construction: `(x >> 11) as f64` keeps only the
+    // 53 bits an `f64` mantissa holds exactly, and `1 << 53` is exact too,
+    // so no precision is lost despite the lint's name.
     #[allow(clippy::cast_precision_loss)]
     fn roll_jet(&mut self) -> f64 {
         // xorshift64, then the top 53 bits to a double in [0, 1).

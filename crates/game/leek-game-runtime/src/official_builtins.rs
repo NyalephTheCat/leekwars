@@ -22,7 +22,19 @@ use crate::state::{
 /// Dispatch one official fight function for the entity `current` (the fid
 /// the running AI controls — `ai.getEntity()`).
 #[must_use]
-// Cell/coordinate args truncate through `(int)` in Java — `as i32` mirrors it.
+// Cell and coordinate arguments arrive as LeekScript `i64` and are narrowed
+// with `as i32`, which is Java's `(int)` cast: the low 32 bits, sign-extended.
+// That is deliberate and observable — `getCellX(-9223372036854775808)` narrows
+// to 0 and answers about cell 0, it does not answer `null` — so the narrowing
+// must stay a truncation and not become a `try_from`. Every such site below is
+// followed by a range check (`Map::get_cell`, `Map::get_cell_xy`,
+// `resolve_entity`) that decides what an out-of-board value means, and those
+// are what turn a genuinely off-board id into the game's sentinel.
+//
+// `cast_possible_wrap` covers the other direction: `usize` fids and cell
+// indices going back out as `i64`/`i32`. Those are bounded by construction —
+// a fid is `< fighters.len()` (at most a few dozen) and a cell index is
+// `< 613` — so no value that exists can wrap.
 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
 pub fn call_official_builtin(
     state: &mut State,
@@ -73,10 +85,24 @@ pub fn call_official_builtin(
         // ---- FieldClass ----
         // The AI-visible x axis is shifted: `getCellFromXY(x, y)` looks up
         // `(x + width - 1, y)` and `getCellX` shifts back.
-        "getCellFromXY" => state
-            .map
-            .get_cell_xy(int_arg(0) as i32 + state.map.width - 1, int_arg(1) as i32)
-            .map_or(Value::Null, |c| Value::Int(c as i64)),
+        "getCellFromXY" => {
+            // `wrapping_add`, not `+`: Java computes `(int) x + width - 1` in
+            // `int`, which wraps. Rust's `+` panics on overflow in any build
+            // with overflow checks on — every debug and test build — so
+            // `getCellFromXY(2147483647, 0)` used to abort the fight there
+            // while quietly wrapping in release. Wrapping is both the
+            // faithful port and the same answer either way: a sum that far
+            // out misses the coordinate table and yields `null`.
+            let x = (int_arg(0) as i32).wrapping_add(state.map.width - 1);
+            state
+                .map
+                .get_cell_xy(x, int_arg(1) as i32)
+                .map_or(Value::Null, |c| Value::Int(c as i64))
+        }
+        // These three narrow and then hand the result straight to
+        // `Map::get_cell`, whose `id < 0 || id as usize >= nb_cells` check
+        // (map.rs) is what decides the answer. No arithmetic happens on the
+        // narrowed value first, so there is nothing left to overflow.
         "getCellX" => state
             .map
             .get_cell(int_arg(0) as i32)
@@ -590,4 +616,230 @@ fn use_weapon(state: &mut State, current: usize, leek_id: i64) -> i64 {
         return -1;
     };
     i64::from(state.use_weapon(current, target_cell))
+}
+
+#[cfg(test)]
+mod tests {
+    use leek_runtime::Value;
+
+    use super::call_official_builtin;
+    use crate::state::{Fighter, STAT_LIFE, STAT_MP, STAT_TP, State, Stats};
+
+    /// Every extreme an AI can hand a builtin. LeekScript integers are `i64`,
+    /// and `Value::to_long` produces any of these from an `Int`, from a
+    /// `BigInt`'s low 64 bits, or from a parsed `String` — so every one of
+    /// them is reachable from ordinary AI code.
+    const EXTREMES: &[i64] = &[
+        i64::MIN,
+        -2_147_483_649, // i32::MIN - 1
+        -2_147_483_648, // i32::MIN
+        -613,
+        -1,
+        0,
+        1,
+        612, // the last cell
+        613, // one past the board
+        2_147_483_630,
+        2_147_483_647, // i32::MAX — `getCellFromXY` used to overflow here
+        2_147_483_648, // i32::MAX + 1
+        4_294_967_296, // truncates to 0 in i32
+        i64::MAX,
+    ];
+
+    /// One living leek on a mid-board cell, enough for the field and
+    /// movement builtins to have something to answer about.
+    fn one_leek() -> State {
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, 100);
+        stats.set(STAT_TP, 10);
+        stats.set(STAT_MP, 5);
+        let mut state = State::new(42);
+        let fid = state.add_entity(0, Fighter::new(0, 1, "test".into(), 0, stats));
+        state.place_entity(fid, 306);
+        state
+    }
+
+    /// `Value` has no `PartialEq` (an `Array` compares by identity, not by
+    /// contents); `identity_eq` is the comparison these scalars want.
+    #[track_caller]
+    fn assert_value(got: &Value, want: &Value, what: &str) {
+        assert!(
+            got.identity_eq(want),
+            "{what}: expected {want:?}, got {got:?}"
+        );
+    }
+
+    /// No argument an AI can write may panic a builtin.
+    ///
+    /// This is the regression test for the `getCellFromXY` overflow:
+    /// `getCellFromXY(2147483647, 0)` computed `(int) x + width - 1` in
+    /// `i32` and overflowed, which aborts the whole fight in any build with
+    /// overflow checks on — every debug and test build, since the workspace
+    /// sets no `[profile]` overrides. In release it wrapped instead, so the
+    /// two builds disagreed about the same fight.
+    #[test]
+    fn extreme_arguments_never_panic_a_builtin() {
+        const NAMES: &[&str] = &[
+            "getCellFromXY",
+            "getCellX",
+            "getCellY",
+            "isObstacle",
+            "getCell",
+            "moveToward",
+            "moveTowardCell",
+            "useChip",
+            "useChipOnCell",
+            "useWeapon",
+            "setWeapon",
+            "summon",
+            "getCellToUseChip",
+            "isStatic",
+        ];
+        for name in NAMES {
+            for &a in EXTREMES {
+                for &b in EXTREMES {
+                    let mut state = one_leek();
+                    // The assertion is "this returns at all".
+                    let _ =
+                        call_official_builtin(&mut state, 0, name, &[Value::Int(a), Value::Int(b)]);
+                }
+            }
+        }
+    }
+
+    /// The exact call that aborted the fight, kept on its own so a
+    /// regression names itself.
+    #[test]
+    fn get_cell_from_xy_survives_an_i32_max_coordinate() {
+        let mut state = one_leek();
+        for x in [2_147_483_647_i64, 2_147_483_630] {
+            let got = call_official_builtin(
+                &mut state,
+                0,
+                "getCellFromXY",
+                &[Value::Int(x), Value::Int(0)],
+            );
+            // The sum wraps to somewhere near `i32::MIN`, which cannot be in
+            // the coordinate table, so the lookup misses and the AI sees
+            // `null` — what the reference answers for an off-board
+            // coordinate, and what release builds already did.
+            assert_value(&got, &Value::Null, &format!("getCellFromXY({x}, 0)"));
+        }
+        // `i64::MAX` narrows to -1, and -1 + 17 = 16 *is* on the board, so
+        // this one aliases rather than missing — the same `(int)` narrowing
+        // documented on `call_official_builtin`.
+        let aliased = call_official_builtin(
+            &mut state,
+            0,
+            "getCellFromXY",
+            &[Value::Int(i64::MAX), Value::Int(0)],
+        );
+        let direct = call_official_builtin(
+            &mut state,
+            0,
+            "getCellFromXY",
+            &[Value::Int(-1), Value::Int(0)],
+        );
+        assert_value(&aliased, &direct, "i64::MAX must answer exactly as -1 does");
+    }
+
+    /// In-range coordinates still round-trip through the shifted x axis.
+    #[test]
+    fn get_cell_from_xy_round_trips_in_range() {
+        let mut state = one_leek();
+        let cell = call_official_builtin(
+            &mut state,
+            0,
+            "getCellFromXY",
+            &[Value::Int(0), Value::Int(0)],
+        );
+        let Value::Int(id) = cell else {
+            panic!("(0, 0) is on the board, got {cell:?}");
+        };
+        let x = call_official_builtin(&mut state, 0, "getCellX", &[Value::Int(id)]);
+        let y = call_official_builtin(&mut state, 0, "getCellY", &[Value::Int(id)]);
+        assert_value(&x, &Value::Int(0), "getCellX of the (0,0) cell");
+        assert_value(&y, &Value::Int(0), "getCellY of the (0,0) cell");
+    }
+
+    /// An off-board cell id that still fits in an `int` answers the
+    /// sentinel: `Map::get_cell` range-checks, and these three only narrow
+    /// in front of it.
+    #[test]
+    fn off_board_cell_ids_answer_the_sentinel() {
+        let mut state = one_leek();
+        for id in [-1_i64, 613, 10_000, 2_147_483_647, -2_147_483_648] {
+            for name in ["getCellX", "getCellY"] {
+                let got = call_official_builtin(&mut state, 0, name, &[Value::Int(id)]);
+                assert_value(&got, &Value::Null, &format!("{name}({id})"));
+            }
+            // A cell that does not exist counts as an obstacle.
+            let got = call_official_builtin(&mut state, 0, "isObstacle", &[Value::Int(id)]);
+            assert_value(&got, &Value::Bool(true), &format!("isObstacle({id})"));
+        }
+    }
+
+    /// A cell id outside `int` aliases onto a real cell, on purpose.
+    ///
+    /// The narrowing is Java's `(int)` cast — low 32 bits, sign-extended —
+    /// and it happens *before* the range check, so `getCellX(i64::MIN)`
+    /// narrows to 0 and answers about cell 0 rather than answering `null`.
+    /// That is the reference engine's behaviour, not an oversight, and this
+    /// crate is a bit-exact port of it; the test is here so the choice is on
+    /// the record and an accidental change to `try_from` fails loudly rather
+    /// than silently moving fight outcomes.
+    #[test]
+    fn cell_ids_outside_int_alias_through_the_java_narrowing() {
+        let mut state = one_leek();
+        // i64::MIN narrows to 0 → cell 0, whose AI-visible x is `0 - 18 + 1`.
+        let got = call_official_builtin(&mut state, 0, "getCellX", &[Value::Int(i64::MIN)]);
+        assert_value(&got, &Value::Int(-17), "getCellX(i64::MIN) aliases cell 0");
+        // 2^32 + 5 narrows to 5.
+        let aliased =
+            call_official_builtin(&mut state, 0, "getCellY", &[Value::Int(4_294_967_296 + 5)]);
+        let direct = call_official_builtin(&mut state, 0, "getCellY", &[Value::Int(5)]);
+        assert_value(&aliased, &direct, "2^32 + 5 must answer exactly as 5 does");
+    }
+
+    /// A movement budget narrows the same way, and the same caveat applies.
+    ///
+    /// `pm_to_use as i32` truncates before the `pm > mp` clamp, so
+    /// `moveToward(e, 4294967296)` spends no MP at all and
+    /// `moveToward(e, 4294967297)` takes exactly one step. Saturating
+    /// instead would read better — "a budget bigger than my MP means all of
+    /// it" — but it is a different answer from the reference engine's
+    /// `(int)` cast, and this crate is a bit-exact port whose consumers
+    /// (`leek-generator`, `leek-scenario`) compare fight transcripts. Pinned
+    /// here so the trade-off is visible and deliberate.
+    #[test]
+    fn a_movement_budget_narrows_like_a_java_int_cast() {
+        let cases = [
+            (-1_i64, 5),        // the documented "all my MP"
+            (5, 5),             // exactly my MP
+            (2, 2),             // less than my MP
+            (4_294_967_296, 0), // narrows to 0 → no movement
+            (4_294_967_297, 1), // narrows to 1 → one step
+            (i64::MIN, 0),      // narrows to 0
+            (-2, 0),            // a negative budget never moves
+        ];
+        for (budget, want) in cases {
+            let mut state = one_leek();
+            let moved = call_official_builtin(
+                &mut state,
+                0,
+                "moveTowardCell",
+                &[Value::Int(FAR_CELL), Value::Int(budget)],
+            );
+            assert_value(
+                &moved,
+                &Value::Int(want),
+                &format!("moveTowardCell({FAR_CELL}, {budget})"),
+            );
+        }
+    }
+
+    /// The board's first cell — a corner, far more than 5 MP from
+    /// `one_leek`'s mid-board start, so the budget always runs out before
+    /// the path does and "how much MP did it spend" is the answer under test.
+    const FAR_CELL: i64 = 0;
 }

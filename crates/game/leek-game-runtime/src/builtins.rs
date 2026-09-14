@@ -589,6 +589,9 @@ const EROSION_CRITICAL_BONUS: f64 = 0.10;
 /// Returns the effect's applied value (damage dealt, points buffed, …);
 /// `use_effects` sums it across targets so the next effect in the item's list
 /// can consume it as `previous_total` (upstream `previousEffectTotalValue`).
+// Effect values: the target count widens to `f64` exactly (it is at
+// most the roster size) and the results narrow back through the
+// reference's `(long)` truncation.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 #[allow(clippy::too_many_arguments)]
 fn apply_effect(
