@@ -50,7 +50,7 @@ shim! {
 fn slice_cost(base: &Value, start: Option<i64>, end: Option<i64>, step: Option<f64>) -> i64 {
     let length = match base {
         Value::Array(a) => a.borrow().len() as i64,
-        Value::String(s) => s.encode_utf16().count() as i64,
+        Value::String(s) => leek_runtime::len_as_int(leek_runtime::jstr::len16(s)),
         _ => return 0,
     };
     let mut stride = step.map_or(1, |s| s as i64);
@@ -466,15 +466,21 @@ shim! {
 }
 
 shim! {
-    /// Element count of an array / map / set (0 otherwise). A string counts
-    /// its characters only in v4 — v1–v3 `count("…")` is 0 (strings aren't
-    /// collections there).
-    pub extern "C" fn leek_count(p: *mut Value, version: i64) -> i64 {
+    /// Element count of an array / map / set — **0 for everything else, at
+    /// every version**, strings included.
+    ///
+    /// `count` is declared over `Type.ARRAY` (`LeekFunctions.java:140`, no
+    /// `setMinVersion` widening), so upstream's generic helper converts the
+    /// receiver with `toLegacyArray` (v1–v3) or `toArray` (v4). Neither
+    /// accepts a `String`: v4's throws `ClassCastException` and the helper
+    /// returns `0`, and v1–v3's yields the empty fallback array. The corpus
+    /// agrees — `count('hello')` is `0` at v1/v2/v3 and `count(unknown(12))`
+    /// is `0` at all four (`reference.tsv`).
+    pub extern "C" fn leek_count(p: *mut Value) -> i64 {
         match unsafe { val(&p) } {
             Value::Array(a) => a.borrow().len() as i64,
             Value::Map(m) => m.borrow().len() as i64,
             Value::Set(s) => s.borrow().len() as i64,
-            Value::String(s) if version >= 4 => s.chars().count() as i64,
             _ => 0,
         }
     }

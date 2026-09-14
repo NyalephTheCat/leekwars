@@ -544,8 +544,13 @@ fn strings() {
     assert_eq!(jit("return 'ab' + 'cd'"), "\"abcd\"");
     assert_eq!(jit("return 'x' + 5"), "\"x5\"");
     assert_eq!(jit("return 5 + 'x'"), "\"5x\"");
-    // Length and indexing (a one-char substring).
-    assert_eq!(jit("return count('hello')"), "5");
+    // `count` is an array builtin: on a string it is 0 at every version,
+    // not the length (`LeekFunctions.java:140` declares it over
+    // `Type.ARRAY`, and `reference.tsv` records `count('hello')` → 0).
+    // `length('hello')` is the call that answers 5.
+    assert_eq!(jit("return count('hello')"), "0");
+    assert_eq!(jit("return length('hello')"), "5");
+    // Indexing (a one-char substring).
     assert_eq!(jit("var s = 'abc' return s[1]"), "\"b\"");
     // foreach over a string, building a reversed copy.
     assert_eq!(

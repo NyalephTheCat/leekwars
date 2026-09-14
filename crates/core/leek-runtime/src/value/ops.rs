@@ -113,6 +113,14 @@ impl Value {
     /// a `long` for arithmetic. Arrays/maps/sets/objects use their
     /// size; null is 0; strings try parsing and fall back to length.
     /// Used for arithmetic ops on container values like `[1] % 2`.
+    ///
+    /// The string branch follows `AI.java:1155-1166` step for step: the
+    /// three literals `"true"` / `"false"` / `""` answer before any parse,
+    /// then `Long.parseLong`, and a parse failure falls back to
+    /// `String.length()` — UTF-16 code units, so [`crate::jstr::len16`] and
+    /// not `s.len()`. (Upstream also ticks `ops(s.length())` before the
+    /// parse. This conversion is pure and charges nothing; no caller meters
+    /// that tick today.)
     pub fn to_long(&self) -> i64 {
         match self {
             Value::Null => 0,
@@ -122,9 +130,12 @@ impl Value {
             // Upstream `longint(big)` is `BigInteger.longValue()` — the low
             // 64 bits, wrapping (not saturating).
             Value::BigInt(b) => super::bigint::big_to_i64_wrapping(b),
-            Value::String(s) => match s.parse::<i64>() {
-                Ok(n) => n,
-                Err(_) => crate::len_as_int(s.len()),
+            Value::String(s) => match s.as_str() {
+                "true" => 1,
+                "false" | "" => 0,
+                other => other
+                    .parse::<i64>()
+                    .unwrap_or_else(|_| crate::len_as_int(crate::jstr::len16(other))),
             },
             Value::Array(a) => crate::len_as_int(a.borrow().len()),
             Value::Map(m) => crate::len_as_int(m.borrow().len()),

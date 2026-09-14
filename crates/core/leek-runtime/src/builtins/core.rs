@@ -186,7 +186,9 @@ pub(crate) fn type_tag(v: &Value) -> i64 {
 
 pub(crate) fn length_of(v: &Value) -> Option<Value> {
     Some(match v {
-        Value::String(s) => Value::Int(crate::len_as_int(s.chars().count())),
+        // Upstream `StringClass.length` is `return string.length()` —
+        // UTF-16 code units, not Unicode scalars (StringClass.java:29-32).
+        Value::String(s) => Value::Int(crate::len_as_int(crate::jstr::len16(s))),
         Value::Array(a) => Value::Int(crate::len_as_int(a.borrow().len())),
         Value::Map(m) => Value::Int(crate::len_as_int(m.borrow().len())),
         Value::Set(s) => Value::Int(crate::len_as_int(s.borrow().len())),

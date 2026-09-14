@@ -10,6 +10,7 @@ mod builtins;
 mod convert;
 mod eval;
 mod host;
+pub mod jstr;
 mod rng;
 mod value;
 

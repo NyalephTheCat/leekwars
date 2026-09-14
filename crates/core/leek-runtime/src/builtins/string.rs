@@ -39,25 +39,12 @@ pub(crate) fn dispatch_string(name: &str, args: &[Value]) -> Option<Value> {
         // so multi-unit emoji are addressable by their high
         // surrogate index. Out-of-range / non-string returns `null`.
         ("codePointAt", 2) => match (&args[0], args[1].as_int()) {
+            // Surrogate recombination lives in `jstr::code_point_at`, which
+            // mirrors Java's `String.codePointAt(int)`.
             (Value::String(s), Some(i)) if i >= 0 => {
-                let units: Vec<u16> = s.encode_utf16().collect();
-                let idx = crate::clamp_index(i);
-                if idx >= units.len() {
-                    Value::Null
-                } else {
-                    let hi = units[idx];
-                    // Surrogate pair: combine with the following
-                    // low surrogate into a full Unicode codepoint.
-                    if (0xD800..=0xDBFF).contains(&hi) && idx + 1 < units.len() {
-                        let lo = units[idx + 1];
-                        if (0xDC00..=0xDFFF).contains(&lo) {
-                            let cp = 0x10000
-                                + (((u32::from(hi)) - 0xD800) << 10)
-                                + ((u32::from(lo)) - 0xDC00);
-                            return Some(Value::Int(i64::from(cp)));
-                        }
-                    }
-                    Value::Int(i64::from(hi))
+                match crate::jstr::code_point_at(s, crate::clamp_index(i)) {
+                    Some(cp) => Value::Int(i64::from(cp)),
+                    None => Value::Null,
                 }
             }
             _ => Value::Null,
