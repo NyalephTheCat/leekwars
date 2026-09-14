@@ -274,11 +274,11 @@ pub(crate) fn binary_op_from_token(k: SyntaxKind) -> Option<BinaryOp> {
         SyntaxKind::KwXor => Xor,
         SyntaxKind::Amp => BitAnd,
         SyntaxKind::Pipe => BitOr,
-        // `^` is *version-specific*: bitwise XOR in v1, power in
-        // v2+. We can't pick at HIR-lower time because the version
-        // isn't threaded here yet; emit `BitXor` and let the
-        // interpreter dispatch on its `version` field. The MIR
-        // representation stays version-neutral.
+        // `^` is bitwise XOR at *every* version — the binary form
+        // is not version-dispatched, so it always lowers to
+        // `BitXor`. Only the compound `^=` form below changes
+        // meaning with the version. The authority on both is
+        // `BinOp::CompoundXor` in `crates/middle/leek-mir/src/ir.rs`.
         SyntaxKind::Caret => BitXor,
         SyntaxKind::ShiftLeft => ShiftL,
         SyntaxKind::ShiftRight => ShiftR,
@@ -296,8 +296,12 @@ pub(crate) fn binary_op_from_token(k: SyntaxKind) -> Option<BinaryOp> {
         SyntaxKind::StarStarEq => PowAssign,
         SyntaxKind::AmpEq => BitAndAssign,
         SyntaxKind::PipeEq => BitOrAssign,
-        // `^=` is the assignment form of `^` — also version-
-        // dispatched at runtime (see the comment on `Caret`).
+        // `^=` is the one compound assignment whose meaning *is*
+        // version-dispatched: POWER-assign at v1 (`x ^= 5` means
+        // `x = x ** 5`), XOR-assign at v2+. HIR stays version-
+        // neutral; MIR lowers this to the dedicated
+        // `BinOp::CompoundXor` (see `crates/middle/leek-mir/src/ir.rs`)
+        // and the backend dispatches on its `version` field.
         SyntaxKind::CaretEq => BitXorAssign,
         SyntaxKind::ShiftLeftEq => ShiftLAssign,
         SyntaxKind::ShiftRightEq => ShiftRAssign,

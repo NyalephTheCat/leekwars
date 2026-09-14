@@ -322,7 +322,6 @@ Byte parity is a Phase-3 goal. What stands between here and there:
   synthesized overloads.
 - **Index l-value chains with promote-on-write semantics** — `t[i][j] = v`
   where the inner array morphs into a sparse map at v1–v3.
-- **Bit-XOR `^` means POWER at v1**, not XOR; we lower it as XOR.
 - **Exotic reference paths** — narrowing casts on boxed locals and
   `rfunction_` reassignable-function fixups emit a structurally valid
   approximation rather than the reference's exact shape.
