@@ -135,16 +135,57 @@ pub(super) fn charge_concat(l: &Value, r: &Value) {
     leek_charge_ops(conv(l) + conv(r) + len(l) + len(r));
 }
 
-/// Charge upstream's `AI.eq` string costs (`neq` delegates to `eq`):
-/// comparing two strings ticks `min(len1, len2)`; comparing a number
-/// against a string parses it, ticking `len(s)` — except the trivial
-/// literals (`"true"`/`"false"`/`"0"`/`""`, and `"1"` against an exact 1)
-/// which short-circuit before the parse and charge nothing. Lengths in
-/// UTF-16 code units (Java `String.length()`). Every other operand mix
-/// (bools, arrays, functions) charges nothing at this level.
+/// Charge upstream's `AI.eq` costs (`neq` delegates to `eq`).
+///
+/// Strings: comparing two strings ticks `min(len1, len2)`; comparing a
+/// number against a string parses it, ticking `len(s)` — except the
+/// trivial literals (`"true"`/`"false"`/`"0"`/`""`, and `"1"` against an
+/// exact 1) which short-circuit before the parse and charge nothing.
+/// Lengths in UTF-16 code units (Java `String.length()`).
+///
+/// Collections: `AI.eq` reaches `ArrayLeekValue.eq` / `MapLeekValue.eq` /
+/// `SetLeekValue.eq` only when BOTH sides are that same kind, and each of
+/// the three opens with `ai.ops(1)`, then returns on a size mismatch or an
+/// empty pair, then charges the per-element part — `ops(size())` for the
+/// array, `ops(2 * size())` for the map and the set. `size()` there is the
+/// receiver's, i.e. the LEFT operand, which only matters for the flat `1`
+/// since the rest is gated on the two sizes being equal. (v1–v3 arrays go
+/// through `LegacyArrayLeekValue.equals(AI, LegacyArrayLeekValue)`, whose
+/// charges are the same `ops(1)` + `ops(mSize)`, so the array arm needs no
+/// version split.)
+///
+/// Two upstream costs stay unmodelled, both because they depend on where
+/// the comparison stops rather than on the operands alone: the per-element
+/// `ai.eq` recursion's own charges (`['ab'] == ['ab']` ticks a further
+/// `min(2, 2)` for the two strings), and `MapLeekValue.eq`'s one
+/// `map.get(key)` per left entry, which goes through the overridden
+/// `MapLeekValue.get` and so adds `READ_OPERATIONS` (2) apiece up to the
+/// first mismatch. An equal 1-entry map pair is therefore 10 ops upstream
+/// (`return [5: 5] == [5: 5]`, reference.tsv) where this charges 8. As
+/// elsewhere in this function, only the top-level operand pair is priced.
 pub(super) fn charge_eq(l: &Value, r: &Value) {
     let utf16 = |s: &str| leek_runtime::len_as_int(leek_runtime::jstr::len16(s));
+    // `ops(1)` unconditionally, then the per-element part only when the
+    // sizes agree — and `per * 0` keeps the empty pair at the bare 1, the
+    // way upstream's early `return true` does.
+    let collection = |a: usize, b: usize, per: i64| {
+        let per_element = if a == b {
+            leek_runtime::len_as_int(a)
+        } else {
+            0
+        };
+        leek_charge_ops(1 + per * per_element);
+    };
     match (l, r) {
+        (Value::Array(a), Value::Array(b)) => {
+            collection(a.borrow().len(), b.borrow().len(), 1);
+        }
+        (Value::Map(a), Value::Map(b)) => {
+            collection(a.borrow().len(), b.borrow().len(), 2);
+        }
+        (Value::Set(a), Value::Set(b)) => {
+            collection(a.borrow().len(), b.borrow().len(), 2);
+        }
         (Value::String(a), Value::String(b)) => {
             leek_charge_ops(utf16(a).min(utf16(b)));
         }

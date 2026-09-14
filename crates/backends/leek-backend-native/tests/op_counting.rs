@@ -336,3 +336,69 @@ fn op_budget_stops_a_lambda_called_by_a_higher_order_builtin() {
         );
     }
 }
+
+#[test]
+fn collection_equality_charges_the_upstream_eq_ops() {
+    // `==` between two same-kind collections runs `ArrayLeekValue.eq` /
+    // `SetLeekValue.eq` / `MapLeekValue.eq`, each of which opens with
+    // `ai.ops(1)`, bails on a size mismatch or an empty pair, and only then
+    // charges per element — `ops(size())` for arrays, `ops(2 * size())` for
+    // sets and maps (#331). Rows are upstream's own counts, from
+    // leek-test-corpus/data/reference.tsv.
+    assert_rows(&[
+        // The flat `ops(1)` lands even when no element is ever compared.
+        (4, "return [] == []", 2),
+        (1, "return [] == []", 2),
+        (4, "return [] == [0]", 4),
+        (4, "return [0, 1] == [0]", 8),
+        // Arrays: `ops(1)` + `ops(size())`.
+        (4, "return [0] == [0]", 7),
+        (4, "return [0, 1] == [0, 1]", 12),
+        // v1-v3 arrays go through `LegacyArrayLeekValue.equals(AI,
+        // LegacyArrayLeekValue)`, whose charges are the same `ops(1)` +
+        // `ops(mSize)`; only the literals' construction cost differs.
+        (1, "return [0, 1] == [0, 1]", 26),
+        (1, "var a = [2, 'a'] return [-a[0], ~a[0]] == [-2, ~2];", 46),
+        (2, "var a = [2, 'a'] return [-a[0], ~a[0]] == [-2, ~2];", 46),
+        (3, "var a = [2, 'a'] return [-a[0], ~a[0]] == [-2, ~2];", 46),
+        (4, "var a = [2, 'a'] return [-a[0], ~a[0]] == [-2, ~2];", 23),
+        // Sets: `ops(1)` + `ops(2 * size())`. `SetLeekValue.contains` is a
+        // plain `LinkedHashSet` probe, so membership itself is free.
+        (4, "return <> == <>", 2),
+        (4, "return <1> == <1>", 8),
+        (4, "return <'a', 'b'> == <'a', 'b'>", 14),
+        (4, "return <'a', 'b'> == <1, 2>", 14),
+        (4, "return <'a', 'b'> == <'a', 'b', 'c', 'd'>", 14),
+        (4, "return <1..3> == <1, 2, 3>", 22),
+        // Maps, on the size-mismatch path where nothing else is charged.
+        (4, "return ['a': 'b'] == ['a': 'b', 'c': 'd']", 8),
+    ]);
+    // The row this slice was asked to pin: two 3-element arrays. Two `var`
+    // ops + two literals at 2/element + the static `==` + `ops(1) + ops(3)`.
+    assert_eq!(ops("var a = [1,2,3] var b = [1,2,3] return a == b"), 19);
+    // `!=` delegates to the same `eq` upstream (`AI.neq`), so it costs the
+    // same.
+    assert_eq!(
+        ops("var a = [1,2,3] var b = [1,2,3] return a != b"),
+        ops("var a = [1,2,3] var b = [1,2,3] return a == b")
+    );
+    // Two upstream costs beyond `eq`'s own `ops` calls stay unmodelled, so
+    // these rows sit *under* the reference counts rather than on them. Both
+    // depend on where the comparison stops, which a pre-charge cannot know:
+    // `MapLeekValue.eq` does one `map.get(key)` per left entry and the
+    // overridden `MapLeekValue.get` ticks `READ_OPERATIONS` (2) apiece, and
+    // the per-element `ai.eq` recursion charges its own string costs.
+    for (src, upstream) in [
+        ("return [5: 5] == [5: 5]", 10),
+        ("return ['a': 'b'] == [1: 1]", 10),
+        ("return ['a': 'b'] == ['a': 'b']", 11),
+        ("return ['Chaine1'] == ['Chaine1']", 14),
+    ] {
+        let got = ops(src);
+        assert!(
+            got < upstream,
+            "`{src}`: {got} is no longer under upstream's {upstream} — if \
+             those costs are now modelled, pin the exact count instead"
+        );
+    }
+}
