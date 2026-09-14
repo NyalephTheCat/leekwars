@@ -146,3 +146,12 @@ backend:
   # source construct to point at (see `NativeErrorKind::Runtime`).
   - { id: E0600, name: NativeUnsupported, severity: error }
   - { id: E0601, name: NativeCompileFailed, severity: error }
+  # The Java emitter's own failures. A construct it has no shape for used to
+  # reach the user as invalid Java (or a silently wrong value) with no Leek
+  # span attached at all — see `EmittedJava::diagnostics`.
+  - { id: E0610, name: JavaUnsupported, severity: error }
+  # The LeekScript source backend could not preserve a semantic through the
+  # round-trip (a dropped type annotation, an unrepresentable literal). A
+  # warning, not an error: the emitted program is still valid LeekScript,
+  # it just means slightly less than the input did.
+  - { id: E0620, name: LeekScriptSemanticLoss, severity: warning }

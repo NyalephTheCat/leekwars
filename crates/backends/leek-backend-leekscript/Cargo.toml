@@ -16,12 +16,12 @@ leek-lexer       = { workspace = true }
 leek-hir         = { workspace = true }
 leek-types       = { workspace = true }
 leek-prelude     = { workspace = true }
+leek-diagnostics = { workspace = true }
 
 [dev-dependencies]
 leek-parser         = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
-leek-diagnostics    = { workspace = true }
 leek-resolver       = { workspace = true }
 leek-pipeline       = { workspace = true }
 leek-recipes        = { workspace = true }

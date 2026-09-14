@@ -652,12 +652,12 @@ fn class_members_and_inheritance() {
 
 #[test]
 fn versions_round_trip() {
-    // The emitter is version-blind today (`Options::version` only steers
-    // comment recovery). These programs use the forms whose *meaning* is
-    // version-dependent — `^`/`^=`, string escapes, integer division — so
-    // the day one of them becomes version-sensitive in the lowerer without
-    // the emitter learning about it, this fails instead of silently
-    // changing the generated program.
+    // `Options::version` steers the string delimiter (#395), the type
+    // annotations (#154) and comment recovery. These programs use the forms
+    // whose *meaning* is version-dependent — `^`/`^=`, string escapes,
+    // integer division, non-finite reals — so the day one of them changes in
+    // the lowerer without the emitter learning about it, this fails instead
+    // of silently changing the generated program.
     const PROGRAMS: &[&str] = &[
         "return 1 + 2 * 3;",
         "var x = 6; x ^= 3; return x;",
@@ -667,12 +667,143 @@ fn versions_round_trip() {
         "return 1 < 2 == true;",
         "var a = [1, 2, 3]; var t = 0; for (var v in a) { t = t + v; } return t;",
         "function f(n) { return n * 2; } return f(21);",
+        // `∞` used to be emitted as `(1.0 / 0.0)`, which at v1 is `null`.
+        "return \u{221e};",
+        "var x = -\u{221e}; return x;",
     ];
     for version in [Version::V1, Version::V2, Version::V3, Version::V4] {
         for src in PROGRAMS {
             check_at(src, version);
         }
     }
+}
+
+// ---- semantics the round-trip used to drop (#154) ----
+
+#[test]
+fn declared_types_survive_the_round_trip() {
+    // A declared scalar type is a coercion upstream, not documentation:
+    // `real r = 5` stores `5.0`. Erasing it to `var r = 5` changed the
+    // program's *result*, which is what made this a bug rather than a
+    // cosmetic loss.
+    check("real r = 5; return r;");
+    check("integer n = 7; n /= 2; return n;");
+    check("real? r = 5; return r;");
+    check("function f(real x) { return x; } return f(5);");
+    check("function g(integer a, real b) { return a + b; } return g(1, 2);");
+    check("global real G = 5; return G;");
+    check("class C { real v = 5 } return (new C()).v;");
+    check("Array<real> a = [1, 2]; return a[0];");
+    check("Map<string, real> m = [\"k\" : 1]; return m[\"k\"];");
+}
+
+#[test]
+fn declared_types_below_v4_are_dropped_loudly() {
+    // The annotation is official v4 syntax; at v1-v3 it is not emitted (the
+    // official servers of those versions predate it), so the coercion is
+    // genuinely lost — and has to say so rather than vanish.
+    for version in [Version::V1, Version::V2, Version::V3] {
+        let (hir, err) = lower_at(
+            "real r = 5; return r;",
+            version,
+            all_parse_features(),
+            experimental_flags(),
+        );
+        assert!(!err, "program failed to lower at {version:?}");
+        let out = emit(&hir, &Options::pretty(version));
+        assert!(
+            !out.source.contains("real"),
+            "[{version:?}] annotation emitted below v4:\n{}",
+            out.source
+        );
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.code.id() == "E0620" && d.severity == Severity::Warning),
+            "[{version:?}] the dropped type was not reported"
+        );
+    }
+}
+
+#[test]
+fn a_type_with_no_official_spelling_is_dropped_loudly() {
+    // `Array[integer, boolean]` is the experimental tuple shape: there is no
+    // non-experimental syntax for it, so the declaration goes out untyped.
+    // The point of the change is that it goes out *with a complaint*.
+    let (hir, err) = lower(
+        "Array[integer, boolean] t = [1, true]; return t[0];",
+        all_parse_features(),
+        experimental_flags(),
+    );
+    assert!(!err, "program failed to lower");
+    let out = emit(&hir, &Options::pretty(Version::V4));
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.code.id() == "E0620" && d.severity == Severity::Warning),
+        "an unrepresentable declared type was dropped silently:\n{}",
+        out.source
+    );
+    check_hir(&hir, "");
+}
+
+#[test]
+fn an_ordinary_program_reports_nothing() {
+    // The no-false-positive guard: a program with nothing to lose must not
+    // pick up a warning, or every build starts printing noise.
+    let (hir, err) = lower(
+        "real r = 5; function f(integer n) -> integer { return n * 2; } return f(3) + r;",
+        all_parse_features(),
+        experimental_flags(),
+    );
+    assert!(!err, "program failed to lower");
+    let out = emit(&hir, &Options::pretty(Version::V4));
+    assert!(
+        out.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}\n{}",
+        out.diagnostics,
+        out.source
+    );
+}
+
+#[test]
+fn non_finite_reals_are_emitted_as_names_not_arithmetic() {
+    // `(1.0 / 0.0)` and `(0.0 / 0.0)` are not `∞` and `NaN` at v1 — division
+    // by zero is `null` there — so the emitted program said something else
+    // entirely. `∞` is official syntax and lowers straight back to
+    // `Literal::Real(INFINITY)`.
+    //
+    // Asserted on the emitted text rather than through `check_at`, because
+    // `jit` runs every program at the native backend's default version: the
+    // round-trip harness lowers at `version` but does not *execute* at it, so
+    // it cannot see a v1-only divergence (a gap worth closing separately).
+    for version in [Version::V1, Version::V2, Version::V3, Version::V4] {
+        for (src, want) in [
+            ("return \u{221e};", "\u{221e}"),
+            ("return -\u{221e};", "-\u{221e}"),
+        ] {
+            let (hir, err) = lower_at(src, version, all_parse_features(), experimental_flags());
+            assert!(!err, "program failed to lower at {version:?}: {src}");
+            let out = emit(&hir, &Options::pretty(version)).source;
+            assert!(
+                out.contains(want),
+                "[{version:?}] {src} emitted as `{out}`, not `{want}`"
+            );
+            assert!(
+                !out.contains("0.0"),
+                "[{version:?}] {src} still emits division: `{out}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_set_stays_a_set() {
+    // `{}` re-parses as an empty *object*, so the emitted program used to
+    // hold a different value than the one it came from.
+    check("return <>;");
+    check("var s = <>; return s;");
+    check("var s = <>; s.push(1); return s;");
 }
 
 // ---- more multi-file shapes ----

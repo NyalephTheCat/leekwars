@@ -371,8 +371,17 @@ fn the_library_flag_dispatches_host_functions_through_their_class() {
     )
     .expect("write");
 
-    let plain = leekc(&["main.leek", "--emit", "java"], &dir);
-    assert_eq!(plain.status, 0, "stderr: {}", plain.stderr);
+    // Without `--library` the backend has no dispatch class for `getCell`
+    // and nothing but a bare `getCell(...)` to write — which is not a method
+    // on the generated class. That used to be printed as a successful
+    // emission; it now fails and says where (JAVA-06 / #152).
+    let plain = leekc(&["main.leek", "--emit", "java", "--no-color"], &dir);
+    assert_eq!(plain.status, 1, "stderr: {}", plain.stderr);
+    assert!(
+        plain.stderr.contains("error[E0610]") && plain.stderr.contains("`getCell`"),
+        "stderr: {}",
+        plain.stderr
+    );
     assert!(
         !plain.stdout.contains("EntityClass"),
         "without --library there is no dispatch class:\n{}",

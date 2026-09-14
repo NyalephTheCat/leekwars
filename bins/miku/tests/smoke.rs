@@ -192,6 +192,63 @@ default = true
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `miku build --backend java` used to write the `.java` and report success
+/// for a program the emitter had no translation for — the user found out from
+/// a javac error inside generated code, or not at all (JAVA-06 / #152).
+#[test]
+fn build_java_reports_an_unsupported_construct_with_a_file_and_a_line() {
+    let dir = scratch_dir("build_java_unsupported");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "nope"
+version = "0.1.0"
+
+[backend.java]
+enable  = true
+default = true
+"#,
+    );
+    // `nosuchfn` is in neither the builtin table nor a host environment, so
+    // the emitter falls back to a bare `nosuchfn(b)` — not a method on the
+    // generated class. It is on line 3.
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4\nvar b = 3;\nvar c = nosuchfn(b);\nreturn c;\n",
+    );
+
+    let out = miku(&["build", "--backend", "java", "--color", "never"], &dir);
+    assert_eq!(
+        out.status, 1,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        out.stderr.contains("error[E0610]"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("main.leek:3:9"),
+        "no file:line:col in stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("var c = nosuchfn(b);"),
+        "no source line in stderr: {}",
+        out.stderr
+    );
+    // The known-bad translation is not left on disk claiming to be a build.
+    assert!(
+        !dir.join("build/java").exists() || std::fs::read_dir(dir.join("build/java")).is_err(),
+        "a .java was written for a program the backend cannot translate"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn run_honors_file_version_pragma_over_manifest_language() {
     // Regression (#36): the project pre-scan never matched `// @version:N`,
@@ -1993,13 +2050,21 @@ fn library_flag_dispatches_host_functions_through_their_class() {
     );
     write(&dir, "src/main.leek", "// @version:4\nreturn getCell();\n");
 
-    let plain = miku(&["build", "--backend", "java"], &dir);
-    assert_eq!(plain.status, 0, "stderr: {}", plain.stderr);
-    let emitted = dir.join("build/java/AI_0.java");
-    let without = std::fs::read_to_string(&emitted).expect("read emitted");
+    // Without `--library`, the backend has no dispatch class for `getCell`
+    // and nothing but a bare `getCell(...)` to write — which is not a method
+    // on the generated class. That used to be written out and reported as a
+    // successful build; it now fails and says where (JAVA-06 / #152).
+    let plain = miku(&["build", "--backend", "java", "--color", "never"], &dir);
+    assert_eq!(plain.status, 1, "stderr: {}", plain.stderr);
     assert!(
-        !without.contains("EntityClass"),
-        "without --library there is no dispatch class:\n{without}"
+        plain.stderr.contains("error[E0610]") && plain.stderr.contains("`getCell`"),
+        "stderr: {}",
+        plain.stderr
+    );
+    let emitted = dir.join("build/java/AI_0.java");
+    assert!(
+        !emitted.exists(),
+        "a .java the backend could not translate was written anyway"
     );
 
     let with_lib = miku(

@@ -170,6 +170,19 @@ pub fn run() -> Result<ExitCode> {
                     opts = opts.with_base_class(base);
                 }
                 let out = leek_backend_java::emit(hir.0.as_ref(), &opts);
+                // A construct the emitter has no shape for produces Java that
+                // javac rejects — or that compiles to something else. Render
+                // it against the Leek source and stop rather than writing a
+                // file that is not a translation of this program (#152).
+                if report_backend_diagnostics(
+                    &result,
+                    &out.diagnostics,
+                    &text,
+                    &file_label,
+                    &reporter,
+                ) {
+                    return Ok(ExitCode::from(1));
+                }
                 match &cli.out_dir {
                     Some(dir) => {
                         std::fs::create_dir_all(dir)
@@ -199,6 +212,19 @@ pub fn run() -> Result<ExitCode> {
                 };
                 opts = opts.with_optimize(cli.optimize).with_user_source(source);
                 let out = leek_backend_leekscript::emit(hir.0.as_ref(), &opts);
+                // Semantics this backend could not carry across (#154). These
+                // are warnings — the emitted program is valid LeekScript — so
+                // they print and the file is still written, unless a `--deny`
+                // promotes one.
+                if report_backend_diagnostics(
+                    &result,
+                    &out.diagnostics,
+                    &text,
+                    &file_label,
+                    &reporter,
+                ) {
+                    return Ok(ExitCode::from(1));
+                }
                 match &cli.out_dir {
                     Some(dir) => {
                         std::fs::create_dir_all(dir)
@@ -334,4 +360,24 @@ pub fn run() -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Render a backend's own diagnostics through the same [`Reporter`] the
+/// frontend ones went through, and report whether any was error-level.
+///
+/// Both source-emitting backends produce output *and* complaints, so this
+/// takes a slice rather than an error: `emit` stays infallible and the caller
+/// decides what a diagnosed file means.
+fn report_backend_diagnostics(
+    result: &leek_pipeline::Run<'_>,
+    diagnostics: &[leek_diagnostics::Diagnostic],
+    text: &str,
+    file_label: &str,
+    reporter: &Reporter,
+) -> bool {
+    if diagnostics.is_empty() {
+        return false;
+    }
+    let sources = leek_driver::run_sources(result, text, file_label);
+    reporter.emit(diagnostics, &sources)
 }
