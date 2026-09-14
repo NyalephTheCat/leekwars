@@ -23,6 +23,15 @@
 //! back a shared snapshot plus the generation it was taken at, and any
 //! consumer that caches further work (a parse, a lowering) stores that
 //! number with it and re-runs once it no longer matches.
+//!
+//! Beside that sits the configuration-keyed view (#98, #184):
+//! [`merged_header_for`] takes the libraries it should merge as a
+//! [`leek_config::LibrarySet`] and reads no global at all, so it is a pure
+//! function of its arguments and a salsa-tracked query may call it. The two
+//! produce the same text for the same libraries; the generation-keyed pair
+//! stays for every caller that still activates rather than configures, and
+//! [`active_library_set`] / [`active_fold_set`] bridge between them until
+//! epic #346 finishes retiring the globals.
 
 use leek_span::SourceId;
 
@@ -42,7 +51,21 @@ pub fn source_id() -> SourceId {
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+
+use leek_config::{FoldSet, LibrarySet};
+
+/// Take `mutex`, recovering from poisoning (#176).
+///
+/// One policy for the whole crate, and the same one `leek-resolver`'s
+/// interner and `leek-parser`'s header cache already use: every mutex here
+/// guards a cache or a registration list, nothing under one of them can
+/// panic, and none of the answers they hand back is a value a caller can
+/// decline to produce. A panic elsewhere in the process therefore must not
+/// turn every later `merged_header` call into a second panic.
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Monotonic counter bumped whenever the active libraries or the active
 /// fold constants actually change.
@@ -88,7 +111,7 @@ static MERGED_HEADER: Mutex<[Option<(u64, Option<Arc<str>>)>; 2]> = Mutex::new([
 /// `--library` does not discard a merged header (nor, downstream, the parse
 /// of it) that is still correct.
 pub fn activate_library(src: &'static str) {
-    let mut libs = ACTIVE_LIBRARIES.lock().expect("library lock");
+    let mut libs = lock_unpoisoned(&ACTIVE_LIBRARIES);
     if !libs.iter().any(|s| std::ptr::eq(*s, src)) {
         libs.push(src);
         // Bumped while the lock is still held, so a reader that samples the
@@ -121,8 +144,8 @@ pub fn merged_header(prelude_enabled: bool) -> Option<(Arc<str>, u64)> {
     }
     // Built under the library lock alone, then published under the cache
     // lock alone. Neither is ever held across the other, so the two need no
-    // lock order between them. Poisoning stays what this crate already does
-    // with it — `expect` — rather than adding a fourth policy (#176).
+    // lock order between them. Both go through `lock_unpoisoned`, the one
+    // policy this crate has for poisoning (#176).
     let (generation, built) = build_merged_header(prelude_enabled);
     publish_header(slot, generation, built)
 }
@@ -130,12 +153,12 @@ pub fn merged_header(prelude_enabled: bool) -> Option<(Arc<str>, u64)> {
 /// The memoized entry for `slot`, if there is one: the generation it was
 /// built at, and the answer as of then (`None` = nothing was active).
 fn cached_header(slot: usize) -> Option<(u64, Option<Arc<str>>)> {
-    MERGED_HEADER.lock().expect("merged header cache lock")[slot].clone()
+    lock_unpoisoned(&MERGED_HEADER)[slot].clone()
 }
 
 /// Join the active headers, and report the generation they were read at.
 fn build_merged_header(prelude_enabled: bool) -> (u64, Option<Arc<str>>) {
-    let libs = ACTIVE_LIBRARIES.lock().expect("library lock");
+    let libs = lock_unpoisoned(&ACTIVE_LIBRARIES);
     let generation = GENERATION.load(Ordering::Acquire);
     let mut parts: Vec<&str> = Vec::new();
     if prelude_enabled {
@@ -158,7 +181,7 @@ fn publish_header(
     generation: u64,
     built: Option<Arc<str>>,
 ) -> Option<(Arc<str>, u64)> {
-    let mut cache = MERGED_HEADER.lock().expect("merged header cache lock");
+    let mut cache = lock_unpoisoned(&MERGED_HEADER);
     let entry = &mut cache[slot];
     match entry {
         Some((built_at, _)) if *built_at >= generation => {}
@@ -176,6 +199,101 @@ fn publish_header(
 /// the caller can hold the `Arc`, since this copies the ~64 KB back out.
 pub fn merged_header_src(prelude_enabled: bool) -> Option<String> {
     merged_header(prelude_enabled).map(|(text, _)| text.to_string())
+}
+
+/// Every library bit, in bit order — the order [`merged_header_for`] joins
+/// them in, and the order [`active_library_set`] reports them in.
+const LIBRARY_BITS: [LibrarySet; 2] = [LibrarySet::LEEKWARS, LibrarySet::STDLIB];
+
+/// The embedded header a single [`LibrarySet`] bit names: bit 0 is
+/// [`LEEKWARS_SRC`], bit 1 is [`STDLIB_SRC`].
+///
+/// `None` for anything that is not exactly one known library —
+/// [`LibrarySet::NONE`], or a set with several bits in it, neither of which
+/// names one source. This is the whole of the correspondence between
+/// `leek_config`'s `Copy` byte (storable as a salsa input field) and the
+/// `&'static str` list [`activate_library`] pushes into, so the two views of
+/// "which libraries are active" cannot drift apart in more than one place.
+pub const fn library_src(bit: LibrarySet) -> Option<&'static str> {
+    let bits = bit.bits();
+    if bits == LibrarySet::LEEKWARS.bits() {
+        Some(LEEKWARS_SRC)
+    } else if bits == LibrarySet::STDLIB.bits() {
+        Some(STDLIB_SRC)
+    } else {
+        None
+    }
+}
+
+/// Memoized [`merged_header_for`] answers, one slot per
+/// `(library set, prelude_enabled)` pair, indexed by
+/// `(libs.bits() << 1) | prelude_enabled as usize`.
+///
+/// A plain array of [`OnceLock`]s, deliberately: no mutex and no generation
+/// counter, because there is nothing to invalidate. The answer in a slot is
+/// a function of the slot's own index, so once computed it is correct
+/// forever, and a salsa-tracked query may call [`merged_header_for`] without
+/// reading state the query system cannot see. That is the property the
+/// generation-keyed [`merged_header`] cannot offer.
+static MERGED_HEADER_FOR: [OnceLock<Option<Arc<str>>>; 8] = [const { OnceLock::new() }; 8];
+
+/// The table above has a slot for every set [`LibrarySet`] can build, times
+/// the two prelude states. A third library bit in `leek-config` would index
+/// past the end, so it has to widen this table in the same change.
+const _: () = assert!(
+    LibrarySet::from_bits(u8::MAX).bits() < 4,
+    "leek-config gained a library bit: widen MERGED_HEADER_FOR accordingly"
+);
+
+/// The combined source of the libraries in `libs` (and, when
+/// `prelude_enabled`, the implicit [`PRELUDE_SRC`] ahead of them), or `None`
+/// when the join would be empty.
+///
+/// The pure form of [`merged_header`] (#98, #184): the answer depends on the
+/// two arguments and on nothing else — not on [`activate_library`], not on
+/// [`generation`] — so a salsa-tracked query that holds a [`LibrarySet`] as
+/// an input may call it and still be re-run correctly when that input
+/// changes. The process-global [`merged_header`] stays beside it for every
+/// current caller; this adds a second door, it does not close the first.
+///
+/// The text is byte-identical to what [`merged_header`] builds for the same
+/// libraries: the prelude first, then each library, `"\n"` between parts and
+/// no trailing newline, and `None` rather than `Some("")` when there are no
+/// parts at all — HIR lowering merges a `Some` as a prelude unit on every
+/// file, so an empty one is not the same answer as nothing. Libraries join
+/// in bit order, which is the order the sole production activation
+/// (`leek_session`'s `register_leekwars`) already produces.
+///
+/// Repeated calls for one `(libs, prelude_enabled)` pair hand back the same
+/// `Arc`, so the ~64 KB join — and the content-hash lookup
+/// `leek_parser::parse_signature_header` then does with it — is paid once
+/// per configuration per process.
+pub fn merged_header_for(libs: LibrarySet, prelude_enabled: bool) -> Option<Arc<str>> {
+    let slot = (usize::from(libs.bits()) << 1) | usize::from(prelude_enabled);
+    MERGED_HEADER_FOR[slot]
+        .get_or_init(|| join_header(libs, prelude_enabled))
+        .clone()
+}
+
+/// Join the prelude and the libraries in `libs`, exactly as
+/// [`build_merged_header`] joins the process-global list.
+fn join_header(libs: LibrarySet, prelude_enabled: bool) -> Option<Arc<str>> {
+    let mut parts: Vec<&str> = Vec::new();
+    if prelude_enabled {
+        parts.push(PRELUDE_SRC);
+    }
+    for bit in LIBRARY_BITS {
+        if libs.contains(bit)
+            && let Some(src) = library_src(bit)
+        {
+            parts.push(src);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(Arc::<str>::from(parts.join("\n")))
+    }
 }
 
 /// Process-global `name → value-string` map of constants to fold to
@@ -201,7 +319,7 @@ where
     K: Into<String>,
     V: Into<String>,
 {
-    let mut map = FOLD_CONSTANTS.lock().expect("fold lock");
+    let mut map = lock_unpoisoned(&FOLD_CONSTANTS);
     let mut changed = false;
     for (k, v) in pairs {
         let (k, v) = (k.into(), v.into());
@@ -231,7 +349,7 @@ where
 pub fn fold_constants_cached() -> (Arc<Vec<(String, String)>>, u64) {
     let generation = generation();
     {
-        let cache = FOLD_SNAPSHOT.lock().expect("fold snapshot lock");
+        let cache = lock_unpoisoned(&FOLD_SNAPSHOT);
         if let Some((taken_at, pairs)) = &*cache
             && *taken_at == generation
         {
@@ -241,10 +359,10 @@ pub fn fold_constants_cached() -> (Arc<Vec<(String, String)>>, u64) {
     // As in `merged_header`: the constants lock and the snapshot lock are
     // taken one after the other, never nested.
     let (generation, pairs) = {
-        let map = FOLD_CONSTANTS.lock().expect("fold lock");
+        let map = lock_unpoisoned(&FOLD_CONSTANTS);
         (GENERATION.load(Ordering::Acquire), Arc::new(map.clone()))
     };
-    let mut cache = FOLD_SNAPSHOT.lock().expect("fold snapshot lock");
+    let mut cache = lock_unpoisoned(&FOLD_SNAPSHOT);
     match &*cache {
         Some((taken_at, _)) if *taken_at >= generation => {}
         _ => *cache = Some((generation, pairs)),
@@ -260,6 +378,80 @@ pub fn fold_constants_cached() -> (Arc<Vec<(String, String)>>, u64) {
 /// wherever the caller can hold the `Arc`.
 pub fn fold_constants() -> Vec<(String, String)> {
     fold_constants_cached().0.as_ref().clone()
+}
+
+/// Whether the activated header `active` is the embedded header `src` —
+/// by pointer when that settles it, by content when it cannot.
+///
+/// [`activate_library`] settles identity with `std::ptr::eq` alone, and for
+/// the question it asks — is this very `&'static str` already in the list? —
+/// that is right. It is not enough here. [`LEEKWARS_SRC`] and
+/// [`STDLIB_SRC`] are `const` items, so every crate that names one
+/// materializes its own copy of the bytes: the pointer `leek_session`'s
+/// `register_leekwars` activates is *not* the pointer this crate's
+/// [`library_src`] hands back (measured: equal lengths, different
+/// addresses). A pointer-only test would therefore report
+/// [`LibrarySet::NONE`] for every activation made outside this crate, which
+/// is every production one.
+fn same_header(active: &str, src: &'static str) -> bool {
+    std::ptr::eq(active, src) || active == src
+}
+
+/// The process-global library activations, read as a [`LibrarySet`].
+///
+/// A bridge for callers that still drive [`activate_library`] but need to
+/// hand a configuration value to something that takes one: it answers "which
+/// known headers has someone activated?" by matching the list against
+/// [`library_src`] with [`same_header`]. A header no bit can name is simply
+/// not reported — there are none today, since [`LEEKWARS_SRC`] and
+/// [`STDLIB_SRC`] are the only headers activated anywhere in the workspace.
+///
+/// # Transitional
+///
+/// This reads a process-global, so it is exactly the thing epic #346 exists
+/// to remove: it is scaffolding for the slices that move each driver from
+/// `activate_library` to a threaded `CompilationConfig`, and the last such
+/// slice deletes it. Do not build anything new on it — take a
+/// [`LibrarySet`] from the caller and pass that to [`merged_header_for`].
+#[doc(hidden)]
+pub fn active_library_set() -> LibrarySet {
+    let libs = lock_unpoisoned(&ACTIVE_LIBRARIES);
+    let mut set = LibrarySet::NONE;
+    for bit in LIBRARY_BITS {
+        if let Some(src) = library_src(bit)
+            && libs.iter().any(|active| same_header(active, src))
+        {
+            set.insert(bit);
+        }
+    }
+    set
+}
+
+/// The process-global fold registrations, read as a [`FoldSet`].
+///
+/// Coarser than the library reading, and necessarily so: `FOLD_CONSTANTS`
+/// holds `name → value` pairs with no record of which catalog they came
+/// from, while a [`FoldSet`] bit names a catalog. Every production
+/// activation registers the leek-wars constants (`leekc --fold-constants`
+/// and `leek_session`'s `activate_leekwars_constant_folding` both pass
+/// `leek_environment::leekwars_constant_values()`), so a non-empty map means
+/// [`FoldSet::LEEKWARS`] and an empty one means nothing is folded. A caller
+/// that registered something else — only tests do today — is reported as
+/// that same bit; the reading is an approximation, which is the whole reason
+/// it is transitional.
+///
+/// # Transitional
+///
+/// Scaffolding with the same owner and the same fate as
+/// [`active_library_set`]: epic #346 deletes it once folding is configured
+/// rather than registered.
+#[doc(hidden)]
+pub fn active_fold_set() -> FoldSet {
+    if lock_unpoisoned(&FOLD_CONSTANTS).is_empty() {
+        FoldSet::NONE
+    } else {
+        FoldSet::LEEKWARS
+    }
 }
 
 #[cfg(test)]

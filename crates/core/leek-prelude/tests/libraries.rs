@@ -5,7 +5,11 @@
 //! second test in this binary would race the first and the ordering
 //! assertions would depend on which one ran.
 
-use leek_prelude::{LEEKWARS_SRC, PRELUDE_SRC, STDLIB_SRC, activate_library, merged_header_src};
+use leek_config::LibrarySet;
+use leek_prelude::{
+    LEEKWARS_SRC, PRELUDE_SRC, STDLIB_SRC, activate_library, active_library_set, merged_header_for,
+    merged_header_src,
+};
 
 /// A line that occurs in exactly one of the three headers — the generator
 /// banner naming the upstream Java class it was derived from.
@@ -78,4 +82,18 @@ fn activation_is_idempotent_ordered_and_newline_separated() {
         merged_header_src(false).is_some(),
         "activation is process-global and never cleared"
     );
+
+    // The configuration-keyed join is the same join (#98, #184). Both
+    // libraries are active here, in bit order, so the pure function fed the
+    // set this process is in must produce the very same text — which is what
+    // lets a later slice move a caller across without changing its output.
+    let active = active_library_set();
+    assert!(active.contains(LibrarySet::LEEKWARS) && active.contains(LibrarySet::STDLIB));
+    for prelude_enabled in [false, true] {
+        assert_eq!(
+            merged_header_for(active, prelude_enabled).as_deref(),
+            merged_header_src(prelude_enabled).as_deref(),
+            "the pure join must match the process-global one"
+        );
+    }
 }

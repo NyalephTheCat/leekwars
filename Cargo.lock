@@ -1365,6 +1365,7 @@ dependencies = [
 name = "leek-prelude"
 version = "0.0.1"
 dependencies = [
+ "leek-config",
  "leek-span",
 ]
 
