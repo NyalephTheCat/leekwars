@@ -1526,3 +1526,222 @@ version = "0.1.0"
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---- include-using projects ----
+//
+// Every command below drives the multi-file front end. They are grouped in
+// one place because the failure they guard against (DRIVER-02: a command
+// that plans its pipeline *without* the include step, so included symbols
+// resolve against an empty file set) is per-command, not per-project.
+
+/// A two-file project: `src/main.leek` includes `src/helper.leek` and calls
+/// a function defined there.
+fn include_project(label: &str) -> PathBuf {
+    let dir = scratch_dir(label);
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "included"
+version = "0.1.0"
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4\ninclude(\"helper\");\nreturn twice(21);\n",
+    );
+    write(
+        &dir,
+        "src/helper.leek",
+        "// @version:4\nfunction twice(x) { return x * 2; }\n",
+    );
+    dir
+}
+
+#[test]
+fn include_project_passes_check_lint_and_fix() {
+    let dir = include_project("include_check");
+    for args in [&["check"][..], &["lint"][..], &["fix"][..]] {
+        let out = miku(args, &dir);
+        assert_eq!(out.status, 0, "miku {args:?} stderr: {}", out.stderr);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn include_project_runs_the_included_function() {
+    let dir = include_project("include_run");
+    let out = miku(&["run"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    // `twice(21)` — proof the included body was compiled, not just accepted.
+    assert_eq!(out.stdout.trim(), "42", "stderr: {}", out.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn include_project_builds_leekscript_that_compiles_on_its_own() {
+    let dir = include_project("include_build");
+    let out = miku(&["build", "--backend", "leekscript"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+
+    let emitted = dir.join("build/leekscript/main.leek");
+    assert!(emitted.is_file(), "stderr: {}", out.stderr);
+    let text = std::fs::read_to_string(&emitted).expect("read emitted");
+    assert!(
+        text.contains("function twice"),
+        "the included definition must be inlined into the single emitted \
+         file, since leek-wars takes one file:\n{text}"
+    );
+
+    // The emitted file must itself be a valid, self-contained program.
+    let round_trip = scratch_dir("include_build_rt");
+    write(
+        &round_trip,
+        "Miku.toml",
+        "[project]\nname = \"rt\"\nversion = \"0.1.0\"\n",
+    );
+    std::fs::create_dir_all(round_trip.join("src")).expect("src dir");
+    std::fs::copy(&emitted, round_trip.join("src/main.leek")).expect("copy emitted");
+    let recheck = miku(&["run"], &round_trip);
+    assert_eq!(recheck.status, 0, "stderr: {}", recheck.stderr);
+    assert_eq!(recheck.stdout.trim(), "42");
+
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&round_trip).ok();
+}
+
+#[test]
+fn analyze_reports_a_complexity_row_per_function() {
+    let dir = include_project("analyze");
+    let out = miku(&["analyze"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("twice"), "stdout: {}", out.stdout);
+    assert!(out.stdout.contains("O("), "stdout: {}", out.stdout);
+    assert!(
+        out.stdout.contains("src/helper.leek"),
+        "every project source is analyzed, not only the entry: {}",
+        out.stdout
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- manifest location ----
+
+#[test]
+fn manifest_path_works_from_an_unrelated_directory() {
+    let dir = include_project("manifest_path");
+    let elsewhere = scratch_dir("manifest_path_cwd");
+
+    let manifest = dir.join("Miku.toml");
+    let out = miku(
+        &[
+            "--manifest-path",
+            manifest.to_str().expect("utf-8"),
+            "check",
+        ],
+        &elsewhere,
+    );
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&elsewhere).ok();
+}
+
+#[test]
+fn discovery_walks_up_from_a_subdirectory() {
+    let dir = include_project("discover_subdir");
+    // Running from `src/` (or anywhere below the root) must find the
+    // ancestor manifest, the way `cargo` does.
+    let out = miku(&["check"], &dir.join("src"));
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn manifest_path_to_a_directory_fails_with_a_message_naming_it() {
+    // Today this is an error (DRIVER-09 / #276 owns making it work); it must
+    // at least say which path it could not read rather than surfacing a bare
+    // "Is a directory".
+    let dir = include_project("manifest_path_dir");
+    let out = miku(
+        &["--manifest-path", dir.to_str().expect("utf-8"), "check"],
+        &dir,
+    );
+    assert_ne!(out.status, 0, "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains(dir.to_str().expect("utf-8")),
+        "stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[ignore = "DRIVER-09 (#276): --manifest-path pointing at a directory should find its Miku.toml"]
+fn manifest_path_accepts_a_directory() {
+    let dir = include_project("manifest_path_dir_ok");
+    let out = miku(
+        &["--manifest-path", dir.to_str().expect("utf-8"), "check"],
+        &dir,
+    );
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- host libraries ----
+
+#[test]
+fn library_flag_dispatches_host_functions_through_their_class() {
+    let dir = scratch_dir("library");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn getCell();\n");
+
+    let plain = miku(&["build", "--backend", "java"], &dir);
+    assert_eq!(plain.status, 0, "stderr: {}", plain.stderr);
+    let emitted = dir.join("build/java/AI_0.java");
+    let without = std::fs::read_to_string(&emitted).expect("read emitted");
+    assert!(
+        !without.contains("EntityClass"),
+        "without --library there is no dispatch class:\n{without}"
+    );
+
+    let with_lib = miku(
+        &["--library", "leekwars", "build", "--backend", "java"],
+        &dir,
+    );
+    assert_eq!(with_lib.status, 0, "stderr: {}", with_lib.stderr);
+    let with = std::fs::read_to_string(&emitted).expect("read emitted");
+    assert!(
+        with.contains("EntityClass.getCell"),
+        "stdout: {}\n{with}",
+        with_lib.stdout
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- dev ----
+
+#[test]
+fn dev_pipeline_prints_a_timing_per_front_end_pass() {
+    let dir = include_project("dev_pipeline");
+    let out = miku(&["dev", "pipeline", "src/main.leek"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    let text = format!("{}{}", out.stdout, out.stderr);
+    for step in [
+        "pragma",
+        "lex",
+        "parse",
+        "resolve",
+        "type-check",
+        "lower-hir",
+    ] {
+        assert!(text.contains(step), "no timing for `{step}`:\n{text}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

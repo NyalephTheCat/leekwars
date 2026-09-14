@@ -226,6 +226,17 @@ impl Default for RecipePlan {
     }
 }
 
+// Steps are trait objects, so the derive is unavailable; the step names are
+// the part worth seeing in an assertion failure anyway.
+impl std::fmt::Debug for RecipePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecipePlan")
+            .field("steps", &self.step_names())
+            .field("produced", &self.produced.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl RecipePlan {
     pub fn new() -> Self {
         Self {
@@ -259,11 +270,24 @@ impl RecipePlan {
         }
         if !self.planning.insert(id) {
             return Err(RecipeError {
-                message: "cycle detected while planning recipe".into(),
+                message: format!(
+                    "cycle detected while planning recipe at `{}`",
+                    std::any::type_name::<A>()
+                ),
             });
         }
 
-        <A::Requires as ArtifactList>::expand(self, params)?;
+        let expanded = <A::Requires as ArtifactList>::expand(self, params);
+        // Leave `planning` clean on every exit: a failed plan must not
+        // poison a later `need` on the same `RecipePlan` with a phantom cycle.
+        self.planning.remove(&id);
+        expanded?;
+        // A prerequisite's producer may list `A` among its `Produces` (the
+        // multi-artifact case, e.g. parse yielding both the green tree and
+        // the AST). Re-check after expansion, or we plan A's producer twice.
+        if self.produced.contains(&id) {
+            return Ok(());
+        }
         self.push_step(<A::Producer as RecipeStep>::build(params), &[]);
 
         let mut produced = Vec::new();
@@ -273,7 +297,6 @@ impl RecipePlan {
         }
         self.produced.extend(produced);
 
-        self.planning.remove(&id);
         Ok(())
     }
 
@@ -285,6 +308,32 @@ impl RecipePlan {
     pub fn push_step(&mut self, step: Box<dyn Step>, produces: &[TypeId]) {
         self.steps.push(step);
         self.produced.extend(produces.iter().copied());
+    }
+
+    /// The planned steps' names, in execution order. See
+    /// [`Pipeline::step_names`] for what the names mean under wrapping.
+    #[must_use]
+    pub fn step_names(&self) -> Vec<&'static str> {
+        self.steps.iter().map(|s| s.name()).collect()
+    }
+
+    /// How many steps the plan holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Whether the plan is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// Whether some planned step already yields artifact `A` — the
+    /// bookkeeping [`need`](Self::need) consults to avoid re-planning.
+    #[must_use]
+    pub fn has_produced<A: Artifact>(&self) -> bool {
+        self.produced.contains(&TypeId::of::<A>())
     }
 }
 
