@@ -10,9 +10,10 @@
 
 use super::{
     CLASS_CTOR_THUNK, CLASS_STRING_METHOD, DISPATCH, GLOBALS, LambdaFn, NATIVE_RNG, aborting,
-    charge_builtin_ops, handle, read_handle, val,
+    charge_builtin_ops, current_runtime_error, guard::INTERNAL_PANIC, handle, raise_runtime_error,
+    read_handle, val,
 };
-use leek_runtime::{BuiltinFlow, BuiltinHost, Function, LambdaCapture, Value};
+use leek_runtime::{BuiltinError, BuiltinHost, BuiltinResult, Function, LambdaCapture, Value};
 use std::cell::RefCell;
 
 /// Apply a class's `string()` override to the *top-level* program result: if
@@ -152,10 +153,7 @@ pub(super) fn dispatch_call_value(
             if charge_builtin_ops(name, &args, i64::from(host.version())) {
                 return Value::Null;
             }
-            match leek_runtime::call_builtin(host, name, &args) {
-                Ok(v) => v,
-                Err(_) => Value::Null,
-            }
+            finish_builtin(leek_runtime::call_builtin(host, name, &args))
         }
         // A named-function reference (`var f = foo; f(…)`). The function is
         // uniform-compiled and registered by index in `LAMBDA_FNS`; the
@@ -339,7 +337,7 @@ shim! {
         let mut host = NativeHost {
             version: version as u8,
         };
-        handle(leek_runtime::call_builtin(&mut host, method, &all).unwrap_or(Value::Null))
+        handle(finish_builtin(leek_runtime::call_builtin(&mut host, method, &all)))
     }
 }
 
@@ -371,6 +369,30 @@ shim! {
 /// across calls (and matches the interpreter's).
 pub(super) struct NativeHost {
     version: u8,
+}
+
+/// The fault behind the current abort, as a [`BuiltinError`]. Only read once
+/// [`aborting`] is true; the `INTERNAL_PANIC` fallback covers the
+/// (unreachable) case of an abort with no code recorded, rather than
+/// inventing a success.
+fn recorded_error() -> BuiltinError {
+    BuiltinError::new(current_runtime_error().unwrap_or_else(|| INTERNAL_PANIC.to_string()))
+}
+
+/// Land a builtin's result on the native side: a reported error becomes a
+/// recorded runtime error (so `run()` ends the run with
+/// `NativeError::Runtime` instead of handing back a value), everything else
+/// yields the builtin's value. `raise_runtime_error` is first-wins, so
+/// re-raising a code that came out of the error slot in the first place is a
+/// no-op.
+pub(super) fn finish_builtin(r: BuiltinResult) -> Value {
+    match r {
+        Ok(v) => v,
+        Err(e) => {
+            raise_runtime_error(&e.code);
+            Value::Null
+        }
+    }
 }
 
 impl BuiltinHost for NativeHost {
@@ -437,8 +459,22 @@ impl BuiltinHost for NativeHost {
         }
         None
     }
-    fn call_value(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, BuiltinFlow> {
-        Ok(dispatch_call_value(self, callee, args))
+    fn call_value(&mut self, callee: &Value, args: Vec<Value>) -> BuiltinResult {
+        // A higher-order builtin drives this in a loop, so the run's error
+        // state has to reach it: without an `Err` the builtin keeps calling
+        // back for every remaining element after the run has already faulted.
+        // The check runs both *before* the callback (a fault raised by an
+        // earlier element, or before the builtin was even entered — note
+        // `dispatch_call_value` itself returns null once `aborting`) and
+        // *after* it (a fault the callback body raised).
+        if aborting() {
+            return Err(recorded_error());
+        }
+        let v = dispatch_call_value(self, callee, args);
+        if aborting() {
+            return Err(recorded_error());
+        }
+        Ok(v)
     }
 }
 
@@ -516,10 +552,7 @@ shim! {
         if aborting() {
             return handle(Value::Null);
         }
-        match leek_runtime::call_builtin(&mut host, n, &args) {
-            Ok(v) => handle(v),
-            Err(_) => handle(Value::Null),
-        }
+        handle(finish_builtin(leek_runtime::call_builtin(&mut host, n, &args)))
     }
 }
 
@@ -616,7 +649,7 @@ shim! {
         if charge_builtin_ops(name, &[], version) {
             return handle(Value::Null);
         }
-        handle(leek_runtime::call_builtin(&mut host, name, &[]).unwrap_or(Value::Null))
+        handle(finish_builtin(leek_runtime::call_builtin(&mut host, name, &[])))
     }
 }
 
@@ -632,7 +665,7 @@ shim! {
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);
         }
-        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
+        handle(finish_builtin(leek_runtime::call_builtin(&mut host, name, &args)))
     }
 }
 
@@ -653,7 +686,7 @@ shim! {
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);
         }
-        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
+        handle(finish_builtin(leek_runtime::call_builtin(&mut host, name, &args)))
     }
 }
 
@@ -679,7 +712,7 @@ shim! {
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);
         }
-        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
+        handle(finish_builtin(leek_runtime::call_builtin(&mut host, name, &args)))
     }
 }
 
@@ -707,6 +740,53 @@ shim! {
         if charge_builtin_ops(name, &args, version) {
             return handle(Value::Null);
         }
-        handle(leek_runtime::call_builtin(&mut host, name, &args).unwrap_or(Value::Null))
+        handle(finish_builtin(leek_runtime::call_builtin(&mut host, name, &args)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::state::{reset_runtime_error, take_runtime_error};
+
+    /// The builtin error channel's *producer* end: once the run has faulted,
+    /// `NativeHost::call_value` must report the recorded code rather than
+    /// hand back a null and let the higher-order builtin keep looping.
+    #[test]
+    fn call_value_reports_the_recorded_runtime_error() {
+        reset_runtime_error();
+        raise_runtime_error("TOO_MUCH_OPERATIONS");
+        let mut host = NativeHost { version: 4 };
+        let callee = Value::Function(Function::Builtin("abs".into()));
+        let r = host.call_value(&callee, vec![Value::Int(-1)]);
+        match r {
+            Err(e) => assert_eq!(e.code, "TOO_MUCH_OPERATIONS"),
+            Ok(v) => panic!("expected the recorded error, got {v:?}"),
+        }
+        reset_runtime_error();
+    }
+
+    /// A clean run still returns the builtin's value — the abort checks must
+    /// not turn every callback into an error.
+    #[test]
+    fn call_value_passes_a_clean_call_through() {
+        reset_runtime_error();
+        let mut host = NativeHost { version: 4 };
+        let callee = Value::Function(Function::Builtin("abs".into()));
+        let r = host.call_value(&callee, vec![Value::Int(-3)]);
+        assert!(matches!(r, Ok(Value::Int(3))), "abs(-3) should be 3");
+    }
+
+    /// The channel's *consumer* end: an error reported by a builtin has to
+    /// land in the run's error slot, which is what `run()` turns into
+    /// `NativeError::Runtime`. Before the channel was wired this discarded
+    /// the code and yielded a plain null.
+    #[test]
+    fn finish_builtin_records_a_reported_error() {
+        reset_runtime_error();
+        let v = finish_builtin(Err(BuiltinError::new("BOOM")));
+        assert!(matches!(v, Value::Null), "a reported error yields null");
+        assert_eq!(take_runtime_error().as_deref(), Some("BOOM"));
+        reset_runtime_error();
     }
 }

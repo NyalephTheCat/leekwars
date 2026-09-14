@@ -439,9 +439,6 @@ shim! {
 }
 
 shim! {
-    /// Call a stdlib builtin by name on boxed argument handles, dispatching
-    /// through the shared `leek_runtime::call_builtin` with a trivial native
-    /// host. One shim per small arity (most builtins take ≤ 3 args).
     /// The `.class` meta-property: the runtime class of a value.
     pub extern "C" fn leek_class_of(v: *mut Value) -> *mut Value {
         handle(leek_runtime::class_of(unsafe { val(&v) }))

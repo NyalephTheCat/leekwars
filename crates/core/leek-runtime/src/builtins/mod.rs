@@ -6,7 +6,7 @@
 //! upstream's "missing builtin" runtime behavior.
 
 use crate::value::Value;
-use crate::{BuiltinFlow, BuiltinHost};
+use crate::{BuiltinHost, BuiltinResult};
 
 mod array;
 mod core;
@@ -175,11 +175,7 @@ fn range_result_len(args: &[Value]) -> u64 {
 /// metering (callers charge [`builtin_op_cost`] separately) and of any
 /// concrete backend — stateful needs (version, RNG, higher-order
 /// callbacks) come through the [`BuiltinHost`].
-pub fn call_builtin(
-    host: &mut dyn BuiltinHost,
-    name: &str,
-    args: &[Value],
-) -> Result<Value, BuiltinFlow> {
+pub fn call_builtin(host: &mut dyn BuiltinHost, name: &str, args: &[Value]) -> BuiltinResult {
     if let Some(v) = dispatch_constant(name) {
         return Ok(v);
     }
@@ -373,6 +369,7 @@ const KNOWN_BUILTIN_NAMES: &[&str] = &[
     "isNaN",
     "isPermutation",
     "join",
+    "keys",
     "jsonDecode",
     "jsonEncode",
     "keySort",
@@ -380,6 +377,8 @@ const KNOWN_BUILTIN_NAMES: &[&str] = &[
     "leadingZeros",
     "length",
     "log",
+    "log10",
+    "log2",
     "Map",
     "mapAverage",
     "mapClear",
@@ -474,7 +473,9 @@ const KNOWN_BUILTIN_NAMES: &[&str] = &[
     "startsWith",
     "String",
     "string",
+    "stringCharCodeAt",
     "stringHash",
+    "stringRepeat",
     "subArray",
     "substring",
     "sum",
@@ -504,6 +505,7 @@ const KNOWN_BUILTIN_NAMES: &[&str] = &[
     "USE_NOT_ENOUGH_TP",
     "USE_RESURRECT",
     "USE_SUCCESS",
+    "values",
     "Value",
     "JSON",
     "System",

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::value::{MapData, Value};
-use crate::{BuiltinFlow, BuiltinHost};
+use crate::{BuiltinHost, BuiltinResult};
 
 use super::array::{min_max_array, stash_promotion, sum_array};
 
@@ -17,7 +17,7 @@ pub(crate) fn dispatch_map(
     host: &mut dyn BuiltinHost,
     name: &str,
     args: &[Value],
-) -> Result<Option<Value>, BuiltinFlow> {
+) -> BuiltinResult<Option<Value>> {
     Ok(Some(match (name, args.len()) {
         ("mapGet", 2) => match &args[0] {
             Value::Map(m) => m.borrow().get(&args[1]).cloned().unwrap_or(Value::Null),
@@ -432,11 +432,7 @@ pub(crate) fn map_call_args(
     }
 }
 
-pub(crate) fn map_map(
-    host: &mut dyn BuiltinHost,
-    m: &Value,
-    fun: &Value,
-) -> Result<Value, BuiltinFlow> {
+pub(crate) fn map_map(host: &mut dyn BuiltinHost, m: &Value, fun: &Value) -> BuiltinResult {
     let items = match m {
         Value::Map(mm) => mm.borrow().entries.clone(),
         _ => return Ok(Value::Null),
@@ -450,11 +446,7 @@ pub(crate) fn map_map(
     Ok(Value::Map(Rc::new(RefCell::new(out))))
 }
 
-pub(crate) fn map_filter(
-    host: &mut dyn BuiltinHost,
-    m: &Value,
-    fun: &Value,
-) -> Result<Value, BuiltinFlow> {
+pub(crate) fn map_filter(host: &mut dyn BuiltinHost, m: &Value, fun: &Value) -> BuiltinResult {
     let items = match m {
         Value::Map(mm) => mm.borrow().entries.clone(),
         _ => return Ok(Value::Null),
@@ -470,11 +462,7 @@ pub(crate) fn map_filter(
     Ok(Value::Map(Rc::new(RefCell::new(out))))
 }
 
-pub(crate) fn map_iter(
-    host: &mut dyn BuiltinHost,
-    m: &Value,
-    fun: &Value,
-) -> Result<Value, BuiltinFlow> {
+pub(crate) fn map_iter(host: &mut dyn BuiltinHost, m: &Value, fun: &Value) -> BuiltinResult {
     let items = match m {
         Value::Map(mm) => mm.borrow().entries.clone(),
         _ => return Ok(Value::Null),
@@ -490,7 +478,7 @@ pub(crate) fn map_fold(
     m: &Value,
     fun: &Value,
     init: Value,
-) -> Result<Value, BuiltinFlow> {
+) -> BuiltinResult {
     let items = match m {
         Value::Map(mm) => mm.borrow().entries.clone(),
         _ => return Ok(Value::Null),
@@ -507,7 +495,7 @@ pub(crate) fn map_quantify(
     m: &Value,
     fun: &Value,
     want_all: bool,
-) -> Result<Value, BuiltinFlow> {
+) -> BuiltinResult {
     let items = match m {
         Value::Map(mm) => mm.borrow().entries.clone(),
         _ => return Ok(Value::Null),

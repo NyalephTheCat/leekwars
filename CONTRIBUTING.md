@@ -159,6 +159,17 @@ than one sprawling change.
 - Unit and integration tests live next to the code they cover (`tests/` per
   crate). Run a single crate with `cargo test -p <crate>` (e.g.
   `cargo test -p leek-scenario`).
+- The **builtin suite** (`crates/testing/leek-builtin-suite/suite.toml`) is the
+  quick place to add a regression row for a builtin or a language feature —
+  one `[[tests]]` block, no Rust. It runs in the per-push gate
+  (`cargo test -p leek-builtin-suite`), or on its own with
+  `cargo run -p leek-builtin-suite --bin run-builtin-suite`. A row expects one
+  of `{ equals = "…" }` (the result's display string — prefer this),
+  `{ ops_at_most = N }`, `{ runtime_error = "CODE" }` (a fight error key such
+  as `TOO_MUCH_OPERATIONS`), `"error"` (rejected at compile time *or* at
+  runtime), or `"pass"` (ran at all — asserts the least, use it last). Source
+  expected strings from the upstream corpus's `reference.tsv` where a row
+  exists; display is version-aware.
 - The **upstream corpus** (`leek-test-corpus`) checks thousands of
   `equals(...)` cases against the reference implementation. It's slow and gated
   behind `tools/check.sh --full`; it needs the submodules checked out. CI runs

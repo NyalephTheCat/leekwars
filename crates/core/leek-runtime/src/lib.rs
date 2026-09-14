@@ -17,6 +17,6 @@ pub use builtins::{
 };
 pub use convert::{clamp_index, int_to_real, len_as_int, real_to_int};
 pub use eval::*;
-pub use host::{BuiltinFlow, BuiltinHost};
+pub use host::{BuiltinError, BuiltinHost, BuiltinResult};
 pub use rng::Rng;
 pub use value::*;
