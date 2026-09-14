@@ -26,7 +26,10 @@ use super::{FnLowerer, LoopCtx};
 fn init_is_fresh_builtin_call(e: &Expr) -> bool {
     matches!(
         &e.kind,
-        ExprKind::Call(c) if matches!(&c.callee, HirCallee::Function(NameRef::Builtin(_)))
+        ExprKind::Call(c) if matches!(
+            &c.callee,
+            HirCallee::Function(NameRef::Builtin(_) | NameRef::Unresolved(_))
+        )
     )
 }
 

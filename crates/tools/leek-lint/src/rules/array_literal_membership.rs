@@ -47,8 +47,10 @@ impl LintPass for ArrayLiteralMembership {
             ExprKind::Binary(BinaryOp::In | BinaryOp::NotIn, _, hay) => is_multi_array(hay),
             // `inArray([a, b, c], x)`.
             ExprKind::Call(call) => {
-                matches!(&call.callee, Callee::Function(NameRef::Builtin(n)) if n == "inArray")
-                    && matches!(&call.args[..], [hay, _] if is_multi_array(hay))
+                matches!(
+                    &call.callee,
+                    Callee::Function(NameRef::Builtin(n) | NameRef::Unresolved(n)) if n == "inArray"
+                ) && matches!(&call.args[..], [hay, _] if is_multi_array(hay))
             }
             _ => false,
         };

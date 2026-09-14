@@ -35,7 +35,7 @@ impl LintPass for DeprecatedFeature {
 
     fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
         if let ExprKind::Call(c) = &e.kind
-            && let Callee::Function(NameRef::Builtin(name)) = &c.callee
+            && let Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &c.callee
             && let Some(replacement) = deprecated_replacement(name)
         {
             cx.emit(diagnostic(name, replacement, e.span, c));

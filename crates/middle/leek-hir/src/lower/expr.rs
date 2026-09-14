@@ -271,12 +271,41 @@ impl Lowerer {
     }
 
     /// Resolve a class-or-builtin name (used by `instanceof`).
-    /// Prefers user-defined classes, falls back to a builtin tag.
+    /// Prefers a user-defined class, then a file-level `global` holding a
+    /// class value, and otherwise tags the name the way
+    /// [`Self::resolve_name`] does.
+    ///
+    /// Deliberately *not* routed through [`Self::resolve_name`]: locals are
+    /// skipped, so a local named `Map` cannot shadow the builtin class in
+    /// `x instanceof Map`. The global arm matters because the global store is
+    /// name-keyed — `global G` used as an `instanceof` operand used to lower
+    /// to `Builtin("G")` and reach the same slot only by name, which hid the
+    /// use from every `DefId`-keyed HIR pass (#53).
     pub(crate) fn resolve_class_or_builtin(&self, name: &str) -> NameRef {
-        if let Some(NameKind::Class(id)) = self.file_decls.get(name) {
-            return NameRef::Class(*id);
+        match self.file_decls.get(name) {
+            Some(NameKind::Class(id)) => NameRef::Class(*id),
+            Some(NameKind::Global(id)) => NameRef::Global(*id),
+            _ => Self::builtin_or_unresolved(name),
         }
-        NameRef::Builtin(name.to_string())
+    }
+
+    /// Tag a name no binding claims: [`NameRef::Builtin`] when it really is a
+    /// builtin, [`NameRef::Unresolved`] otherwise.
+    ///
+    /// The tag is a *hint*, never an authority. `is_builtin_name` consults a
+    /// process-global registry that `register_builtin_function` /
+    /// `register_builtin_constant` fill when a library is loaded, so whether
+    /// e.g. `WEAPON_PISTOL` lowers to `Builtin` or `Unresolved` depends on
+    /// whether the `leekwars` library was registered before lowering ran.
+    /// Every consumer keyed on a *name table* must therefore match both
+    /// variants; only a pass that genuinely cares whether the resolver could
+    /// see a binding may distinguish them.
+    fn builtin_or_unresolved(name: &str) -> NameRef {
+        if leek_resolver::builtins::is_builtin_name(name) {
+            NameRef::Builtin(name.to_string())
+        } else {
+            NameRef::Unresolved(name.to_string())
+        }
     }
 
     pub(crate) fn lower_name_ref(&mut self, n: &ast::NameRef) -> NameRef {
@@ -302,7 +331,8 @@ impl Lowerer {
 
     /// Resolve a bare identifier: innermost local (crossing lambda
     /// boundaries, so captures resolve), then a file-level function /
-    /// class / global, else `Builtin`.
+    /// class / global, else `Builtin` for a real builtin name and
+    /// `Unresolved` for anything else.
     pub(crate) fn resolve_name(&self, name: &str) -> NameRef {
         if let Some(id) = self.lookup_local(name) {
             return NameRef::Local(id);
@@ -314,22 +344,26 @@ impl Lowerer {
                 NameKind::Global(id) => NameRef::Global(*id),
             };
         }
-        // Anything else — could be a builtin or unresolved. The
-        // interpreter knows the builtin set; we tag everything as
-        // `Builtin` here and let the interpreter sort it out.
-        NameRef::Builtin(name.to_string())
+        // Anything else — a real builtin, or a name nothing declares.
+        // See [`Self::builtin_or_unresolved`] for why the distinction is a
+        // hint rather than an authority.
+        Self::builtin_or_unresolved(name)
     }
 
     /// The expression a resolved bare name stands for. Inside a method/ctor
-    /// body, an unresolved (`Builtin`) identifier that names a class field
-    /// rewrites to `this.field` (static: `class.field`), and a bare method
-    /// value to `this.method`. Method names in *call* position stay `Builtin`
-    /// (see [`Self::lower_call`]) so the arity-aware dispatch runs.
+    /// body, a name no binding claims (`Builtin` / `Unresolved`) that names a
+    /// class field rewrites to `this.field` (static: `class.field`), and a
+    /// bare method value to `this.method`. Method names in *call* position
+    /// keep their tag (see [`Self::lower_call`]) so the arity-aware dispatch
+    /// runs.
+    ///
+    /// Both tags are accepted: a field or method name is almost never a
+    /// builtin, so keying this on `Builtin` alone would drop the sugar.
     ///
     /// Shared by name reads, assignment l-values and foreach bindings, so all
     /// three resolve a name to the same storage.
     pub(crate) fn name_expr_kind(&self, nr: NameRef, span: Span) -> ExprKind {
-        let NameRef::Builtin(name) = &nr else {
+        let (NameRef::Builtin(name) | NameRef::Unresolved(name)) = &nr else {
             return ExprKind::Name(nr);
         };
         let Some(c) = self.class_ctx.last() else {
@@ -465,7 +499,7 @@ impl Lowerer {
                 // resolve to an instance method (`this.foo`) or a
                 // static method (`class.foo`). Rewrite to a method
                 // call so the dispatcher does the right thing.
-                if let NameRef::Builtin(name) = &nr {
+                if let NameRef::Builtin(name) | NameRef::Unresolved(name) = &nr {
                     let argc = args.len();
                     if let Some(ctx) = self.class_ctx.last() {
                         // Arity-aware rewrite: a bare `foo(...)`

@@ -69,7 +69,7 @@ fn size_call(e: &Expr) -> Option<(&str, &Expr)> {
     let ExprKind::Call(call) = &e.kind else {
         return None;
     };
-    let Callee::Function(NameRef::Builtin(name)) = &call.callee else {
+    let Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &call.callee else {
         return None;
     };
     if !SIZE_BUILTINS.contains(&name.as_str()) {

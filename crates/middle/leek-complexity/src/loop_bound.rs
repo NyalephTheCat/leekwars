@@ -234,7 +234,7 @@ fn bound_from_iter_expr(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
 pub(crate) fn resolve_size_var(e: &Expr, ctx: &BoundContext) -> Option<SizeVar> {
     // `count(x)` / `length(x)` / … → size of `x`.
     if let ExprKind::Call(call) = &e.kind
-        && let Callee::Function(NameRef::Builtin(name)) = &call.callee
+        && let Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &call.callee
         && matches!(name.as_str(), "count" | "length" | "size" | "mapSize")
     {
         return resolve_size_var(call.args.first()?, ctx);

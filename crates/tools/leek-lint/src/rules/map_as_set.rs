@@ -145,7 +145,7 @@ fn judge(
             }
             // `mapContainsKey(m, k)`, `mapRemove(m, k)`, sizes.
             ExprKind::Call(call) => {
-                if let Callee::Function(NameRef::Builtin(n)) = &call.callee
+                if let Callee::Function(NameRef::Builtin(n) | NameRef::Unresolved(n)) = &call.callee
                     && SET_SHAPED_CALLS.contains(&n.as_str())
                     && call.args.first().is_some_and(|a| is_name(a, def))
                 {

@@ -39,7 +39,7 @@ impl super::Emitter<'_> {
         // through the shadow map instead of the builtin dispatch.
         // Read the shadow's value as a FunctionLeekValue and
         // `execute(...)` it.
-        if let Callee::Function(NameRef::Builtin(name)) = &c.callee
+        if let Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &c.callee
             && self.shadowed_builtins.borrow().contains(name)
         {
             buf.push_str("(__shadows.containsKey(\"");
@@ -60,7 +60,11 @@ impl super::Emitter<'_> {
             return;
         }
         match &c.callee {
-            Callee::Function(NameRef::Builtin(name)) => {
+            // A name no binding claims. `Unresolved` shares this arm: before
+            // the two tags were split every such callee was `Builtin`, and the
+            // dispatch below is keyed by name, so a name the resolver never
+            // saw still falls through to the same by-name emission it used to.
+            Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) => {
                 // `max`/`min` are polymorphic over int/real and there's no
                 // `(Object, Object)` overload — picking long/double at compile
                 // time is wrong for a real-typed *variable* arg (`max(0, a)`
@@ -555,19 +559,6 @@ impl super::Emitter<'_> {
                 if wrap_long {
                     buf.push_str(")).longValue()");
                 }
-            }
-            Callee::Function(NameRef::Unresolved(name)) => {
-                // Best-effort: emit `f_name(args)` so the compile error
-                // surfaces at the user's call site instead of here.
-                buf.push_str(&mangle::function(self.opts, name));
-                buf.push('(');
-                for (i, a) in c.args.iter().enumerate() {
-                    if i > 0 {
-                        buf.push_str(", ");
-                    }
-                    self.write_expr(buf, a, false);
-                }
-                buf.push(')');
             }
             Callee::Function(name_ref @ (NameRef::Local(_) | NameRef::Global(_))) => {
                 // `var f = cos; f(0.5)` — the callee is a local /

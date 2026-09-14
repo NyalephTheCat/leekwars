@@ -128,7 +128,9 @@ fn bound_forces_real(e: &Expr) -> bool {
         // `]-∞..5]` as an `IntegerInterval` (the infinite bound is just the
         // sentinel). Only the `Infinity` *keyword* (a builtin name) forces real.
         ExprKind::Literal(Literal::Real(r)) => r.is_finite(),
-        ExprKind::Name(NameRef::Builtin(n)) => n == "Infinity" || n == "INFINITY",
+        ExprKind::Name(NameRef::Builtin(n) | NameRef::Unresolved(n)) => {
+            n == "Infinity" || n == "INFINITY"
+        }
         ExprKind::Unary(_, inner) => bound_forces_real(inner),
         _ => false,
     }
@@ -283,7 +285,11 @@ impl Emitter<'_> {
                 let name = self.def_name(*id).to_string();
                 buf.push_str(&mangle::class_name(self.opts, &name));
             }
-            NameRef::Builtin(name) => {
+            // A name no binding claims. `Unresolved` shares this arm: before
+            // the two tags were split every such name was `Builtin`, and the
+            // emission below is keyed by name, so a name the resolver never
+            // saw still renders exactly as it used to.
+            NameRef::Builtin(name) | NameRef::Unresolved(name) => {
                 // If the source ever reassigns this builtin name
                 // (`push = 1` etc.), check the `__shadows` map
                 // first and fall through to the original builtin
@@ -379,12 +385,6 @@ impl Emitter<'_> {
                 } else {
                     buf.push_str("this.getClass()");
                 }
-            }
-            NameRef::Unresolved(name) => {
-                // Fall back to the mangled local form so the surrounding
-                // code still parses. The interpreter would surface the
-                // unresolved diagnostic separately.
-                buf.push_str(&mangle::local(self.opts, name));
             }
         }
     }
@@ -879,7 +879,7 @@ impl Emitter<'_> {
             }
             return;
         }
-        if let ExprKind::Name(NameRef::Builtin(name)) = &l.kind {
+        if let ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &l.kind {
             // Builtin reassign — route through the `__shadows`
             // map field on the AI class. v1 allows shadowing
             // builtin names; subsequent reads via `write_name`
@@ -895,7 +895,12 @@ impl Emitter<'_> {
         }
         if matches!(
             &l.kind,
-            ExprKind::Name(NameRef::Builtin(_) | NameRef::Function(_) | NameRef::Class(_))
+            ExprKind::Name(
+                NameRef::Builtin(_)
+                    | NameRef::Unresolved(_)
+                    | NameRef::Function(_)
+                    | NameRef::Class(_)
+            )
         ) {
             // Assignment to a function/class name (no shadow
             // tracking yet for these — the resolver already
@@ -1151,7 +1156,7 @@ impl Emitter<'_> {
     fn shadowed_overcharge(&self, e: &Expr) -> u32 {
         let mut total = 0;
         if let ExprKind::Call(c) = &e.kind
-            && let Callee::Function(NameRef::Builtin(name)) = &c.callee
+            && let Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &c.callee
             && self.shadowed_builtins.borrow().contains(name)
         {
             total += super::builtin_call_cost(name);
@@ -1295,7 +1300,8 @@ impl Emitter<'_> {
             ExprKind::Unary(UnaryOp::Neg, x) => Self::expr_is_numeric(x),
             ExprKind::Call(c) => matches!(
                 &c.callee,
-                Callee::Function(NameRef::Builtin(n)) if is_numeric_math_builtin(n)
+                Callee::Function(NameRef::Builtin(n) | NameRef::Unresolved(n))
+                    if is_numeric_math_builtin(n)
             ),
             _ => false,
         }

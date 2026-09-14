@@ -587,7 +587,9 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
         ExprKind::Call(c) => {
             let mut total: u32 = c.args.iter().map(expr_op_cost).sum();
             match &c.callee {
-                Callee::Function(NameRef::Builtin(name)) => total += builtin_call_cost(name),
+                Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) => {
+                    total += builtin_call_cost(name);
+                }
                 // `[ … ][i]…[j](args)` — indexing into an *array literal* and
                 // calling the result routes each index level through
                 // `executeArrayAccess`, which the reference charges 2 ops apiece.
@@ -601,7 +603,10 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
                 // extra per-call op. Builtin-class receivers
                 // (`Integer.parse(...)`) are exempt like the `Field` arm.
                 Callee::Method { receiver, .. }
-                    if !matches!(&receiver.kind, ExprKind::Name(NameRef::Builtin(_))) =>
+                    if !matches!(
+                        &receiver.kind,
+                        ExprKind::Name(NameRef::Builtin(_) | NameRef::Unresolved(_))
+                    ) =>
                 {
                     total += 1 + expr_op_cost(receiver);
                 }
@@ -616,7 +621,10 @@ pub(crate) fn expr_op_cost(e: &Expr) -> u32 {
         // standard `1 + base.ops` formula from
         // `LeekObjectAccess.analyze`.
         ExprKind::Field(b, ..) => {
-            if matches!(&b.kind, ExprKind::Name(NameRef::Builtin(_))) {
+            if matches!(
+                &b.kind,
+                ExprKind::Name(NameRef::Builtin(_) | NameRef::Unresolved(_))
+            ) {
                 0
             } else {
                 1 + expr_op_cost(b)
@@ -1064,7 +1072,8 @@ pub(crate) fn collect_shadowed_builtins(
     pub(crate) fn scan_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
         if let ExprKind::Binary(op, lhs, rhs) = &e.kind {
             if matches!(op, BinaryOp::Assign)
-                && let ExprKind::Name(NameRef::Builtin(name)) = &lhs.kind
+                && let ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) =
+                    &lhs.kind
             {
                 out.insert(name.clone());
             }
