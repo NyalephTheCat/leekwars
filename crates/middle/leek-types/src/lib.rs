@@ -1,22 +1,42 @@
 //! Type inference and assignment-compatibility checking.
 //!
-//! First-slice scope:
-//! - Infer the type of each local variable from its initializer.
-//! - On subsequent assignment, check RHS type against the LHS's
-//!   recorded type. Mismatch emits `ASSIGNMENT_INCOMPATIBLE_TYPE`.
-//! - Inference covers literals, identifier lookup, simple arithmetic
-//!   binary operators, array/map/set/object literals, `new C(...)`.
+//! The checker walks a file, infers a [`Type`] for every expression, and
+//! reports the assignments and calls that can't be reconciled — chiefly
+//! `ASSIGNMENT_INCOMPATIBLE_TYPE` and, in strict mode,
+//! `WRONG_ARGUMENT_TYPE`. Leekscript is dynamically typed, so inference
+//! is deliberately permissive: anything it can't pin down stays
+//! [`Type::Any`], which is compatible with everything, on the principle
+//! that a false positive costs more than a miss.
 //!
-//! Types not yet inferred (function calls, complex postfix chains,
-//! etc.) fall back to `Type::Any`, which is compatible with anything
-//! to avoid false positives.
+//! What inference covers:
+//! - Literals, locals (from the initializer, re-checked on every later
+//!   assignment), and the arithmetic / comparison operators.
+//! - Container literals — array, map, set, object — and `new C(...)`.
+//! - Call return types: user functions via the checker's
+//!   `user_fn_return_type` table, class fields and method returns via
+//!   [`InferredSignatures`], and library functions from the generated
+//!   signature headers in `leek-prelude`.
+//! - Nullable (`T?`), bounded unions (`A | B`), and flow narrowing from
+//!   `instanceof` and null guards (the `checker::narrow` submodule).
+//! - Classes with inheritance, and — behind the `LEEK_EXPERIMENTAL_*`
+//!   flags — `type` aliases, tuple-shaped arrays, `interface`
+//!   declarations with `implements`, `enum` declarations, and generic
+//!   signature instantiation.
+//!
+//! The lattice itself — assignability, joins, and the canonical forms
+//! of unions and nullables — is written up in `docs/semantics.md` §5.
 //!
 //! Module layout:
 //! - [`ty`] — the [`Type`] enum and conversions to/from the CST.
+//! - [`generic`] — generic type patterns ([`generic::GType`]) and
+//!   signature instantiation.
 //! - [`builtins`] — per-builtin signature table for strict-mode
 //!   WRONG_ARGUMENT_TYPE detection.
 //! - [`checker`] — the walking `Checker` and its
 //!   `check_*` / `infer_*` methods.
+//! - [`index`] — the LSP-facing outputs: [`TypeTable`] (span → inferred
+//!   type, for hover) and [`InferredSignatures`].
+//! - [`pipeline`] — the [`Step`](leek_pipeline::Step) / salsa integration.
 //!
 //! Public entry: [`check`].
 

@@ -31,7 +31,8 @@
 //!
 //! The per-crate tracked queries land in each pass crate (lexer,
 //! parser, …) when those crates opt in to the salsa feature
-//! themselves. See `doc/pipeline.md` for the migration shape.
+//! themselves, each behind that crate's own `salsa` feature so a
+//! consumer that doesn't want the dependency keeps the plain [`Step`].
 
 use leek_span::SourceId;
 

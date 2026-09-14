@@ -1,4 +1,4 @@
-//! Runtime values produced by the interpreter.
+//! The runtime value model.
 //!
 //! Mirrors the upstream Java runtime's tagged-value model: a single
 //! `Value` enum covers all primitive and composite kinds. Arrays and
@@ -14,9 +14,9 @@ use super::key::MapKey;
 /// Identifies a user-defined class inside the program being run.
 ///
 /// An opaque handle minted by whoever loads the program — the runtime
-/// never dereferences it, it only stores and compares it. Both the
-/// interpreter and the native backend use the class's HIR `DefId.0`,
-/// but nothing here depends on that: the loader picks the numbering
+/// never dereferences it, it only stores and compares it. The native
+/// backend uses the class's HIR `DefId.0`, but nothing here depends on
+/// that: the loader picks the numbering
 /// and is the only side allowed to interpret it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(pub u32);
@@ -88,7 +88,7 @@ pub enum Value {
     /// one or more lambdas so writes propagate between the outer
     /// scope and every closure that holds a reference. Reads peek
     /// through; writes go through the cell. Constructed by the
-    /// interpreter at frame init for locals the lowerer marked
+    /// backend at frame init for locals the lowerer marked
     /// `is_shared`. Never produced by user code directly.
     Cell(Rc<RefCell<Value>>),
 }
@@ -434,8 +434,8 @@ impl FromIterator<Value> for SetData {
     }
 }
 
-/// First-class function values. The interpreter dispatches each
-/// case to a different path.
+/// First-class function values. The backend dispatches each case to a
+/// different path.
 #[derive(Debug, Clone)]
 pub enum Function {
     /// Top-level user function. Body lookup is by the [`FnId`] the
@@ -446,7 +446,7 @@ pub enum Function {
     /// (matches Leekscript value-capture semantics).
     Lambda(Rc<LambdaCapture>),
     /// Method bound to a specific receiver. `function_idx` indexes
-    /// into [`leek_mir::MirProgram::functions`]; the interpreter
+    /// into [`leek_mir::MirProgram::functions`]; the backend
     /// prepends `receiver` to the caller's arg list when invoking,
     /// matching how methods are lowered (first param is the
     /// synthetic `this`).
@@ -465,7 +465,7 @@ pub struct LambdaCapture {
     /// slots, in the same order as `captured` below.
     pub function_idx: usize,
     /// Captured values pre-bound at lambda-construction time. The
-    /// interpreter prepends these to the user arguments before
-    /// entering the lambda's frame.
+    /// backend prepends these to the user arguments before entering
+    /// the lambda's frame.
     pub captured: std::cell::RefCell<Vec<Value>>,
 }

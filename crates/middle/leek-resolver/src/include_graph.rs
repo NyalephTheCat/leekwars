@@ -2,8 +2,10 @@
 //!
 //! Walks `include("name")` statements transitively using a
 //! [`Folder`] for I/O. Stops on cycles (reported as
-//! `CircularInclude`) and missing files (reported as
-//! `AI_NOT_EXISTING`). Returns a topologically-ordered list of
+//! [`CIRCULAR_INCLUDE`](leek_diagnostics::codes::CIRCULAR_INCLUDE)) and
+//! missing files (reported as
+//! [`INCLUDE_NOT_FOUND`](leek_diagnostics::codes::INCLUDE_NOT_FOUND)).
+//! Returns a topologically-ordered list of
 //! `LoadedFile`s — entry last — so callers can pre-declare items
 //! from leaves first and the entry inherits everything.
 //!
@@ -13,7 +15,7 @@
 //! file's own `@version` pragma applied. Otherwise a v2 file using
 //! `and` as a keyword gets tokenized at v4 (where `and` is an
 //! identifier) and the cached token stream is wrong for the next
-//! real compile pass. See `doc/pipeline.md` §5.1.7. We honor this
+//! real compile pass (`docs/semantics.md` §2.2). We honor this
 //! by re-parsing each file with its declared version before
 //! scanning for include tokens.
 //!

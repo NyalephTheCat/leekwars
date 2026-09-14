@@ -24,7 +24,7 @@ pub use array::{deep_clone_for_v1, take_pending_promotion};
 
 /// Total operation cost upstream charges for a builtin call: a per-call
 /// base plus, for batch operations, a per-element multiplier over the
-/// input size. Pure (no interpreter state) so any caller can meter it.
+/// input size. Pure (no backend state) so any caller can meter it.
 pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
     let total = builtin_cost(name);
 
@@ -110,7 +110,7 @@ pub fn builtin_op_cost(name: &str, args: &[Value], version: u8) -> u64 {
 
     // `range(lo, hi)` allocates `hi - lo + 1` integers, but the size lives in
     // the numeric args, not a container in `arg[0]`, so it isn't in the batch
-    // catalog. Meter it explicitly: the interpreter charges this cost *before*
+    // catalog. Meter it explicitly: the cost is charged *before*
     // dispatching, so a huge range (`range(0, Number.MAX_VALUE)`) trips the op
     // budget before it can allocate — closing an OOM/DoS hole.
     if name == "range" {
@@ -247,7 +247,7 @@ pub fn is_known_builtin(name: &str) -> bool {
     KNOWN_BUILTIN_NAMES.contains(&name)
 }
 
-/// Every standard-library name the interpreter can reach via a
+/// Every standard-library name a backend can reach via a
 /// `Callee::Builtin` / `BuiltinRef`. New builtins must be added
 /// here AND to the relevant `dispatch_*`.
 const KNOWN_BUILTIN_NAMES: &[&str] = &[

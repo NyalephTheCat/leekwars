@@ -6,7 +6,8 @@
 //! shapes can be desugared here so backends downstream don't each
 //! need their own rules.
 //!
-//! See `doc/pipeline.md` §7.
+//! The include, scope and version rules this lowering implements are
+//! written up in `docs/semantics.md`.
 
 pub mod captures;
 pub mod ir;

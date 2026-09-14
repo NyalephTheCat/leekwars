@@ -1,5 +1,5 @@
-//! Scalar built-in implementations shared by the interpreter and the
-//! native (Cranelift) backend.
+//! Scalar built-in implementations shared by the builtin dispatchers and
+//! the native (Cranelift) backend.
 //!
 //! These are the pure, stateless math builtins (`sqrt`, `cos`, `floor`,
 //! …): each takes scalar `f64` argument(s) and returns a scalar, with no
@@ -100,7 +100,7 @@ pub extern "C" fn leek_hypot(a: f64, b: f64) -> f64 {
 }
 
 /// Integer power for the `**` operator's all-integer path with a
-/// non-negative exponent `< 64`. Matches the interpreter:
+/// non-negative exponent `< 64`. Matches upstream:
 /// `a.checked_pow(b) ` saturating to `i64::MAX` on overflow. Callers must
 /// guarantee `0 <= b < 64`.
 #[allow(unsafe_code)]

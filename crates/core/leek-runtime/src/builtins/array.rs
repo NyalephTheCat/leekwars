@@ -688,8 +688,9 @@ thread_local! {
     /// One-shot side-channel: a v1-v3 mutating builtin
     /// (`removeElement`, `assocReverse`, `assocSort`, …) sets the
     /// promoted Map here when it morphs its first arg's container;
-    /// the interp's `ApplyPromotion` statement consumes it and
-    /// writes the new value back to the caller's slot.
+    /// MIR's `ApplyPromotion` statement consumes it (via
+    /// [`take_pending_promotion`]) and writes the new value back to
+    /// the caller's slot.
     static PENDING_PROMOTION: std::cell::RefCell<Option<Value>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -706,7 +707,7 @@ pub fn take_pending_promotion() -> Option<Value> {
 /// in `crate::eval` and is re-exported here.
 pub(crate) use crate::deep_clone;
 
-/// Public wrapper around `deep_clone` for the interp's v1 boundaries
+/// Public wrapper around `deep_clone` for a backend's v1 boundaries
 /// (function argument, return). A no-op for primitives.
 pub fn deep_clone_for_v1(v: &Value) -> Value {
     deep_clone(v)
