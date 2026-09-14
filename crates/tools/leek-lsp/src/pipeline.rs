@@ -1,15 +1,14 @@
 //! Shared pipeline drivers for LSP handlers.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::Arc;
 
 use leek_fmt::FormatOptions;
 use leek_pipeline::Run;
 use leek_pipeline::salsa::SourceFile;
 use leek_recipes::{self, Target};
 use leek_resolver::folder::{Folder, LoadError, LoadedFile, MemFolder};
-use leek_span::SourceId;
+use leek_resolver::interner::SourceInterner;
 use leek_span::paths::canonical_or_normalized;
 use tower_lsp::lsp_types as lsp;
 
@@ -54,30 +53,12 @@ fn run_on_uri<'db>(
         return Some(pipeline.run_memoized(&ws.db, source_file));
     };
 
-    let (folder, source_ids) = WorkspaceFolder::from_workspace(ws);
-    let mut next_source = source_ids
-        .values()
-        .map(|id| id.get())
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let mut known_sources = source_ids;
-    let source_allocator: Arc<Mutex<dyn FnMut(&Path) -> SourceId + Send>> =
-        Arc::new(Mutex::new(move |path: &Path| {
-            let key = canonical_or_normalized(path);
-            if let Some(source) = known_sources.get(&key).copied() {
-                return source;
-            }
-            let source = SourceId::new(next_source).expect("source id space exhausted");
-            next_source = next_source.saturating_add(1);
-            known_sources.insert(key, source);
-            source
-        }));
-    let includes = leek_resolver::pipeline::ResolveIncludes {
+    let folder = WorkspaceFolder::from_workspace(ws);
+    let includes = leek_resolver::pipeline::ResolveIncludes::new(
         folder,
-        entry_path: canonical_or_normalized(&entry_path),
-        source_allocator,
-    };
+        canonical_or_normalized(&entry_path),
+        Arc::clone(&ws.interner) as Arc<dyn SourceInterner>,
+    );
     let pipeline = leek_recipes::pipeline_with_includes(
         target,
         Box::new(includes),
@@ -112,24 +93,29 @@ struct WorkspaceFolder {
 }
 
 impl WorkspaceFolder {
-    fn from_workspace(ws: &Workspace) -> (Arc<dyn Folder>, HashMap<PathBuf, SourceId>) {
+    /// The folder for one include-aware run, and — as a side effect —
+    /// the workspace interner seeded with every analysis target's id.
+    ///
+    /// The seeding is what keeps the include graph naming an open or
+    /// indexed file by the `SourceId` its salsa input already carries:
+    /// [`run_on_file_with_includes`] maps a source back to a URI by
+    /// exactly that id. Files the walker reaches that are neither open
+    /// nor indexed get fresh ids from the same interner, so they cannot
+    /// collide with an id the workspace hands out later.
+    fn from_workspace(ws: &Workspace) -> Arc<dyn Folder> {
         let mut memory = MemFolder::new();
-        let mut source_ids = HashMap::new();
         for target in ws.analysis_targets() {
             let Some(path) = crate::workspace::uri_to_path(target.uri) else {
                 continue;
             };
             let path = canonical_or_normalized(&path);
             memory.insert(path.clone(), target.text.to_string());
-            source_ids.insert(path, target.source_file.source(&ws.db));
+            ws.interner.assign(&path, target.source_file.source(&ws.db));
         }
-        (
-            Arc::new(Self {
-                memory,
-                disk: leek_resolver::folder::DiskFolder,
-            }),
-            source_ids,
-        )
+        Arc::new(Self {
+            memory,
+            disk: leek_resolver::folder::DiskFolder,
+        })
     }
 }
 

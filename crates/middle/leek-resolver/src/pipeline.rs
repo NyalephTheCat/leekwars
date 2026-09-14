@@ -17,6 +17,7 @@ use leek_syntax::version::version_from_byte;
 use crate::folder::Folder;
 use crate::include_graph::{ResolvedFile, build_include_graph};
 use crate::index::ResolveTable;
+use crate::interner::SourceInterner;
 use crate::{FileUnit, Options, ResolveResult, resolve_collecting, resolve_collecting_files};
 
 /// Resolver outcome.
@@ -158,35 +159,32 @@ impl Artifact for IncludeGraphArtifact {}
 /// parsed AST in the [`IncludeGraphArtifact`]. Without this step
 /// the existing single-file flow runs unchanged.
 ///
-/// `source_allocator` is the per-pipeline strategy for issuing
-/// `SourceId`s to newly-discovered include files. Callers that
-/// need stable ids across runs (LSP) pass a closure that maps
-/// canonical paths to ids they've already allocated; one-shot CLI
-/// users (miku) can use a simple monotonic counter.
+/// `interner` issues the `SourceId`s: the entry file first (the
+/// walker seeds it), then each newly-discovered include. Callers that
+/// compile several entry files in one run — the LSP over a workspace,
+/// `miku test` over a tests directory — hand every pipeline the *same*
+/// interner, so a helper included by two entries keeps one id instead
+/// of colliding with the next entry's. One-shot callers build a fresh
+/// [`PathInterner`](crate::interner::PathInterner) per run.
 pub struct ResolveIncludes {
     pub folder: Arc<dyn Folder>,
     pub entry_path: PathBuf,
-    pub source_allocator:
-        Arc<std::sync::Mutex<dyn FnMut(&std::path::Path) -> leek_span::SourceId + Send>>,
+    pub interner: Arc<dyn SourceInterner>,
 }
 
 impl ResolveIncludes {
-    /// Convenience constructor with a monotonic-counter allocator
-    /// starting at `start`. Each newly-discovered include file gets
-    /// a fresh sequential `SourceId`.
-    pub fn with_counter(folder: Arc<dyn Folder>, entry_path: PathBuf, start: u32) -> Self {
-        let mut next = start;
-        let allocator: Arc<
-            std::sync::Mutex<dyn FnMut(&std::path::Path) -> leek_span::SourceId + Send>,
-        > = Arc::new(std::sync::Mutex::new(move |_p: &std::path::Path| {
-            let id = leek_span::SourceId::new(next).expect("non-zero SourceId");
-            next += 1;
-            id
-        }));
+    /// The step for `entry_path`, numbering it and its includes out of
+    /// `interner`.
+    #[must_use]
+    pub fn new(
+        folder: Arc<dyn Folder>,
+        entry_path: PathBuf,
+        interner: Arc<dyn SourceInterner>,
+    ) -> Self {
         Self {
             folder,
             entry_path,
-            source_allocator: allocator,
+            interner,
         }
     }
 }
@@ -197,19 +195,13 @@ impl Step for ResolveIncludes {
     }
     fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
         let entry_path = canonical_or_normalized(&self.entry_path);
-        let graph = {
-            let mut alloc = self.source_allocator.lock().map_err(|e| StepError {
-                step: "resolve_includes",
-                message: format!("source allocator poisoned: {e}"),
-            })?;
-            build_include_graph(
-                &entry_path,
-                cx.text(),
-                version_from_byte(cx.version_byte()),
-                &*self.folder,
-                |p| (alloc)(p),
-            )
-        };
+        let graph = build_include_graph(
+            &entry_path,
+            cx.text(),
+            version_from_byte(cx.version_byte()),
+            &*self.folder,
+            |p| self.interner.intern(p),
+        );
 
         cx.emit_all(graph.diagnostics.iter().cloned());
 

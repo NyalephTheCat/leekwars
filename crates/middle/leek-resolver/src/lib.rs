@@ -22,6 +22,7 @@
 //! - [`expressions`] — expression-level resolution + calls + names
 //! - [`checks`] — assignment / l-value / privacy / final-field checks
 //! - [`util`] — pure AST helpers and constants
+//! - [`interner`] — path → [`SourceId`] interning for include ids
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ mod classes;
 mod expressions;
 pub mod folder;
 pub mod include_graph;
+pub mod interner;
 pub mod pipeline;
 mod scope;
 mod statements;
