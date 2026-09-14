@@ -88,6 +88,7 @@ impl Compiled {
                 .map(|file| (canonical_or_normalized(&file.path), file.source.get()))
                 .collect(),
             self.safepoint_lines(),
+            self.version,
         )
     }
 

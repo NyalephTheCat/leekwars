@@ -63,7 +63,10 @@ mod options;
 mod runtime;
 mod translate;
 
-pub use debug::{DebugHook, clear_debug_hook, frame_name, render_frame_vars, set_debug_hook};
+pub use debug::{
+    DebugHook, DebugValue, clear_debug_hook, frame_name, read_frame_vars, render_frame_vars,
+    set_debug_hook,
+};
 pub use game::{GameRuntime, set_game_runtime};
 pub use options::{
     CodegenKey, DEFAULT_OP_BUDGET, NativeEmit, NativeError, NativeErrorKind, NativeOptions,

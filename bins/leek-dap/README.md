@@ -9,11 +9,26 @@ the **native (Cranelift) backend**: on launch the adapter compiles the
 program in debug mode (no optimization, per-statement safepoints, DWARF) and
 runs it in-process, on a worker thread — so the adapter keeps answering
 requests (including `terminate` / `disconnect`) for the whole run. Supported
-today: line breakpoints, `stopOnEntry`, step in/over/out (depth-aware),
-`pause`, multi-frame stack traces, and per-frame local-variable inspection.
-Known gap: conditional breakpoints, hit counts and logpoints — the matching
-capabilities stay off rather than advertise something the adapter would
-silently ignore.
+today: line breakpoints with conditions and logpoints, `stopOnEntry`, step
+in/over/out (depth-aware), `pause`, multi-frame stack traces, per-frame
+local-variable inspection, `evaluate` against a parked frame, and
+`breakpointLocations`.
+
+A breakpoint condition, a logpoint's `{…}` holes and an `evaluate` expression
+all speak the same subset of Leekscript: literals, the frame's own locals,
+operators and `? :`, compiled at the debugged program's language version. No
+calls, indexing or field access — there is no interpreter behind the debugger
+to run them in — and anything outside the subset is reported back as an
+unverified breakpoint naming what it could not use, rather than silently never
+firing.
+
+Known gap: hit counts. `hitCondition` is honoured when a client sends one, but
+`supportsHitConditionalBreakpoints` stays off: one source line can lower to
+several MIR statements and the debugger arrives at each of them, so a count
+would tally lowered statements rather than visits ([#408]). The same applies
+to a logpoint on such a line — it prints once per arrival.
+
+[#408]: https://github.com/NyalephTheCat/leekwars/issues/408
 
 The program is compiled through the same project front-end as `miku run`:
 `include("…")` resolves off disk, so a program split across files debugs the

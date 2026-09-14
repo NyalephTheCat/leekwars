@@ -48,11 +48,13 @@ pub(crate) fn dispatch<R: Read, W: Write + Send + 'static>(
 
         Command::SetBreakpoints(_) => breakpoints::set(session, server, req),
         Command::SetExceptionBreakpoints(_) => breakpoints::set_exception(server, req),
+        Command::BreakpointLocations(_) => breakpoints::locations(session, server, req),
 
         Command::Threads => inspection::threads(server, req),
         Command::StackTrace(_) => inspection::stack_trace(session, server, req),
         Command::Scopes(_) => inspection::scopes(server, req),
         Command::Variables(_) => inspection::variables(session, server, req),
+        Command::Evaluate(_) => inspection::evaluate(session, server, req),
 
         Command::Continue(_) => execution::continue_(session, server, req),
         Command::Next(_) => execution::next(session, server, req),

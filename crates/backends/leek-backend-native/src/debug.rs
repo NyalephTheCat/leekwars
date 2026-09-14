@@ -16,6 +16,7 @@
 //! Single debuggee at a time: the hook is global, matching one debug
 //! session per process (a debug adapter drives exactly one).
 
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use leek_runtime::Value;
@@ -117,12 +118,53 @@ pub fn clear_debug_hook(hook: &Arc<dyn DebugHook>) -> bool {
     true
 }
 
-/// Render a frame's locals to `(name, value)` string pairs. Safe wrapper the
-/// adapter calls while the debuggee is parked (so the frame is alive and the
-/// values are stable). `desc`/`values` are the pointers handed to
+/// One local read out of a live frame, as owned data.
+///
+/// The point of the type is what it leaves behind: a [`Value`] is `Rc`-based
+/// and so neither `Send` nor `Sync`, which means it cannot leave the debuggee
+/// thread that built it. A `DebugValue` is owned scalars and `String`s all
+/// the way down, so a debugger can carry a parked frame's locals over to its
+/// request loop and *compute* with them — a breakpoint condition, a logpoint
+/// message, a watch expression — instead of only printing them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DebugValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Real(f64),
+    Str(String),
+    /// A value with no scalar form — an array, map, object, class instance,
+    /// function, big integer — carrying the text the runtime renders it to.
+    /// Displayable, but not something an expression can compute with.
+    Opaque(String),
+}
+
+impl DebugValue {
+    /// The value as the debugger displays it, which is how the language
+    /// itself prints it: a string keeps its quotes, a real keeps its `.0`.
+    ///
+    /// Real numbers are version-sensitive (`leek_runtime::DISPLAY_VERSION`),
+    /// so this belongs on the thread the debuggee runs on unless the caller
+    /// has settled that version itself.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::Null => Value::Null.to_string(),
+            Self::Bool(b) => Value::Bool(*b).to_string(),
+            Self::Int(i) => Value::Int(*i).to_string(),
+            Self::Real(r) => Value::Real(*r).to_string(),
+            Self::Str(s) => Value::String(Rc::new(s.clone())).to_string(),
+            Self::Opaque(text) => text.clone(),
+        }
+    }
+}
+
+/// Read a frame's locals as `(name, value)` pairs. Safe wrapper the adapter
+/// calls while the debuggee is parked (so the frame is alive and the values
+/// are stable). `desc`/`values` are the pointers handed to
 /// [`DebugHook::safepoint`].
 #[must_use]
-pub fn render_frame_vars(desc: usize, values: usize) -> Vec<(String, String)> {
+pub fn read_frame_vars(desc: usize, values: usize) -> Vec<(String, DebugValue)> {
     if desc == 0 || values == 0 {
         return Vec::new();
     }
@@ -143,8 +185,20 @@ pub fn render_frame_vars(desc: usize, values: usize) -> Vec<(String, String)> {
             // SAFETY: the parked debuggee's frame is alive and the slot is
             // an initialised i64.
             let raw = unsafe { *slot };
-            (desc.name.clone(), render_slot(desc.kind, raw))
+            (desc.name.clone(), read_slot(desc.kind, raw))
         })
+        .collect()
+}
+
+/// Render a frame's locals to `(name, value)` string pairs — [`read_frame_vars`]
+/// with every value put through [`DebugValue::render`], so the text a debugger
+/// prints and the value it evaluates against come off one pointer walk and
+/// cannot drift apart.
+#[must_use]
+pub fn render_frame_vars(desc: usize, values: usize) -> Vec<(String, String)> {
+    read_frame_vars(desc, values)
+        .into_iter()
+        .map(|(name, value)| (name, value.render()))
         .collect()
 }
 
@@ -160,21 +214,34 @@ pub fn frame_name(desc: usize) -> Option<String> {
     Some(table.func_name.clone())
 }
 
-fn render_slot(kind: u8, raw: i64) -> String {
+/// One raw slot, decoded by the storage kind its descriptor records.
+fn read_slot(kind: u8, raw: i64) -> DebugValue {
     match kind {
-        0 => raw.to_string(),
-        1 => f64::from_bits(raw as u64).to_string(),
-        2 => if raw != 0 { "true" } else { "false" }.to_string(),
+        0 => DebugValue::Int(raw),
+        1 => DebugValue::Real(f64::from_bits(raw as u64)),
+        2 => DebugValue::Bool(raw != 0),
         3 => {
             if raw == 0 {
-                "null".to_string()
+                DebugValue::Null
             } else {
                 // SAFETY: a kind-3 slot holds a live boxed-`Value` handle.
                 let value = unsafe { &*(raw as *const Value) };
-                value.to_string()
+                read_boxed(value)
             }
         }
-        _ => "<unknown>".to_string(),
+        _ => DebugValue::Opaque("<unknown>".to_string()),
+    }
+}
+
+/// A boxed handle's scalar content, or its rendered text when it has none.
+fn read_boxed(value: &Value) -> DebugValue {
+    match value {
+        Value::Null => DebugValue::Null,
+        Value::Bool(b) => DebugValue::Bool(*b),
+        Value::Int(i) => DebugValue::Int(*i),
+        Value::Real(r) => DebugValue::Real(*r),
+        Value::String(s) => DebugValue::Str((**s).clone()),
+        other => DebugValue::Opaque(other.to_string()),
     }
 }
 
@@ -209,7 +276,13 @@ pub(crate) fn fire_leave() {
 
 #[cfg(test)]
 mod tests {
-    use super::{DebugHook, HOOK, clear_debug_hook, set_debug_hook};
+    use super::{
+        DebugHook, DebugValue, HOOK, VarDesc, VarTable, clear_debug_hook, read_frame_vars,
+        render_frame_vars, set_debug_hook,
+    };
+    use leek_runtime::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     /// A hook that records nothing: these tests are about which `Arc` sits in
@@ -218,6 +291,72 @@ mod tests {
 
     impl DebugHook for Inert {
         fn safepoint(&self, _source: u32, _offset: u32, _desc: usize, _values: usize) {}
+    }
+
+    /// A frame's locals, read twice: once as typed values and once as the
+    /// text the adapter prints. The two must agree, because the rendering
+    /// path *is* the reading path — and a string must come back quoted, the
+    /// way the language prints one, since a protocol test compares the exact
+    /// text a `variables` response carries.
+    #[test]
+    fn a_frames_locals_read_back_typed_and_render_the_way_they_print() {
+        // Leaked for the same reason the backend leaks its own: the pointers
+        // in a frame descriptor outlive every frame that names them.
+        let table: &'static VarTable = Box::leak(Box::new(VarTable {
+            func_name: "f".to_string(),
+            vars: ["i", "r", "b", "nothing", "s", "list"]
+                .into_iter()
+                .zip([0, 1, 2, 3, 3, 3])
+                .map(|(name, kind)| VarDesc {
+                    name: name.to_string(),
+                    kind,
+                })
+                .collect(),
+        }));
+        let text: &'static Value = Box::leak(Box::new(Value::String(Rc::new("hi".to_string()))));
+        let list: &'static Value = Box::leak(Box::new(Value::Array(Rc::new(RefCell::new(vec![
+            Value::Int(1),
+        ])))));
+        let slots: [i64; 6] = [
+            7,
+            2.5f64.to_bits() as i64,
+            1,
+            0,
+            std::ptr::from_ref(text) as i64,
+            std::ptr::from_ref(list) as i64,
+        ];
+        let desc = std::ptr::from_ref(table) as usize;
+        let values = slots.as_ptr() as usize;
+
+        let read = read_frame_vars(desc, values);
+        assert_eq!(
+            read.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(),
+            vec![
+                DebugValue::Int(7),
+                DebugValue::Real(2.5),
+                DebugValue::Bool(true),
+                DebugValue::Null,
+                DebugValue::Str("hi".to_string()),
+                DebugValue::Opaque("[1]".to_string()),
+            ]
+        );
+
+        let rendered = render_frame_vars(desc, values);
+        assert_eq!(
+            rendered,
+            read.iter()
+                .map(|(name, value)| (name.clone(), value.render()))
+                .collect::<Vec<_>>(),
+            "the rendered text and the typed read came from different walks"
+        );
+        assert_eq!(rendered[0].1, "7");
+        assert_eq!(rendered[3].1, "null");
+        assert_eq!(rendered[4].1, "\"hi\"", "a string lost its quotes");
+
+        // No descriptor (a function with no named locals) is empty, not a
+        // dereference of a null pointer.
+        assert!(read_frame_vars(0, values).is_empty());
+        assert!(read_frame_vars(desc, 0).is_empty());
     }
 
     fn installed() -> Option<*const ()> {

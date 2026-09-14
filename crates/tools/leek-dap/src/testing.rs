@@ -174,11 +174,12 @@ impl Client {
         let (from_server, server_out) = std::io::pipe().expect("event pipe");
 
         let loop_thread = std::thread::spawn(move || {
+            let (input, raw) = crate::wire::tee(server_in);
             let mut server = dap::server::Server::new(
-                std::io::BufReader::new(server_in),
+                std::io::BufReader::new(input),
                 std::io::BufWriter::new(server_out),
             );
-            crate::server::serve(&mut server).expect("request loop");
+            crate::server::serve(&mut server, &raw).expect("request loop");
         });
 
         let (tx, inbox) = std::sync::mpsc::channel();
