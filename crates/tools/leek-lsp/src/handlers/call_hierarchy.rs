@@ -39,9 +39,21 @@ pub fn prepare(
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
+    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
+    let root = SyntaxNode::new_root(green.clone());
+
     if let Some(sym) = crate::handlers::resolve_symbol(table, offset)
         && sym.kind == SymbolKind::Function
     {
+        // A method shares `SymbolKind::Function` with top-level
+        // functions, but the item built here is a *bare name* searched
+        // program-wide — for a method that finds every same-named free
+        // function's call sites and none of its own `obj.m()` ones.
+        // Report no hierarchy rather than an unrelated one until member
+        // calls are tracked (leekwars#46).
+        if crate::handlers::symbol_is_class_member(&root, sym) {
+            return None;
+        }
         return Some(vec![item_for(
             ws,
             uri,
@@ -54,8 +66,6 @@ pub fn prepare(
 
     // Cross-file: the cursor is on a call to a function declared in an
     // `include`d file.
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
     let name = crate::handlers::ident_name_at(&root, offset)?;
     let (file, sym) = crate::handlers::find_top_level_decl(ws, uri, &name)?;
     if sym.kind != SymbolKind::Function {

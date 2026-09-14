@@ -22,9 +22,26 @@ pub fn guard<T: Default>(label: &str, f: impl FnOnce() -> T) -> T {
     value
 }
 
+/// [`guard`] for a result type that has no [`Default`] — notably a
+/// `Result` that can carry a refusal message
+/// ([`Refusable`](crate::handlers::refusal::Refusable)). On panic this
+/// returns `on_panic`, which callers should set to the type's "no
+/// result" value so a panicking handler degrades the same way
+/// [`guard`] does, rather than surfacing as a refusal the user never
+/// triggered.
+pub fn guard_with<T>(label: &str, on_panic: T, f: impl FnOnce() -> T) -> T {
+    let Ok(value) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) else {
+        if crate::trace_enabled() {
+            eprintln!("leek-lsp: handler `{label}` panicked; returning empty result");
+        }
+        return on_panic;
+    };
+    value
+}
+
 #[cfg(test)]
 mod tests {
-    use super::guard;
+    use super::{guard, guard_with};
 
     #[test]
     fn guard_returns_value_when_no_panic() {
@@ -44,5 +61,20 @@ mod tests {
         std::panic::set_hook(prev);
         assert_eq!(opt, None);
         assert!(vec.is_empty());
+    }
+
+    #[test]
+    fn guard_with_returns_the_fallback_on_panic() {
+        // The rename handlers return `Result<Option<_>, Refusal>`, which
+        // has no `Default`. A panic there must still degrade to "no
+        // result" rather than escaping and aborting the server — and
+        // must not be reported to the user as a refusal.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let r: Result<Option<i32>, String> = guard_with("boom", Ok(None), || panic!("kaboom"));
+        let ok: Result<Option<i32>, String> = guard_with("ok", Ok(None), || Ok(Some(7)));
+        std::panic::set_hook(prev);
+        assert_eq!(r, Ok(None));
+        assert_eq!(ok, Ok(Some(7)));
     }
 }

@@ -49,6 +49,18 @@ pub fn handle(
         return None;
     }
 
+    // Class members are refused for the same reason `rename` refuses
+    // them: `this.x` / `obj.x` are not recorded as references, so the
+    // group below would be a *partial* set of the name's occurrences
+    // and live-editing it would silently desynchronise the member from
+    // its uses. Unlike rename there is no channel to explain, so we
+    // report "no linked editing here" (leekwars#46).
+    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
+    let root = leek_syntax::SyntaxNode::new_root(green.clone());
+    if crate::handlers::symbol_is_class_member(&root, sym) {
+        return None;
+    }
+
     let mut ranges: Vec<lsp::Range> = vec![span_to_range(doc.pos_map(), sym.def_span)];
     for r in &table.references {
         if r.target == target_id {

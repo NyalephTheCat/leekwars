@@ -353,7 +353,9 @@ fn rename_produces_edit_for_each_occurrence() {
         line: 0,
         character: 4,
     };
-    let edit = rename::handle(&ws, &url(), pos, "pear").expect("rename");
+    let edit = rename::handle(&ws, &url(), pos, "pear")
+        .expect("not refused")
+        .expect("edit");
     let edits = edit.changes.unwrap().remove(&url()).unwrap();
     assert_eq!(edits.len(), 2, "decl + 1 use");
     assert!(edits.iter().all(|e| e.new_text == "pear"));
@@ -500,7 +502,9 @@ fn prepare_rename_returns_range_on_ident() {
         line: 1,
         character: 1,
     };
-    let resp = prepare_rename::handle(&ws, &url(), pos).expect("prepare");
+    let resp = prepare_rename::handle(&ws, &url(), pos)
+        .expect("not refused")
+        .expect("prepare");
     match resp {
         lsp::PrepareRenameResponse::Range(_) => {}
         other => panic!("expected Range, got {other:?}"),
@@ -516,7 +520,11 @@ fn prepare_rename_refuses_on_keyword() {
         line: 0,
         character: 1,
     };
-    assert!(prepare_rename::handle(&ws, &url(), pos).is_none());
+    assert!(
+        prepare_rename::handle(&ws, &url(), pos)
+            .expect("not refused")
+            .is_none()
+    );
 }
 
 #[test]
@@ -1126,7 +1134,8 @@ fn rename_top_level_function_edits_every_file() {
         },
         "assist",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     // The declaration in util.leek AND the call in main.leek are edited.
     let util_edits = changes.get(&proj("util.leek")).expect("util edited");
@@ -1154,7 +1163,8 @@ fn rename_does_not_touch_local_shadow_in_other_file() {
         },
         "assist",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(changes.contains_key(&proj("a.leek")), "a.leek edited");
     assert!(
@@ -1183,7 +1193,8 @@ fn rename_does_not_touch_member_access_in_other_file() {
         },
         "assist",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(
         !changes.contains_key(&proj("b.leek")),
@@ -1237,7 +1248,8 @@ fn local_rename_stays_single_file() {
         },
         "y",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(
         !changes.contains_key(&proj("b.leek")),
@@ -2033,7 +2045,8 @@ fn rename_from_a_cross_file_use_site_edits_all_files() {
         },
         "assist",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(changes.contains_key(&proj("util.leek")), "decl edited");
     assert!(changes.contains_key(&proj("main.leek")), "use edited");
@@ -2059,7 +2072,8 @@ fn rename_from_use_site_reaches_other_includers() {
         },
         "assist",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(changes.contains_key(&proj("util.leek")), "util decl");
     assert!(changes.contains_key(&proj("ai1.leek")), "ai1 use");
@@ -2084,6 +2098,7 @@ fn prepare_rename_allows_cross_file_use_site() {
             character: 9,
         },
     )
+    .expect("not refused")
     .expect("prepare allows it");
     let lsp::PrepareRenameResponse::Range(r) = resp else {
         panic!("expected a range");
@@ -2114,10 +2129,11 @@ fn prepare_rename_rejects_cross_file_member_access() {
             character: 11,
         },
     );
-    // The method is locally resolved, so prepare returns *its* range —
-    // but a rename here must stay the method, never the free function.
-    // What we assert is that it does not point into util.leek's program
-    // by checking the range is on line 2 (the member-access site) only.
+    // A member access is not a reference, so nothing resolves here and
+    // prepare declines ("can't rename here"). What matters is that it
+    // never points into util.leek's program: if a range does come back
+    // it must be on line 2, the member-access site itself.
+    let resp = resp.expect("a member access must never be routed at the free function");
     if let Some(lsp::PrepareRenameResponse::Range(r)) = resp {
         assert_eq!(r.start.line, 2, "must stay on the member-access site");
     }
@@ -2298,7 +2314,8 @@ fn rename_does_not_cross_into_independent_ai() {
         },
         "step",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(changes.contains_key(&proj("ai1.leek")), "ai1 edited");
     assert!(
@@ -2327,7 +2344,8 @@ fn rename_shared_library_symbol_reaches_all_includers() {
         },
         "common",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(changes.contains_key(&proj("util.leek")), "util decl");
     assert!(changes.contains_key(&proj("ai1.leek")), "ai1 use");
@@ -2363,7 +2381,8 @@ fn rename_ai_private_symbol_does_not_leak_through_shared_library() {
         },
         "helper1",
     )
-    .expect("rename");
+    .expect("not refused")
+    .expect("edit");
     let changes = edit.changes.expect("changes");
     assert!(changes.contains_key(&proj("ai1.leek")), "ai1 edited");
     assert!(
@@ -3199,4 +3218,233 @@ fn multi_declarator_inits_resolve_per_binding() {
         panic!("expected scalar response");
     };
     assert_eq!(loc.range.start.line, 1, "expected `class Bb`: {loc:?}");
+}
+
+// ─── LSP-01: class members are refused by the rename family ────────
+//
+// Methods are declared as plain `SymbolKind::Function` and fields as
+// `SymbolKind::Field`, and the resolver records no reference for a
+// member access (`this.x`, `obj.m()`). So every name-based occurrence
+// search over a member is wrong: it misses every dotted use site, and
+// for a method it also fans out over same-named *top-level* functions.
+// Until member references exist, the destructive paths refuse and the
+// read-only ones stay in-file. See leekwars#46.
+
+/// A class method and a top-level function that share a name, plus a
+/// call of the free function. Renaming the method used to rewrite the
+/// free function and its call and leave the method untouched.
+const SHARED_NAME_SRC: &str =
+    "class A { update() { return 1 } }\nfunction update() { return 2 }\nvar r = update()\n";
+
+/// A field, a bare in-method use of it, and a `this.` use of it.
+const FIELD_SRC: &str = "class A { x\n  f() { x = 1 return this.x } }\n";
+
+#[test]
+fn rename_refuses_a_method_declaration() {
+    let ws = open(SHARED_NAME_SRC);
+    // Cursor on the method name `update` (line 0, col 10).
+    let err = rename::handle(
+        &ws,
+        &url(),
+        lsp::Position {
+            line: 0,
+            character: 10,
+        },
+        "tick",
+    )
+    .expect_err("renaming a method must be refused, not silently mis-applied");
+    assert!(
+        err.message.contains("class `A`"),
+        "the message should name the class: {}",
+        err.message
+    );
+}
+
+#[test]
+fn rename_refuses_a_field_declaration() {
+    let ws = open(FIELD_SRC);
+    // Cursor on the field name `x` (line 0, col 10).
+    let err = rename::handle(
+        &ws,
+        &url(),
+        lsp::Position {
+            line: 0,
+            character: 10,
+        },
+        "y",
+    )
+    .expect_err("renaming a field must be refused");
+    assert!(err.message.contains("class `A`"), "{}", err.message);
+}
+
+#[test]
+fn rename_refuses_a_bare_field_reference_inside_a_method() {
+    let ws = open(FIELD_SRC);
+    // Cursor on the `x` of `x = 1` (line 1, col 8) — a resolved
+    // reference to the field. This used to rewrite `x = 1` and the
+    // declaration while leaving `this.x` stale: a partial rename that
+    // leaves the file broken.
+    let err = rename::handle(
+        &ws,
+        &url(),
+        lsp::Position {
+            line: 1,
+            character: 8,
+        },
+        "y",
+    )
+    .expect_err("renaming through a field reference must be refused");
+    assert!(err.message.contains("class `A`"), "{}", err.message);
+}
+
+#[test]
+fn prepare_rename_refuses_a_class_member() {
+    // prepareRename must refuse too, so clients that honour it never
+    // open the rename input box.
+    let ws = open(SHARED_NAME_SRC);
+    assert!(
+        prepare_rename::handle(
+            &ws,
+            &url(),
+            lsp::Position {
+                line: 0,
+                character: 10,
+            },
+        )
+        .is_err(),
+        "prepareRename on a method must refuse"
+    );
+
+    let ws = open(FIELD_SRC);
+    assert!(
+        prepare_rename::handle(
+            &ws,
+            &url(),
+            lsp::Position {
+                line: 0,
+                character: 10,
+            },
+        )
+        .is_err(),
+        "prepareRename on a field must refuse"
+    );
+}
+
+#[test]
+fn rename_still_renames_a_local_inside_a_method() {
+    // Over-refusal guard: a local declared in a method body is an
+    // ordinary scoped binding and renames correctly today.
+    let text = "class A { f() { var t = 1 return t } }\n";
+    let ws = open(text);
+    let edit = rename::handle(&ws, &url(), needle_pos(text, "t = 1", 1), "u")
+        .expect("a method-local rename must not be refused")
+        .expect("edit");
+    let edits = edit.changes.expect("changes").remove(&url()).expect("file");
+    assert_eq!(edits.len(), 2, "decl + 1 use: {edits:?}");
+    assert!(edits.iter().all(|e| e.new_text == "u"));
+}
+
+#[test]
+fn rename_still_renames_a_method_parameter() {
+    // Over-refusal guard: a parameter lives in the method's ParamList,
+    // not the class body.
+    let text = "class A { f(p) { return p } }\n";
+    let ws = open(text);
+    let edit = rename::handle(
+        &ws,
+        &url(),
+        lsp::Position {
+            line: 0,
+            character: 12,
+        },
+        "q",
+    )
+    .expect("a parameter rename must not be refused")
+    .expect("edit");
+    let edits = edit.changes.expect("changes").remove(&url()).expect("file");
+    assert_eq!(edits.len(), 2, "decl + 1 use: {edits:?}");
+}
+
+#[test]
+fn rename_top_level_function_sharing_a_method_name_skips_the_method() {
+    // The other direction: renaming the *free* function must edit its
+    // declaration and call site and leave the same-named method alone.
+    let ws = open(SHARED_NAME_SRC);
+    let edit = rename::handle(
+        &ws,
+        &url(),
+        lsp::Position {
+            line: 1,
+            character: 9,
+        },
+        "tick",
+    )
+    .expect("not refused")
+    .expect("edit");
+    let edits = edit.changes.expect("changes").remove(&url()).expect("file");
+    assert_eq!(edits.len(), 2, "the decl + the call: {edits:?}");
+    assert!(
+        edits.iter().all(|e| e.range.start.line != 0),
+        "the class body on line 0 must be untouched: {edits:?}"
+    );
+}
+
+#[test]
+fn linked_editing_refuses_a_class_member() {
+    // Live-editing a member name would rewrite the bare uses and not
+    // `this.x`, silently and with no confirmation step.
+    let ws = open(FIELD_SRC);
+    assert!(
+        linked_editing::handle(
+            &ws,
+            &url(),
+            lsp::Position {
+                line: 0,
+                character: 10,
+            },
+        )
+        .is_none(),
+        "linked editing must not group a partial set of a member's uses"
+    );
+}
+
+#[test]
+fn references_on_a_method_do_not_reach_a_same_named_function() {
+    // Narrowing, not a full fix: a member's results are now in-file
+    // only (a subset of the truth) instead of a program-wide fan-out
+    // that reports an unrelated free function.
+    let ws = open(SHARED_NAME_SRC);
+    let locs = references::handle(
+        &ws,
+        &url(),
+        lsp::Position {
+            line: 0,
+            character: 10,
+        },
+        /* include_declaration */ true,
+    )
+    .expect("references");
+    assert!(
+        locs.iter().all(|l| l.range.start.line != 1),
+        "the top-level `update` on line 1 is a different symbol: {locs:#?}"
+    );
+}
+
+#[test]
+fn call_hierarchy_prepare_refuses_a_method() {
+    // The item would be a bare name searched program-wide, which finds
+    // the free function's callers and none of the method's own.
+    let ws = open(SHARED_NAME_SRC);
+    assert!(
+        call_hierarchy::prepare(
+            &ws,
+            &url(),
+            lsp::Position {
+                line: 0,
+                character: 10,
+            },
+        )
+        .is_none(),
+        "a method has no sound call hierarchy yet"
+    );
 }

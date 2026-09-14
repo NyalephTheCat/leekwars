@@ -7,6 +7,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types as lsp;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::handlers::refusal::Refusal;
 use crate::handlers::{
     call_hierarchy, code_action, code_lens, completion, definition, document_color,
     document_highlight, document_link, execute_command, file_operations, folding, formatting,
@@ -14,8 +15,24 @@ use crate::handlers::{
     prepare_rename, pull_diagnostics, range_formatting, references, rename, selection_range,
     semantic_tokens, signature_help, symbols, type_definition, type_hierarchy, workspace_symbols,
 };
-use crate::util::guard::guard;
+use crate::util::guard::{guard, guard_with};
 use crate::workspace::Workspace;
+
+/// JSON-RPC error code for LSP `RequestFailed`: the request was valid
+/// but the server cannot carry it out. Editors surface the message to
+/// the user (a notification in VS Code, the echo area in Emacs/Neovim),
+/// which is exactly what a refusal needs.
+const REQUEST_FAILED: i64 = -32803;
+
+/// Turn a handler's [`Refusal`] into the JSON-RPC error the client
+/// shows the user.
+fn refusal_to_rpc_error(refusal: Refusal) -> tower_lsp::jsonrpc::Error {
+    tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::ServerError(REQUEST_FAILED),
+        message: std::borrow::Cow::Owned(refusal.message),
+        data: None,
+    }
+}
 
 pub struct LeekLanguageServer {
     pub client: Client,
@@ -637,9 +654,10 @@ impl LanguageServer for LeekLanguageServer {
         let uri = params.text_document.uri;
         let pos = params.position;
         let ws = self.state.lock().await;
-        Ok(guard("prepare_rename", || {
+        guard_with("prepare_rename", Ok(None), || {
             prepare_rename::handle(&ws, &uri, pos)
-        }))
+        })
+        .map_err(refusal_to_rpc_error)
     }
 
     async fn prepare_call_hierarchy(
@@ -745,9 +763,10 @@ impl LanguageServer for LeekLanguageServer {
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let ws = self.state.lock().await;
-        Ok(guard("rename", || {
+        guard_with("rename", Ok(None), || {
             rename::handle(&ws, &uri, pos, &params.new_name)
-        }))
+        })
+        .map_err(refusal_to_rpc_error)
     }
 
     async fn folding_range(

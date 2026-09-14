@@ -3,7 +3,7 @@ mod mod_support;
 pub(crate) use mod_support::{
     cross_file_use_target, enclosing_class_name, find_top_level_decl, ident_name_at,
     ident_range_at, is_workspace_global, occurrences_in_file, preceded_by_dot, resolve_symbol,
-    resolve_symbol_id, workspace_occurrences,
+    resolve_symbol_id, symbol_is_class_member, workspace_occurrences,
 };
 
 pub mod call_hierarchy;
@@ -29,6 +29,7 @@ pub mod program_scope;
 pub mod pull_diagnostics;
 pub mod range_formatting;
 pub mod references;
+pub mod refusal;
 pub mod rename;
 pub mod selection_range;
 pub mod semantic_tokens;
