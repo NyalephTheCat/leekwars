@@ -5,11 +5,10 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use leek_backends::resolve_backend;
-use leek_driver::{DriverConfig, run_entry};
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
 use leek_project::Project;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{DriverConfig, RecipeParams, Target, run_entry};
 
 use crate::cli::{Check, ColorWhen, MessageFormat};
 
@@ -21,7 +20,7 @@ pub fn run(
     _quiet: bool,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+    if leek_session::report_manifest(&project, color.into(), format.into()) {
         return Ok(ExitCode::from(1));
     }
 
@@ -66,7 +65,7 @@ fn native_compat_wanted(args: &Check, project: &Project) -> bool {
 /// gets is the location — the point of the pass — without a changed exit code.
 fn report_native_compat(
     project: &Project,
-    driver_run: &leek_driver::DriverRun,
+    driver_run: &leek_session::DriverRun,
     color: ColorWhen,
     format: MessageFormat,
 ) {
@@ -77,7 +76,7 @@ fn report_native_compat(
     // against, reused so a backend warning points at the same files.
     let entry_label = project.entry_path().display().to_string();
     let entry_text = std::fs::read_to_string(project.entry_path()).unwrap_or_default();
-    let sources = leek_driver::run_sources(&driver_run.run, &entry_text, &entry_label);
+    let sources = leek_session::run_sources(&driver_run.run, &entry_text, &entry_label);
 
     let mut opts = leek_backend_native::NativeOptions::jit_for_input(
         driver_run.run.input(),

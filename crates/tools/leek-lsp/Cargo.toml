@@ -18,7 +18,7 @@ leek-parser      = { workspace = true, features = ["salsa"] }
 leek-resolver    = { workspace = true, features = ["salsa"] }
 leek-types       = { workspace = true, features = ["salsa"] }
 leek-pipeline    = { workspace = true, features = ["salsa"] }
-leek-recipes     = { workspace = true }
+leek-session     = { workspace = true }
 leek-fmt         = { workspace = true, features = ["salsa"] }
 leek-rewrite     = { workspace = true }
 leek-hir         = { workspace = true, features = ["salsa"] }

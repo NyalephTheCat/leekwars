@@ -19,7 +19,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
         return Some(Vec::new());
     }
 
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Parsed)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Parsed)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
 
     let (target_range, replacement) = leek_fmt::format_range(

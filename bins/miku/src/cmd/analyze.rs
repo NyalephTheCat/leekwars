@@ -1,6 +1,6 @@
 //! `miku analyze` — per-function / per-method complexity table.
 //!
-//! Runs the `leek-recipes` [`Complexity`](leek_recipes::Target::Complexity)
+//! Runs the `leek-session` [`Complexity`](leek_session::Target::Complexity)
 //! pipeline over each source file (which lowers to HIR and runs
 //! `leek-complexity`'s [`Analyze`](leek_complexity::pipeline::Analyze)
 //! step) and prints a per-item summary:
@@ -21,9 +21,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use leek_complexity::Complexity;
 use leek_complexity::pipeline::ComplexityArtifact;
-use leek_driver::DriverConfig;
 use leek_pipeline::Input;
-use leek_recipes::Target;
+use leek_session::{DriverConfig, Target};
 use leek_span::SourceId;
 
 use crate::cli::Analyze;
@@ -31,7 +30,7 @@ use leek_project::Project;
 
 pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(
+    if leek_session::report_manifest(
         &project,
         leek_diagnostics::ColorWhen::Auto,
         leek_diagnostics::MessageFormat::Human,
@@ -60,7 +59,7 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let (src, _text) = project.pipeline_input(source, path)?;
         let input = Input::from(src);
-        let pipeline = leek_driver::file_pipeline(&project, path, source, &config)?;
+        let pipeline = leek_session::file_pipeline(&project, path, source, &config)?;
         let result = pipeline.run(input);
         let Some(report) = result.get::<ComplexityArtifact>() else {
             eprintln!(

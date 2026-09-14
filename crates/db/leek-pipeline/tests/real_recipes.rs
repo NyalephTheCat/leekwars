@@ -1,12 +1,12 @@
 //! The shape of the *real* recipes, target by target.
 //!
-//! `leek-recipes` derives these chains from the artifact graph rather than
+//! `leek-session` derives these chains from the artifact graph rather than
 //! writing them out, so a wrong `Requires`/`Produces` in any pass crate
 //! silently reorders or drops a pass. Spelling the expected sequences out
 //! here turns that into a failing assertion naming the offending target.
 
 use leek_pipeline::{Context, Step, Tap};
-use leek_recipes::{Target, driver_params, lsp_params, plan, plan_with_includes};
+use leek_session::{Target, driver_params, lsp_params, plan, plan_with_includes};
 
 fn names(target: Target) -> Vec<&'static str> {
     plan(target, &driver_params())

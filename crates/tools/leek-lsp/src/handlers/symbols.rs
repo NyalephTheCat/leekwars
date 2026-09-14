@@ -14,7 +14,7 @@ use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<lsp::DocumentSymbolResponse> {
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Parsed)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Parsed)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = SyntaxNode::new_root(green.clone());
 

@@ -26,12 +26,11 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use leek_complexity::Complexity;
 use leek_complexity::pipeline::ComplexityArtifact;
-use leek_driver::DriverConfig;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
 use leek_ide::signature::signature_for;
 use leek_parser::pipeline::GreenTreeArtifact;
 use leek_pipeline::Input;
-use leek_recipes::Target;
+use leek_session::{DriverConfig, Target};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 
@@ -40,7 +39,7 @@ use leek_project::Project;
 
 pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(
+    if leek_session::report_manifest(
         &project,
         leek_diagnostics::ColorWhen::Auto,
         leek_diagnostics::MessageFormat::Human,
@@ -71,7 +70,7 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         let source_id = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let (src, text) = project.pipeline_input(source_id, path)?;
         let input = Input::from(src);
-        let pipeline = leek_driver::file_pipeline(&project, path, source_id, &config)?;
+        let pipeline = leek_session::file_pipeline(&project, path, source_id, &config)?;
         let result = pipeline.run(input);
         let Some(report) = result.get::<ComplexityArtifact>() else {
             if !quiet {

@@ -8,10 +8,10 @@ use std::sync::Arc;
 use leek_hir::pipeline::HirArtifact;
 use leek_hir::{Def, ExprKind, Literal, Stmt};
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, pipeline_hir_from_parse, pipeline_hir_with_includes};
 use leek_resolver::folder::MemFolder;
 use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::ResolveIncludes;
+use leek_session::{RecipeParams, pipeline_hir_from_parse, pipeline_hir_with_includes};
 use leek_span::SourceId;
 
 fn run_pipeline(entry_path: &str, files: &[(&str, &str)]) -> Arc<leek_hir::HirFile> {

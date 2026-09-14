@@ -36,7 +36,7 @@ pub fn prepare(
 ) -> Option<Vec<lsp::CallHierarchyItem>> {
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
@@ -96,7 +96,7 @@ pub fn incoming(
 
     for file in crate::handlers::program_scope::program_scope(ws, &item.uri) {
         let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Hir)
         else {
             continue;
         };
@@ -162,7 +162,7 @@ pub fn outgoing(
 ) -> Option<Vec<lsp::CallHierarchyOutgoingCall>> {
     let scope = crate::handlers::program_scope::program_scope(ws, &item.uri);
     let home = scope.iter().find(|f| f.uri == item.uri)?;
-    let run = crate::pipeline::run_on_file(ws, home.source_file, leek_recipes::Target::Hir)?;
+    let run = crate::pipeline::run_on_file(ws, home.source_file, leek_session::Target::Hir)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
     let hir = run.get::<HirArtifact>()?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
@@ -253,7 +253,7 @@ fn program_functions(
     let mut out: HashMap<String, FuncInfo> = HashMap::new();
     for file in scope {
         let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Hir)
         else {
             continue;
         };

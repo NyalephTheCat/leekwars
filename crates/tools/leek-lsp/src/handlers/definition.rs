@@ -29,7 +29,7 @@ pub fn handle(
 
     // TypeChecked (not just Resolved): a member access needs the type
     // table to resolve its receiver's class.
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::TypeChecked)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
     // 1. Same-file: the cursor may be on a use OR on a declaration

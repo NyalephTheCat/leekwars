@@ -38,7 +38,7 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
-    leek_recipes::load_and_register_libraries(["leekwars"]).map_err(|e| anyhow::anyhow!("{e}"))?;
+    leek_session::load_and_register_libraries(["leekwars"]).map_err(|e| anyhow::anyhow!("{e}"))?;
     let scn = Scenario::from_json_str(SCENARIO_JSON)?;
     let world = leek_scenario::build_world(&scn)?;
     let mut ais = HashMap::new();
@@ -100,7 +100,7 @@ path = "src/main.rs"
 [dependencies]
 leek-scenario  = {{ path = "{root}/crates/game/leek-scenario" }}
 leek-generator = {{ path = "{root}/crates/game/leek-generator" }}
-leek-recipes   = {{ path = "{root}/crates/db/leek-recipes" }}
+leek-session   = {{ path = "{root}/crates/db/leek-session" }}
 anyhow = "1"
 
 # Stand alone — don't attach to the engine workspace.

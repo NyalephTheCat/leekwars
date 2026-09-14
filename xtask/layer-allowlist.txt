@@ -10,8 +10,8 @@
 
 # The recipe catalogue plans the formatter and lint pipeline steps. Fix: let
 # tools register their own steps on top of the db layer (ARCH-03).
-leek-recipes -> leek-fmt: recipes plan the Fmt step and FormattedArtifact
-leek-recipes -> leek-lint: recipes plan the LintFindings step
+leek-session -> leek-fmt: recipes plan the Fmt step and FormattedArtifact
+leek-session -> leek-lint: recipes plan the LintFindings step
 
 # Every frontend/middle stage defines its own pipeline step and artifact types
 # on top of the generic `leek-pipeline` substrate, which itself depends only on

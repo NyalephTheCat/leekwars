@@ -6,7 +6,7 @@
 use leek_hir::pipeline::HirArtifact;
 use leek_hir::{Block, Stmt};
 use leek_pipeline::{Artifact, Context, Input, Step, StepError};
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 
 /// Output of [`CountIfs`].
 struct IfCount(u32);
@@ -50,7 +50,7 @@ fn walk_stmts(stmts: &[Stmt], n: &mut u32) {
 }
 
 fn main() {
-    let pipeline = leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive())
+    let pipeline = leek_session::pipeline(Target::Hir, &RecipeParams::permissive())
         .expect("recipe")
         .with(CountIfs);
     let run = pipeline.run(Input {

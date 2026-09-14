@@ -1,6 +1,6 @@
 //! Small adapters between CLI flags and shared library types.
 //!
-//! The `Reporter` itself is built by [`leek_driver::reporter_for`], so
+//! The `Reporter` itself is built by [`leek_session::reporter_for`], so
 //! every subcommand picks up the manifest's `[lint]` levels the same way.
 
 use leek_backend_native::{NativeOptions, OptLevel};
@@ -51,7 +51,7 @@ pub fn report_diagnostics(
     color: ColorWhen,
     format: MessageFormat,
 ) -> bool {
-    match leek_driver::reporter_for(project, color.into(), format.into()) {
+    match leek_session::reporter_for(project, color.into(), format.into()) {
         Ok(reporter) => {
             reporter.emit(diagnostics, sources);
             true

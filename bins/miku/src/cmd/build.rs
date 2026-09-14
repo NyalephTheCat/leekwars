@@ -5,11 +5,10 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use leek_backends::{java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_backend};
-use leek_driver::{DriverConfig, run_entry, run_entry_timed};
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
 use leek_project::Project;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{DriverConfig, RecipeParams, Target, run_entry, run_entry_timed};
 use leek_syntax::version::version_from_byte;
 
 use crate::cli::{Build, ColorWhen, MessageFormat};
@@ -24,7 +23,7 @@ pub fn run(
     environment: Option<&std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+    if leek_session::report_manifest(&project, color.into(), format.into()) {
         return Ok(ExitCode::from(1));
     }
 
@@ -44,9 +43,9 @@ pub fn run(
     let opt = if (matches!(backend, BackendKind::Java) && !clean_java)
         || matches!(backend, BackendKind::LeekScript)
     {
-        leek_recipes::OptLevel::O0
+        leek_session::OptLevel::O0
     } else {
-        leek_recipes::OptLevel::O1
+        leek_session::OptLevel::O1
     };
 
     let config = DriverConfig {
@@ -132,8 +131,8 @@ fn report_backend_diagnostics(
     // at *that* file.
     let entry_label = project.entry_path().display().to_string();
     let entry_text = std::fs::read_to_string(project.entry_path()).unwrap_or_default();
-    let sources = leek_driver::run_sources(result, &entry_text, &entry_label);
-    if let Ok(reporter) = leek_driver::reporter_for(project, color.into(), format.into()) {
+    let sources = leek_session::run_sources(result, &entry_text, &entry_label);
+    if let Ok(reporter) = leek_session::reporter_for(project, color.into(), format.into()) {
         return reporter.emit(diagnostics, &sources);
     }
     for d in diagnostics {
