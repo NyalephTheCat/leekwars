@@ -1,0 +1,21 @@
+function classify(n) {
+    switch (n) {
+        case 0:
+            return "zero";
+
+        case 1:
+        case 2:
+            debug("small");
+            break;
+        case 3:
+
+        default:
+            debug("big");
+            return "many";
+    }
+    return "";
+}
+
+function empty(n) {
+    switch (n) {}
+}
