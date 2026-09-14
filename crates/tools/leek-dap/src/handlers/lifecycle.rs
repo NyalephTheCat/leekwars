@@ -114,11 +114,11 @@ pub(crate) fn configuration_done<R: Read, W: Write + Send + 'static>(
     // `noDebug` runs the very same program with breakpoints, stepping and the
     // per-statement safepoints switched off.
     let debug = !config.no_debug;
-    if debug {
-        install_debug_hook(session, server, &program, &config);
-    }
+    // The hook this run installed, and so the only one it may ever remove —
+    // `None` for a `noDebug` run, which installed none.
+    let hook = debug.then(|| install_debug_hook(session, server, &program, &config));
 
-    session.run_thread = Some(spawn_run(server.output.clone(), move || {
+    session.run_thread = Some(spawn_run(server.output.clone(), hook, move || {
         // A scenario debugs `program` inside the fight; otherwise it runs
         // standalone. Both honor the breakpoints installed above.
         if config.scenario.is_some() {
@@ -135,12 +135,15 @@ pub(crate) fn configuration_done<R: Read, W: Write + Send + 'static>(
 /// it as the native backend's global debug hook. The controller emits the DAP
 /// `stopped` events from the debuggee thread while the main loop keeps
 /// servicing requests (continue, stackTrace, …).
+///
+/// Returns the installed hook, so whoever tears the run down can remove that
+/// hook specifically rather than whatever is in the global slot by then.
 fn install_debug_hook<R: Read, W: Write + Send + 'static>(
     session: &mut Session,
     server: &Server<R, W>,
     program: &Compiled,
     config: &LaunchConfig,
-) {
+) -> Arc<dyn leek_backend_native::DebugHook> {
     let on_stop_output = server.output.clone();
     let on_stop = Box::new(move |info: StopInfo| {
         let reason = match info.reason {
@@ -179,8 +182,10 @@ fn install_debug_hook<R: Read, W: Write + Send + 'static>(
         config.stop_on_entry,
         on_stop,
     ));
-    leek_backend_native::set_debug_hook(Some(controller.clone()));
+    let hook: Arc<dyn leek_backend_native::DebugHook> = controller.clone();
+    leek_backend_native::set_debug_hook(Some(hook.clone()));
     session.native_debug = Some(controller);
+    hook
 }
 
 /// Re-answer every breakpoint now that the program is compiled.
@@ -216,13 +221,22 @@ fn announce_breakpoints<R: Read, W: Write>(
 /// Run the debuggee on a worker thread, then report its output, exit code and
 /// termination to the client. Returns the worker's handle so the session can
 /// tell a run is in flight.
+///
+/// `hook` is the debug hook this run installed, if any. The run removes that
+/// one and nothing else: the backend's hook slot is process-global, so a
+/// `noDebug` run clearing it wholesale would tear down a debug session that
+/// happens to be live beside it, and a debug run doing so after the slot has
+/// moved on would do the same to its successor.
 fn spawn_run<W: Write + Send + 'static>(
     output: Arc<Mutex<ServerOutput<W>>>,
+    hook: Option<Arc<dyn leek_backend_native::DebugHook>>,
     run: impl FnOnce() -> RunOutcome + Send + 'static,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let outcome = run();
-        leek_backend_native::set_debug_hook(None);
+        if let Some(hook) = &hook {
+            leek_backend_native::clear_debug_hook(hook);
+        }
         if let Ok(mut out) = output.lock() {
             let category = if outcome.exit_code == 0 {
                 OutputEventCategory::Stdout

@@ -69,8 +69,10 @@ impl Session {
         if let Some(debug) = self.native_debug.take() {
             debug.detach();
             // Only a session that installed the process-global hook clears
-            // it; a `noDebug` session never had one to clear.
-            leek_backend_native::set_debug_hook(None);
+            // it, and only its own: a `noDebug` session never had one, and
+            // the slot may already belong to whoever came next.
+            let hook: Arc<dyn leek_backend_native::DebugHook> = debug;
+            leek_backend_native::clear_debug_hook(&hook);
         }
         let Some(worker) = self.run_thread.take() else {
             return;

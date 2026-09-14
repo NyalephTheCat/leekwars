@@ -656,6 +656,66 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    /// A `noDebug` run ending must leave a debug session that is already in
+    /// flight exactly as it found it.
+    ///
+    /// The backend's debug hook is one process-global slot. A run that never
+    /// installed a hook has none to remove, and a run that did owns only its
+    /// own: clearing the slot wholesale pulls the live session's controller
+    /// out from under a parked debuggee, which then sails through every later
+    /// breakpoint and runs to the end — exactly the failure the next test is
+    /// named for, a breakpoint set while parked that never fires.
+    #[test]
+    fn a_no_debug_run_ending_leaves_a_live_debug_session_alone() {
+        let _guard = debug_session_guard();
+        let dir = project_with("proto-nodebug-bystander", &[("main.leek", STEPS)]);
+        let entry = dir.join("main.leek").display().to_string();
+
+        // A debug session, parked at program entry with its hook installed.
+        let mut debugged = Client::spawn();
+        handshake(
+            &mut debugged,
+            serde_json::json!({ "program": entry, "stopOnEntry": true }),
+        );
+        debugged.ok("configurationDone", Value::Null);
+        assert_eq!(debugged.event("stopped")["reason"], "entry");
+
+        // A second session runs the same program to completion with `noDebug`.
+        // Its worker sends `terminated` last of all, so by the time that event
+        // arrives whatever tidying up it does has already happened.
+        let mut bystander = Client::spawn();
+        handshake(
+            &mut bystander,
+            serde_json::json!({ "program": entry, "noDebug": true }),
+        );
+        bystander.ok("configurationDone", Value::Null);
+        bystander.event("terminated");
+        bystander.finish();
+
+        // The first session is still being debugged: a breakpoint set now
+        // still fires, on this run.
+        let set = debugged.ok(
+            "setBreakpoints",
+            serde_json::json!({
+                "source": { "path": entry },
+                "breakpoints": [{ "line": 3 }],
+            }),
+        );
+        debugged.ok("continue", serde_json::json!({ "threadId": 1 }));
+        let stopped = debugged.event("stopped");
+        assert_eq!(
+            stopped["reason"], "breakpoint",
+            "the noDebug run tore down the live debug session: {stopped}"
+        );
+        assert_eq!(
+            stopped["hitBreakpointIds"],
+            serde_json::json!([set["breakpoints"][0]["id"]])
+        );
+
+        debugged.finish();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     #[test]
     fn a_breakpoint_set_while_parked_fires_on_this_run() {
         let _guard = debug_session_guard();

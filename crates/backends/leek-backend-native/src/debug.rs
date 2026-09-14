@@ -81,12 +81,40 @@ pub struct VarDesc {
 static HOOK: RwLock<Option<Arc<dyn DebugHook>>> = RwLock::new(None);
 
 /// Install (or clear, with `None`) the global debug hook. The adapter sets
-/// this before running an instrumented program and clears it afterward.
+/// this before running an instrumented program; to take one back out again,
+/// reach for [`clear_debug_hook`], which removes only the hook it is handed.
 ///
 /// # Panics
 /// Panics only if the lock is poisoned (a prior holder panicked).
 pub fn set_debug_hook(hook: Option<Arc<dyn DebugHook>>) {
     *HOOK.write().expect("debug-hook lock poisoned") = hook;
+}
+
+/// Remove `hook` from the global slot, and only `hook`: if something else is
+/// installed by now, it is left exactly where it is. Reports whether `hook`
+/// was the installed one.
+///
+/// The slot is process-global, so "I am done, clear it" is not a thing a
+/// caller can safely say — a run that has finished may be tidying up long
+/// after another debug session took the slot over, and `set_debug_hook(None)`
+/// would tear that live session down: its parked debuggee would resume with
+/// no hook at all and run past every breakpoint to the end. Whoever installs
+/// a hook removes that hook, and a run that installed none removes nothing.
+///
+/// # Panics
+/// Panics only if the lock is poisoned (a prior holder panicked).
+pub fn clear_debug_hook(hook: &Arc<dyn DebugHook>) -> bool {
+    let mut slot = HOOK.write().expect("debug-hook lock poisoned");
+    // Compared as thin addresses: two `Arc<dyn DebugHook>` for one allocation
+    // may carry different vtable pointers, and the allocation is the identity.
+    let installed = slot
+        .as_ref()
+        .map(|installed| Arc::as_ptr(installed).cast::<()>());
+    if installed != Some(Arc::as_ptr(hook).cast::<()>()) {
+        return false;
+    }
+    *slot = None;
+    true
 }
 
 /// Render a frame's locals to `(name, value)` string pairs. Safe wrapper the
@@ -176,5 +204,50 @@ pub(crate) fn fire_leave() {
     let hook = HOOK.read().expect("debug-hook lock poisoned").clone();
     if let Some(hook) = hook {
         hook.leave_frame();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DebugHook, HOOK, clear_debug_hook, set_debug_hook};
+    use std::sync::Arc;
+
+    /// A hook that records nothing: these tests are about which `Arc` sits in
+    /// the global slot, not about what a safepoint does.
+    struct Inert;
+
+    impl DebugHook for Inert {
+        fn safepoint(&self, _source: u32, _offset: u32, _desc: usize, _values: usize) {}
+    }
+
+    fn installed() -> Option<*const ()> {
+        HOOK.read()
+            .expect("debug-hook lock poisoned")
+            .as_ref()
+            .map(|hook| Arc::as_ptr(hook).cast::<()>())
+    }
+
+    /// One test, not three: the slot is process-global, so two tests taking
+    /// turns with it would be racing each other rather than testing it.
+    #[test]
+    fn a_hook_is_cleared_by_its_owner_and_by_nobody_else() {
+        let mine: Arc<dyn DebugHook> = Arc::new(Inert);
+        let someone_elses: Arc<dyn DebugHook> = Arc::new(Inert);
+        set_debug_hook(Some(mine.clone()));
+
+        assert!(
+            !clear_debug_hook(&someone_elses),
+            "clearing a hook that was never installed reported a removal"
+        );
+        assert_eq!(
+            installed(),
+            Some(Arc::as_ptr(&mine).cast::<()>()),
+            "a stranger's clear took down the installed hook"
+        );
+
+        assert!(clear_debug_hook(&mine), "the owner's clear did nothing");
+        assert_eq!(installed(), None, "the hook outlived its own clear");
+        // And clearing an already-empty slot is simply false, not a panic.
+        assert!(!clear_debug_hook(&mine));
     }
 }
