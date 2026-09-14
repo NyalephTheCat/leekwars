@@ -1,66 +1,31 @@
 //! Pipeline integration: HIR lowering as a [`Step`].
+//!
+//! The composition this step drives — parse the active headers, lower the
+//! file against them, fold and optimize — lives in [`crate::lower`] and
+//! [`crate::fold`] as public functions, so a driver that is not a pipeline
+//! can assemble the same stages itself.
+//!
+//! A note on what lowering does and does not share with the type checker:
+//! lowering parses the **concatenation** of `PRELUDE_SRC` and the active
+//! libraries under one cache key, while the checker parses `STDLIB_SRC` and
+//! `LEEKWARS_SRC` as two separate keys (the `seed_header` calls in
+//! `leek-types`' `checker/file.rs`). Both go through
+//! [`leek_parser::parse_signature_header`], so they share its cache — but
+//! never an entry in it. Each pass parses its own text once per language
+//! version; neither re-parses per compile.
 
 use std::sync::Arc;
 
 use leek_diagnostics::Diagnostic;
-use leek_parser::ast::AstNode;
 use leek_parser::pipeline::AstArtifact;
 use leek_pipeline::{Artifact, Context, OptLevel, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 use leek_resolver::pipeline::IncludeGraphArtifact;
-use leek_span::SourceId;
 use leek_syntax::Version;
 
 use crate::HirFile;
-use crate::lower::{
-    LowerUnit, PRELUDE_UNIT_PATH, lower_file_versioned_with_flags,
-    lower_file_with_prelude_with_flags, lower_files,
-};
-
-/// Parse the active library/prelude headers (the implicit prelude when
-/// enabled, plus any `--library` headers like leekwars) into a single
-/// signature AST to merge ahead of the user file. `None` when nothing
-/// is active.
-///
-/// Parsed at the **program's** language version through the shared,
-/// version-keyed [`leek_parser::parse_signature_header`] cache — the same
-/// one the type checker seeds signatures from — so lowering and checking
-/// see the same header tree and nothing is re-parsed per compile.
-fn parse_prelude(
-    prelude_enabled: bool,
-    version: Version,
-) -> Option<(leek_parser::ast::SourceFile, SourceId)> {
-    use leek_parser::ast::SourceFile as AstSourceFile;
-    use leek_syntax::SyntaxNode;
-    let combined = leek_prelude::merged_header_src(prelude_enabled)?;
-    let green = leek_parser::parse_signature_header(&combined, version);
-    let ast = AstSourceFile::cast(SyntaxNode::new_root(green))?;
-    Some((ast, leek_prelude::source_id()))
-}
-
-/// Lower one file at the pipeline's settled language settings: `version`
-/// is `Input::version_byte` (already resolved from override > pragma >
-/// default by the driver), never re-derived from the file's pragmas.
-fn lower_single(
-    ast: &leek_parser::ast::SourceFile,
-    source: SourceId,
-    version_byte: u8,
-    flags: leek_pipeline::FeatureFlags,
-) -> (HirFile, Vec<Diagnostic>) {
-    if let Some((prelude, prelude_src)) =
-        parse_prelude(flags.prelude, Version::from_byte(version_byte))
-    {
-        return lower_file_with_prelude_with_flags(
-            ast,
-            source,
-            version_byte,
-            &prelude,
-            prelude_src,
-            flags,
-        );
-    }
-    lower_file_versioned_with_flags(ast, source, version_byte, flags)
-}
+use crate::fold::fold_map;
+use crate::lower::{LowerUnit, PRELUDE_UNIT_PATH, finish, lower_files, lower_one, prelude_tree};
 
 /// Lowered HIR.
 ///
@@ -159,7 +124,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         // pre-declared before every user file's, mirroring the
         // single-file prelude path. No `include` statement resolves
         // to the synthetic path, so it contributes no main block.
-        let prelude = parse_prelude(flags.prelude, version);
+        let prelude = prelude_tree(flags.prelude, version);
         let mut units: Vec<LowerUnit<'_>> = Vec::with_capacity(graph.includes.len() + 1);
         if let Some((prelude_ast, prelude_src)) = &prelude {
             units.push(LowerUnit {
@@ -184,7 +149,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
             version,
         };
         let (hir, diagnostics) = lower_files(entry, &units, Some(&graph.resolved), flags);
-        return (finish_hir(hir, opt), diagnostics);
+        return (finish(hir, &fold_map(), opt), diagnostics);
     }
 
     #[cfg(feature = "salsa")]
@@ -205,40 +170,16 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         .get::<AstArtifact>()
         .map(|a| a.0.clone())
         .expect("LowerHir::run guards on AstArtifact presence outside the salsa path");
-    let (hir, diagnostics) = lower_single(&ast, cx.source(), cx.version_byte(), cx.flags());
-    (finish_hir(hir, opt), diagnostics)
-}
-
-/// Apply the opt-in constant-folding pass (if any constants are active),
-/// then wrap the lowered HIR in an `Arc`. Routing every fresh-HIR return
-/// site through this means *all* downstream consumers — the Java backend
-/// (reads `HirArtifact`) and MIR/native/interp (lower from the same
-/// `HirArtifact`) — see folded literals from one hook. A no-op (and
-/// allocation-free) when no fold constants are registered, so the default
-/// path and the corpus baseline are unchanged.
-fn finish_hir(mut hir: HirFile, opt: OptLevel) -> Arc<HirFile> {
-    let pairs = leek_prelude::fold_constants();
-    if !pairs.is_empty() {
-        let map: std::collections::HashMap<String, crate::ir::Literal> = pairs
-            .into_iter()
-            .filter_map(|(name, value)| {
-                let lit = if value.contains('.') {
-                    value.parse::<f64>().ok().map(crate::ir::Literal::Real)
-                } else {
-                    value.parse::<i64>().ok().map(crate::ir::Literal::Int)
-                }?;
-                Some((name, lit))
-            })
-            .collect();
-        crate::transform::fold_constants(&mut hir, &map);
-    }
-    // Backend-agnostic optimization — only at O1. Propagation and folding run
-    // to a fixpoint so chained constants (`var A = 2; var B = A + 1; …`) fully
-    // resolve.
-    if opt.optimizes() {
-        crate::transform::optimize_hir(&mut hir);
-    }
-    Arc::new(hir)
+    let flags = cx.flags();
+    let prelude = prelude_tree(flags.prelude, Version::from_byte(cx.version_byte()));
+    let (hir, diagnostics) = lower_one(
+        &ast,
+        cx.source(),
+        cx.version_byte(),
+        flags,
+        prelude.as_ref().map(|(tree, source)| (tree, *source)),
+    );
+    (finish(hir, &fold_map(), opt), diagnostics)
 }
 
 /// Tracked return type for [`lower_hir_query`]: the HIR (in an
@@ -270,9 +211,17 @@ pub fn lower_hir_query(
         };
     };
     let flags = leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db));
-    let (hir, diagnostics) = lower_single(&ast, file.source(db), file.version_byte(db), flags);
+    let version_byte = file.version_byte(db);
+    let prelude = prelude_tree(flags.prelude, Version::from_byte(version_byte));
+    let (hir, diagnostics) = lower_one(
+        &ast,
+        file.source(db),
+        version_byte,
+        flags,
+        prelude.as_ref().map(|(tree, source)| (tree, *source)),
+    );
     LowerHirResult {
-        hir: finish_hir(hir, OptLevel::O0),
+        hir: finish(hir, &fold_map(), OptLevel::O0),
         diagnostics,
     }
 }

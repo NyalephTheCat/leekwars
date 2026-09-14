@@ -16,9 +16,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{self, AstNode, Stmt as AstStmt};
+use leek_pipeline::OptLevel;
 use leek_resolver::include_graph::{ExpandUnit, IncludeExpander};
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken, Version};
@@ -132,6 +134,79 @@ pub fn lower_file_with_prelude_with_flags(
 /// Synthetic path of the library/prelude header unit. No `include`
 /// statement resolves to it, so it never contributes a main block.
 pub const PRELUDE_UNIT_PATH: &str = "<prelude>";
+
+/// Parse the active library/prelude headers (the implicit prelude when
+/// enabled, plus any `--library` headers like leekwars) into a single
+/// signature AST to merge ahead of the user file. `None` when nothing is
+/// active.
+///
+/// Neither cost here is paid per file: [`leek_prelude::merged_header`] joins
+/// the headers once per [`leek_prelude::generation`] and hands back the same
+/// `Arc`, and the parse of that text is memoized by
+/// [`leek_parser::parse_signature_header`] on the **program's** language
+/// version — `version` is the one the driver settled (override > pragma >
+/// default), never re-derived from the file's pragmas.
+pub fn prelude_tree(
+    prelude_enabled: bool,
+    version: Version,
+) -> Option<(ast::SourceFile, SourceId)> {
+    let (combined, _generation) = leek_prelude::merged_header(prelude_enabled)?;
+    let green = leek_parser::parse_signature_header(&combined, version);
+    let ast = ast::SourceFile::cast(SyntaxNode::new_root(green))?;
+    Some((ast, leek_prelude::source_id()))
+}
+
+/// Lower one file at settled language settings: `version` is the driver's
+/// `Input::version_byte`, and `prelude` the header tree from
+/// [`prelude_tree`] (`None` when no library or implicit prelude is active).
+///
+/// Taking the prelude as an argument lets a caller that lowers several files
+/// parse it once — and lets the multi-file path push the very same tree in as
+/// a leading [`LowerUnit`] instead of duplicating the merge rules.
+pub fn lower_one(
+    file: &ast::SourceFile,
+    source: SourceId,
+    version: u8,
+    flags: leek_span::FeatureFlags,
+    prelude: Option<(&ast::SourceFile, SourceId)>,
+) -> (HirFile, Vec<Diagnostic>) {
+    match prelude {
+        Some((prelude, prelude_source)) => lower_file_with_prelude_with_flags(
+            file,
+            source,
+            version,
+            prelude,
+            prelude_source,
+            flags,
+        ),
+        None => lower_file_versioned_with_flags(file, source, version, flags),
+    }
+}
+
+/// Apply the opt-in constant-folding pass, then the backend-agnostic
+/// optimizer when `opt` asks for it, and wrap the result in an `Arc`.
+///
+/// Routing every fresh-HIR return site through this means *all* downstream
+/// consumers — the Java backend (reads `HirArtifact`) and MIR/native/interp
+/// (lower from the same `HirArtifact`) — see folded literals from one hook.
+/// `fold` comes from [`crate::fold::fold_map`], already parsed once per
+/// generation; an empty map makes the fold pass a no-op, so the default path
+/// and the corpus baseline are unchanged.
+///
+/// Propagation and folding run to a fixpoint inside
+/// [`optimize_hir`](crate::transform::optimize_hir) so chained constants
+/// (`var A = 2; var B = A + 1; …`) fully resolve.
+pub fn finish(
+    mut hir: HirFile,
+    fold: &HashMap<String, crate::ir::Literal>,
+    opt: OptLevel,
+) -> Arc<HirFile> {
+    crate::transform::fold_constants(&mut hir, fold);
+    if opt.optimizes() {
+        crate::transform::optimize_hir(&mut hir);
+    }
+    Arc::new(hir)
+}
 
 /// One file of a multi-file lowering: its AST, source id, canonical path,
 /// and the language version it was lexed/parsed at (its own explicit
