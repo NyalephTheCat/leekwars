@@ -108,23 +108,26 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
     )
 }
 
+/// Assemble the checker options for a direct (non-memoized) run.
+///
+/// The one place on this path that reads the process-global
+/// [`seed_library_enabled`](crate::seed_library_enabled): it is an entry
+/// boundary, not a tracked query, so reading it here cannot strand a
+/// salsa memo. The memoized path takes the setting off the
+/// [`SourceFile`](leek_pipeline::salsa::SourceFile) input instead.
 fn type_options(cx: &Context<'_>) -> Options {
-    Options {
-        strict: cx.strict(),
-        experimental_generics: cx.flags().generics,
-        seed_library: crate::seed_library_enabled(),
-        experimental_prelude: cx.flags().prelude,
-        experimental_types: cx.flags().types,
-        experimental_interfaces: cx.flags().interfaces,
-        experimental_enums: cx.flags().enums,
-    }
+    Options::from_settings(cx.flags(), cx.strict(), crate::seed_library_enabled())
 }
 
 /// Salsa-tracked entry point for type checking. Re-runs when the upstream
 /// [`parse_query`](leek_parser::pipeline::parse_query)'s green tree
 /// changes, or when an input field this body reads off the
 /// [`SourceFile`](leek_pipeline::salsa::SourceFile) changes: `strict`,
-/// `flags_bits`, `source_id` or `version_byte`.
+/// `seed_library`, `flags_bits`, `source_id` or `version_byte`.
+///
+/// Every setting the checker options are built from comes off that
+/// input. Reading a process-global here instead would be invisible to
+/// salsa, and the memo would survive a change it depends on.
 #[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn typecheck_query(
@@ -142,15 +145,7 @@ pub fn typecheck_query(
         return TypeCheckArtifact::default();
     };
     let flags = leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db));
-    let opts = Options {
-        strict: file.strict(db),
-        experimental_generics: flags.generics,
-        seed_library: crate::seed_library_enabled(),
-        experimental_prelude: flags.prelude,
-        experimental_types: flags.types,
-        experimental_interfaces: flags.interfaces,
-        experimental_enums: flags.enums,
-    };
+    let opts = Options::from_settings(flags, file.strict(db), file.seed_library(db));
     let TypeCheckResult {
         diagnostics,
         table,
@@ -198,7 +193,7 @@ mod salsa_invalidation_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut db = LeekDb::default();
-        let file = SourceFile::new(&db, 1, SRC.to_string(), 4, false, 0, Vec::new());
+        let file = SourceFile::new(&db, 1, SRC.to_string(), 4, false, false, 0, Vec::new());
         // No `Resolve` step: without an `IncludeGraphArtifact` in the
         // context `TypeCheck` takes the single-file salsa branch, which is
         // the one under test.
@@ -218,6 +213,17 @@ mod salsa_invalidation_tests {
     #[test]
     fn an_untouched_input_reuses_the_cached_type_check() {
         assert_eq!(reruns_after(|_, _| {}), 0);
+    }
+
+    #[test]
+    fn flipping_seed_library_rechecks() {
+        assert_eq!(
+            reruns_after(|db, file| {
+                file.set_seed_library(db).to(true);
+            }),
+            1,
+            "`seed_library` is read off the input, not off a process-global"
+        );
     }
 
     #[test]
@@ -265,6 +271,56 @@ mod salsa_invalidation_tests {
                     .to("var y = \"s\";\nreturn y + 1;\n".to_string());
             }),
             1
+        );
+    }
+}
+
+/// `seed_library` has to reach the checker as a
+/// [`SourceFile`](leek_pipeline::salsa::SourceFile) field.
+///
+/// It used to be read from a process-global inside
+/// [`typecheck_query`]'s body, where salsa cannot see it: the memo then
+/// outlived the setting it was computed under, and the LSP kept serving
+/// `any` for every builtin call it had already checked with the library
+/// unseeded. Pinning it here means two inputs that differ in nothing
+/// else must still type-check differently.
+#[cfg(all(test, feature = "salsa"))]
+mod seed_library_is_an_input_tests {
+    use leek_pipeline::salsa::{LeekDb, SourceFile};
+
+    use super::{TypeCheckArtifact, typecheck_query};
+    use crate::salsa_probe::SERIAL;
+
+    /// `getLife()` is declared `-> integer` in the seeded leek-wars
+    /// header, so `x` infers `integer` with the library seeded and stays
+    /// `any` without it — a difference in the type table with no
+    /// difference in the token stream.
+    const SRC: &str = "var x = getLife();\nreturn x;\n";
+
+    fn checked(db: &LeekDb, seed_library: bool) -> TypeCheckArtifact {
+        let file = SourceFile::new(
+            db,
+            1,
+            SRC.to_string(),
+            4,
+            false,
+            seed_library,
+            0,
+            Vec::new(),
+        );
+        typecheck_query(db, file)
+    }
+
+    #[test]
+    fn two_inputs_differing_only_in_seed_library_check_differently() {
+        let _guard = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let db = LeekDb::default();
+        assert_ne!(
+            checked(&db, false),
+            checked(&db, true),
+            "seeding the library signatures has to change what the checker infers"
         );
     }
 }

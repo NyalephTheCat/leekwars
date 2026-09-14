@@ -281,7 +281,7 @@ mod salsa_invalidation_tests {
 
     fn fixture() -> (LeekDb, SourceFile) {
         let db = LeekDb::default();
-        let file = SourceFile::new(&db, 1, SRC.to_string(), 4, false, 0, Vec::new());
+        let file = SourceFile::new(&db, 1, SRC.to_string(), 4, false, false, 0, Vec::new());
         (db, file)
     }
 

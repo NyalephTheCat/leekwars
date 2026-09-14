@@ -168,7 +168,7 @@ mod salsa_tests {
     use super::salsa_probe::{LOWER_MIR_CALLS, SERIAL};
 
     fn source(db: &mut LeekDb, text: &str) -> SourceFile {
-        SourceFile::new(db, 1, text.to_string(), 4, false, 0, Vec::new())
+        SourceFile::new(db, 1, text.to_string(), 4, false, false, 0, Vec::new())
     }
 
     #[test]

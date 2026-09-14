@@ -8,9 +8,10 @@
 //! - [`LeekDb`] — a concrete database. Single-threaded; clone forks
 //!   a copy sharing storage.
 //! - [`SourceFile`] — the canonical salsa input grouping
-//!   `(source_id, text, version, strict)`. Pass crates that want
-//!   tracked queries take `(db: &dyn Db, file: SourceFile)` as input
-//!   and call `file.text(db)`, `file.version(db)`, etc.
+//!   `(source_id, text, version, strict, seed_library, flags)`. Pass
+//!   crates that want tracked queries take `(db: &dyn Db, file:
+//!   SourceFile)` as input and call `file.text(db)`,
+//!   `file.version(db)`, etc.
 //!
 //! The pipeline itself doesn't force memoization on any step. A step
 //! that wants caching does:
@@ -70,6 +71,12 @@ pub struct SourceFile {
     /// `salsa::Update` on the enum.
     pub version_byte: u8,
     pub strict: bool,
+    /// Whether the type checker should seed the typed standard-library
+    /// signature headers (`stdlib.leek` / `leekwars.leek`) for this
+    /// file. An input rather than a process-global so a tracked query
+    /// that depends on it is invalidated when it changes — the LSP
+    /// turns it on, the driver/corpus baseline leaves it off.
+    pub seed_library: bool,
     /// Experimental [`leek_span::FeatureFlags`] packed as a bitmask (a
     /// primitive, so no `salsa::Update` impl is needed on the flags type).
     pub flags_bits: u8,
@@ -106,6 +113,8 @@ pub struct ProjectFile {
     pub text: String,
     pub version_byte: u8,
     pub strict: bool,
+    /// See [`SourceFile::seed_library`].
+    pub seed_library: bool,
     /// Experimental [`leek_span::FeatureFlags`] packed as a bitmask.
     pub flags_bits: u8,
     /// Class names declared elsewhere in the project — see
