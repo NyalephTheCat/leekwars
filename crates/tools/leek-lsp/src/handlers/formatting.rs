@@ -79,5 +79,5 @@ pub(crate) fn edit_is_safe(
 
 /// The language version `doc` was parsed with.
 fn doc_version(ws: &Workspace, doc: &DocHandle) -> Version {
-    leek_syntax::pipeline::version_from_byte(doc.source_file.version_byte(&ws.db))
+    leek_syntax::version::version_from_byte(doc.source_file.version_byte(&ws.db))
 }

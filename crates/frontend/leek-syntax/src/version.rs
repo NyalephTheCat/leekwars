@@ -50,6 +50,13 @@ impl Default for Version {
     }
 }
 
+/// Decode a `Context::version_byte()` into the typed [`Version`]
+/// enum. Values out of range collapse to [`Version::LATEST`].
+#[must_use]
+pub fn version_from_byte(b: u8) -> Version {
+    Version::from_byte(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

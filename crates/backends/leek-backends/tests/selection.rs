@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use leek_backends::{
     LINKED, is_linked, java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_backend,
-    resolve_run_backend, version_from_byte,
+    resolve_run_backend,
 };
 use leek_manifest::{BackendKind, BackendSettings, JavaMode, Manifest};
 use leek_project::Project;
@@ -356,19 +356,6 @@ fn linked_lists_exactly_the_backends_this_build_can_run() {
             is_linked(kind),
             LINKED.contains(&kind),
             "is_linked disagrees with LINKED for {kind:?}"
-        );
-    }
-}
-
-// ---- version_from_byte ----
-
-#[test]
-fn version_from_byte_maps_the_pipeline_byte_to_a_language_version() {
-    for byte in 1u8..=4 {
-        assert_eq!(
-            version_from_byte(byte),
-            leek_syntax::Version::from_byte(byte),
-            "byte {byte}"
         );
     }
 }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use leek_parser::pipeline::GreenTreeArtifact;
 use leek_pipeline::{Artifact, Context, RecipeArtifact, RecipeParams, RecipeStep, Step, StepError};
 use leek_syntax::language::GreenNode;
-use leek_syntax::pipeline::version_from_byte;
+use leek_syntax::version::version_from_byte;
 
 use crate::FormatOptions;
 

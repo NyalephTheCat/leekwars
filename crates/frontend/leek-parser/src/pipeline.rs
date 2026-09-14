@@ -5,8 +5,8 @@ use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStepStopOnError};
 use leek_syntax::SyntaxNode;
 use leek_syntax::language::GreenNode;
-use leek_syntax::pipeline::version_from_byte;
 use leek_syntax::version::Version;
+use leek_syntax::version::version_from_byte;
 
 use crate::ast::{AstNode, SourceFile};
 use crate::parse_tokens_with_classes;

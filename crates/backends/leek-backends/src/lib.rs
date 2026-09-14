@@ -9,7 +9,6 @@ pub use linked::{LINKED, is_linked};
 use anyhow::{Result, bail};
 use leek_manifest::{BackendKind, BackendSettings, JavaMode, Manifest};
 use leek_project::Project;
-use leek_syntax::Version;
 
 /// Resolve which backend to use from the manifest and an optional CLI override.
 pub fn resolve_backend(manifest: &Manifest, cli_backend: Option<&str>) -> Result<BackendKind> {
@@ -85,11 +84,6 @@ pub fn pick_java_out_dir(
         settings,
         project.build_dir().join("java"),
     )
-}
-
-/// Map a pipeline version byte to [`Version`].
-pub fn version_from_byte(byte: u8) -> Version {
-    Version::from_byte(byte)
 }
 
 /// Whether to use clean Java emission mode.

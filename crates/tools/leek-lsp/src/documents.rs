@@ -35,7 +35,7 @@ impl DocHandle {
     /// formatter needs it to re-lex token boundaries when deciding
     /// where a separator is required.
     pub fn source_file_version(&self, db: &dyn Db) -> leek_syntax::Version {
-        leek_syntax::pipeline::version_from_byte(self.source_file.version_byte(db))
+        leek_syntax::version::version_from_byte(self.source_file.version_byte(db))
     }
 
     /// UTF-16-aware position map (line table + source text) for converting

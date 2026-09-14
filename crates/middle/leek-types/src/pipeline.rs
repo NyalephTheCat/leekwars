@@ -4,7 +4,7 @@ use leek_diagnostics::Diagnostic;
 use leek_parser::pipeline::AstArtifact;
 use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
-use leek_syntax::pipeline::version_from_byte;
+use leek_syntax::version::version_from_byte;
 
 use crate::index::{InferredSignatures, TypeTable};
 use crate::{Options, TypeCheckResult, check_collecting, check_collecting_files};
