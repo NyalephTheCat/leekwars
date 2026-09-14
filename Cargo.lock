@@ -1105,6 +1105,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leek-config"
+version = "0.0.1"
+
+[[package]]
 name = "leek-dap"
 version = "0.0.1"
 dependencies = [
