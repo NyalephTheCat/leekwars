@@ -11,10 +11,14 @@
 //! require a fixture naming that variant, and each fixture pins the
 //! number of children the walkers report — which is what a hand-rolled
 //! walker gets wrong when it silently skips a subtree.
+//!
+//! The last section covers the file-level enumerators, whose per-variant
+//! list is a different one: not the children of a node, but every root a
+//! *file* can hang executable code off.
 
 use leek_hir::{
-    Expr, ExprKind, HirFile, ImportStmt, IncludeStmt, Stmt, walk_expr_children,
-    walk_stmt_child_exprs, walk_stmt_child_stmts, walk_stmts_deep,
+    BinaryOp, BodyRoot, Def, Expr, ExprKind, Global, HirFile, ImportStmt, IncludeStmt, NameRef,
+    Stmt, walk_expr_children, walk_stmt_child_exprs, walk_stmt_child_stmts, walk_stmts_deep,
 };
 use leek_parser::ast::{AstNode, SourceFile};
 use leek_span::{SourceId, Span};
@@ -398,4 +402,195 @@ fn walk_stmts_deep_crosses_lambda_bodies() {
     // The `var f` declaration itself, plus `var inner` and `return inner`
     // from inside the lambda body.
     assert_eq!(names, ["VarDecl", "VarDecl", "Return"]);
+}
+
+// ---------------------------------------------------------------------------
+// File-level enumerators
+//
+// The walkers above take a tree; these take a *file* and have to know every
+// place executable code can hide in one. The fixtures below pin the two
+// things a hand-rolled version gets wrong: which roots exist at all (#253),
+// and where the lambda boundary sits.
+// ---------------------------------------------------------------------------
+
+/// The builtin `e` reassigns, when `e` is `<builtin> = …` — the shape the
+/// Java backend hunts for to know which builtins a file shadows.
+///
+/// Both name tags count: whether a name lowers to `Builtin` or `Unresolved`
+/// depends on which library was registered before lowering ran, so a
+/// name-keyed analysis must accept either (see `builtin_or_unresolved`).
+fn reassigned_builtin(e: &Expr) -> Option<&str> {
+    let ExprKind::Binary(BinaryOp::Assign, lhs, _) = &e.kind else {
+        return None;
+    };
+    match &lhs.kind {
+        ExprKind::Name(NameRef::Builtin(n) | NameRef::Unresolved(n)) => Some(n),
+        _ => None,
+    }
+}
+
+/// Every name `walk_file_exprs` sees reassigned in `hir`, in walk order.
+fn reassigned_builtins(hir: &HirFile) -> Vec<String> {
+    let mut seen = Vec::new();
+    leek_hir::walk_file_exprs(hir, &mut |e| {
+        if let Some(name) = reassigned_builtin(e) {
+            seen.push(name.to_string());
+        }
+    });
+    seen
+}
+
+/// The name of every `var`/`global` declaration `f` reports.
+fn decl_names(f: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut push = |s: &Stmt| {
+        if let Stmt::VarDecl(v) = s {
+            names.push(v.name.clone());
+        }
+    };
+    f(&mut push);
+    names
+}
+
+/// One builtin reassignment in each executable position a file has, each
+/// shadowing a *different* builtin so a walker that reaches five of the six
+/// says which position it missed.
+const REASSIGNED_BUILTINS: &str = "\
+global g = (getType = 1)
+function fun() { typeOf = 2 }
+class Foo {
+    static integer sf = (isNull = 3)
+    integer inst = (clone = 4)
+    constructor() { length = 5 }
+    m() { count = 6 }
+}
+";
+
+/// The regression #253 names: a builtin reassigned inside a class method, a
+/// constructor, an instance-field initialiser, a static-field initialiser or
+/// a global initialiser is code like any other, and the file-level
+/// expression walk has to reach all of it. Three walkers in the Java backend
+/// each enumerated a different subset of these roots.
+#[test]
+fn walk_file_exprs_reaches_a_builtin_reassignment_in_every_position() {
+    let hir = lower(REASSIGNED_BUILTINS);
+    let mut seen = reassigned_builtins(&hir);
+    seen.sort();
+    assert_eq!(
+        seen,
+        ["clone", "count", "getType", "isNull", "length", "typeOf"],
+        "a reassignment position went unwalked"
+    );
+}
+
+/// Lowering keeps a file-scope `global x = e` in the main block, as a
+/// `VarDecl` with `is_global` set, and leaves `Global::init` empty — which is
+/// why the fixture above reaches `getType` through `BodyRoot::Main`. The slot
+/// is part of the IR all the same, so `BodyRoot::GlobalInit` has to walk it;
+/// build that shape by hand, as the synthetic statements above do.
+#[test]
+fn a_populated_global_init_slot_is_walked() {
+    let mut hir = lower("var p = (getType = 1)\n");
+    let Stmt::VarDecl(v) = hir.main.remove(0) else {
+        panic!("fixture is a var declaration")
+    };
+    assert!(hir.main.is_empty(), "nothing left in the main block");
+    hir.defs.push(Def::Global(Global {
+        name: "g".into(),
+        ty: None,
+        init: Some(v.init.expect("an initializer")),
+        span: v.span,
+    }));
+    assert_eq!(reassigned_builtins(&hir), ["getType"]);
+}
+
+/// A file with one root of every kind. `bare` has no initialiser and so is
+/// not a root; `sf`/`inst` are declared in that order and must be reported in
+/// it.
+const EVERY_ROOT: &str = "\
+global bare
+function fun() { return 1 }
+class Foo {
+    static integer sf = 1
+    integer inst = 2
+    constructor() { }
+    m() { return 3 }
+    n() { return 4 }
+}
+var top = 5
+";
+
+fn root_label(root: BodyRoot<'_>) -> String {
+    match root {
+        BodyRoot::Main(_) => "main".to_string(),
+        BodyRoot::Function(f) => format!("function {}", f.name),
+        BodyRoot::Method(c, m) => format!("method {}.{}", c.name, m.name),
+        BodyRoot::Constructor(c, m) => format!("constructor {}/{}", c.name, m.params.len()),
+        BodyRoot::FieldInit(c, f) => format!("field {}.{}", c.name, f.name),
+        BodyRoot::GlobalInit(g) => format!("global {}", g.name),
+    }
+}
+
+/// The enumeration order is part of the contract — downstream sets are built
+/// from it and must be reproducible — so it is pinned here rather than left
+/// to whatever `defs` iteration happens to produce.
+#[test]
+fn walk_file_bodies_enumerates_every_root_in_a_fixed_order() {
+    let hir = lower(EVERY_ROOT);
+    let mut roots = Vec::new();
+    leek_hir::walk_file_bodies(&hir, &mut |root| roots.push(root_label(root)));
+    assert_eq!(
+        roots,
+        [
+            "main",
+            "function fun",
+            "field Foo.sf",
+            "field Foo.inst",
+            "constructor Foo/0",
+            "method Foo.m",
+            "method Foo.n",
+        ],
+        "a body-less `global bare` is not a root, and the order is fixed"
+    );
+}
+
+/// The lambda boundary, at file scope: the binding is a statement of the
+/// method body and both walks report it, but the lambda's own statements
+/// belong to its own scope and only the `_deep` walk crosses into them.
+#[test]
+fn a_lambda_body_inside_a_method_is_deep_only() {
+    let hir =
+        lower("class Foo { m() { var x = function() { var inner = 1 return inner } return x } }\n");
+    assert_eq!(
+        decl_names(|f| leek_hir::walk_file_stmts(&hir, &mut |s| f(s))),
+        ["x"],
+        "the binding, never the lambda's own statements"
+    );
+    assert_eq!(
+        decl_names(|f| leek_hir::walk_file_stmts_deep(&hir, &mut |s| f(s))),
+        ["x", "inner"],
+    );
+}
+
+/// A parameter default is a real expression position — code runs there — and
+/// every hand-rolled walker in the Java backend skipped it.
+#[test]
+fn a_parameter_default_is_walked() {
+    let hir = lower(
+        "function fun(g = (getType = 1), h = function() { var fromDefault = 2 }) { return 0 }\n",
+    );
+    assert_eq!(
+        reassigned_builtins(&hir),
+        ["getType"],
+        "the default expression itself"
+    );
+    assert_eq!(
+        decl_names(|f| leek_hir::walk_file_stmts_deep(&hir, &mut |s| f(s))),
+        ["fromDefault"],
+        "a statement inside a lambda in a default"
+    );
+    assert!(
+        decl_names(|f| leek_hir::walk_file_stmts(&hir, &mut |s| f(s))).is_empty(),
+        "the shallow walk still stops at the lambda"
+    );
 }
