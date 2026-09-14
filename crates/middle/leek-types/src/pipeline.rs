@@ -4,7 +4,7 @@ use leek_diagnostics::Diagnostic;
 use leek_parser::pipeline::AstArtifact;
 use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
-use leek_syntax::{Version, pipeline::version_from_byte};
+use leek_syntax::pipeline::version_from_byte;
 
 use crate::index::{InferredSignatures, TypeTable};
 use crate::{Options, TypeCheckResult, check_collecting, check_collecting_files};
@@ -70,13 +70,23 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
         && !graph.includes.is_empty()
         && let Some(entry) = cx.get::<AstArtifact>().and_then(|a| a.0.as_ref())
     {
-        let mut files: Vec<(&leek_parser::ast::SourceFile, leek_span::SourceId, Version)> = graph
+        let mut files: Vec<leek_resolver::FileUnit<'_>> = graph
             .includes
             .iter()
-            .map(|file| (&file.ast, file.source, file.version))
+            .map(|file| leek_resolver::FileUnit {
+                ast: &file.ast,
+                source: file.source,
+                version: file.version,
+                path: &file.path,
+            })
             .collect();
-        files.push((entry, cx.source(), version_from_byte(cx.version_byte())));
-        return check_collecting_files(&files, type_options(cx));
+        files.push(leek_resolver::FileUnit {
+            ast: entry,
+            source: cx.source(),
+            version: version_from_byte(cx.version_byte()),
+            path: &graph.entry_path,
+        });
+        return check_collecting_files(&files, Some(&graph.resolved), type_options(cx));
     }
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {

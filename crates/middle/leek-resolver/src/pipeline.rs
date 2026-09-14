@@ -17,7 +17,7 @@ use leek_syntax::pipeline::version_from_byte;
 use crate::folder::Folder;
 use crate::include_graph::{ResolvedFile, build_include_graph};
 use crate::index::ResolveTable;
-use crate::{Options, ResolveResult, resolve_collecting, resolve_collecting_files};
+use crate::{FileUnit, Options, ResolveResult, resolve_collecting, resolve_collecting_files};
 
 /// Resolver outcome.
 ///
@@ -68,13 +68,23 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
         && !graph.includes.is_empty()
         && let Some(entry) = cx.get::<AstArtifact>().and_then(|a| a.0.as_ref())
     {
-        let mut files: Vec<(&SourceFile, leek_span::SourceId, Version)> = graph
+        let mut files: Vec<FileUnit<'_>> = graph
             .includes
             .iter()
-            .map(|file| (&file.ast, file.source, file.version))
+            .map(|file| FileUnit {
+                ast: &file.ast,
+                source: file.source,
+                version: file.version,
+                path: &file.path,
+            })
             .collect();
-        files.push((entry, cx.source(), version_from_byte(cx.version_byte())));
-        return resolve_collecting_files(&files, resolve_options(cx));
+        files.push(FileUnit {
+            ast: entry,
+            source: cx.source(),
+            version: version_from_byte(cx.version_byte()),
+            path: &graph.entry_path,
+        });
+        return resolve_collecting_files(&files, Some(&graph.resolved), resolve_options(cx));
     }
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {

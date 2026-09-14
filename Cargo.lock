@@ -1422,6 +1422,7 @@ dependencies = [
  "leek-recipes",
  "leek-span",
  "leek-syntax",
+ "leek-types",
  "rowan",
  "salsa",
 ]

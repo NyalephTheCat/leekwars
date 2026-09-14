@@ -88,7 +88,8 @@ impl Checker {
                 }
             }
             Stmt::Block(b) => self.check_block(b),
-            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Include(_) | Stmt::Import(_) => {}
+            Stmt::Include(i) => self.expand_include(i.syntax()),
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Import(_) => {}
         }
     }
 

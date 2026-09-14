@@ -252,12 +252,20 @@ impl Resolver {
 
     pub(crate) fn resolve_block_body(&mut self, block: &Block) {
         self.push_scope();
-        let mut terminated_at: Option<leek_span::Span> = None;
+        // A terminator inside this block ends *this* statement list, not
+        // the enclosing one, so the flag is saved and restored around it.
+        let outer_terminated_at = self.terminated_at.take();
         for stmt in block.stmts() {
+            if let Stmt::Include(inc) = &stmt {
+                // Statement-list position: the included file's statements
+                // splice in flat and take part in this block's
+                // termination tracking.
+                self.expand_include(inc.syntax());
+                continue;
+            }
+            let after_terminator = self.terminated_at.is_some();
             self.resolve_stmt(&stmt);
-            if terminated_at.is_none() && is_block_terminator(&stmt) {
-                terminated_at = Some(self.node_span(stmt.syntax()));
-            } else if terminated_at.is_some() {
+            if after_terminator {
                 // Anything after a terminator in the same block is
                 // dead code — upstream emits this as an error rather
                 // than a warning.
@@ -270,7 +278,11 @@ impl Resolver {
                 // flood on long dead tails.
                 break;
             }
+            if is_block_terminator(&stmt) {
+                self.terminated_at = Some(self.node_span(stmt.syntax()));
+            }
         }
+        self.terminated_at = outer_terminated_at;
         self.pop_scope();
     }
 
@@ -356,9 +368,48 @@ impl Resolver {
                 }
                 self.breakable_depth -= 1;
             }
-            Stmt::Include(_) => {}
+            Stmt::Include(i) => {
+                // Boxed statement position (`if (c) include("x");`, an
+                // unbraced loop body). The HIR lowerer wraps such an
+                // expansion in a block, so a terminator inside it ends
+                // that block and not the enclosing list; save and
+                // restore the flag to agree.
+                let outer_terminated_at = self.terminated_at.take();
+                self.expand_include(i.syntax());
+                self.terminated_at = outer_terminated_at;
+            }
             Stmt::Import(i) => self.resolve_import(i),
             Stmt::Block(b) => self.resolve_block_body(b),
+        }
+    }
+
+    /// Resolve an `include("name")` site as inline expansion of the
+    /// included file's main statements, in the scope live here.
+    ///
+    /// A no-op without an armed expander (single-file resolves), for a
+    /// name that resolves to nothing, and for a file some earlier site
+    /// already expanded — the diamond rule.
+    pub(crate) fn expand_include(&mut self, include_stmt: &leek_syntax::SyntaxNode) {
+        let Some(name) = crate::include_graph::include_name(include_stmt) else {
+            return;
+        };
+        let Some(expansion) = self
+            .include_expander
+            .as_mut()
+            .and_then(|expander| expander.enter(&name))
+        else {
+            return;
+        };
+        // Spans and version-dependent checks follow the included file
+        // while its statements interleave with ours.
+        let saved = (self.source, self.version);
+        self.source = expansion.source;
+        self.version = expansion.version;
+        self.resolve_main_children(&expansion.root);
+        self.source = saved.0;
+        self.version = saved.1;
+        if let Some(expander) = self.include_expander.as_mut() {
+            expander.leave();
         }
     }
 
