@@ -10,9 +10,11 @@
 //!
 //! # Handle safety contract
 //!
-//! Every shim that takes a handle is an `unsafe extern "C" fn`, and its
-//! `# Safety` section defers to this one contract. For each handle parameter
-//! the caller — JIT'd or AOT'd code, or another shim — promises:
+//! A shim that takes a handle should be an `unsafe extern "C" fn` whose
+//! `# Safety` section defers to this one contract (values.rs is converted;
+//! calls.rs / collections.rs / objects.rs are not yet — see #114). For each
+//! handle parameter the caller — JIT'd or AOT'd code, or another shim —
+//! promises:
 //!
 //! 1. **Provenance.** The pointer was produced by [`handle`] (live until
 //!    [`free_run_boxes`] ends the run) or by [`box_value`] / `const_handle`
@@ -21,10 +23,12 @@
 //! 2. **Alignment and initialisation.** It points at a fully initialised
 //!    `Value` — guaranteed by (1), since both allocators bump-allocate a
 //!    `Value` and never hand back the storage.
-//! 3. **No concurrent write.** The runtime is single-threaded per run, and no
-//!    write through the handle (or through an aliasing handle) happens while a
-//!    borrow taken by [`val`] is alive. `a[a] = x` makes the aliasing case
-//!    reachable, which is why [`objects::set_member`] takes its index raw.
+//! 3. **No write while borrowed.** The runtime is single-threaded per run, and
+//!    no write through the handle (or through an aliasing handle) happens while
+//!    a borrow taken by [`val`] is alive. Two parameters CAN be the same handle
+//!    — `a[a] = x` passes one as both base and index — which is why
+//!    [`objects::set_member`] takes its index raw and keeps every borrow
+//!    derived from it inside a statement that writes nothing.
 //!
 //! Shims that take only scalars (`leek_box_int`, `leek_map_new`, …) promise
 //! nothing and stay safe.
