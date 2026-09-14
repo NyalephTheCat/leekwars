@@ -1,0 +1,24 @@
+# leek-fmt known failures over upstream AI file(s).
+# Every row is a formatter BUG to fix, not accepted behaviour: the entry
+# exists so a NEW break fails the build while the known ones are worked off.
+# Fixing one means DELETING its row, not editing it.
+# Which defect each row belongs to, and its issue: see data/README.md.
+# Regenerate with: LEEK_FMT_WRITE_KNOWN_FAILURES=1 cargo test -p leek-test-corpus --test fmt_roundtrip
+# Columns: id<TAB>kind<TAB>detail (\t \n \r \\ escaped).
+# total=101
+code/break_and_continue.leek	unsafe	formatting would change token #74: `KwIf` becomes `ifx`
+code/catch_else.leek	unsafe	formatting would change token #8: `<end of file>` becomes `:`
+code/french.leek	unsafe	formatting would drop 1 comment(s): `/*…`; formatting would introduce 1 comment(s): `/*…`
+code/french.min.leek	unsafe	formatting would change token #73: `x` becomes `]`
+code/primes_gmp.leek	unsafe	formatting would change token #15: `KwIf` becomes `ifi`
+code/product_n_arrays.leek	unsafe	formatting would change token #3: `KwIf` becomes `ifn`
+code/recursive_2_versions.leek	unsafe	formatting would change token #5: `KwIf` becomes `ifn`
+code/recursive_conditions.leek	unsafe	formatting would change token #6: `KwIf` becomes `ifx`
+code/recursive_conditions_2.leek	unsafe	formatting would change token #6: `KwIf` becomes `ifx`
+euler/pe010.leek	unsafe	formatting would change token #40: `KwIf` becomes `ifnumbers`
+euler/pe025.leek	unsafe	formatting would change token #20: `KwVar` becomes `>`
+euler/pe062.leek	unsafe	formatting would change token #45: `KwIf` becomes `ifns`
+euler/pe063.leek	unsafe	formatting would change token #32: `KwIf` becomes `ifpower`
+euler/pe064.leek	unsafe	formatting would change token #71: `..` becomes `]`
+euler/pe206.leek	unsafe	formatting would change token #59: `KwIf` becomes `ifs`
+french.leek	unsafe	formatting would change token #73: `x` becomes `]`

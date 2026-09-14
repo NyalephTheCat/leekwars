@@ -1,6 +1,12 @@
 //! Fixtures, extraction, and multi-backend runner for the upstream JUnit suite.
 
 pub mod extract;
+pub mod fmt_ratchet;
+
+pub use fmt_ratchet::{
+    FmtFailure, FmtRatchet, FmtRatchetDiff, KIND_NOT_IDEMPOTENT, KIND_UNSAFE, KIND_UNSAFE_REFORMAT,
+    diff_fmt_ratchet, first_difference,
+};
 
 pub use leek_test_driver::{
     CaseAudit, CasePlan, CheckKind, Expectation, Manifest, MultiReport, SuiteBackend, TestCase,
@@ -56,6 +62,12 @@ pub fn upstream_tests_dir() -> PathBuf {
 /// Per-backend baseline of *non-passing* outcomes (`run --save-baseline`).
 pub fn baseline_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("data/baseline.toml")
+}
+
+/// The formatter's known-bad list for one suite (`corpus` or `ai`). See
+/// [`fmt_ratchet`] and `tests/fmt_roundtrip.rs`.
+pub fn fmt_known_failures_path(suite: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("data/fmt-known-failures-{suite}.tsv"))
 }
 
 pub fn suite_backends() -> Vec<SuiteBackend> {
