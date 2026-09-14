@@ -326,6 +326,25 @@ impl super::Emitter<'_> {
     }
 }
 
+/// The l-values a `foreach` header stores into each iteration — the value
+/// binding, and the key binding when the header has one.
+///
+/// These are **not** reported by `leek_hir::walk_stmt_child_exprs`, which
+/// surfaces only the iterable. That is deliberate and stays that way: the
+/// shared walk feeds leek-lint's rules and the LeekScript backend's
+/// const-folder, none of which have ever seen an l-value come out of it, so
+/// teaching it to emit bind targets would change lint and const-fold behaviour
+/// well outside this backend. Every walk here that has to see a foreach write
+/// names the targets explicitly through this helper instead — as does
+/// `leek_hir::captures`, which answers the same question for the two
+/// consumers that decide whether a *parameter* binding gets its runtime `Box`.
+fn foreach_bind_targets(fe: &leek_hir::ForeachStmt) -> impl Iterator<Item = &Expr> {
+    fe.key
+        .iter()
+        .chain([&fe.value])
+        .map(|b: &leek_hir::ForeachBind| &b.target)
+}
+
 pub(crate) fn lambda_outer_captures(
     block: &leek_hir::Block,
     params: &std::collections::HashSet<leek_hir::DefId>,
@@ -495,6 +514,13 @@ pub(crate) fn lambda_outer_captures(
             }
             Stmt::Foreach(fe) => {
                 expr(&fe.iter, params, out, seen);
+                // The binding targets are l-values, not declarations: a bare
+                // `for (x in …)` over an outer local *writes* that local every
+                // iteration, so the lambda captures it. `walk_stmt_child_exprs`
+                // deliberately does not report them — see `foreach_bind_targets`.
+                for t in foreach_bind_targets(fe) {
+                    expr(t, params, out, seen);
+                }
                 stmt(&fe.body, params, out, seen);
             }
             Stmt::Switch(sw) => {
@@ -557,14 +583,22 @@ pub(crate) fn collect_inner_decls(
                 stmt(&f.body, inner);
             }
             Stmt::Foreach(fe) => {
-                // `for (k : v in iter)` — `k` and `v` are locals
+                // `for (var k : var v in iter)` — `k` and `v` are locals
                 // bound by the loop header, not separate VarDecl
                 // statements. Add them so they're not treated as
                 // outer captures.
+                //
+                // Only the bindings the header *declares* (`is_new`). A bare
+                // `for (x in …)` reuses a binding from an enclosing scope and
+                // writes it; that is a capture of this lambda, not a local it
+                // declares, and listing it here used to hide it from
+                // `lambda_outer_captures` — so the outlined body assigned to
+                // an outer local Java never boxed.
                 inner.extend(
                     fe.key
                         .iter()
                         .chain([&fe.value])
+                        .filter(|b| b.is_new)
                         .filter_map(leek_hir::ForeachBind::local_def),
                 );
                 stmt(&fe.body, inner);
@@ -697,6 +731,15 @@ pub(crate) fn lambda_writes_to_outer(
         found
     }
     fn stmt(s: &Stmt, captures: &std::collections::HashSet<leek_hir::DefId>) -> bool {
+        // A bare `for (x in …)` stores into `x` every iteration — a write to
+        // the capture, and the only one that is not an assignment expression.
+        // `walk_stmt_child_exprs` reports only the iterable (see
+        // `foreach_bind_targets`), so ask the targets here.
+        if let Stmt::Foreach(fe) = s
+            && foreach_bind_targets(fe).any(|t| is_captured_local(t, captures))
+        {
+            return true;
+        }
         let mut found = false;
         leek_hir::walk_stmt_child_exprs(s, &mut |e| found = found || expr(e, captures));
         if !found {

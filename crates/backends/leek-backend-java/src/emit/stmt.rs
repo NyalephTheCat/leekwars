@@ -715,35 +715,36 @@ impl Emitter<'_> {
     }
 
     /// `<lhs> = <value>` storing one foreach slot into a binding that isn't a
-    /// runtime `Box`: its Java local (`local`), or — for a bare binding over a
-    /// global or an own instance field — that storage, coerced to its
-    /// declared scalar type the way a plain `=` is.
+    /// runtime `Box` the loop itself declared.
+    ///
+    /// The binding target is an l-value resolved exactly like the left-hand
+    /// side of an assignment (see [`leek_hir::ForeachBind::target`]), so the
+    /// dispatch is [`Emitter::write_place_store`] — the one the assignment
+    /// path uses. This function used to reimplement a three-case subset of it,
+    /// which left a bare `for (x in …)` over a static field, an inherited
+    /// instance field or a reassigned builtin name storing into a Java local
+    /// that does not exist.
     fn foreach_store(&self, bind: &leek_hir::ForeachBind, local: &str, value: &str) -> String {
+        // Foreach-specific: the slot arrives as the iterator entry's
+        // `getKey()`/`getValue()`, so cast to `Object` once for every arm.
         let value = format!("(Object) {value}");
-        match &bind.target.kind {
-            ExprKind::Name(NameRef::Global(_)) => format!(
-                "{} = {}",
-                mangle::global(self.opts, &bind.name),
-                Self::coerce_decl(self.assign_target_scalar_ty(&bind.target), value)
-            ),
-            ExprKind::Field(base, field, _) if self.is_own_instance_field(base, field) => format!(
-                "{} = {}",
-                self.own_instance_field_ref(field),
-                Self::coerce_decl(self.own_field_ty(field).as_ref(), value)
-            ),
-            // A reused outer local (`for (x in …)` with `x` declared above)
-            // that a lambda captures-and-writes is a shared `Object[]`, so the
-            // per-iteration store goes through `[0]` like every other write to
-            // it (`write_name`). Without this the store would assign an
-            // `Object` to an `Object[]` slot — a javac type error.
-            _ if bind
+        // Foreach-specific: a reused outer local (`for (x in …)` with `x`
+        // declared above) that a lambda captures-and-writes is a shared
+        // `Object[]`, so the per-iteration store goes through `[0]` like every
+        // other write to it (`write_name`). Without this the store would
+        // assign an `Object` to an `Object[]` slot — a javac type error.
+        // A `Box`-bound binding takes precedence, the same way `write_name`
+        // and `emit_var_decl` check `ref_boxes` before `boxed_locals`.
+        if !self.is_ref_box(&bind.target)
+            && bind
                 .local_def()
-                .is_some_and(|d| self.boxed_locals.borrow().contains(&d)) =>
-            {
-                format!("{local}[0] = {value}")
-            }
-            _ => format!("{local} = {value}"),
+                .is_some_and(|d| self.boxed_locals.borrow().contains(&d))
+        {
+            return format!("{local}[0] = {value}");
         }
+        let mut buf = String::new();
+        self.write_place_store(&mut buf, &bind.target, &value);
+        buf
     }
 
     /// Monotonically increasing id for foreach-temp names so nested
