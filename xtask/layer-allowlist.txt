@@ -8,11 +8,6 @@
 # Do not add entries to get a new dependency past the gate; see "The layering
 # rule" in docs/architecture.md for the alternatives.
 
-# The runtime value model stores HIR definition ids (class refs, class
-# instances, user functions). Fix: move the id type into `core` or give the
-# runtime its own id type (ARCH-03).
-leek-runtime -> leek-hir: value::types uses leek_hir::DefId in Value
-
 # The recipe catalogue plans the formatter and lint pipeline steps. Fix: let
 # tools register their own steps on top of the db layer (ARCH-03).
 leek-recipes -> leek-fmt: recipes plan the Fmt step and FormattedArtifact

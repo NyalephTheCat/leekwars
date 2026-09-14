@@ -44,6 +44,7 @@ pub mod aot;
 pub mod aot_meta;
 pub mod debug;
 pub mod game;
+pub mod ids;
 mod options;
 mod runtime;
 mod translate;

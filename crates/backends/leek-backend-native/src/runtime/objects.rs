@@ -6,8 +6,7 @@ use super::{
     CLASS_PARENT, CLASS_REFLECT, DISPATCH, GLOBALS, LambdaFn, STATIC_FIELDS, STATIC_INIT, STRICT,
     aborting, builtin_name, builtin_name_ref, handle, raise_runtime_error, val,
 };
-use leek_hir::DefId;
-use leek_runtime::{Function, Instance, ObjectData, Value};
+use leek_runtime::{ClassId, Function, Instance, ObjectData, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -382,7 +381,7 @@ shim! {
     /// fields return `null` (matching the interpreter's `read_field`), so the
     /// emitted `new` only needs to set fields that have initializers. The
     /// field initializers and constructor run as separate emitted calls.
-    /// `class_def` is the class's `DefId.0`; `name_box` is a boxed-string
+    /// `class_def` is the class's [`ClassId`] raw value; `name_box` is a boxed-string
     /// handle carrying the class name (used by `Display`).
     pub extern "C" fn leek_instance_new(class_def: i64, name_box: *mut Value) -> *mut Value {
         let class_name = match unsafe { val(name_box) } {
@@ -390,7 +389,7 @@ shim! {
             _ => String::new(),
         };
         handle(Value::Instance(Rc::new(RefCell::new(Instance {
-            class: DefId(class_def as u32),
+            class: ClassId(class_def as u32),
             class_name,
             fields: ObjectData::new(),
         }))))
@@ -441,7 +440,7 @@ shim! {
         match unsafe { val(v) } {
             Value::ClassRef(def, _) => match CLASS_PARENT.with(|c| c.borrow().get(&def.0).cloned()) {
                 // Explicit user parent.
-                Some(Some((pdef, pname))) => handle(Value::ClassRef(DefId(pdef), Rc::new(pname))),
+                Some(Some((pdef, pname))) => handle(Value::ClassRef(ClassId(pdef), Rc::new(pname))),
                 // User class with no explicit parent → the implicit `Value` root.
                 Some(None) => handle(Value::BuiltinClass("Value")),
                 None => handle(Value::Null),

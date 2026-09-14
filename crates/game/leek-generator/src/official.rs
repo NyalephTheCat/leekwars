@@ -26,6 +26,7 @@ pub use leek_game_runtime::state::{
 };
 
 use crate::AiPrograms;
+use leek_backend_native::ids::fn_id;
 use leek_backend_native::{NativeError, NativeOptions, ops_used};
 use leek_game_runtime::actions::Action;
 use leek_game_runtime::official_builtins::call_official_builtin;
@@ -181,13 +182,14 @@ fn log_ai_error(state: &mut State, acting: usize, log_fid: usize, err: &NativeEr
 /// A `Function::User` value for the top-level zero-arg function named `name`
 /// in `hir`, or `None` when the AI defines no such function — the port of
 /// `EntityAI.hasHook(name)` / `findHookMethod`. The `DefId` is the function's
-/// index into `HirFile::defs`, which the native backend resolves through
-/// `user_fn_idx` once `hook_roots` has force-compiled it.
+/// index into `HirFile::defs`; [`leek_backend_native::ids::fn_id`] turns it
+/// into the runtime handle the native backend resolves through `user_fn_idx`
+/// once `hook_roots` has force-compiled it.
 fn find_hook(hir: &HirFile, name: &str) -> Option<Value> {
     hir.defs.iter().enumerate().find_map(|(i, def)| match def {
         Def::Function(f) if f.name == name && f.params.is_empty() => u32::try_from(i)
             .ok()
-            .map(|id| Value::Function(Function::User(DefId(id)))),
+            .map(|id| Value::Function(Function::User(fn_id(DefId(id))))),
         _ => None,
     })
 }

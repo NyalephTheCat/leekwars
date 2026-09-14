@@ -1427,7 +1427,6 @@ version = "0.0.1"
 dependencies = [
  "leek-builtins",
  "leek-environment",
- "leek-hir",
  "num-bigint",
  "num-traits",
 ]

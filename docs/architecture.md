@@ -60,8 +60,8 @@ two workspace members:
 
 Existing violations are listed, each with a justification, in
 [`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt). Today that
-includes every frontend and middle stage depending on `leek-pipeline`,
-`leek-runtime` → `leek-hir`, and `leek-recipes` → `leek-fmt`/`leek-lint`. The
+includes every frontend and middle stage depending on `leek-pipeline` and
+`leek-recipes` → `leek-fmt`/`leek-lint`. The
 list may only shrink: an entry whose edge no longer breaks the rule fails the
 check, so remove it in the same change that fixes the edge.
 
