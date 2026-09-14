@@ -1,0 +1,10 @@
+[package]
+name        = "leek-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Explicit compilation configuration: the library, fold-constant, seeding and dynamic-builtin settings that are process-globals today, as one value every layer can name."
+
+[lints]
+workspace = true
