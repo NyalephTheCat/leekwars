@@ -23,21 +23,23 @@
 use leek_diagnostics::{codes, diag};
 use leek_hir::Stmt;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct DeepNesting;
 
 /// A control-flow statement sitting at this depth (so its body runs
 /// one deeper) triggers the lint.
 const MAX_DEPTH: usize = 4;
 
-static META: LintMeta = LintMeta {
-    name: "deep-nesting",
-    code: codes::DEEP_NESTING,
-    group: LintGroup::Pedantic,
-    description: "control flow nested more than 4 levels deep — flatten with early returns or helpers",
-};
+declare_lint!(
+    DeepNesting,
+    "deep-nesting",
+    codes::DEEP_NESTING,
+    Pedantic,
+    "control flow nested more than 4 levels deep — flatten with early returns or helpers"
+);
 
 impl LintPass for DeepNesting {
     fn meta(&self) -> &'static LintMeta {

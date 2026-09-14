@@ -205,34 +205,35 @@ fn run_one(
         return Ok(TestOutcome::Fail("HIR lowering produced no output".into()));
     };
 
-    // Default op budget per test file when no `timeout` annotation is given.
-    let budget = annotations
-        .timeout
-        .unwrap_or(leek_backend_native::DEFAULT_OP_BUDGET);
+    // Op budget for this file: the per-file `// miku-test: timeout` annotation
+    // wins, then the manifest's `[test] timeout`, then the backend default.
+    let chosen_budget = annotations.timeout.or(project.manifest.test.timeout);
+    let budget = chosen_budget.unwrap_or(leek_backend_native::DEFAULT_OP_BUDGET);
     // Execute via the native JIT (the interpreter backend was removed), at the
     // input's settled version and strict mode. A runtime error surfaces as
     // `Err(NativeError::Runtime(..))`.
     let mut opts = leek_backend_native::NativeOptions::jit_for_input(result.input(), budget);
-    if let Some(depth) = project
-        .manifest
-        .backend
-        .native
-        .as_ref()
-        .and_then(|s| s.max_call_depth)
-    {
-        opts.max_call_depth = depth;
-    }
+    crate::util::apply_native_settings(&mut opts, &project.manifest);
     let run = match leek_backend_native::compile(hir.0.as_ref(), &opts) {
         Ok(NativeArtifact::Value(v)) => Ok(v.to_string()),
         Ok(_) => return Ok(TestOutcome::Fail("the JIT produced no result value".into())),
         Err(e) => Err(e),
     };
-    Ok(judge(&annotations, run))
+    Ok(judge(&annotations, chosen_budget.is_some(), run))
 }
 
 /// Compare a finished run (`Ok` = the displayed result value) with what the
 /// test expects. Compile-error expectations are settled before running.
-fn judge(annotations: &Annotations, run: Result<String, NativeError>) -> TestOutcome {
+///
+/// `budget_chosen` says whether the op budget came from the test file or the
+/// manifest rather than from the backend default — it is what separates
+/// "this `expect-fail` test deliberately runs out of ops" from "this test
+/// just happens to be enormous".
+fn judge(
+    annotations: &Annotations,
+    budget_chosen: bool,
+    run: Result<String, NativeError>,
+) -> TestOutcome {
     let fail = |reason: String| TestOutcome::Fail(reason);
     match (&annotations.expect, run) {
         (Expectation::Pass, Ok(output)) => match &annotations.output {
@@ -256,12 +257,13 @@ fn judge(annotations: &Annotations, run: Result<String, NativeError>) -> TestOut
         )),
         (Expectation::Fail, Ok(_)) => fail("expected failure but program ran clean".into()),
         (Expectation::Fail, Err(NativeError::Runtime(code))) => {
-            if code != BUDGET_EXHAUSTED || annotations.timeout.is_some() {
+            if code != BUDGET_EXHAUSTED || budget_chosen {
                 TestOutcome::Pass
             } else {
                 fail(format!(
                     "expected failure, but the run only exhausted the default op budget \
-                     ({code}); set `timeout` or use `expect-runtime-error: {code}`"
+                     ({code}); set `timeout` here or in `[test]`, or use \
+                     `expect-runtime-error: {code}`"
                 ))
             }
         }
@@ -544,31 +546,68 @@ mod tests {
     #[test]
     fn expect_fail_rejects_default_budget_exhaustion() {
         let loose = parse_annotations("// miku-test: expect-fail\n");
-        assert!(is_fail(&judge(&loose, runtime(BUDGET_EXHAUSTED))));
-        assert_eq!(judge(&loose, runtime("STACKOVERFLOW")), TestOutcome::Pass);
         assert!(is_fail(&judge(
             &loose,
+            loose.timeout.is_some(),
+            runtime(BUDGET_EXHAUSTED)
+        )));
+        assert_eq!(
+            judge(&loose, loose.timeout.is_some(), runtime("STACKOVERFLOW")),
+            TestOutcome::Pass
+        );
+        assert!(is_fail(&judge(
+            &loose,
+            loose.timeout.is_some(),
             Err(NativeError::Compile("boom".into()))
         )));
-        assert!(is_fail(&judge(&loose, Ok("null".into()))));
+        assert!(is_fail(&judge(
+            &loose,
+            loose.timeout.is_some(),
+            Ok("null".into())
+        )));
 
         let timed = parse_annotations("// miku-test: expect-fail\n// miku-test: timeout 10\n");
-        assert_eq!(judge(&timed, runtime(BUDGET_EXHAUSTED)), TestOutcome::Pass);
+        assert_eq!(
+            judge(&timed, timed.timeout.is_some(), runtime(BUDGET_EXHAUSTED)),
+            TestOutcome::Pass
+        );
+
+        // A budget the *manifest* chose counts the same as an annotation:
+        // the guard is about the backend default, not about where the
+        // deliberate budget was written.
+        assert_eq!(
+            judge(&loose, true, runtime(BUDGET_EXHAUSTED)),
+            TestOutcome::Pass
+        );
     }
 
     #[test]
     fn expect_runtime_error_matches_the_code() {
         let a = parse_annotations("// miku-test: expect-runtime-error: STACKOVERFLOW\n");
-        assert_eq!(judge(&a, runtime("STACKOVERFLOW")), TestOutcome::Pass);
-        assert!(is_fail(&judge(&a, runtime(BUDGET_EXHAUSTED))));
-        assert!(is_fail(&judge(&a, Ok("1".into()))));
+        assert_eq!(
+            judge(&a, a.timeout.is_some(), runtime("STACKOVERFLOW")),
+            TestOutcome::Pass
+        );
+        assert!(is_fail(&judge(
+            &a,
+            a.timeout.is_some(),
+            runtime(BUDGET_EXHAUSTED)
+        )));
+        assert!(is_fail(&judge(&a, a.timeout.is_some(), Ok("1".into()))));
     }
 
     #[test]
     fn expect_output_compares_the_result() {
         let a = parse_annotations("// miku-test: expect-output: 3\n");
-        assert_eq!(judge(&a, Ok("3".into())), TestOutcome::Pass);
-        assert!(is_fail(&judge(&a, Ok("4".into()))));
-        assert!(is_fail(&judge(&a, runtime("STACKOVERFLOW"))));
+        assert_eq!(
+            judge(&a, a.timeout.is_some(), Ok("3".into())),
+            TestOutcome::Pass
+        );
+        assert!(is_fail(&judge(&a, a.timeout.is_some(), Ok("4".into()))));
+        assert!(is_fail(&judge(
+            &a,
+            a.timeout.is_some(),
+            runtime("STACKOVERFLOW")
+        )));
     }
 }

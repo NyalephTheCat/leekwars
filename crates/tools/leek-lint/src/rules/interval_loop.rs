@@ -16,23 +16,23 @@
 //! have intervals.
 
 use leek_diagnostics::{codes, diag};
-use leek_hir::{BinaryOp, DefId, Expr, ExprKind, Literal, NameRef, PostfixOp, Stmt, UnaryOp};
+use leek_hir::{BinaryOp, DefId, Expr, ExprKind, Literal, PostfixOp, Stmt, UnaryOp};
 
 use super::{for_each_expr_deep, for_each_stmt};
-use crate::LintGroup;
+use super::util::{is_counter, step_is_increment};
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
-pub struct IntervalLoop {
-    /// Target language version; the lint is silent below 4.
-    pub version: u8,
-}
+#[derive(Default)]
+pub struct IntervalLoop;
 
-static META: LintMeta = LintMeta {
-    name: "interval-loop",
-    code: codes::INTERVAL_LOOP,
-    group: LintGroup::Nursery,
-    description: "C-style counting loop — LeekScript 4 intervals say the same with less ceremony",
-};
+declare_lint!(
+    IntervalLoop,
+    "interval-loop",
+    codes::INTERVAL_LOOP,
+    Nursery,
+    "C-style counting loop — LeekScript 4 intervals say the same with less ceremony"
+);
 
 impl LintPass for IntervalLoop {
     fn meta(&self) -> &'static LintMeta {
@@ -40,7 +40,7 @@ impl LintPass for IntervalLoop {
     }
 
     fn check_stmt(&mut self, cx: &mut LintCx<'_, '_>, s: &Stmt) {
-        if self.version < 4 {
+        if cx.version < 4 {
             return;
         }
         let Stmt::For(fr) = s else { return };
@@ -100,24 +100,6 @@ fn upper_bound(cond: Option<&Expr>, counter: DefId) -> Option<bool> {
     }
 }
 
-/// `i++`, `++i`, or `i += 1`.
-fn step_is_increment(step: Option<&Expr>, counter: DefId) -> bool {
-    let Some(step) = step else { return false };
-    match &step.kind {
-        ExprKind::Postfix(PostfixOp::PostInc, e) | ExprKind::Unary(UnaryOp::PreInc, e) => {
-            is_counter(e, counter)
-        }
-        ExprKind::Binary(BinaryOp::AddAssign, lhs, rhs) => {
-            is_counter(lhs, counter) && matches!(&rhs.kind, ExprKind::Literal(Literal::Int(1)))
-        }
-        _ => false,
-    }
-}
-
-fn is_counter(e: &Expr, counter: DefId) -> bool {
-    matches!(&e.kind, ExprKind::Name(NameRef::Local(d)) if *d == counter)
-}
-
 /// True when the body assigns / increments the counter.
 fn body_writes(body: &Stmt, counter: DefId) -> bool {
     let mut writes = false;
@@ -147,7 +129,7 @@ mod tests {
     use leek_syntax::Version;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        lint_one(IntervalLoop { version: 4 }, src)
+        lint_one(IntervalLoop, src)
     }
 
     #[test]
@@ -187,7 +169,7 @@ mod tests {
     #[test]
     fn silent_below_v4() {
         let d = lint_one_v(
-            IntervalLoop { version: 1 },
+            IntervalLoop,
             "function f(n) {\n  var t = 0\n  for (var i = 0; i < n; i++) {\n    t += i\n  }\n  return t\n}\n",
             Version::V1,
         );

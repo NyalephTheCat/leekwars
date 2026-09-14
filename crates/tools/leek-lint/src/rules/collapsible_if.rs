@@ -15,17 +15,19 @@
 use leek_diagnostics::{codes, diag};
 use leek_hir::{IfStmt, Stmt};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct CollapsibleIf;
 
-static META: LintMeta = LintMeta {
-    name: "collapsible-if",
-    code: codes::COLLAPSIBLE_IF,
-    group: LintGroup::Pedantic,
-    description: "`if` containing only another `if` — combine the conditions with `&&`",
-};
+declare_lint!(
+    CollapsibleIf,
+    "collapsible-if",
+    codes::COLLAPSIBLE_IF,
+    Pedantic,
+    "`if` containing only another `if` — combine the conditions with `&&`"
+);
 
 impl LintPass for CollapsibleIf {
     fn meta(&self) -> &'static LintMeta {

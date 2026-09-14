@@ -28,7 +28,7 @@ use leek_hir::{
 };
 use leek_span::Span;
 
-use crate::group::LintGroup;
+use crate::group::{LintGroup, LintOptions};
 
 /// Static description of a lint. One `static META: LintMeta` per
 /// rule module; [`LintPass::meta`] returns a reference to it.
@@ -79,6 +79,14 @@ pub struct LintCx<'a, 'o> {
     /// body adds one. `else if` stays at its chain's depth and bare
     /// `{}` blocks are transparent.
     pub depth: usize,
+    /// Leekscript version the source targets (1..=4). Version-gated lints
+    /// read it here rather than carrying a field of their own, which is what
+    /// lets every pass be built by [`crate::registry::LintRegistration`] with
+    /// no constructor arguments.
+    pub version: u8,
+    /// The options the run was started with — the enabled groups plus
+    /// [`version`](Self::version).
+    pub opts: &'a LintOptions,
     out: &'o mut Vec<Diagnostic>,
 }
 
@@ -129,12 +137,23 @@ pub trait LintPass {
 /// Run `passes` over `file` in a single traversal, appending findings
 /// to `out`. Callers sort the result; within the walk findings are in
 /// visitation order.
-pub fn run_passes(file: &HirFile, passes: &mut [Box<dyn LintPass>], out: &mut Vec<Diagnostic>) {
+///
+/// `opts` reaches the hooks as [`LintCx::opts`] / [`LintCx::version`]; it does
+/// *not* filter `passes` — the caller decides which passes to hand over (see
+/// [`crate::lint_with`]).
+pub fn run_passes(
+    file: &HirFile,
+    passes: &mut [Box<dyn LintPass>],
+    opts: &LintOptions,
+    out: &mut Vec<Diagnostic>,
+) {
     let mut driver = Driver {
         passes,
         cx: LintCx {
             file,
             depth: 0,
+            version: opts.version,
+            opts,
             out,
         },
     };

@@ -18,17 +18,19 @@ use leek_hir::Stmt;
 use leek_span::Span;
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct DuplicateCase;
 
-static META: LintMeta = LintMeta {
-    name: "duplicate-case",
-    code: codes::DUPLICATE_CASE,
-    group: LintGroup::Correctness,
-    description: "`case` label identical to an earlier one — never matches",
-};
+declare_lint!(
+    DuplicateCase,
+    "duplicate-case",
+    codes::DUPLICATE_CASE,
+    Correctness,
+    "`case` label identical to an earlier one — never matches"
+);
 
 impl LintPass for DuplicateCase {
     fn meta(&self) -> &'static LintMeta {

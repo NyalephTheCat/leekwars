@@ -15,17 +15,19 @@ use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Expr, ExprKind};
 
 use super::structural::{expr_key, has_side_effect};
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct ManualMinMax;
 
-static META: LintMeta = LintMeta {
-    name: "manual-min-max",
-    code: codes::MANUAL_MIN_MAX,
-    group: LintGroup::Pedantic,
-    description: "ternary re-implementing `min`/`max` — use the builtin",
-};
+declare_lint!(
+    ManualMinMax,
+    "manual-min-max",
+    codes::MANUAL_MIN_MAX,
+    Pedantic,
+    "ternary re-implementing `min`/`max` — use the builtin"
+);
 
 impl LintPass for ManualMinMax {
     fn meta(&self) -> &'static LintMeta {

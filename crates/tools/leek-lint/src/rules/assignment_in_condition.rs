@@ -7,17 +7,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Expr, ExprKind, Stmt};
 
 use super::structural::is_assignment;
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct AssignmentInCondition;
 
-static META: LintMeta = LintMeta {
-    name: "assignment-in-condition",
-    code: codes::ASSIGNMENT_IN_CONDITION,
-    group: LintGroup::Suspicious,
-    description: "assignment used as a condition — likely a typo for `==`",
-};
+declare_lint!(
+    AssignmentInCondition,
+    "assignment-in-condition",
+    codes::ASSIGNMENT_IN_CONDITION,
+    Suspicious,
+    "assignment used as a condition — likely a typo for `==`"
+);
 
 impl LintPass for AssignmentInCondition {
     fn meta(&self) -> &'static LintMeta {

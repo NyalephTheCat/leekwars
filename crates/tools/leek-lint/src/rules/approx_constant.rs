@@ -14,9 +14,10 @@
 use leek_diagnostics::{codes, diag};
 use leek_hir::{Expr, ExprKind, Literal};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct ApproxConstant;
 
 /// `(digits, builtin name)` for each known constant. Digits as text so
@@ -27,12 +28,13 @@ const KNOWN: &[(&str, &str)] = &[("3.141592653589793", "PI"), ("2.71828182845904
 /// (counting the `x.` prefix: `3.14` is four chars).
 const MIN_DIGITS: usize = 4;
 
-static META: LintMeta = LintMeta {
-    name: "approx-constant",
-    code: codes::APPROX_CONSTANT,
-    group: LintGroup::Pedantic,
-    description: "real literal approximating a known constant — use the builtin (`PI`, `E`)",
-};
+declare_lint!(
+    ApproxConstant,
+    "approx-constant",
+    codes::APPROX_CONSTANT,
+    Pedantic,
+    "real literal approximating a known constant — use the builtin (`PI`, `E`)"
+);
 
 impl LintPass for ApproxConstant {
     fn meta(&self) -> &'static LintMeta {

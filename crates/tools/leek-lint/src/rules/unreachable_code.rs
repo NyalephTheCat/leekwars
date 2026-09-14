@@ -23,17 +23,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 use leek_span::Span;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct UnreachableCode;
 
-static META: LintMeta = LintMeta {
-    name: "unreachable-code",
-    code: codes::UNREACHABLE_CODE,
-    group: LintGroup::Correctness,
-    description: "statement after a `return`/`break`/`continue` — never runs",
-};
+declare_lint!(
+    UnreachableCode,
+    "unreachable-code",
+    codes::UNREACHABLE_CODE,
+    Correctness,
+    "statement after a `return`/`break`/`continue` — never runs"
+);
 
 impl LintPass for UnreachableCode {
     fn meta(&self) -> &'static LintMeta {

@@ -1,51 +1,76 @@
 //! Individual lint implementations.
 //!
 //! Each lint lives in its own module as a unit struct implementing
-//! [`crate::LintPass`], plus a `static META` describing it. The
-//! driver in [`crate::pass`] walks the HIR once and fires every
-//! pass's hooks, so modules here contain *only* the lint logic — no
-//! traversal boilerplate.
+//! [`crate::LintPass`], plus a `declare_lint!` call describing it. The driver
+//! in [`crate::pass`] walks the HIR once and fires every pass's hooks, so
+//! modules here contain *only* the lint logic — no traversal boilerplate.
+//!
+//! The `lint_rules!` list below is the **single source of truth** for which
+//! lints exist: it generates both the `pub mod` declarations and [`REGISTRY`],
+//! which [`crate::all_passes`] and [`crate::allow`]'s name lookup are derived
+//! from. Adding a lint is one line here plus the `declare_lint!` in the
+//! module; `tests/registry.rs` fails if the catalog and this list disagree.
 
-pub mod approx_constant;
-pub mod array_literal_membership;
-pub mod assignment_in_condition;
-pub mod chained_comparison;
-pub mod collapsible_if;
-pub mod constant_condition;
-pub mod count_in_loop_condition;
-pub mod deep_nesting;
-pub mod deprecated_feature;
-pub mod division_by_zero;
-pub mod double_negation;
-pub mod duplicate_branches;
-pub mod duplicate_case;
-pub mod duplicate_condition;
-pub mod duplicate_include;
-pub mod empty_block;
-pub mod identical_operands;
-pub mod interval_loop;
-pub mod long_function;
-pub mod manual_min_max;
-pub mod manual_range_check;
-pub mod map_as_set;
-pub mod needless_index_loop;
-pub mod negated_comparison;
-pub mod redundant_boolean;
-pub mod redundant_ternary;
-pub mod self_assignment;
-pub mod self_comparison;
-pub mod shadowed_binding;
-pub mod shadowed_builtin;
-pub mod string_concat_in_loop;
+/// Declare the rule modules once and derive [`REGISTRY`] from the same list.
+macro_rules! lint_rules {
+    ($($m:ident),+ $(,)?) => {
+        $(pub mod $m;)+
+
+        /// Every lint this crate knows about, in module order. Output order
+        /// does not depend on it — [`crate::lint_with`] sorts by code and
+        /// span — so keep the list alphabetical.
+        pub(crate) const REGISTRY: &[crate::registry::LintRegistration] =
+            &[$($m::REGISTRATION),+];
+    };
+}
+
+lint_rules! {
+    approx_constant,
+    array_literal_membership,
+    assignment_in_condition,
+    chained_comparison,
+    collapsible_if,
+    constant_condition,
+    count_in_loop_condition,
+    deep_nesting,
+    deprecated_feature,
+    division_by_zero,
+    double_negation,
+    duplicate_branches,
+    duplicate_case,
+    duplicate_condition,
+    duplicate_include,
+    empty_block,
+    identical_operands,
+    interval_loop,
+    long_function,
+    manual_min_max,
+    manual_range_check,
+    map_as_set,
+    needless_index_loop,
+    negated_comparison,
+    redundant_boolean,
+    redundant_ternary,
+    self_assignment,
+    self_comparison,
+    shadowed_binding,
+    shadowed_builtin,
+    string_concat_in_loop,
+    switch_missing_default,
+    too_many_arguments,
+    unnecessary_else,
+    unreachable_code,
+    unused_expression,
+    unused_parameter,
+    unused_variable,
+    useless_foreach_write,
+}
+
+/// Shared structural comparison helpers — not a lint, so outside
+/// `lint_rules!`.
 pub(crate) mod structural;
-pub mod switch_missing_default;
-pub mod too_many_arguments;
-pub mod unnecessary_else;
-pub mod unreachable_code;
-pub mod unused_expression;
-pub mod unused_parameter;
-pub mod unused_variable;
-pub mod useless_foreach_write;
+/// Shared one-shape predicates — not a lint; see [`structural`].
+pub(crate) mod util;
 
 // ---- Recursive walk helpers ----
 //

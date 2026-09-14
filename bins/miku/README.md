@@ -148,6 +148,96 @@ A complete, runnable example — AIs, reusable leek builds, composable
 scenarios, and debugger launch configs — lives in
 [`examples/fight/`](../../examples/fight/).
 
+## The `Miku.toml` schema
+
+Every key below either changes what `miku` does or says out loud that it does
+not. An unknown top-level table is an error (`E0401`); an unknown key inside a
+known table is a warning (`W0400`); a key that is *in* the schema but that
+nothing in this toolchain reads is a warning naming the reason (`W0402`).
+Silence is not an option any of them has — a key you can set that quietly does
+nothing is worse than a message.
+
+Manifest warnings are ordinary diagnostics, so `[lint]` governs them:
+`allow = ["W0402"]` silences the ignored-key notices, `deny = ["W0402"]` turns
+them into errors.
+
+```toml
+[project]                       # required
+name        = "my-leek"         # required
+version     = "0.1.0"           # required
+language    = 4                 # default `@version` for sources (1..=4)
+strict      = false             # default `@strict`
+entry       = "src/main.leek"   # entry point
+description = "…"               # rendered by `miku doc`
+authors     = ["…"]             # rendered by `miku doc`
+license     = "MIT"             # rendered by `miku doc`
+repository  = "https://…"       # rendered by `miku doc`
+
+[paths]
+src     = "src"                 # sources
+tests   = "tests"               # tests
+build   = "build"               # the single output root `miku clean` removes
+benches = "benches"             # W0402: benches are not run (see [bench])
+
+[backend.<kind>]                # kind: java | jar | native | wasm | leekscript
+enable  = true
+default = true                  # at most one backend, and it must be enabled
+out_dir = "build/java"          # artifact directory
+
+[backend.java]
+mode       = "exact"            # "exact" | "clean"
+emit_lines = false              # write a `.lines` sidecar
+
+[backend.native]
+out            = "bin/app"      # the standalone executable `miku build` writes
+                                # (`out_dir` and `--out-dir` take precedence)
+                                # (`out_dir` and `--out-dir` take precedence)
+opt_level      = "speed"        # "none" | "speed" | "speed-and-size"
+max_call_depth = 5000           # nested user calls before STACKOVERFLOW
+target         = "…"            # W0402: the native backend targets the host
+
+[backend.jar]
+main_class = "Main"             # W0402: the jar backend is not implemented
+
+[lint]
+deny     = ["L0001"]            # severity overrides, by code or rule name
+warn     = []
+allow    = ["W0402"]
+pedantic = false                # run the pedantic group
+nursery  = false                # run the nursery group
+
+[test]
+timeout   = 250000              # per-test budget in *operations*
+parallel  = false               # W0402: the runner is sequential
+junit_xml = "build/tests.xml"   # where --message-format junit writes
+
+[format]                        # see `miku fmt --help`
+[fight]                         # see "The `[fight]` manifest table" above
+```
+
+Keys outside a backend's own list warn: `mode` and `emit_lines` are java-only,
+`out`, `opt_level`, `max_call_depth` and `target` are native-only (`out` and
+`main_class` are also legal on `jar`), so `[backend.native] mode = "clean"` is
+a `W0400` rather than a setting that quietly does nothing.
+
+`[lsp]`, `[bench]`, `[experimental]`, `[profiles]`, `[profile]`, `[workspace]`
+and `[toolchain]` parse and warn as deferred tables (`W0401`).
+
+### Keys that were removed
+
+`project.edition` and `backend.<kind>.java_version` parsed into fields nothing
+ever read, and neither has a concept behind it (`project.language` plus the
+`@version` pragma is the whole versioning axis; `leek_backend_java::Options`
+has no java-version knob). They are out of the schema and now report as
+unknown keys.
+
+Two keys changed type, both from a value nothing read to one that is enforced:
+`test.timeout` is an integer op budget rather than a duration string (the
+runner budgets operations; there is no wall clock), and
+`backend.native.opt_level` is one of `leekc --opt-level`'s names rather than an
+integer. A manifest still spelling them the old way now gets an error instead
+of silence.
+
 ## Shell completions
 
 ```sh

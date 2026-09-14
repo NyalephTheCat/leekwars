@@ -104,7 +104,7 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     }
 
     // Write the index.
-    let index_html = render_index(&pages, &project.manifest.project.name);
+    let index_html = render_index(&pages, &project.manifest.project);
     let index_path = out_root.join("index.html");
     std::fs::write(&index_path, index_html)
         .with_context(|| format!("writing {}", index_path.display()))?;
@@ -253,9 +253,17 @@ h1, h2 { border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
 .file-list a { color: #4a6db5; text-decoration: none; }
 .file-list a:hover { text-decoration: underline; }
 .file-list .count { color: #888; margin-left: 0.5em; font-size: 0.85em; }
+.tagline { color: #444; font-size: 1.05em; margin: 0.2em 0 1em 0; }
+.meta { color: #888; font-size: 0.85em; border-top: 1px solid #ddd; margin-top: 2.5em; padding-top: 0.8em; }
+.meta a { color: #4a6db5; }
 "#;
 
-fn render_index(pages: &[Page], project_name: &str) -> String {
+/// The index page. Takes the whole `[project]` table rather than just its
+/// name: `description`, `authors`, `license` and `repository` are parsed and
+/// this is where they land, which is what makes them something other than
+/// decoration in `Miku.toml`.
+fn render_index(pages: &[Page], project: &leek_manifest::ProjectTable) -> String {
+    let project_name = project.name.as_str();
     let mut out = String::new();
     out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     let _ = write!(
@@ -267,6 +275,9 @@ fn render_index(pages: &[Page], project_name: &str) -> String {
     out.push_str(CSS);
     out.push_str("</style></head><body>");
     let _ = write!(out, "<h1>{}</h1>", html_escape(project_name));
+    if let Some(description) = &project.description {
+        let _ = write!(out, "<p class=\"tagline\">{}</p>", html_escape(description));
+    }
     out.push_str("<p class=\"crumbs\">miku doc – API reference</p>");
 
     out.push_str("<h2>Files</h2>");
@@ -283,6 +294,23 @@ fn render_index(pages: &[Page], project_name: &str) -> String {
         );
     }
     out.push_str("</ul>");
+
+    // Version, authors, license, repository — a footer rather than a header,
+    // since the file list is what a reader came for.
+    let mut meta: Vec<String> = vec![format!("v{}", html_escape(&project.version))];
+    if !project.authors.is_empty() {
+        let names: Vec<String> = project.authors.iter().map(|a| html_escape(a)).collect();
+        meta.push(names.join(", "));
+    }
+    if let Some(license) = &project.license {
+        meta.push(html_escape(license));
+    }
+    if let Some(repository) = &project.repository {
+        let href = html_escape(repository);
+        meta.push(format!("<a href=\"{href}\">{href}</a>"));
+    }
+    let _ = write!(out, "<p class=\"meta\">{}</p>", meta.join(" · "));
+
     out.push_str("</body></html>");
     out
 }

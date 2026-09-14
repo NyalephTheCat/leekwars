@@ -21,17 +21,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::{Expr, ExprKind, Stmt};
 
 use super::structural::has_side_effect;
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct UnusedExpression;
 
-static META: LintMeta = LintMeta {
-    name: "unused-expression",
-    code: codes::UNUSED_EXPRESSION,
-    group: LintGroup::Suspicious,
-    description: "expression statement whose value is discarded without side effects",
-};
+declare_lint!(
+    UnusedExpression,
+    "unused-expression",
+    codes::UNUSED_EXPRESSION,
+    Suspicious,
+    "expression statement whose value is discarded without side effects"
+);
 
 impl LintPass for UnusedExpression {
     fn meta(&self) -> &'static LintMeta {

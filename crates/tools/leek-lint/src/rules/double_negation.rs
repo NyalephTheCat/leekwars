@@ -6,17 +6,19 @@ use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes, d
 use leek_hir::{Expr, ExprKind, UnaryOp};
 use leek_span::Span;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct DoubleNegation;
 
-static META: LintMeta = LintMeta {
-    name: "double-negation",
-    code: codes::DOUBLE_NEGATION,
-    group: LintGroup::Complexity,
-    description: "`!!x` is just `x` — the double negation is redundant",
-};
+declare_lint!(
+    DoubleNegation,
+    "double-negation",
+    codes::DOUBLE_NEGATION,
+    Complexity,
+    "`!!x` is just `x` — the double negation is redundant"
+);
 
 impl LintPass for DoubleNegation {
     fn meta(&self) -> &'static LintMeta {

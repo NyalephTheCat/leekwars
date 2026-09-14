@@ -13,8 +13,8 @@ use crate::error::{
 };
 use crate::format::FormatOptions;
 use crate::types::{
-    BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest, PathsTable,
-    ProjectTable, TestTable,
+    BackendSettings, BackendTable, FightTable, JavaMode, LintTable, Manifest, NativeOptLevel,
+    PathsTable, ProjectTable, TestTable,
 };
 use leek_span::Span;
 use std::path::PathBuf;
@@ -136,10 +136,13 @@ fn parse_project(
     tbl: &dyn TableLike,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<ProjectTable, ManifestError> {
+    // `edition` used to be here. It was parsed and never read, and there is
+    // no edition concept in the language — `project.language` plus the
+    // `@version` pragma is the whole versioning axis — so it is gone from the
+    // schema and reports as an unknown key.
     const KNOWN: &[&str] = &[
         "name",
         "version",
-        "edition",
         "language",
         "strict",
         "entry",
@@ -154,9 +157,6 @@ fn parse_project(
     let version = expect_string(tbl, "project", "version")?;
     let mut out = ProjectTable::defaults_with(name, version);
 
-    if let Some(v) = tbl.get("edition") {
-        out.edition = Some(string_val(v, "project.edition")?);
-    }
     if let Some(v) = tbl.get("language") {
         let n = int_val(v, "project.language")?;
         if !(1..=4).contains(&n) {
@@ -207,6 +207,13 @@ fn parse_paths(
     }
     if let Some(v) = tbl.get("benches") {
         out.benches = PathBuf::from(string_val(v, "paths.benches")?);
+        warn_ignored(
+            tbl,
+            "benches",
+            "paths.benches",
+            "benches are not run by this toolchain; see the deferred `[bench]` table",
+            warnings,
+        );
     }
     if let Some(v) = tbl.get("build") {
         out.build = build_dir_val(&string_val(v, "paths.build")?, item_span(v))?;
@@ -245,12 +252,43 @@ fn parse_backend(
     const KNOWN: &[&str] = &["java", "jar", "native", "wasm", "leekscript"];
     warn_unknown(tbl, "backend", KNOWN, warnings);
     let mut out = BackendTable::default();
+    // The first backend already claiming `default = true`, so the *second*
+    // one is what the error points at.
+    let mut claimed_default: Option<&str> = None;
     for (kind, val) in tbl.iter() {
         if !KNOWN.contains(&kind) {
             continue;
         }
         let sub = table_val(val, &format!("backend.{kind}"))?;
         let settings = parse_backend_settings(sub, kind, warnings)?;
+        // `default_kind` used to resolve a conflict by silently taking the
+        // first in a fixed order, which builds the wrong artifact without
+        // saying so. Both shapes are now hard errors.
+        if settings.is_default {
+            if let Some(first) = claimed_default {
+                return Err(ManifestError::at(
+                    key_span(sub, "default"),
+                    ManifestErrorKind::BadValue {
+                        key: format!("backend.{kind}.default"),
+                        expected: format!(
+                            "the only backend marked `default` (`backend.{first}` is too)"
+                        ),
+                        got: None,
+                    },
+                ));
+            }
+            if !settings.enable {
+                return Err(ManifestError::at(
+                    key_span(sub, "enable"),
+                    ManifestErrorKind::BadValue {
+                        key: format!("backend.{kind}.enable"),
+                        expected: "`true` on the backend marked `default`".to_string(),
+                        got: Some("false".to_string()),
+                    },
+                ));
+            }
+            claimed_default = Some(kind);
+        }
         match kind {
             "java" => out.java = Some(settings),
             "jar" => out.jar = Some(settings),
@@ -263,26 +301,37 @@ fn parse_backend(
     Ok(out)
 }
 
+/// Which keys `[backend.<kind>]` accepts. One list per backend rather than
+/// one shared list, so `[backend.native] mode = "clean"` and
+/// `[backend.java] max_call_depth = 3` — both previously silent — warn.
+fn backend_known_keys(kind: &str) -> &'static [&'static str] {
+    const COMMON: &[&str] = &["enable", "default", "out_dir"];
+    const JAVA: &[&str] = &["enable", "default", "out_dir", "mode", "emit_lines"];
+    const NATIVE: &[&str] = &[
+        "enable",
+        "default",
+        "out_dir",
+        "out",
+        "max_call_depth",
+        "opt_level",
+        "target",
+    ];
+    const JAR: &[&str] = &["enable", "default", "out_dir", "out", "main_class"];
+    match kind {
+        "java" => JAVA,
+        "native" => NATIVE,
+        "jar" => JAR,
+        _ => COMMON,
+    }
+}
+
 fn parse_backend_settings(
     tbl: &dyn TableLike,
     kind: &str,
     warnings: &mut Vec<ManifestWarning>,
 ) -> Result<BackendSettings, ManifestError> {
-    const KNOWN: &[&str] = &[
-        "enable",
-        "default",
-        "mode",
-        "java_version",
-        "emit_lines",
-        "out_dir",
-        "out",
-        "main_class",
-        "target",
-        "opt_level",
-        "max_call_depth",
-    ];
     let scope = format!("backend.{kind}");
-    warn_unknown(tbl, &scope, KNOWN, warnings);
+    warn_unknown(tbl, &scope, backend_known_keys(kind), warnings);
     let mut out = BackendSettings::default();
     if let Some(v) = tbl.get("enable") {
         out.enable = bool_val(v, &format!("{scope}.enable"))?;
@@ -307,16 +356,9 @@ fn parse_backend_settings(
             }
         });
     }
-    if let Some(v) = tbl.get("java_version") {
-        let n = int_val(v, &format!("{scope}.java_version"))?;
-        out.java_version = Some(u32::try_from(n).map_err(|_| {
-            bad_value(
-                v,
-                format!("{scope}.java_version"),
-                "non-negative".to_string(),
-            )
-        })?);
-    }
+    // `java_version` used to be here. It was parsed and never read, and
+    // `leek_backend_java::Options` has no such knob, so it is out of the
+    // schema and reports as an unknown key.
     if let Some(v) = tbl.get("emit_lines") {
         out.emit_lines = bool_val(v, &format!("{scope}.emit_lines"))?;
     }
@@ -328,16 +370,41 @@ fn parse_backend_settings(
     }
     if let Some(v) = tbl.get("main_class") {
         out.main_class = Some(string_val(v, &format!("{scope}.main_class"))?);
+        warn_ignored(
+            tbl,
+            "main_class",
+            &format!("{scope}.main_class"),
+            "the jar backend is not implemented",
+            warnings,
+        );
     }
     if let Some(v) = tbl.get("target") {
         out.target = Some(string_val(v, &format!("{scope}.target"))?);
+        warn_ignored(
+            tbl,
+            "target",
+            &format!("{scope}.target"),
+            "cross-compilation is not supported; the native backend targets the host",
+            warnings,
+        );
     }
     if let Some(v) = tbl.get("opt_level") {
-        let n = int_val(v, &format!("{scope}.opt_level"))?;
-        out.opt_level = Some(
-            u8::try_from(n)
-                .map_err(|_| bad_value(v, format!("{scope}.opt_level"), "0..=255".to_string()))?,
-        );
+        let key = format!("{scope}.opt_level");
+        let raw = string_val(v, &key)?;
+        out.opt_level = Some(NativeOptLevel::parse(&raw).ok_or_else(|| {
+            ManifestError::at(
+                item_span(v),
+                ManifestErrorKind::BadValue {
+                    key,
+                    expected: NativeOptLevel::NAMES
+                        .iter()
+                        .map(|n| format!("{n:?}"))
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                    got: Some(format!("{raw:?}")),
+                },
+            )
+        })?);
     }
     if let Some(v) = tbl.get("max_call_depth") {
         let n = int_val(v, &format!("{scope}.max_call_depth"))?;
@@ -388,10 +455,36 @@ fn parse_test(
     warn_unknown(tbl, "test", KNOWN, warnings);
     let mut out = TestTable::default();
     if let Some(v) = tbl.get("timeout") {
-        out.timeout = Some(string_val(v, "test.timeout")?);
+        // An op budget, not a duration: the runner budgets operations (the
+        // JIT counts them), so `timeout = "5s"` cannot be honored and says so
+        // rather than parsing into a field nobody reads.
+        let n = int_val(v, "test.timeout").map_err(|e| match e.kind {
+            ManifestErrorKind::WrongType { .. } => ManifestError::at(
+                item_span(v),
+                ManifestErrorKind::BadValue {
+                    key: "test.timeout".to_string(),
+                    expected: "an operation budget as an integer (the runner budgets ops, \
+                               not wall time)"
+                        .to_string(),
+                    got: None,
+                },
+            ),
+            _ => e,
+        })?;
+        out.timeout =
+            Some(u64::try_from(n).map_err(|_| {
+                bad_value(v, "test.timeout".to_string(), format!("0..={}", u64::MAX))
+            })?);
     }
     if let Some(v) = tbl.get("parallel") {
         out.parallel = bool_val(v, "test.parallel")?;
+        warn_ignored(
+            tbl,
+            "parallel",
+            "test.parallel",
+            "the test runner is sequential (leekwars#133)",
+            warnings,
+        );
     }
     if let Some(v) = tbl.get("junit_xml") {
         out.junit_xml = Some(PathBuf::from(string_val(v, "test.junit_xml")?));
@@ -478,6 +571,25 @@ fn warn_unknown(
             ));
         }
     }
+}
+
+/// Report a key that is *in* the schema but that nothing reads, naming why.
+/// Only called when the key is actually present — a defaulted field is not
+/// something the user asked for.
+fn warn_ignored(
+    tbl: &dyn TableLike,
+    key: &str,
+    dotted: &str,
+    reason: &'static str,
+    warnings: &mut Vec<ManifestWarning>,
+) {
+    warnings.push(ManifestWarning::at(
+        key_span(tbl, key),
+        ManifestWarningKind::IgnoredKey {
+            key: dotted.to_string(),
+            reason,
+        },
+    ));
 }
 
 fn expect_string(tbl: &dyn TableLike, scope: &str, key: &str) -> Result<String, ManifestError> {
@@ -714,20 +826,24 @@ mod tests {
             enable = true
             default = true
             mode = "clean"
-            java_version = 17
             emit_lines = true
             out_dir = "build/java"
 
             [backend.native]
             enable = true
+            opt_level = "speed-and-size"
+            max_call_depth = 64
         "#;
-        let (m, _) = parse_ok(src);
+        let (m, w) = parse_ok(src);
         let j = m.backend.java.as_ref().unwrap();
         assert!(j.enable);
         assert!(j.is_default);
         assert_eq!(j.java_mode, Some(JavaMode::Clean));
-        assert_eq!(j.java_version, Some(17));
         assert_eq!(j.out_dir, Some(PathBuf::from("build/java")));
+        let n = m.backend.native.as_ref().unwrap();
+        assert_eq!(n.opt_level, Some(NativeOptLevel::SpeedAndSize));
+        assert_eq!(n.max_call_depth, Some(64));
+        assert!(w.is_empty(), "warnings: {w:?}");
         assert!(m.backend.native.as_ref().unwrap().enable);
         assert_eq!(
             m.backend.default_kind(),
@@ -741,14 +857,14 @@ mod tests {
         // `toml::Value::as_table` did, and a manifest is allowed to use it.
         let src = r#"
             project = { name = "demo", version = "0.1.0" }
-            backend = { java = { enable = true, java_version = 21 } }
+            backend = { java = { enable = true, emit_lines = true } }
         "#;
         let (m, warnings) = parse_ok(src);
         assert!(warnings.is_empty(), "warnings: {warnings:?}");
         assert_eq!(m.project.name, "demo");
         let j = m.backend.java.as_ref().unwrap();
         assert!(j.enable);
-        assert_eq!(j.java_version, Some(21));
+        assert!(j.emit_lines);
     }
 
     #[test]
@@ -960,5 +1076,287 @@ mod tests {
         let (m, _) = parse_ok(src);
         assert_eq!(m.format.indent, 2);
         assert_eq!(m.format.max_line_length, 80);
+    }
+
+    // ---- "declared in one place, used in another" (DRIVER-06) ----
+    //
+    // Every key below either does something or says that it does not. The
+    // tests come in pairs: the key parses, *and* the right number of
+    // warnings comes out — a silently-accepted key fails the second half.
+
+    /// Every `IgnoredKey` warning in `w`, as `(key, reason)`.
+    fn ignored(w: &[ManifestWarning]) -> Vec<(&str, &str)> {
+        w.iter()
+            .filter_map(|x| match &x.kind {
+                ManifestWarningKind::IgnoredKey { key, reason } => Some((key.as_str(), *reason)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_backend_key_on_the_wrong_backend_warns() {
+        // `mode` is java-only; before per-backend key lists this parsed in
+        // silence and the native build ignored it.
+        let (_, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.native]
+            enable = true
+            mode = "clean"
+            "#,
+        );
+        assert!(
+            w.iter().any(|x| matches!(
+                &x.kind,
+                ManifestWarningKind::UnknownField { table, key }
+                    if table == "backend.native" && key == "mode"
+            )),
+            "warnings: {w:?}"
+        );
+    }
+
+    #[test]
+    fn max_call_depth_is_native_only() {
+        let (_, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.java]
+            enable = true
+            max_call_depth = 3
+            "#,
+        );
+        assert!(
+            w.iter().any(|x| matches!(
+                &x.kind,
+                ManifestWarningKind::UnknownField { table, key }
+                    if table == "backend.java" && key == "max_call_depth"
+            )),
+            "warnings: {w:?}"
+        );
+    }
+
+    #[test]
+    fn two_default_backends_are_an_error() {
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.java]
+            enable = true
+            default = true
+            [backend.native]
+            enable = true
+            default = true
+            "#,
+        )
+        .expect_err("two defaults must not parse");
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::BadValue { key, .. }
+                if key == "backend.native.default"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_default_backend_is_an_error() {
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.native]
+            enable = false
+            default = true
+            "#,
+        )
+        .expect_err("`default` on a disabled backend must not parse");
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::BadValue { key, .. }
+                if key == "backend.native.enable"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn opt_level_takes_the_same_names_as_leekc() {
+        let (m, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.native]
+            enable = true
+            opt_level = "none"
+            "#,
+        );
+        assert_eq!(
+            m.backend.native.unwrap().opt_level,
+            Some(NativeOptLevel::None)
+        );
+        assert!(w.is_empty(), "warnings: {w:?}");
+    }
+
+    #[test]
+    fn a_numeric_opt_level_is_rejected() {
+        // It used to parse as `u8` and then be ignored, so `opt_level = 2`
+        // looked like it did something.
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.native]
+            opt_level = 2
+            "#,
+        )
+        .expect_err("an integer opt_level must not parse");
+        assert!(
+            matches!(&err.kind, ManifestErrorKind::WrongType { key, .. }
+                if key == "backend.native.opt_level"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_opt_level_names_the_alternatives() {
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [backend.native]
+            opt_level = "fast"
+            "#,
+        )
+        .expect_err("`fast` is not a level");
+        let ManifestErrorKind::BadValue { expected, .. } = &err.kind else {
+            panic!("{err:?}");
+        };
+        assert!(expected.contains("speed-and-size"), "{expected}");
+    }
+
+    #[test]
+    fn test_timeout_is_an_op_budget() {
+        let (m, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [test]
+            timeout = 250000
+            "#,
+        );
+        assert_eq!(m.test.timeout, Some(250_000));
+        assert!(w.is_empty(), "warnings: {w:?}");
+    }
+
+    #[test]
+    fn a_duration_string_timeout_is_rejected() {
+        let err = parse(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [test]
+            timeout = "5s"
+            "#,
+        )
+        .expect_err("a duration string must not parse");
+        let ManifestErrorKind::BadValue { key, expected, .. } = &err.kind else {
+            panic!("{err:?}");
+        };
+        assert_eq!(key, "test.timeout");
+        assert!(expected.contains("ops"), "{expected}");
+    }
+
+    #[test]
+    fn parallel_is_off_by_default_and_warns_when_set() {
+        let (m, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            "#,
+        );
+        // The runner is sequential, so the default must not claim otherwise.
+        assert!(!m.test.parallel);
+        assert!(
+            w.is_empty(),
+            "a defaulted key is not something to warn about"
+        );
+
+        let (_, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [test]
+            parallel = true
+            "#,
+        );
+        assert_eq!(
+            ignored(&w).iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            ["test.parallel"]
+        );
+    }
+
+    #[test]
+    fn keys_that_do_nothing_say_so_exactly_once() {
+        let (_, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            [paths]
+            benches = "benches"
+            [backend.native]
+            enable = true
+            target = "aarch64-unknown-linux-gnu"
+            [backend.jar]
+            main_class = "Main"
+            "#,
+        );
+        let mut keys: Vec<&str> = ignored(&w).iter().map(|(k, _)| *k).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "backend.jar.main_class",
+                "backend.native.target",
+                "paths.benches"
+            ]
+        );
+        // No `UnknownField` noise on top: these keys *are* in the schema.
+        assert_eq!(w.len(), 3, "warnings: {w:?}");
+    }
+
+    #[test]
+    fn edition_and_java_version_are_out_of_the_schema() {
+        let (_, w) = parse_ok(
+            r#"
+            [project]
+            name = "demo"
+            version = "0.1.0"
+            edition = "2024"
+            [backend.java]
+            enable = true
+            java_version = 17
+            "#,
+        );
+        let mut keys: Vec<String> = w
+            .iter()
+            .filter_map(|x| match &x.kind {
+                ManifestWarningKind::UnknownField { table, key } => Some(format!("{table}.{key}")),
+                _ => None,
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["backend.java.java_version", "project.edition"]);
     }
 }

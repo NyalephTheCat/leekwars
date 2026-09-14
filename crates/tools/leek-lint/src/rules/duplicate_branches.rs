@@ -11,17 +11,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 
 use super::structural::stmt_key;
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct DuplicateBranches;
 
-static META: LintMeta = LintMeta {
-    name: "duplicate-branches",
-    code: codes::DUPLICATE_BRANCHES,
-    group: LintGroup::Suspicious,
-    description: "`if` whose then- and else-branches are identical — the condition has no effect",
-};
+declare_lint!(
+    DuplicateBranches,
+    "duplicate-branches",
+    codes::DUPLICATE_BRANCHES,
+    Suspicious,
+    "`if` whose then- and else-branches are identical — the condition has no effect"
+);
 
 impl LintPass for DuplicateBranches {
     fn meta(&self) -> &'static LintMeta {

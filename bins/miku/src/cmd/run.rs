@@ -47,15 +47,7 @@ pub fn run(
     // input's settled version *and* strict mode.
     use leek_backend_native::{DEFAULT_OP_BUDGET, NativeArtifact, NativeOptions};
     let mut opts = NativeOptions::jit_for_input(driver_run.run.input(), DEFAULT_OP_BUDGET);
-    if let Some(depth) = project
-        .manifest
-        .backend
-        .native
-        .as_ref()
-        .and_then(|s| s.max_call_depth)
-    {
-        opts.max_call_depth = depth;
-    }
+    crate::util::apply_native_settings(&mut opts, &project.manifest);
     match leek_backend_native::compile(hir.0.as_ref(), &opts) {
         Ok(NativeArtifact::Value(v)) => {
             println!("{v}");

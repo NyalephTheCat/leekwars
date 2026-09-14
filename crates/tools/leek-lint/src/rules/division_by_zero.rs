@@ -5,17 +5,19 @@
 use leek_diagnostics::{Diagnostic, codes};
 use leek_hir::{BinaryOp, Expr, ExprKind, Literal};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct DivisionByZero;
 
-static META: LintMeta = LintMeta {
-    name: "division-by-zero",
-    code: codes::DIVISION_BY_ZERO,
-    group: LintGroup::Correctness,
-    description: "division or modulo by a literal zero — faults at runtime",
-};
+declare_lint!(
+    DivisionByZero,
+    "division-by-zero",
+    codes::DIVISION_BY_ZERO,
+    Correctness,
+    "division or modulo by a literal zero — faults at runtime"
+);
 
 impl LintPass for DivisionByZero {
     fn meta(&self) -> &'static LintMeta {

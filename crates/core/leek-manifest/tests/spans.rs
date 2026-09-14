@@ -141,3 +141,59 @@ fn warnings_and_errors_carry_distinguishable_codes() {
         ManifestWarningKind::UnknownField { .. }
     ));
 }
+
+#[test]
+fn an_ignored_key_points_at_the_key() {
+    let src = format!("{HEAD}\n[backend.native]\nenable = true\ntarget = \"riscv64\"\n");
+    assert_eq!(warning_text(&src), "target");
+}
+
+#[test]
+fn an_ignored_key_reports_as_w0402() {
+    let src = format!("{HEAD}\n[test]\nparallel = true\n");
+    let (_, warnings) = leek_manifest::load_str(&src).expect("should parse");
+    assert!(matches!(
+        warnings[0].kind,
+        ManifestWarningKind::IgnoredKey { .. }
+    ));
+    let diag = warnings[0].clone().into_diagnostic();
+    assert_eq!(diag.code.id(), "W0402");
+    assert_eq!(diag.severity, Severity::Warning);
+    assert!(diag.message.contains("sequential"), "{}", diag.message);
+}
+
+#[test]
+fn a_second_default_backend_points_at_its_own_default_key() {
+    // Both `default` keys are equally "the problem"; the caret goes under the
+    // second, so the message reads as "this one conflicts with the earlier
+    // one" — which is what the `got` field says too.
+    let src = format!(
+        "{HEAD}\n[backend.java]\nenable = true\ndefault = true\n\
+         [backend.native]\nenable = true\ndefault = true\n"
+    );
+    let err = leek_manifest::load_str(&src).expect_err("should not parse");
+    let span = err.span.expect("spanned");
+    assert_eq!(&src[span.start as usize..span.end as usize], "default");
+    assert!(
+        span.start as usize > src.find("[backend.native]").unwrap(),
+        "the caret must be on the *second* default"
+    );
+}
+
+#[test]
+fn a_disabled_default_backend_points_at_enable() {
+    let src = format!("{HEAD}\n[backend.native]\nenable = false\ndefault = true\n");
+    assert_eq!(error_text(&src), "enable");
+}
+
+#[test]
+fn a_bad_opt_level_points_at_the_value() {
+    let src = format!("{HEAD}\n[backend.native]\nopt_level = \"fast\"\n");
+    assert_eq!(error_text(&src), "\"fast\"");
+}
+
+#[test]
+fn a_duration_shaped_timeout_points_at_the_value() {
+    let src = format!("{HEAD}\n[test]\ntimeout = \"5s\"\n");
+    assert_eq!(error_text(&src), "\"5s\"");
+}

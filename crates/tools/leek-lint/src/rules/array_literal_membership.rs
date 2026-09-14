@@ -18,20 +18,19 @@
 use leek_diagnostics::{codes, diag};
 use leek_hir::{BinaryOp, Callee, Expr, ExprKind, NameRef};
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
-pub struct ArrayLiteralMembership {
-    /// Target language version; the lint is silent below 4.
-    pub version: u8,
-}
+#[derive(Default)]
+pub struct ArrayLiteralMembership;
 
-static META: LintMeta = LintMeta {
-    name: "array-literal-membership",
-    code: codes::ARRAY_LITERAL_MEMBERSHIP,
-    group: LintGroup::Nursery,
-    description: "membership test against an array literal — a set literal `<a, b, c>` is the structure for \"one of these\"",
-};
+declare_lint!(
+    ArrayLiteralMembership,
+    "array-literal-membership",
+    codes::ARRAY_LITERAL_MEMBERSHIP,
+    Nursery,
+    "membership test against an array literal — a set literal `<a, b, c>` is the structure for \"one of these\""
+);
 
 impl LintPass for ArrayLiteralMembership {
     fn meta(&self) -> &'static LintMeta {
@@ -39,7 +38,7 @@ impl LintPass for ArrayLiteralMembership {
     }
 
     fn check_expr(&mut self, cx: &mut LintCx<'_, '_>, e: &Expr) {
-        if self.version < 4 {
+        if cx.version < 4 {
             return;
         }
         let found = match &e.kind {
@@ -84,7 +83,7 @@ mod tests {
     use leek_syntax::Version;
 
     fn run(src: &str) -> Vec<Diagnostic> {
-        lint_one(ArrayLiteralMembership { version: 4 }, src)
+        lint_one(ArrayLiteralMembership, src)
     }
 
     #[test]
@@ -127,7 +126,7 @@ mod tests {
     #[test]
     fn silent_below_v4() {
         let d = lint_one_v(
-            ArrayLiteralMembership { version: 2 },
+            ArrayLiteralMembership,
             "function f(x) {\n  return inArray([1, 5, 9], x)\n}\n",
             Version::V2,
         );

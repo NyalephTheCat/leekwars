@@ -16,17 +16,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 use leek_resolver::builtins::is_builtin_name;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{Body, BodyKind, LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct ShadowedBuiltin;
 
-static META: LintMeta = LintMeta {
-    name: "shadowed-builtin",
-    code: codes::SHADOWED_BUILTIN,
-    group: LintGroup::Nursery,
-    description: "declaration reuses a builtin function's name — calls to the builtin now hit the local",
-};
+declare_lint!(
+    ShadowedBuiltin,
+    "shadowed-builtin",
+    codes::SHADOWED_BUILTIN,
+    Nursery,
+    "declaration reuses a builtin function's name — calls to the builtin now hit the local"
+);
 
 impl LintPass for ShadowedBuiltin {
     fn meta(&self) -> &'static LintMeta {

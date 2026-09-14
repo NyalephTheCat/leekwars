@@ -19,17 +19,19 @@ use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 use leek_span::Span;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct UnnecessaryElse;
 
-static META: LintMeta = LintMeta {
-    name: "unnecessary-else",
-    code: codes::UNNECESSARY_ELSE,
-    group: LintGroup::Style,
-    description: "`else` after a branch that always exits — dedent its body instead",
-};
+declare_lint!(
+    UnnecessaryElse,
+    "unnecessary-else",
+    codes::UNNECESSARY_ELSE,
+    Style,
+    "`else` after a branch that always exits — dedent its body instead"
+);
 
 impl LintPass for UnnecessaryElse {
     fn meta(&self) -> &'static LintMeta {

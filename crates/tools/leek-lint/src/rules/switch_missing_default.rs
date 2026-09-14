@@ -7,17 +7,19 @@
 use leek_diagnostics::{codes, diag};
 use leek_hir::Stmt;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct SwitchMissingDefault;
 
-static META: LintMeta = LintMeta {
-    name: "switch-missing-default",
-    code: codes::SWITCH_MISSING_DEFAULT,
-    group: LintGroup::Pedantic,
-    description: "`switch` without a `default` arm — unmatched values silently do nothing",
-};
+declare_lint!(
+    SwitchMissingDefault,
+    "switch-missing-default",
+    codes::SWITCH_MISSING_DEFAULT,
+    Pedantic,
+    "`switch` without a `default` arm — unmatched values silently do nothing"
+);
 
 impl LintPass for SwitchMissingDefault {
     fn meta(&self) -> &'static LintMeta {

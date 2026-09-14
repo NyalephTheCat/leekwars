@@ -7,17 +7,19 @@
 use leek_diagnostics::{Diagnostic, codes, diag};
 use leek_hir::Stmt;
 
-use crate::LintGroup;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct EmptyBlock;
 
-static META: LintMeta = LintMeta {
-    name: "empty-block",
-    code: codes::EMPTY_BLOCK,
-    group: LintGroup::Style,
-    description: "control-flow construct with an empty body",
-};
+declare_lint!(
+    EmptyBlock,
+    "empty-block",
+    codes::EMPTY_BLOCK,
+    Style,
+    "control-flow construct with an empty body"
+);
 
 impl LintPass for EmptyBlock {
     fn meta(&self) -> &'static LintMeta {

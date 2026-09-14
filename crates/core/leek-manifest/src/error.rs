@@ -199,6 +199,17 @@ pub enum ManifestWarningKind {
     },
     /// A table that parses but whose behavior is deferred.
     DeferredTable { name: &'static str },
+    /// A key in the schema — right name, right type — that nothing in this
+    /// toolchain reads. Distinct from [`UnknownField`](Self::UnknownField),
+    /// which is a typo or a key from a newer schema: this one means "we
+    /// recognize what you asked for and we are not doing it", which is why it
+    /// carries the reason.
+    IgnoredKey {
+        /// The dotted path of the key (`"backend.native.target"`).
+        key: String,
+        /// Why it is inert, as the message's parenthetical.
+        reason: &'static str,
+    },
 }
 
 impl ManifestWarning {
@@ -212,6 +223,7 @@ impl ManifestWarningKind {
         match self {
             ManifestWarningKind::UnknownField { .. } => codes::MANIFEST_UNKNOWN_FIELD,
             ManifestWarningKind::DeferredTable { .. } => codes::MANIFEST_DEFERRED_TABLE,
+            ManifestWarningKind::IgnoredKey { .. } => codes::MANIFEST_IGNORED_KEY,
         }
     }
 
@@ -222,6 +234,9 @@ impl ManifestWarningKind {
             }
             ManifestWarningKind::DeferredTable { name } => {
                 format!("`[{name}]` is parsed but not yet interpreted in this toolchain")
+            }
+            ManifestWarningKind::IgnoredKey { key, reason } => {
+                format!("`{key}` is parsed but not acted on by this toolchain ({reason})")
             }
         }
     }

@@ -3,20 +3,23 @@
 //! to `x` or `!x`, and the lint ships a machine-applicable autofix.
 
 use leek_diagnostics::{Applicability, Diagnostic, Suggestion, TextEdit, codes, diag};
-use leek_hir::{BinaryOp, Expr, ExprKind, Literal};
+use leek_hir::{BinaryOp, Expr, ExprKind};
 use leek_span::Span;
 
-use crate::LintGroup;
+use super::util::bool_lit;
+use crate::registry::declare_lint;
 use crate::pass::{LintCx, LintMeta, LintPass};
 
+#[derive(Default)]
 pub struct RedundantBoolean;
 
-static META: LintMeta = LintMeta {
-    name: "redundant-boolean",
-    code: codes::REDUNDANT_BOOLEAN,
-    group: LintGroup::Complexity,
-    description: "comparison against a boolean literal — `x == true` is just `x`",
-};
+declare_lint!(
+    RedundantBoolean,
+    "redundant-boolean",
+    codes::REDUNDANT_BOOLEAN,
+    Complexity,
+    "comparison against a boolean literal — `x == true` is just `x`"
+);
 
 impl LintPass for RedundantBoolean {
     fn meta(&self) -> &'static LintMeta {
@@ -37,13 +40,6 @@ impl LintPass for RedundantBoolean {
                 ));
             }
         }
-    }
-}
-
-fn bool_lit(e: &Expr) -> Option<bool> {
-    match &e.kind {
-        ExprKind::Literal(Literal::Bool(b)) => Some(*b),
-        _ => None,
     }
 }
 
