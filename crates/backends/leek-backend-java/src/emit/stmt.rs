@@ -438,6 +438,11 @@ impl Emitter<'_> {
     pub(crate) fn loop_cond_string(&self, c: &Expr) -> String {
         let inner = self.expr_to_bool(c);
         if !self.opts.emit_ops {
+            // Clean mode deliberately keeps the bare `true`: `is_infinite_loop`
+            // (emit/mod.rs) reads javac's own rule off it and suppresses both
+            // the trailing `return null;` and any statement after the loop.
+            // Wrapping the literal in `bool(...)` here would hide the loop from
+            // javac and bring the `missing return statement` failures back.
             return inner;
         }
         // Match the reference `WhileBlock`: a boolean *literal* condition is
@@ -813,11 +818,24 @@ impl Emitter<'_> {
     /// entry baseline tick. This mirrors `JavaWriter.addCounter(1)`
     /// in the reference: it's `addCode`, not `addLine`, so the tick
     /// is concatenated onto whatever the first statement emits next.
-    /// Used for while/for/do-while/foreach/function bodies but NOT
-    /// for if/else bodies or the main runIA block.
+    /// Used for while/for/do-while bodies but NOT for if/else bodies or
+    /// the main runIA block (`emit_foreach` and the function emitters
+    /// write their own ticks inline).
+    ///
+    /// Clean mode emits no per-statement ticks — a block's whole static
+    /// cost arrives as the single `Stmt::Charge` the charge pass prepends,
+    /// and that pass emits nothing for a block that costs nothing. An
+    /// *empty* loop body therefore charged zero ops per iteration, so
+    /// `while (true) {}` spun forever at 100% CPU instead of tripping the
+    /// per-turn op budget (#388). Emit the body-entry tick by hand for that
+    /// one shape, in the same spelling the charge pass would have used. A
+    /// body with any statement in it already charges at least 1 (even
+    /// `{ { } }` or a bare `null`), so this is the only hole.
     pub(crate) fn emit_body_with_entry_tick(&mut self, s: &Stmt) {
         if self.opts.emit_ops {
             self.writer.add_code("ops(1);");
+        } else if matches!(s, Stmt::Block(b) if b.stmts.is_empty()) {
+            self.writer.add_line("ops(1);");
         }
         if let Stmt::Block(b) = s {
             self.emit_stmts(&b.stmts);
