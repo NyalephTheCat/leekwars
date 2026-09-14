@@ -1,12 +1,22 @@
 //! The parser's known-bad list over the fixtures upstream *enables*.
 //!
-//! `tests/parser_fixtures.rs` asserts that every upstream `.leek` file
-//! the standalone-LeekScript JUnit suite actually runs parses with no
-//! lexer, pragma or parser diagnostic at all. Two of them do not, and
-//! neither is fixable in the change that scoped the gate, so they are
-//! tracked here the way this repo tracks every other known-bad set: a
-//! **tracked, diffable file**, one sorted row per failing fixture, with
-//! the suite gating on the *diff* rather than on the list.
+//! **Nothing gates on this today.** `tests/parser_fixtures.rs` asserts
+//! that every upstream `.leek` file the standalone-LeekScript JUnit
+//! suite actually runs parses with no lexer, pragma or parser
+//! diagnostic at all. Two of them did not when the gate was scoped, and
+//! were tracked here — `code/french.leek` and `code/french.min.leek`,
+//! both of them this parser disagreeing with the reference
+//! implementation rather than dialect it does not target. #351 closed
+//! both, `data/parse-known-failures.tsv` went with them, and the suite
+//! is back to the plain assertion a ratchet is only ever a detour from.
+//! The machinery stays — with its own tests, like
+//! [`fmt_ratchet`](crate::fmt_ratchet) after #197 — for the next parser
+//! gap too large to close in the change that finds it. The rest of this
+//! module describes how to wire it back up.
+//!
+//! A known-bad set is a **tracked, diffable file**, one sorted row per
+//! failing fixture, with the suite gating on the *diff* rather than on
+//! the list.
 //!
 //! The file format is deliberately the one
 //! [`fmt_ratchet`](crate::fmt_ratchet) and `leek-bench`'s
@@ -28,7 +38,7 @@
 //! and a reworded detail is information. That was right for 289 rows
 //! whose details came out of a third party (a JDK bump rewords hundreds
 //! of `javac` messages at once, and a red build teaches nobody
-//! anything). Here there are two rows, and their details are this
+//! anything). Here the list is small and the details are this
 //! toolchain's *own* diagnostics. So [`ParseRatchetDiff::is_regression`]
 //! is true for all three buckets:
 //!

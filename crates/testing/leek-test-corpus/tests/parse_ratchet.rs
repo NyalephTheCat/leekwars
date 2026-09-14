@@ -1,12 +1,14 @@
 //! The parser ratchet's serialise/diff layer.
 //!
 //! Everything here is pure Rust: no upstream submodule, no parser, no
-//! fixtures. The suite that uses it (`parser_fixtures.rs`) needs the
-//! submodule checked out and only runs in `corpus.yml`, which is exactly
-//! why the layer it leans on has to be tested on its own — a ratchet is
-//! only worth committing if regenerating it on another machine produces
-//! the same file, and strict enough that it cannot pass while measuring
-//! nothing.
+//! fixtures. No gate uses the layer at the moment — `parser_fixtures.rs`
+//! went back to a plain assertion when #351 closed the last two rows —
+//! but the machinery is kept for the next parser gap too large to close
+//! in the change that finds it, and machinery kept unexercised is
+//! machinery that rots. A ratchet is only worth committing if
+//! regenerating it on another machine produces the same file, and if it
+//! is strict enough that it cannot pass while measuring nothing; that is
+//! what these pin.
 //!
 //! The gate this layer implements is stricter than
 //! `leek_test_corpus::fmt_ratchet`'s on purpose, and the tests below pin
@@ -94,13 +96,13 @@ fn tsv_is_sorted_and_stable_regardless_of_discovery_order() {
         45,
         &[
             ("code/french.min.leek", row("E0100 x16", "expected RParen")),
-            ("code/french.leek", row("W0005 x1", "block comment")),
+            ("code/french.leek", row("E0100 x1", "block comment")),
         ],
     );
     let reordered = ratchet(
         45,
         &[
-            ("code/french.leek", row("W0005 x1", "block comment")),
+            ("code/french.leek", row("E0100 x1", "block comment")),
             ("code/french.min.leek", row("E0100 x16", "expected RParen")),
         ],
     );
@@ -119,7 +121,7 @@ fn tsv_round_trips_including_tabs_and_newlines() {
     let original = ratchet(
         45,
         &[
-            ("code/french.leek", row("W0005 x1", "block\tcomment\nopen")),
+            ("code/french.leek", row("E0100 x1", "block\tcomment\nopen")),
             ("odd\\path.leek", row("E0100 x1", "back\\slash")),
         ],
     );
@@ -152,7 +154,7 @@ fn an_empty_file_is_not_a_passing_gate() {
 fn a_differently_sized_run_is_refused() {
     let committed = ratchet(
         45,
-        &[("code/french.leek", row("W0005 x1", "block comment"))],
+        &[("code/french.leek", row("E0100 x1", "block comment"))],
     );
     committed.check_comparable(45).expect("same size is fine");
     let err = committed
@@ -170,7 +172,7 @@ fn a_differently_sized_run_is_refused() {
 #[test]
 fn a_file_without_a_total_header_is_comparable_to_anything() {
     let committed =
-        ParseRatchet::parse("code/french.leek\tW0005 x1\tblock comment\n").expect("parse");
+        ParseRatchet::parse("code/french.leek\tE0100 x1\tblock comment\n").expect("parse");
     assert_eq!(committed.total, None);
     committed.check_comparable(45).expect("nothing to compare");
 }
@@ -185,12 +187,12 @@ fn a_file_without_a_total_header_is_comparable_to_anything() {
 fn a_newly_failing_fixture_is_a_regression() {
     let committed = ratchet(
         45,
-        &[("code/french.leek", row("W0005 x1", "block comment"))],
+        &[("code/french.leek", row("E0100 x1", "block comment"))],
     );
     let current = ratchet(
         45,
         &[
-            ("code/french.leek", row("W0005 x1", "block comment")),
+            ("code/french.leek", row("E0100 x1", "block comment")),
             ("code/gcd.leek", row("E0100 x1", "unexpected token: KwLet")),
         ],
     );
@@ -212,13 +214,13 @@ fn a_row_that_starts_parsing_cleanly_fails_the_build() {
     let committed = ratchet(
         45,
         &[
-            ("code/french.leek", row("W0005 x1", "block comment")),
+            ("code/french.leek", row("E0100 x1", "block comment")),
             ("code/french.min.leek", row("E0100 x16", "expected RParen")),
         ],
     );
     let current = ratchet(
         45,
-        &[("code/french.leek", row("W0005 x1", "block comment"))],
+        &[("code/french.leek", row("E0100 x1", "block comment"))],
     );
 
     let diff = diff_parse_ratchet(&current, &committed);
@@ -258,7 +260,7 @@ fn a_row_whose_diagnostics_moved_fails_the_build() {
 #[test]
 fn an_unchanged_run_is_not_a_regression() {
     let rows: &[(&str, ParseFailure)] = &[
-        ("code/french.leek", row("W0005 x1", "block comment")),
+        ("code/french.leek", row("E0100 x1", "block comment")),
         ("code/french.min.leek", row("E0100 x16", "expected RParen")),
     ];
     let diff = diff_parse_ratchet(&ratchet(45, rows), &ratchet(45, rows));

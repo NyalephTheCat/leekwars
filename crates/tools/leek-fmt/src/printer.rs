@@ -15,7 +15,6 @@
 //! after the inner doc, so the pop happens at the natural moment
 //! the region's last work item is consumed.
 
-use leek_diagnostics::codes;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, Version};
 
@@ -125,14 +124,16 @@ fn leading_fragment(s: &str) -> &str {
 /// Lex `s` into `(kind, text)` pairs, dropping the terminating `Eof`,
 /// plus how many diagnostics say the *fragment itself* is malformed.
 ///
-/// `BLOCK_COMMENT_NOT_CLOSED` is excluded deliberately. A fragment is
-/// a maximal run of operator or word characters, so the leading
-/// fragment of a `/* … */` comment is the bare `/*` — unclosed on its
-/// own however well-formed the comment is in the document. Counting
-/// it would make [`needs_separator`] bail on a boundary it has to
-/// answer: printing `/` next to a block comment with no space
-/// produces `//*`, which re-lexes as a line comment and swallows the
-/// rest of the line. Every other lexer diagnostic describes damage a
+/// An unterminated block comment contributes nothing here, and must
+/// not: a fragment is a maximal run of operator or word characters, so
+/// the leading fragment of a `/* … */` comment is the bare `/*` —
+/// unclosed on its own however well-formed the comment is in the
+/// document. Counting it would make [`needs_separator`] bail on a
+/// boundary it has to answer: printing `/` next to a block comment with
+/// no space produces `//*`, which re-lexes as a line comment and
+/// swallows the rest of the line. The lexer no longer reports the
+/// unclosed form at all (upstream accepts it — #351), so no filter is
+/// needed; every diagnostic that does reach here describes damage a
 /// separator cannot repair.
 fn tokens_of(s: &str, version: Version) -> (Vec<(SyntaxKind, &str)>, usize) {
     let src = SourceId::new(1).expect("1 is a valid SourceId");
@@ -143,12 +144,7 @@ fn tokens_of(s: &str, version: Version) -> (Vec<(SyntaxKind, &str)>, usize) {
         .filter(|t| t.kind != SyntaxKind::Eof)
         .map(|t| (t.kind, &s[t.span.range()]))
         .collect();
-    let malformed = res
-        .diagnostics
-        .iter()
-        .filter(|d| d.code != codes::BLOCK_COMMENT_NOT_CLOSED)
-        .count();
-    (toks, malformed)
+    (toks, res.diagnostics.len())
 }
 
 /// Would writing `left` and `right` back to back change how they lex?
@@ -197,12 +193,14 @@ mod separator_tests {
     use leek_syntax::Version;
 
     /// The fragment a block comment hands [`separator_needed`] is its
-    /// leading operator-character run, `/*` — which lexes as an
-    /// unterminated comment on its own whatever the full comment looks
-    /// like in the document. If [`tokens_of`] counted that warning as
-    /// "this fragment is malformed", the separator rule would answer
-    /// "no space" and the printer could emit `//*`, re-lexing a block
-    /// comment as a line comment (#140 meeting #412/#417).
+    /// leading operator-character run, `/*` — an unterminated comment
+    /// on its own whatever the full comment looks like in the document.
+    /// If [`tokens_of`] read that as "this fragment is malformed", the
+    /// separator rule would answer "no space" and the printer could
+    /// emit `//*`, re-lexing a block comment as a line comment (#140
+    /// meeting #412/#417). Since #351 the lexer reports nothing for the
+    /// unclosed form, matching upstream — this pins that the count
+    /// stays at zero rather than coming back through a new code.
     #[test]
     fn a_block_comment_fragment_is_not_treated_as_malformed() {
         assert_eq!(tokens_of("/*", Version::V4).1, 0);

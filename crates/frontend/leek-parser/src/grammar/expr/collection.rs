@@ -6,7 +6,7 @@ use leek_syntax::SyntaxKind as S;
 
 use crate::parser::Parser;
 
-use super::{can_start_expr, expr};
+use super::{close_list, comma_optional_list, expr};
 
 /// Either an array literal `[a, b, ...]` or a map literal
 /// `[k: v, k: v, ...]`. Decided by looking at the first element's
@@ -43,6 +43,7 @@ pub(super) fn bracket_collection(p: &mut Parser) {
 fn bracket_first_sep_is_colon(p: &Parser) -> bool {
     let mut i = 1usize;
     let mut depth = 0i32;
+    let mut ternaries = TernaryDepth::default();
     let cap = 128;
     let mut steps = 0;
     while steps < cap {
@@ -51,7 +52,8 @@ fn bracket_first_sep_is_colon(p: &Parser) -> bool {
             S::RParen | S::RBracket | S::RBrace if depth == 0 => return false,
             S::RParen | S::RBracket | S::RBrace => depth -= 1,
             S::Comma if depth == 0 => return false,
-            S::Colon if depth == 0 => return true,
+            S::Colon if depth == 0 && !ternaries.close() => return true,
+            S::Question if depth == 0 => ternaries.open(p.nth(i + 1)),
             S::Eof => return false,
             _ => {}
         }
@@ -61,13 +63,49 @@ fn bracket_first_sep_is_colon(p: &Parser) -> bool {
     false
 }
 
-/// `[k: v, k: v, …]` map literal — the canonical map syntax.
+/// How many ternary `?`s are still waiting for their `:` at the depth
+/// being scanned.
+///
+/// Without this a lone `[cond ? a : b]` reads as a map literal keyed on
+/// `cond ? a`, because its `:` is the first one at bracket depth 0.
+/// Upstream never faces the question: `readArrayOrMapOrInterval` reads
+/// the whole first expression — ternary and all — and only *then* looks
+/// at the token in front of it. Pairing each `:` with a pending `?`
+/// reproduces that answer without parsing twice, and still calls
+/// `[a ? b : c : v]` a map, since its second `:` has no `?` left to
+/// pair with.
+#[derive(Default)]
+struct TernaryDepth(u32);
+
+impl TernaryDepth {
+    /// Record a `?` that opens a ternary. `next` is the token after it:
+    /// `?.` is optional member access, not a ternary. (`??` and `??=`
+    /// are their own token kinds and never reach here.)
+    fn open(&mut self, next: S) {
+        if next != S::Dot {
+            self.0 += 1;
+        }
+    }
+
+    /// Consume a `:` — `true` if it closed a pending ternary rather
+    /// than separating a key from a value.
+    fn close(&mut self) -> bool {
+        if self.0 == 0 {
+            return false;
+        }
+        self.0 -= 1;
+        true
+    }
+}
+
+/// `[k: v, k: v, …]` map literal — the canonical map syntax. The comma
+/// between entries is optional, as in upstream's `readMap`.
 fn bracket_map_literal(p: &mut Parser) {
     assert!(p.at(S::LBracket));
     p.start_node(S::MapExpr);
     p.bump(); // '['
-    map_entries_until(p, S::RBracket);
-    p.expect(S::RBracket);
+    let stuck = map_entries_until(p, S::RBracket);
+    close_list(p, S::RBracket, stuck);
     p.finish_node();
 }
 
@@ -100,26 +138,11 @@ fn object_literal(p: &mut Parser) {
     // Object fields: `name: expr [, name: expr]*`. We accept any
     // expression as the key here and let the type-checker reject
     // non-identifier shapes later. `,` between fields is optional —
-    // `{a: 1 b: 2}` parses the same as `{a: 1, b: 2}` (matches
-    // upstream object-literal tolerance).
-    while !p.at(S::RBrace) && !p.at_eof() {
-        let before = p.position();
-        expr(p);
-        p.expect(S::Colon);
-        expr(p);
-        if p.at(S::Comma) {
-            p.bump();
-        } else if !p.at(S::RBrace) && can_start_expr(p.current()) {
-            // No comma but the next field can start — keep going.
-        } else {
-            break;
-        }
-        if p.position() == before {
-            p.err_and_bump("stuck in object literal");
-            break;
-        }
-    }
-    p.expect(S::RBrace);
+    // `{a: 1 b: 2}` parses the same as `{a: 1, b: 2}`, matching the
+    // `if (get().getType() == VIRG) skip()` of upstream's object loop
+    // (`WordCompiler.java:1992`).
+    let stuck = map_entries_until(p, S::RBrace);
+    close_list(p, S::RBrace, stuck);
     p.finish_node();
 }
 
@@ -158,6 +181,7 @@ fn set_element(p: &mut Parser) {
 fn brace_first_sep_is_colon(p: &Parser) -> bool {
     let mut i = 1usize;
     let mut depth = 0i32;
+    let mut ternaries = TernaryDepth::default();
     let cap = 128;
     let mut steps = 0;
     while steps < cap {
@@ -167,7 +191,8 @@ fn brace_first_sep_is_colon(p: &Parser) -> bool {
             S::RBrace if depth == 0 => return false,
             S::RBrace => depth -= 1,
             S::Comma if depth == 0 => return false,
-            S::Colon if depth == 0 => return true,
+            S::Colon if depth == 0 && !ternaries.close() => return true,
+            S::Question if depth == 0 => ternaries.open(p.nth(i + 1)),
             S::Eof => return false,
             _ => {}
         }
@@ -177,48 +202,35 @@ fn brace_first_sep_is_colon(p: &Parser) -> bool {
     false
 }
 
-/// Parse `key: value, key: value, ...` until `closer` (not consumed).
-fn map_entries_until(p: &mut Parser, closer: S) {
-    while !p.at(closer) && !p.at_eof() {
-        let before = p.position();
+/// Parse `key: value key: value …` until `closer` (not consumed),
+/// comma between entries optional. Reports whether the list ended stuck
+/// — see [`comma_optional_list`].
+fn map_entries_until(p: &mut Parser, closer: S) -> bool {
+    comma_optional_list(p, closer, |p| {
         expr(p); // key
-        p.expect(S::Colon);
+        // An entry with no `:` is not a map entry, and guessing at a
+        // value would report the rest of the literal as damage too.
+        // Upstream throws `SIMPLE_ARRAY` here; we stop the list with
+        // the one message `expect` just emitted.
+        if !p.expect(S::Colon) {
+            return false;
+        }
         expr(p); // value
-        if !p.eat(S::Comma) {
-            break;
-        }
-        if p.position() == before {
-            p.err_and_bump("stuck in map literal");
-            break;
-        }
-    }
+        true
+    })
 }
 
-/// Array literal: `[]` or `[e1, e2, …]`. Trailing comma allowed.
+/// Array literal: `[]`, `[e1, e2, …]` or — commas being optional
+/// upstream — `[e1 e2 …]`. Trailing comma allowed.
 fn array_literal(p: &mut Parser) {
     assert!(p.at(S::LBracket));
     p.start_node(S::ArrayExpr);
     p.bump(); // '['
-    while !p.at(S::RBracket) && !p.at_eof() {
-        let before = p.position();
+    let stuck = comma_optional_list(p, S::RBracket, |p| {
         expr(p);
-        if p.at(S::Comma) {
-            p.bump();
-        } else if can_start_expr(p.current()) {
-            // v1 quirk: `[1 2 3]` — comma-free array literal.
-            // Just continue with the next element.
-        } else if !p.at(S::RBracket) {
-            // No comma, can't continue. Recovery.
-            if p.position() == before {
-                p.err_and_bump(format!(
-                    "unexpected token in array literal: {:?}",
-                    p.current()
-                ));
-            }
-            break;
-        }
-    }
-    p.expect(S::RBracket);
+        true
+    });
+    close_list(p, S::RBracket, stuck);
     p.finish_node();
 }
 
@@ -241,7 +253,9 @@ pub(super) fn angle_set_or_map(p: &mut Parser) {
     if is_map {
         p.start_node(S::MapExpr);
         p.bump(); // '<'
-        map_entries_until_gt(p);
+        // The angle spelling of a map literal is the bracket one with
+        // a different closer, optional comma included.
+        let _stuck = map_entries_until(p, S::Gt);
         let _ = p.eat(S::Gt);
         p.finish_node();
     } else {
@@ -267,6 +281,7 @@ pub(super) fn angle_set_or_map(p: &mut Parser) {
 fn angle_first_sep_is_colon(p: &Parser) -> bool {
     let mut i = 1usize;
     let mut depth = 0i32;
+    let mut ternaries = TernaryDepth::default();
     let cap = 128;
     let mut steps = 0;
     while steps < cap {
@@ -280,7 +295,8 @@ fn angle_first_sep_is_colon(p: &Parser) -> bool {
             S::UShiftRight if depth == 0 => return false,
             S::UShiftRight => depth -= 3,
             S::Comma if depth == 0 => return false,
-            S::Colon if depth == 0 => return true,
+            S::Colon if depth == 0 && !ternaries.close() => return true,
+            S::Question if depth == 0 => ternaries.open(p.nth(i + 1)),
             S::Eof => return false,
             _ => {}
         }
@@ -288,20 +304,4 @@ fn angle_first_sep_is_colon(p: &Parser) -> bool {
         steps += 1;
     }
     false
-}
-
-fn map_entries_until_gt(p: &mut Parser) {
-    while !p.at(S::Gt) && !p.at_eof() {
-        let before = p.position();
-        expr(p);
-        p.expect(S::Colon);
-        expr(p);
-        if !p.eat(S::Comma) {
-            break;
-        }
-        if p.position() == before {
-            p.err_and_bump("stuck in angle map literal");
-            break;
-        }
-    }
 }

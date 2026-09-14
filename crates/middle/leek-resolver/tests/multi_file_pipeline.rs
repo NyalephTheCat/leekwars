@@ -10,6 +10,7 @@ use leek_hir::{Def, ExprKind, Literal, Stmt};
 use leek_pipeline::Input;
 use leek_recipes::{RecipeParams, pipeline_hir_from_parse, pipeline_hir_with_includes};
 use leek_resolver::folder::MemFolder;
+use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::ResolveIncludes;
 use leek_span::SourceId;
 
@@ -33,10 +34,10 @@ fn run_pipeline(entry_path: &str, files: &[(&str, &str)]) -> Arc<leek_hir::HirFi
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
 
-    let resolve_includes = ResolveIncludes::with_counter(
+    let resolve_includes = ResolveIncludes::new(
         Arc::new(folder),
         PathBuf::from(entry_path),
-        /* start = */ 2,
+        Arc::new(PathInterner::starting_at(2)),
     );
 
     let params = RecipeParams::permissive();
@@ -147,8 +148,11 @@ fn include_pipeline_lowers_each_file_at_its_version() {
     folder.insert("/main.leek", entry);
     folder.insert("/inherits.leek", "var i = \"a\\\"b\"\n");
     folder.insert("/modern.leek", "// @version:4\nvar m = \"a\\\"b\"\n");
-    let resolve_includes =
-        ResolveIncludes::with_counter(Arc::new(folder), PathBuf::from("/main.leek"), 2);
+    let resolve_includes = ResolveIncludes::new(
+        Arc::new(folder),
+        PathBuf::from("/main.leek"),
+        Arc::new(PathInterner::starting_at(2)),
+    );
     let pipeline =
         pipeline_hir_with_includes(Box::new(resolve_includes), &RecipeParams::permissive())
             .expect("recipe");

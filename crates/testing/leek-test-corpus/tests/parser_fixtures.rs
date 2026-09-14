@@ -58,15 +58,22 @@
 //! this compiler does not target. A fixture outside the enabled set
 //! still has to round-trip — that is (1), and it is not negotiable.
 //!
-//! # The ratchet
+//! # There is no allow-list
 //!
-//! Two fixtures upstream *does* enable still fail here, and those are
-//! real parser gaps (epic R7, #351), not dialect mismatches. They are
-//! tracked one row at a time in `data/parse-known-failures.tsv` and the
-//! suite gates on the **diff**: a fixture that fails and is not listed
-//! fails the build, and so does a listed fixture that starts parsing
-//! cleanly — the list can only shrink, and closing a gap means deleting
-//! its row. See `leek_test_corpus::parse_ratchet`.
+//! There was one: `data/parse-known-failures.tsv`, a ratchet holding the
+//! two fixtures upstream enabled that this parser could not read —
+//! `code/french.leek` (a deliberate unterminated `/*` at EOF, which
+//! upstream's lexer accepts silently) and `code/french.min.leek`
+//! (minified source with the commas left out between call arguments and
+//! between array elements, which upstream's element loops also accept).
+//! Both were real divergences from the reference implementation, both
+//! are closed (#351), and a ratchet with nothing in it is not a passing
+//! gate but a missing one — so the file went and (2) is a plain
+//! assertion again. Should a submodule bump break a fixture, this fails
+//! loudly, which is the point. The ratchet machinery itself stays in
+//! `leek_test_corpus::parse_ratchet`, with its own tests, for the next
+//! parser gap too large to close in the change that finds it; wire it
+//! back up only alongside a gap worth tracking.
 //!
 //! Runs under `.github/workflows/corpus.yml`, which checks out the
 //! upstream submodule; `cargo test --workspace` in ci.yml excludes this
@@ -79,29 +86,17 @@ use leek_parser::parse;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, parse_pragmas};
 use leek_test_corpus::{
-    ParseFailure, ParseRatchet, diff_parse_ratchet, fixture_id, leek_files,
-    parse_known_failures_path, upstream_enabled_fixtures, upstream_fixture,
+    fixture_id, leek_files, upstream_enabled_fixtures, upstream_fixture,
     upstream_fixtures_available, upstream_fixtures_dir,
 };
 
 /// How many failing fixtures to name before summarizing.
 const REPORTED: usize = 20;
 
-/// Set this to rewrite `data/parse-known-failures.tsv` from the current
-/// run instead of gating on it. The mirror of
-/// `LEEK_FMT_WRITE_KNOWN_FAILURES`.
-const WRITE_ENV: &str = "LEEK_PARSE_WRITE_KNOWN_FAILURES";
-
-/// How the file's header tells a reader to rewrite it.
-const WRITE_COMMAND: &str =
-    "LEEK_PARSE_WRITE_KNOWN_FAILURES=1 cargo test -p leek-test-corpus --test parser_fixtures";
-
-/// A parse result: the reconstructed text, every diagnostic (pragma +
-/// parse) as `(code, message)` for the ratchet row, and its full `Debug`
-/// rendering for the failure report.
+/// A parse result: the reconstructed text plus every diagnostic (pragma
+/// + parse) in its full `Debug` rendering for the failure report.
 struct Parsed {
     round_tripped: String,
-    diags: Vec<(String, String)>,
     rendered: Vec<String>,
 }
 
@@ -116,10 +111,6 @@ fn parse_report(text: &str) -> Parsed {
         .collect();
     Parsed {
         round_tripped: node.text().to_string(),
-        diags: all
-            .iter()
-            .map(|d| (d.code.id().to_string(), d.message.clone()))
-            .collect(),
         rendered: all.iter().map(|d| format!("{d:?}")).collect(),
     }
 }
@@ -131,7 +122,7 @@ fn assert_parses(rel: &str) {
     let parsed = parse_report(&text);
     assert_eq!(parsed.round_tripped, text, "round-trip mismatch in {rel}");
     assert!(
-        parsed.diags.is_empty(),
+        parsed.rendered.is_empty(),
         "unexpected diagnostics in {rel}: {:?}",
         parsed.rendered
     );
@@ -241,23 +232,21 @@ fn the_enabled_fixture_set_is_derived_and_plausible() {
     );
 }
 
-/// Every fixture the upstream suite actually runs parses with no
-/// diagnostics at all, except the rows in
-/// `data/parse-known-failures.tsv`.
+/// Every fixture the upstream suite actually runs parses with no lexer,
+/// pragma or parser diagnostic at all. No exceptions and no allow-list:
+/// the last two both came from this parser disagreeing with the
+/// reference implementation, and both are closed (#351).
 ///
-/// There *is* an allow-list now, and it is a ratchet rather than an
-/// excuse: each row is an open parser gap (epic R7, #351), a fixture
-/// that fails without a row fails the build, and a row that starts
-/// parsing cleanly fails the build too, so the list can only shrink. The
-/// scope — see this file's module docs — is upstream's own enablement,
-/// extracted from its Java sources, never a list written here.
+/// The scope — see this file's module docs — is upstream's own
+/// enablement, extracted from its Java sources, never a list written
+/// here. A failure is therefore a parser gap against a program upstream
+/// compiles, and the fix is in the parser, not in a row added here.
 #[test]
 fn every_upstream_enabled_fixture_parses_without_diagnostics() {
     let Some(files) = fixtures() else { return };
     let enabled = upstream_enabled_fixtures();
 
     let mut covered = 0usize;
-    let mut failures: Vec<(String, ParseFailure)> = Vec::new();
     let mut rendered: Vec<String> = Vec::new();
     for path in &files {
         let id = fixture_id(path);
@@ -266,72 +255,17 @@ fn every_upstream_enabled_fixture_parses_without_diagnostics() {
         }
         covered += 1;
         let parsed = parse_report(&read(path));
-        if !parsed.diags.is_empty() {
-            failures.push((id.clone(), ParseFailure::from_diagnostics(&parsed.diags)));
+        if !parsed.rendered.is_empty() {
             rendered.push(format!("{id}: {}", parsed.rendered.join(", ")));
         }
     }
 
-    let current = ParseRatchet::from_failures(covered, failures);
-    let path = parse_known_failures_path();
-
-    if std::env::var_os(WRITE_ENV).is_some() {
-        std::fs::write(&path, current.to_tsv(WRITE_COMMAND))
-            .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
-        eprintln!(
-            "{WRITE_ENV} set: wrote {} row(s) over {covered} fixture(s) to {}",
-            current.entries.len(),
-            path.display(),
-        );
-        return;
-    }
-
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "reading {}: {e}. The parser ratchet's known-failures file is missing, and a \
-             missing file is not an empty allow-list. Restore it, or rewrite it with \
-             `{WRITE_COMMAND}` once you have checked that every row is a gap you mean to \
-             track.",
-            path.display(),
-        )
-    });
-    let committed =
-        ParseRatchet::parse(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
-    committed
-        .check_gateable(&path)
-        .unwrap_or_else(|e| panic!("{e}"));
-    committed
-        .check_comparable(covered)
-        .unwrap_or_else(|e| panic!("{e}"));
-
-    let diff = diff_parse_ratchet(&current, &committed);
-    let new_ids: Vec<String> = diff
-        .new_ids
-        .iter()
-        .map(|(id, row)| format!("{id}: {}", row.describe()))
-        .collect();
-    let changed: Vec<String> = diff
-        .changed_detail
-        .iter()
-        .map(|(id, was, now)| format!("{id}\n  was: {was}\n  now: {now}"))
-        .collect();
-
     assert!(
-        !diff.is_regression(),
-        "the parser gate over the {covered} upstream-enabled fixture(s) moved.\n\n\
-         NEWLY FAILING ({} — a parser regression: fix it, do not add a row):\n{}\n\n\
-         NOW CLEAN ({} — the gap is closed, so DELETE the row from {}):\n{}\n\n\
-         ROW NO LONGER DESCRIBES THE FAILURE ({} — still broken, diagnostics moved; \
-         update the row):\n{}\n\n\
-         Full diagnostics for every failing fixture in this run:\n\n{}\n\n\
-         Rewrite the file with `{WRITE_COMMAND}`.",
-        new_ids.len(),
-        summarize(&new_ids),
-        diff.fixed_ids.len(),
-        path.display(),
-        summarize(&diff.fixed_ids),
-        changed.len(),
-        summarize(&changed),
+        rendered.is_empty(),
+        "{} of the {covered} upstream-enabled fixture(s) do not parse cleanly. Each one is a \
+         program the reference compiler accepts, so each is a parser gap to close (epic R7, \
+         #351) — not a row to add to an allow-list:\n\n{}",
+        rendered.len(),
         summarize(&rendered),
     );
 }

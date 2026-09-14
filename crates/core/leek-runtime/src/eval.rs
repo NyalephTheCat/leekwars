@@ -610,7 +610,13 @@ pub fn deep_clone(v: &Value) -> Value {
         Value::Map(m) => {
             let mut out = MapData::new();
             for (k, val) in &m.borrow().entries {
-                out.insert_canonical(MapKey::of(k), deep_clone(k), deep_clone(val));
+                // Canonicalise the *copy*, not the original: a
+                // composite key is keyed by identity, and the copy is
+                // a different object. Keying the clone under the
+                // original's address would index an entry nothing in
+                // the new map can find.
+                let copied_key = deep_clone(k);
+                out.insert_canonical(MapKey::of(&copied_key), copied_key, deep_clone(val));
             }
             Value::Map(Rc::new(RefCell::new(out)))
         }
