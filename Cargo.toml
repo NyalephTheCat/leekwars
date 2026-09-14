@@ -26,8 +26,7 @@ members = [
     "crates/middle/leek-charge",
     "crates/middle/leek-complexity",
     "crates/db/leek-pipeline",
-    "crates/db/leek-recipes",
-    "crates/db/leek-driver",
+    "crates/db/leek-session",
     "crates/backends/leek-backend-java",
     "crates/backends/leek-backend-leekscript",
     "crates/backends/leek-backend-native",
@@ -87,8 +86,7 @@ leek-mir          = { path = "crates/middle/leek-mir" }
 leek-charge       = { path = "crates/middle/leek-charge" }
 leek-complexity   = { path = "crates/middle/leek-complexity" }
 leek-pipeline     = { path = "crates/db/leek-pipeline" }
-leek-recipes      = { path = "crates/db/leek-recipes" }
-leek-driver       = { path = "crates/db/leek-driver" }
+leek-session      = { path = "crates/db/leek-session" }
 leek-backend-java = { path = "crates/backends/leek-backend-java" }
 leek-backend-leekscript = { path = "crates/backends/leek-backend-leekscript" }
 leek-backend-native = { path = "crates/backends/leek-backend-native" }

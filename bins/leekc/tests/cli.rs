@@ -204,7 +204,7 @@ fn denying_a_warning_code_turns_a_clean_run_into_a_failure() {
 
 // ---- include-using inputs ----
 //
-// `leekc` plans the name-resolving emits through `leek_driver`, the same
+// `leekc` plans the name-resolving emits through `leek_session`, the same
 // entry point `miku` uses, so a single file's `include("helper")` is
 // resolved from disk instead of being inert (DRIVER-02).
 

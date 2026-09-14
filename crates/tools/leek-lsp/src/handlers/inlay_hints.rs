@@ -16,7 +16,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
         return Some(Vec::new());
     }
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::TypeChecked)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
 
     let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>()?;
     let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;

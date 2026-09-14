@@ -1,6 +1,6 @@
 //! Recipe planning over a synthetic artifact graph.
 //!
-//! The real recipes (`leek-recipes`) only exercise a handful of graph
+//! The real recipes (`leek-session`) only exercise a handful of graph
 //! shapes; these fakes pin the planner's contract directly — ordering,
 //! deduplication, multi-artifact producers, `Optional` gating, and cycle
 //! reporting — so a planner change that silently drops or duplicates a

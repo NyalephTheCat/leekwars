@@ -1647,9 +1647,9 @@ fn run() -> Result<serde_json::Value> {
     // The fight functions must resolve at compile time, same as `miku fight`,
     // and the fight constants must fold to literals like the harness's
     // `leekc --fold-constants` invocation that generated the goldens.
-    leek_recipes::load_and_register_libraries(["leekwars"])
+    leek_session::load_and_register_libraries(["leekwars"])
         .map_err(|e| anyhow!("registering the leekwars library: {e}"))?;
-    leek_recipes::activate_leekwars_constant_folding();
+    leek_session::activate_leekwars_constant_folding();
 
     let mut state = State::new(seed);
     state.add_entity(0, harness_leek(1, "AI_1"));

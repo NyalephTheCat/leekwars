@@ -2,7 +2,7 @@
 
 use leek_diagnostics::{Diagnostic as LeekDiagnostic, Severity};
 use leek_pipeline::salsa::SourceFile;
-use leek_recipes::Target;
+use leek_session::Target;
 use leek_span::SourceId;
 use tower_lsp::lsp_types as lsp;
 

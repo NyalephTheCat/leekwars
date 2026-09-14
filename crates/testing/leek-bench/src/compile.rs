@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::{Input, Run, TimingSink};
-use leek_recipes::{OptLevel, RecipeParams, Target};
+use leek_session::{OptLevel, RecipeParams, Target};
 
 /// HIR plus per-step prepare timings from a standard compile pipeline.
 pub struct CompiledHir {
@@ -22,7 +22,7 @@ pub fn compile_hir(input: Input) -> Result<(CompiledHir, Run<'static>)> {
     // benchmark measures the pipeline users actually execute, not an
     // unoptimized one.
     let params = RecipeParams::permissive().with_opt(OptLevel::O1);
-    let pipeline = leek_recipes::pipeline_timed(Target::Hir, &params, &sink)
+    let pipeline = leek_session::pipeline_timed(Target::Hir, &params, &sink)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let run = pipeline.run(input);
     let hir = run

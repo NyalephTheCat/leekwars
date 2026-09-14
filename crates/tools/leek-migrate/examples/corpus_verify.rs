@@ -37,7 +37,7 @@ use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_migrate::migrate_text;
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::Version;
 use leek_test_corpus::{TestCase, embedded_manifest, run_on_large_stack};
@@ -76,7 +76,7 @@ fn build(text: &str, version: u8, strict: bool) -> Built {
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
     let pipeline =
-        leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
+        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
     let run = pipeline.run(input);
     let first_error = run
         .diagnostics()

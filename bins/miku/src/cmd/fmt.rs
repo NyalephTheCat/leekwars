@@ -19,7 +19,7 @@ pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     let standalone = args.stdin || !args.paths.is_empty();
     let project = match Project::discover(manifest_path) {
         Ok(project) => {
-            if leek_driver::report_manifest(
+            if leek_session::report_manifest(
                 &project,
                 leek_diagnostics::ColorWhen::Auto,
                 leek_diagnostics::MessageFormat::Human,

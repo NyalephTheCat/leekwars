@@ -15,7 +15,7 @@
 # `pipeline_for` and `file_pipeline` return `anyhow::Result` because they fold
 # together a recipe error, a manifest error and an IO error. Fix: a
 # `DriverError` enum over the three. `reporter_for` is already typed.
-leek-driver -> anyhow: pipeline construction folds three error kinds into one
+leek-session -> anyhow: pipeline construction folds three error kinds into one
 
 # `BackendError` exists but the registry's `emit`/`link` entry points return
 # `anyhow::Result` around it.

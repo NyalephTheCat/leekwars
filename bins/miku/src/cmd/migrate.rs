@@ -33,7 +33,7 @@ use leek_project::Project;
 
 pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(
+    if leek_session::report_manifest(
         &project,
         leek_diagnostics::ColorWhen::Auto,
         leek_diagnostics::MessageFormat::Human,

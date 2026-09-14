@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn file_catalogs_register_their_declared_arities_verbatim() {
         let dir = std::env::temp_dir().join(format!(
-            "leek-recipes-lib-{}-{:?}",
+            "leek-session-recipes-lib-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn a_malformed_library_file_reports_the_offending_line() {
         let dir = std::env::temp_dir().join(format!(
-            "leek-recipes-bad-{}-{:?}",
+            "leek-session-recipes-bad-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

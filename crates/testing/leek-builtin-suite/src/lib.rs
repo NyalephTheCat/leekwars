@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use leek_diagnostics::Severity;
 use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use serde::Deserialize;
 
@@ -154,7 +154,7 @@ fn run_case(case: &Case, file_id: usize) -> Result<Outcome> {
     };
 
     let pipeline =
-        leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
+        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
     let run = pipeline.run(input);
     if let Some(d) = run
         .diagnostics()

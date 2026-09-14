@@ -1,10 +1,10 @@
 use leek_pipeline::{Input, TimingSink};
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 
 fn main() {
     let sink = TimingSink::new();
-    let pipeline = leek_recipes::pipeline_timed(Target::Mir, &RecipeParams::permissive(), &sink)
+    let pipeline = leek_session::pipeline_timed(Target::Mir, &RecipeParams::permissive(), &sink)
         .expect("recipe");
     let _run = pipeline.run(Input {
         source: SourceId::new(1).unwrap(),

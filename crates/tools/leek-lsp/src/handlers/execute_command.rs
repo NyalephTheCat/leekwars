@@ -44,7 +44,7 @@ fn show_complexity(ws: &Workspace, args: &[Json]) -> Option<Json> {
     let fn_name = args.get(1)?.as_str()?;
     let uri = lsp::Url::parse(uri_str).ok()?;
     let _doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_recipes::Target::Complexity)?;
+    let run = crate::pipeline::run(ws, &uri, leek_session::Target::Complexity)?;
     let report = run.get::<ComplexityArtifact>()?;
     let c = report.0.iter().find(|c| c.name == fn_name)?;
     Some(Json::String(format!("{} — ops: {}", c.big_o, c.formula)))
@@ -56,7 +56,7 @@ fn analyze(ws: &Workspace, args: &[Json]) -> Option<Json> {
     let uri_str = args.first()?.as_str()?;
     let uri = lsp::Url::parse(uri_str).ok()?;
     let _doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_recipes::Target::Complexity)?;
+    let run = crate::pipeline::run(ws, &uri, leek_session::Target::Complexity)?;
     let report = run.get::<ComplexityArtifact>()?;
     let entries: Vec<Json> = report
         .0

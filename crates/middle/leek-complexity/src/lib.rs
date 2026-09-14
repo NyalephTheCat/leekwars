@@ -48,7 +48,7 @@
 //!
 //! The analysis is exposed as a [`pipeline`] [`Step`] producing a
 //! [`ComplexityArtifact`], so tools plan it through `leek-pipeline`
-//! / `leek-recipes` (and reuse salsa-cached HIR) instead of calling
+//! / `leek-session` (and reuse salsa-cached HIR) instead of calling
 //! [`analyze_file`] by hand.
 //!
 //! [`leek_builtins`]: ../../leek_builtins/index.html

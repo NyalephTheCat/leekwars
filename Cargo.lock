@@ -993,9 +993,9 @@ dependencies = [
  "leek-parser",
  "leek-pipeline",
  "leek-prelude",
- "leek-recipes",
  "leek-resolver",
  "leek-runtime",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-types",
@@ -1045,7 +1045,7 @@ dependencies = [
  "leek-diagnostics",
  "leek-hir",
  "leek-pipeline",
- "leek-recipes",
+ "leek-session",
  "leek-span",
  "leek-syntax",
 ]
@@ -1060,8 +1060,8 @@ dependencies = [
  "leek-diagnostics",
  "leek-hir",
  "leek-pipeline",
- "leek-recipes",
  "leek-runtime",
+ "leek-session",
  "leek-span",
  "serde",
  "toml",
@@ -1116,17 +1116,16 @@ dependencies = [
  "dap",
  "leek-backend-native",
  "leek-diagnostics",
- "leek-driver",
  "leek-generator",
  "leek-hir",
  "leek-manifest",
  "leek-mir",
  "leek-parser",
  "leek-pipeline",
- "leek-recipes",
  "leek-resolver",
  "leek-runtime",
  "leek-scenario",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-text",
@@ -1151,20 +1150,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
-]
-
-[[package]]
-name = "leek-driver"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "leek-diagnostics",
- "leek-manifest",
- "leek-pipeline",
- "leek-project",
- "leek-recipes",
- "leek-resolver",
- "leek-span",
 ]
 
 [[package]]
@@ -1260,9 +1245,9 @@ dependencies = [
  "leek-hir",
  "leek-parser",
  "leek-pipeline",
- "leek-recipes",
  "leek-resolver",
  "leek-rewrite",
+ "leek-session",
  "leek-span",
  "leek-syntax",
 ]
@@ -1280,9 +1265,9 @@ dependencies = [
  "leek-lint",
  "leek-parser",
  "leek-pipeline",
- "leek-recipes",
  "leek-resolver",
  "leek-rewrite",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-types",
@@ -1323,9 +1308,9 @@ dependencies = [
  "leek-lexer",
  "leek-parser",
  "leek-pipeline",
- "leek-recipes",
  "leek-rewrite",
  "leek-runtime",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-test-corpus",
@@ -1371,7 +1356,7 @@ dependencies = [
  "leek-manifest",
  "leek-mir",
  "leek-project",
- "leek-recipes",
+ "leek-session",
  "leek-span",
  "salsa",
 ]
@@ -1393,26 +1378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "leek-recipes"
-version = "0.0.1"
-dependencies = [
- "leek-complexity",
- "leek-diagnostics",
- "leek-environment",
- "leek-fmt",
- "leek-hir",
- "leek-lexer",
- "leek-lint",
- "leek-mir",
- "leek-parser",
- "leek-pipeline",
- "leek-prelude",
- "leek-resolver",
- "leek-syntax",
- "leek-types",
-]
-
-[[package]]
 name = "leek-resolver"
 version = "0.0.1"
 dependencies = [
@@ -1422,7 +1387,7 @@ dependencies = [
  "leek-lexer",
  "leek-parser",
  "leek-pipeline",
- "leek-recipes",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-types",
@@ -1459,12 +1424,36 @@ dependencies = [
  "leek-generator",
  "leek-hir",
  "leek-pipeline",
- "leek-recipes",
+ "leek-session",
  "leek-span",
  "leek-workpool",
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "leek-session"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "leek-complexity",
+ "leek-diagnostics",
+ "leek-environment",
+ "leek-fmt",
+ "leek-hir",
+ "leek-lexer",
+ "leek-lint",
+ "leek-manifest",
+ "leek-mir",
+ "leek-parser",
+ "leek-pipeline",
+ "leek-prelude",
+ "leek-project",
+ "leek-resolver",
+ "leek-span",
+ "leek-syntax",
+ "leek-types",
 ]
 
 [[package]]
@@ -1508,7 +1497,7 @@ dependencies = [
  "leek-manifest",
  "leek-parser",
  "leek-pipeline",
- "leek-recipes",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-test-cases",
@@ -1529,8 +1518,8 @@ dependencies = [
  "leek-manifest",
  "leek-parser",
  "leek-pipeline",
- "leek-recipes",
  "leek-runtime",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-test-cases",
@@ -1590,7 +1579,6 @@ dependencies = [
  "leek-backend-leekscript",
  "leek-backend-native",
  "leek-diagnostics",
- "leek-driver",
  "leek-environment",
  "leek-fmt",
  "leek-hir",
@@ -1601,8 +1589,8 @@ dependencies = [
  "leek-parser",
  "leek-pipeline",
  "leek-prelude",
- "leek-recipes",
  "leek-resolver",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-types",
@@ -1713,7 +1701,6 @@ dependencies = [
  "leek-backends",
  "leek-complexity",
  "leek-diagnostics",
- "leek-driver",
  "leek-environment",
  "leek-fmt",
  "leek-generator",
@@ -1727,9 +1714,9 @@ dependencies = [
  "leek-parser",
  "leek-pipeline",
  "leek-project",
- "leek-recipes",
  "leek-rewrite",
  "leek-scenario",
+ "leek-session",
  "leek-span",
  "leek-syntax",
  "serde_json",

@@ -19,7 +19,7 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
     // A fight always needs the leek-wars game builtins resolvable at compile
     // time, so register them up front (idempotent — harmless if `--library
     // leekwars` already did). This makes plain `miku fight scenario.toml` work.
-    leek_recipes::load_and_register_libraries(["leekwars"])
+    leek_session::load_and_register_libraries(["leekwars"])
         .map_err(|e| anyhow!("registering the leekwars library: {e}"))?;
 
     // Fights run on bare scenario files too, so a missing `Miku.toml` is not
@@ -30,7 +30,7 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
         None => Project::discover(None).ok(),
     };
     if let Some(project) = &project
-        && leek_driver::report_manifest(
+        && leek_session::report_manifest(
             project,
             leek_diagnostics::ColorWhen::Auto,
             leek_diagnostics::MessageFormat::Human,

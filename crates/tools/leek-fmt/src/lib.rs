@@ -17,6 +17,7 @@
 //! - [`format`] — format a parsed [`GreenNode`].
 //! - [`format_source`] — lex+parse a string then format.
 
+mod comments;
 pub mod doc;
 pub mod equivalence;
 pub mod format;

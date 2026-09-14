@@ -30,7 +30,7 @@ pub(crate) fn run_fight_debug(
     };
 
     // The fight's AIs use the leek-wars builtins; make them resolvable.
-    if let Err(e) = leek_recipes::load_and_register_libraries(["leekwars"]) {
+    if let Err(e) = leek_session::load_and_register_libraries(["leekwars"]) {
         return RunOutcome::failed(format!("registering the leekwars library: {e}"));
     }
 
