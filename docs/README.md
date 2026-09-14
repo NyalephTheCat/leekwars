@@ -7,6 +7,7 @@ Project documentation for the Rust LeekScript toolchain.
 | [`architecture.md`](architecture.md) | Crate layers, the compilation pipeline, the fight simulator, and how the pieces fit together. Start here to find your way around the codebase. |
 | [`grammar.md`](grammar.md) | The formal LeekScript grammar (ECMA-262-inspired notation). |
 | [`semantics.md`](semantics.md) | Front-end semantics: file identity, `include` expansion, version resolution, scope and boundary rules, and the type lattice. |
+| [`lsp.md`](lsp.md) | The language server's design: the workspace and its salsa DB, per-program symbol scoping, threading and panic containment, the diagnostic set, and the logging seam. |
 | [`java-backend.md`](java-backend.md) | The Java backend spec: emission modes, output shape, identifier mangling, the op-cost model, v1 boxing, the parity harness, and the known byte-parity gaps. |
 | [`leekscript-backend.md`](leekscript-backend.md) | The LeekScript source backend: the single-self-contained-file contract, include splicing, one declaration per global, what `Options::version` does, and the equivalence harness. |
 

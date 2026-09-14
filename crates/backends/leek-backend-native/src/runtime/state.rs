@@ -23,9 +23,9 @@ pub fn ops_used() -> u64 {
 
 shim! {
     /// Charge `n` operations. Called from JIT'd code at each MIR charge site
-    /// (matching the interpreter's `charge_ops`). On exceeding the budget it
+    /// (matching upstream's op charging). On exceeding the budget it
     /// records `TOO_MUCH_OPERATIONS`; the JIT'd code can't unwind, so loops poll
-    /// [`op_budget_exceeded`] at their back-edges to stop promptly.
+    /// `leek_op_budget_exceeded` at their back-edges to stop promptly.
     pub extern "C" fn leek_charge_ops(n: i64) {
         let next = OP_COUNT.with(|c| {
             let v = c.get().saturating_add(n.max(0) as u64);
@@ -172,7 +172,7 @@ pub(super) fn charge_eq(l: &Value, r: &Value) {
 
 /// Charge a builtin's runtime op cost (`builtin_op_cost`, which depends on the
 /// argument values — e.g. batch ops over a collection's length). Called by the
-/// `leek_builtinN` shims before dispatch, mirroring the interpreter's
+/// `leek_builtinN` shims before dispatch, mirroring upstream's
 /// `run_builtin`, so a `.ops(N)` case over a builtin matches.
 ///
 /// Returns `true` if the run must stop (the budget is now exhausted, or an
@@ -180,7 +180,7 @@ pub(super) fn charge_eq(l: &Value, r: &Value) {
 /// dispatch (returning null) so a single huge-allocation builtin
 /// (`fill(a, 1, 1e9)`, `range(0, huge)`) can't exhaust host memory after the
 /// budget is already spent, and no builtin acts after an error. Mirrors the
-/// interpreter's `run_builtin`, which returns the over-budget error *before*
+/// upstream, which returns the over-budget error *before*
 /// calling the builtin.
 #[must_use]
 pub(super) fn charge_builtin_ops(name: &str, args: &[Value], version: i64) -> bool {
@@ -272,7 +272,7 @@ pub fn clear_globals() {
     GLOBALS.with(|g| g.borrow_mut().clear());
     STATIC_FIELDS.with(|g| g.borrow_mut().clear());
     // Reseed the PRNG so each run starts from the same sequence the
-    // interpreter does (deterministic, reproducible).
+    // upstream does (deterministic, reproducible).
     NATIVE_RNG.with(|r| *r.borrow_mut() = Rng::new());
 }
 

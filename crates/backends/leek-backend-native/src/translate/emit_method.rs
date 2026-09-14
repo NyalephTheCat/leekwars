@@ -36,7 +36,7 @@ impl Tx<'_, '_> {
             return Err(self.unsupported("new: unknown class"));
         };
         // `class A extends Array {}` (or Map/Set/Object) — upstream (and the
-        // interpreter's `construct_user_class`) collapses the user class to the
+        // upstream's user-class construction) collapses the user class to the
         // underlying builtin constructor, so `new A()` is a plain `[]`,
         // `push(new A(), 12)` works, and `instanceof A` is false in BOTH
         // backends. Mirror that exactly. A non-collection builtin ancestor still
@@ -53,7 +53,7 @@ impl Tx<'_, '_> {
             return Err(self.unsupported("new: class extends a non-collection builtin"));
         }
         // A user `string()` method is a `Display`/`toString` override applied to
-        // the *top-level* program result (mirroring the interpreter's
+        // the *top-level* program result (mirroring upstream's
         // `invoke_instance_string_method`). The instance constructs normally;
         // `define_program` force-compiles + registers `string()` for every
         // constructed class so the post-run transform can invoke it. Nested
@@ -71,7 +71,7 @@ impl Tx<'_, '_> {
             .iconst(types::I64, i64::from(self.lang.version));
 
         // Initialize every declared field (in flattened slot order, matching
-        // the interpreter's parent-first order), so even initializer-less
+        // upstream's parent-first order), so even initializer-less
         // fields exist (as null) — `Display` and `keys()` see them all.
         for fs in &c.field_layout {
             let key = self.const_string(&fs.name)?;
@@ -145,7 +145,7 @@ impl Tx<'_, '_> {
                 // An omitted trailing user param is filled from its
                 // self-contained constant default (`constructor(x = 2)`); a
                 // param with no default binds to null — matching the
-                // interpreter — provided the slot is a boxed `Ref` (a declared
+                // upstream — provided the slot is a boxed `Ref` (a declared
                 // scalar param can't hold null, so that still skips).
                 let mut cl_args = Vec::with_capacity(sig.params.len());
                 cl_args.push(self.coerce(this, ValTy::Ref, sig.params[0])?);
@@ -183,7 +183,7 @@ impl Tx<'_, '_> {
     /// `true` if a write to field `name` on `base` must silently no-op:
     /// the field is `final` AND the write comes from outside the receiver's
     /// class. Inside the class (its constructor/methods) `final` fields are
-    /// writable — matching the interpreter's `caller_class_def() != class`.
+    /// writable — matching upstream's caller-class comparison.
     pub(super) fn is_final_field(&self, base: LocalId, name: &str) -> bool {
         let Some(cls) = receiver_class(
             self.mir_locals,
@@ -258,7 +258,7 @@ impl Tx<'_, '_> {
     }
 
     /// Whether a member owned by `owner` with visibility `vis` is reachable
-    /// from the function being compiled. Mirrors the interpreter's
+    /// from the function being compiled. Mirrors upstream's
     /// `member_visible`: public always; private only from the same class;
     /// protected from the class or a descendant.
     pub(super) fn method_visible(&self, owner: DefId, vis: Visibility) -> bool {
@@ -293,7 +293,7 @@ impl Tx<'_, '_> {
     /// fall back to builtin-method sugar).
     /// `C.staticMethod(args)` — the receiver is a class reference. Resolve
     /// the static method and call it as a free function (no `this`). Mirrors
-    /// the interpreter's `dispatch_method_call` on a `Value::ClassRef`.
+    /// upstream's method dispatch on a `Value::ClassRef`.
     pub(super) fn try_static_method(
         &mut self,
         receiver: LocalId,
@@ -306,7 +306,7 @@ impl Tx<'_, '_> {
         let Some(idx) = resolve_static_method(self.program, &cls, method, args.len()) else {
             // Not a static method — but it may be a static *field* holding a
             // callable (`static a = -> 12` then `A.a()`): read the field and
-            // invoke the value indirectly (matching the interpreter, which
+            // invoke the value indirectly (matching upstream, which
             // reads the static member then `call_value`s it). The field's
             // initializer (+ lambda) is made reachable by
             // `static_field_accesses` recognizing this call shape.
@@ -417,7 +417,7 @@ impl Tx<'_, '_> {
             // Unknown receiver class. If `method` is a (non-builtin) user method
             // of some class, dispatch dynamically on the receiver's RUNTIME class
             // via `leek_call_method` (instance method else builtin) — mirroring
-            // the interpreter, and matching `dynamic_method_targets`' seeding.
+            // upstream, and matching `dynamic_method_targets`' seeding.
             if !leek_runtime::is_known_builtin(method)
                 && prog
                     .classes
@@ -446,7 +446,7 @@ impl Tx<'_, '_> {
             // No method by that name. If the class has a data *field* with
             // that name, `obj.field(args)` reads the field and invokes its
             // value (a stored function/lambda/bound method) — matching the
-            // interpreter's `dispatch_method_call`, which falls back to a field
+            // upstream's method dispatch, which falls back to a field
             // read + `call_value`.
             if c.field_slot(method).is_some() {
                 let (callee, ct) = self.field(receiver, method)?;
@@ -461,7 +461,7 @@ impl Tx<'_, '_> {
                 let inst = self.b.ins().call(f, &[callee, ptr, nc, ver]);
                 return Ok(Some((self.b.inst_results(inst)[0], ValTy::Ref)));
             }
-            // No method and no field — the interpreter falls back to
+            // No method and no field — upstream falls back to
             // `run_method` = `run_builtin(method, [receiver, …args])` (a builtin
             // method on the value; an unknown name or a math builtin on a
             // non-number yields null). The generic `call_builtin` shim
@@ -501,7 +501,7 @@ impl Tx<'_, '_> {
             let inst = self.b.ins().call(f, &[bound, ptr, nc, ver]);
             return Ok(Some((self.b.inst_results(inst)[0], ValTy::Ref)));
         }
-        // An inaccessible method call yields null (matching the interpreter's
+        // An inaccessible method call yields null (matching upstream's
         // `dispatch_method_call`), rather than invoking the method.
         if !self.method_visible(vt.owner, vt.visibility) {
             let null = self.imports.rt("leek_box_null")?;
@@ -581,8 +581,8 @@ impl Tx<'_, '_> {
 
     /// `o.field(args)` where `o` is an object literal — read the field and
     /// invoke its value (`leek_call_value`: a callable runs, a non-callable /
-    /// absent field yields null, matching the interpreter's `Object` arm of
-    /// `dispatch_method_call`). Returns `Ok(None)` when `o` isn't a known
+    /// absent field yields null, matching upstream's handling of a method
+    /// call on an `Object`). Returns `Ok(None)` when `o` isn't a known
     /// object local (so the caller falls back to builtin-method sugar).
     pub(super) fn try_object_method(
         &mut self,
@@ -596,8 +596,8 @@ impl Tx<'_, '_> {
         // Only a field the object literal actually DEFINES is an
         // object-field-call. A *missing* field name is a builtin method on the
         // object (`{}.keys()`, `{a:1}.values()`) — fall through to builtin
-        // sugar (the interpreter's `Object` arm does the same: field-then-
-        // `run_method`).
+        // sugar (upstream does the same: look for a field first, then run a
+        // builtin method).
         let Some(field_op) = self
             .object_field_srcs
             .get(&receiver)

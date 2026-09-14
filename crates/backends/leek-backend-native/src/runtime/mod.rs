@@ -1,12 +1,16 @@
 //! C-ABI runtime shims for composite values (arrays first).
 //!
 //! Native code keeps composite — and boxed scalar — values as opaque
-//! `*mut Value` *handles*. A handle is a leaked `Box<Value>`: there's no
-//! garbage collector yet, which is sound for the run-once JIT execution
-//! the corpus runner and `leekc --emit native` perform (the process exits
-//! shortly after). The shims box/unbox scalars and implement array
-//! operations by delegating to the shared `leek_runtime` value logic, so
-//! the semantics match the interpreter.
+//! `*mut Value` *handles*. A handle points into a per-run bump arena
+//! ([`handle`]): there is no garbage collector, and none is needed,
+//! because [`free_run_boxes`] drops every value the run allocated and
+//! resets the arena in one sweep once the result has been read out. The
+//! arena keeps its capacity between runs, so a program run repeatedly —
+//! a fight turn loop — reaches a steady state rather than growing.
+//!
+//! The shims box and unbox scalars and implement composite operations by
+//! delegating to the shared `leek_runtime` value logic, so native and
+//! the Java backend compute the same answers from one implementation.
 //!
 //! # Handle safety contract
 //!
@@ -121,18 +125,18 @@ thread_local! {
     static CONST_STATE: RefCell<BoxState> =
         const { RefCell::new(BoxState { arena: None, boxes: Vec::new() }) };
 
-    /// File-level globals, keyed by name (matching the interpreter), each
+    /// File-level globals, keyed by name (matching upstream), each
     /// holding a value handle. Cleared by [`clear_globals`] before every
     /// JIT run so programs don't see a previous run's globals.
     static GLOBALS: RefCell<HashMap<String, *mut Value>> = RefCell::new(HashMap::new());
 
     /// The program's PRNG — ONE generator persisted across the whole run
-    /// (like the interpreter's `self.rng`), so successive `rand`/`randInt`
+    /// (one RNG per run, as upstream has), so successive `rand`/`randInt`
     /// calls advance a single xorshift sequence. (Constructing a fresh
     /// `Rng::new()` per builtin shim, as native used to, reset the
     /// sequence on every call.) Default-seeded and reset per run in
-    /// [`clear_globals`]; the same seed + sequence as the interpreter, so
-    /// native reproduces the interpreter's RNG-dependent results exactly.
+    /// [`clear_globals`]; the same seed + sequence as upstream, so
+    /// native reproduces upstream's RNG-dependent results exactly.
     static NATIVE_RNG: RefCell<Rng> = RefCell::new(Rng::new());
 
     /// Static-field storage, keyed by `(owning-class def_id, field name)`,
@@ -162,7 +166,7 @@ thread_local! {
     /// Per-class 0-arg `string()` display override: class `DefId` raw → the
     /// method's `program.functions` index (uniform-ABI, in `LAMBDA_FNS`). When
     /// the *top-level* program result is an instance of such a class, the result
-    /// goes through `string()` (mirroring the interpreter's
+    /// goes through `string()` (mirroring upstream's
     /// `invoke_instance_string_method`). Only constructed classes get one.
     static CLASS_STRING_METHOD: RefCell<HashMap<u32, usize>> = RefCell::new(HashMap::new());
 
@@ -206,19 +210,19 @@ thread_local! {
     /// inside a small thread stack.
     static STACK_FLOOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
-    /// Whether the current run uses strict typing. Mirrors the interpreter's
+    /// Whether the current run uses strict typing. Mirrors upstream's
     /// `strict` flag, which some runtime-fault rules depend on (e.g. an
     /// out-of-bounds array write only errors under v4 *strict*).
     static STRICT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
     /// Operations charged during the current run. The JIT'd code calls
-    /// [`leek_charge_ops`] at the same MIR sites the interpreter charges, so
+    /// [`leek_charge_ops`] at the same MIR sites upstream charges, so
     /// the two backends produce identical op counts. Read after `main` returns.
     static OP_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 
     /// Operation budget for the current run. When [`OP_COUNT`] exceeds it,
     /// `leek_charge_ops` records `TOO_MUCH_OPERATIONS` (mirroring the
-    /// interpreter's `charge_ops`). `u64::MAX` ≈ unlimited (for op-count
+    /// upstream's op charging). `u64::MAX` ≈ unlimited (for op-count
     /// verification of small programs that must run to completion).
     static OP_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
 }
@@ -346,8 +350,9 @@ pub fn take_const_arena() -> ConstArena {
 }
 
 /// Read the `Value` behind a handle by cloning it, WITHOUT freeing the box.
-/// The box stays owned by the per-run [`BOXES`] registry and is reclaimed in a
-/// single sweep by [`free_run_boxes`] at run end — so handles are never freed
+/// The box stays owned by the per-run registry in [`BOX_STATE`] and is
+/// reclaimed in a single sweep by [`free_run_boxes`] at run end — so handles
+/// are never freed
 /// at the read site, which keeps box ownership in exactly one place and makes a
 /// double-free impossible. Used at the JIT boundary to read the program's
 /// result and at each lambda-callback return.
@@ -378,7 +383,8 @@ pub(crate) fn arena_allocated_bytes() -> usize {
 /// result `Value` and anything reachable from it (held by its own `Rc` clones)
 /// survives.
 ///
-/// Each handle's storage lives in the [`ARENA`]; bumpalo doesn't run
+/// Each handle's storage lives in the bump arena held by [`BOX_STATE`];
+/// bumpalo doesn't run
 /// destructors, so we `drop_in_place` each value exactly once here (releasing
 /// the `Rc`-backed array/map/string storage it holds — no other code frees a
 /// handle, so there is no double-free), then `reset` the arena to reclaim all

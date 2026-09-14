@@ -166,11 +166,16 @@ pub fn compile_object(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtif
 /// binary. Returns a human description of the first such construct, or `None`.
 ///
 /// Two distinct blockers, both rooted in the native backend being JIT-first:
-/// 1. **Compile-time pointer baking** — string literals and other constant
-///    `Value`s are boxed in the *compiler* process and the heap pointer is
-///    embedded in the code as an absolute immediate. Valid in-process (JIT),
-///    but a dangling pointer in a separate AOT process. (Scalar/`bool`/`real`
-///    constants and runtime-built int/real arrays are fine — no baked handle.)
+/// 1. **Compile-time pointer baking** — a constant `Value` boxed in the
+///    *compiler* process, whose heap pointer is embedded in the code as an
+///    absolute immediate. Valid in-process (JIT), a dangling pointer in a
+///    separate AOT process. What still bakes one: a builtin used as a value
+///    (`PI`, `var f = abs`), a lambda's captures, and class handles.
+///
+///    String and null literals used to be in that list and are not any more:
+///    they are materialized in-binary at runtime via `Tx::const_string`, so
+///    they carry no compiler-process pointer. Scalar / `bool` / `real`
+///    constants and runtime-built int/real arrays never did.
 /// 2. **Post-finalize dispatch tables** — lambda/method addresses and class
 ///    metadata the JIT installs after finalize. The AOT metadata machinery
 ///    ([`crate::aot_meta`]) can reinstall the *tables*, but the functions and
@@ -232,8 +237,10 @@ pub fn compile_to_executable(
         ));
     }
 
-    // Reject constructs that would bake a compiler-process heap pointer (strings,
-    // lambdas, classes, …) into the standalone binary — they segfault at runtime.
+    // Reject constructs that would bake a compiler-process heap pointer
+    // (lambdas, classes, builtins used as values, …) into the standalone binary
+    // — they segfault at runtime. String and null literals are *not* among them
+    // any more: `Tx::const_string` materializes them in-binary.
     // See [`aot_unsupported_reason`]. (The dispatch-table metadata below is in
     // place for when the backend stops baking pointers; today it only ever
     // carries empty tables for the AOT-able subset.)

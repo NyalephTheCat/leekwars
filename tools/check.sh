@@ -11,6 +11,12 @@
 #   touch the compiler.
 #
 # Notes:
+#   * The clippy and test steps pass `--locked`, exactly as ci.yml does. It is
+#     the difference between meeting lockfile drift here, where the fix is one
+#     `cargo update` you can review, and meeting it in CI on a pull request
+#     whose diff does not explain it. If a step fails with "the lock file needs
+#     to be updated", a dependency moved: update Cargo.lock on purpose and
+#     commit it with the change that needed it.
 #   * `cargo clippy --workspace --all-targets` must be completely quiet — the
 #     workspace denies warnings here via `-D warnings`. The leek-test-corpus
 #     build script now prints its extraction count on plain stdout, which cargo
@@ -71,7 +77,7 @@ step "fight constant drift (tools/game-builtin-extract.sh --check)"
 tools/game-builtin-extract.sh --check
 
 step "cargo clippy --workspace --all-targets (-D warnings)"
-cargo clippy --workspace --all-targets --quiet -- -D warnings
+cargo clippy --workspace --all-targets --locked --quiet -- -D warnings
 
 # Fingerprint the whole tracked snapshot directory so we can prove the test
 # run left every file in it alone — the reproducible .diff/SUMMARY.txt goldens
@@ -97,10 +103,10 @@ fi
 
 if (( FULL )); then
   step "cargo test --workspace (full, incl. leek-test-corpus upstream_suite — slow)"
-  cargo test --workspace --quiet
+  cargo test --workspace --locked --quiet
 else
   step "cargo test --workspace (excluding leek-test-corpus; use --full to include)"
-  cargo test --workspace --exclude leek-test-corpus --quiet
+  cargo test --workspace --exclude leek-test-corpus --locked --quiet
 fi
 
 # Running the suite must be side-effect free: the java-backend tests compare

@@ -51,7 +51,7 @@ impl Tx<'_, '_> {
                 // the call site is a runtime decision, so defer to the
                 // `leek_call_ref_or_builtin` shim: it calls the global's value
                 // if assigned, else dispatches the builtin — matching the
-                // interpreter's resolution order. (Such globals are referenced
+                // upstream's resolution order. (Such globals are referenced
                 // via `Global`/`GlobalRef` places, not always in
                 // `program.globals`.)
                 if program_writes_global(self.program, name) {
@@ -246,8 +246,8 @@ impl Tx<'_, '_> {
         } else if leek_runtime::builtin_class_name(name).is_some() {
             // A bare builtin-class name called as a function is constructor
             // sugar (`Array(1, 2)` == `[1, 2]`, `Map()` == `[:]`), exactly
-            // mirroring the interpreter's `Callee::Builtin` →
-            // `construct_builtin_class` path.
+            // mirroring upstream's builtin-class constructor path
+            // (`leek_runtime::construct_builtin_class` here).
             let name_h = self.const_string(name)?;
             let (ptr, n) = self.build_ref_array(args)?;
             let f = self.imports.rt("leek_construct_builtin")?;
@@ -483,7 +483,7 @@ impl Tx<'_, '_> {
     /// Emit a *fresh* copy of a compile-time-folded composite default value.
     /// The value is boxed once into a leaked handle (like a string literal);
     /// each call deep-clones it so callees that mutate the default don't alias
-    /// across calls — matching the interpreter's per-call default
+    /// across calls — matching upstream's per-call default
     /// re-evaluation. (`leek_clone_v1` is the deep-clone shim; despite the
     /// name it clones in every version.)
     pub(super) fn fresh_composite_default(
@@ -601,7 +601,7 @@ impl Tx<'_, '_> {
     }
 
     /// `min` / `max` of two scalars: both-int stays int, any-real
-    /// promotes to real (matching the interpreter's `min_max_pair`).
+    /// promotes to real (matching `leek_runtime`'s `min_max_pair`).
     pub(super) fn min_max(
         &mut self,
         want_min: bool,
@@ -614,7 +614,7 @@ impl Tx<'_, '_> {
         let (b, bt) = self.operand(&args[1])?;
         // A dynamic (boxed) operand routes through the shared builtin
         // catalog (`call_builtin("min"/"max", …)`), which handles mixed /
-        // non-numeric values exactly like the interpreter.
+        // non-numeric values exactly like upstream.
         if at == ValTy::Ref || bt == ValTy::Ref {
             return self.generic_builtin(if want_min { "min" } else { "max" }, args);
         }
@@ -666,7 +666,7 @@ impl Tx<'_, '_> {
     }
 
     /// `push(arr, elem)` — append in place. Returns `null` (a handle), per
-    /// the interpreter.
+    /// upstream.
     pub(super) fn push_call(&mut self, args: &[Operand]) -> Result<(Value, ValTy), NativeError> {
         if args.len() != 2 {
             return Err(self.unsupported("push: expected 2 args"));

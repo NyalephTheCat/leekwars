@@ -1,21 +1,91 @@
 //! Native backend: MIR → Cranelift IR → machine code.
 //!
-//! First slice: JIT-compiles the scalar (integer / boolean) +
-//! control-flow subset of MIR and runs it in-process. Unsupported
-//! constructs surface as [`NativeError::Unsupported`] so the corpus
-//! runner can skip them while coverage grows.
+//! The JIT is the execution path for `miku run` / `miku test` and
+//! `leekc --emit run`, and it covers most of the language: arithmetic and
+//! control flow, globals, strings, arrays, maps, sets and intervals,
+//! classes and methods, lambdas and first-class functions. What it still
+//! cannot translate surfaces as [`NativeErrorKind::Unsupported`] —
+//! carrying the construct's name and span — rather than being dropped,
+//! so the corpus runner can skip and account for exactly those cases.
+//!
+//! # The value model
+//!
+//! Two representations, chosen per local:
+//!
+//! * **Unboxed** — a local whose type is statically known to be
+//!   `integer`, `real` or `boolean` lives in a Cranelift register or
+//!   stack slot as a machine `i64`/`f64`. No allocation, no shim call:
+//!   `n - 1` is an `isub`.
+//! * **A handle** — everything else is a `*mut leek_runtime::Value`
+//!   carried as an `i64`. `ValTy::Ref` is the universal fallback: any
+//!   value can be a handle, so translation coerces to one wherever a
+//!   static kind runs out.
+//!
+//! Handles are bump-allocated from a per-run arena and reclaimed in one
+//! sweep at run end; the `runtime` module owns the allocation and the
+//! safety contract that governs passing them across the ABI.
+//!
+//! # The runtime ABI
+//!
+//! Composite operations are not open-coded. The generated code calls
+//! the `leek_*` C-ABI shims of the `runtime` module, which unbox their
+//! arguments and delegate to `leek-runtime` — the same value semantics
+//! the Java backend is checked against — so there is one implementation
+//! of what `+` means, not one per backend.
+//!
+//! Whatever cannot be resolved at compile time is resolved through
+//! per-run tables the compiler installs before `main` runs: globals,
+//! class parents and constructors, method resolution, static fields, the
+//! seeded RNG. Dynamic dispatch (`expr.method()` on an unknown class,
+//! calling a value) is a lookup in those.
+//!
+//! # Operation charging
+//!
+//! Leekscript programs run against an operation budget. The generated
+//! code charges ops at the same MIR sites the reference implementation
+//! does, so counts match and are comparable; loops poll the budget at
+//! their back-edges because JIT'd code cannot unwind. See
+//! [`NativeOptions::op_limit`] and [`ops_used`].
+//!
+//! # Emitting
 //!
 //! Compilation options live in [`NativeOptions`]: optimization level
 //! (debug vs release), the IR verifier, frame-pointer preservation,
 //! DWARF debug info, and the emit mode — run via JIT, dump the
 //! Cranelift IR / disassembly (for inspecting generated code), or
 //! write a relocatable object file.
+//!
+//! [`aot`] links that object into a standalone executable. It supports
+//! less than the JIT does, and for one reason: the JIT may bake a
+//! pointer into compiler-process memory, which is valid in-process and
+//! dangling in a separate program. See [`aot`] for what that rules out.
+//!
+//! # A word this crate's comments use
+//!
+//! **upstream** is the official Java LeekScript implementation. It is the
+//! oracle: where a comment says the generated code matches upstream, that
+//! is a claim the corpus suite checks against upstream's own expectations.
+//!
+//! Comments here used to say "the interpreter" instead, meaning
+//! `leek-backend-interp` — a Rust interpreter that mirrored upstream and
+//! was removed in fd2d97e once the JIT became the execution path. The
+//! value logic it shared now lives in `leek-runtime`, which both this
+//! backend and the Java backend call, so a comment naming `leek-runtime`
+//! is pointing at code in this workspace and one naming upstream is
+//! pointing at the reference implementation.
 
 // Printing is an API decision in a library, not a convenience: a crate that
 // writes to the terminal behind its caller's back is unusable from a language
 // server or a test harness. Every print below is either the tool's *output*
 // or a justified exception, and says which.
 #![warn(clippy::print_stdout, clippy::print_stderr)]
+// A doc link to an item that does not exist is worse than no link: it reads as
+// a pointer to somewhere the reader can go and look. This crate accumulated
+// several — to `BOXES` and `ARENA`, which never existed, and to
+// `NativeError::Unsupported`, which is a variant of `NativeErrorKind`. Note
+// that `warn` is as far as this goes on its own: nothing in CI builds docs, so
+// these surface to whoever runs `cargo doc`, not to the gate.
+#![warn(rustdoc::broken_intra_doc_links)]
 // This crate inherits the workspace lint table (see Cargo.toml). Its Cranelift
 // JIT path transmutes and calls finalized function pointers, which the
 // workspace's `unsafe_code = "deny"` would otherwise block, so re-allow it
@@ -447,7 +517,7 @@ impl CompiledProgram {
     /// single-shot equivalent.
     ///
     /// # Errors
-    /// [`NativeError::Runtime`] if the program faulted or exhausted its op
+    /// [`NativeErrorKind::Runtime`] if the program faulted or exhausted its op
     /// budget (`opts.op_limit`, armed here — it is not part of the compile).
     pub fn run(&self, opts: &NativeOptions) -> Result<Value, NativeError> {
         self.run_entry(opts, JitEntry::Main)
@@ -478,16 +548,17 @@ impl CompiledProgram {
         // Arm the runtime-fault channel: shims (e.g. a v4-strict OOB array
         // write) record a fault here instead of unwinding; we surface it
         // after `main` returns. `set_strict` lets those rules match the
-        // interpreter's strict-gated behavior.
+        // upstream's strict-gated behavior.
         runtime::reset_runtime_error();
         runtime::set_strict(opts.strict);
         // Set the value-display version BEFORE running, so version-specific
         // string conversions during execution (e.g. a real's `.` vs `,`
         // decimal separator in v1) and the caller's final `value.to_string()`
-        // both format correctly. (Was previously an interpreter side effect.)
+        // both format correctly. (Was previously a side effect of the interpreter
+        // backend removed in fd2d97e.)
         leek_runtime::DISPLAY_VERSION.with(|c| c.set(opts.version));
         // Arm the op counter + budget for this run. The JIT'd body charges
-        // ops at the same MIR sites the interpreter does (so counts match);
+        // ops at the same MIR sites upstream does (so counts match);
         // `ops_used()` reads the total after `main` returns.
         runtime::reset_ops(opts.op_limit);
         // Arm the recursion guard: frames start at zero for this run, and
@@ -520,7 +591,7 @@ impl CompiledProgram {
                 // A composite / boxed result: the function returns a
                 // handle; recover the owned `Value` (freeing the box). A
                 // top-level instance whose class declares `string()` is routed
-                // through it (matching the interpreter's display).
+                // through it (matching upstream's display).
                 ValTy::Ref => {
                     // SAFETY: see above.
                     let f = unsafe {
@@ -592,8 +663,9 @@ pub fn reset_jit_compiles() {
 /// the produced code depends on, and therefore which ones a cache must key on.
 ///
 /// # Errors
-/// [`NativeError::Unsupported`] if the program uses a construct outside the
-/// native subset, [`NativeError::Compile`] if MIR lowering or Cranelift fails.
+/// [`NativeErrorKind::Unsupported`] if the program uses a construct outside
+/// the native subset, [`NativeErrorKind::Compile`] if MIR lowering or
+/// Cranelift fails.
 pub fn compile_program(
     hir: &HirFile,
     opts: &NativeOptions,
@@ -743,10 +815,6 @@ fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProg
     })
 }
 
-/// Declare and define `main` plus every user function reachable from it
-/// in `module`, returning `main`'s `FuncId` and result kind. Bails (so the
-/// whole program skips) if any reachable function falls outside the scalar
-/// subset.
 /// Map each *bodiless* function's HIR `DefId` to the runtime builtin to dispatch
 /// when it's called (honoring a `@native-backend:` directive's leading
 /// identifier, else the function's own name).

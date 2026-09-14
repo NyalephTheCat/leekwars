@@ -19,7 +19,7 @@ use std::rc::Rc;
 shim! {
     /// `C.staticField` read — returns the stored handle, lazily running the
     /// field's initialiser on first access (a null sentinel is stored first to
-    /// break self-referential init cycles). Mirrors the interpreter's lazy
+    /// break self-referential init cycles). Mirrors upstream's lazy
     /// static-field initialisation.
     pub extern "C" fn leek_static_get(class_def: i64, name: *mut Value) -> *mut Value {
         let Some(field) = (unsafe { builtin_name(name) }) else {
@@ -59,9 +59,9 @@ shim! {
     }
 }
 
-/// The native string-/index-keyed member read shared by [`leek_value_index`]
+/// The native string-/index-keyed member read shared by `leek_value_index`
 /// (boxed key) and [`read_member`] (`&str` key). Returns the value; the caller
-/// boxes or coerces it. Mirrors the interpreter: a runtime class-ref's
+/// boxes or coerces it. Mirrors upstream: a runtime class-ref's
 /// reflection arrays, an instance's stored field then bound-method fallback,
 /// otherwise the shared `read_index_versioned`.
 pub(super) fn member_by_value(base: &Value, idx: &Value, version: u8) -> Value {
@@ -83,8 +83,8 @@ pub(super) fn member_by_value(base: &Value, idx: &Value, version: u8) -> Value {
                 .collect(),
         )));
     }
-    // `instance['name']` resolves to a stored field first, then (like the
-    // interpreter's `read_index_with_methods`) to a bound method.
+    // `instance['name']` resolves to a stored field first, then (like
+    // upstream's indexed member read) to a bound method.
     if let (Value::Instance(inst), Value::String(name)) = (base, idx) {
         let b = inst.borrow();
         if b.fields.get(name.as_str()).is_none() {
@@ -111,7 +111,7 @@ pub(super) fn member_by_value(base: &Value, idx: &Value, version: u8) -> Value {
 /// path). FAST PATH: an existing instance field needs NO string allocation —
 /// borrow the `&str`, clone the value out. Everything else (method fallback,
 /// object, class-ref reflection, non-composite) builds the boxed `Value::String`
-/// key and uses the exact same [`member_by_value`] logic as [`leek_value_index`],
+/// key and uses the exact same [`member_by_value`] logic as `leek_value_index`,
 /// so the result is byte-identical to the boxed-key path.
 pub(super) fn read_member(base: &Value, name: &str, version: u8) -> Value {
     if let Value::Instance(inst) = base
@@ -169,7 +169,7 @@ unsafe fn member_name<'a>(ptr: *const u8, len: i64) -> &'a str {
 
 shim! {
     /// `obj.field` read with the field name passed UNBOXED (`ptr`/`len`), returning
-    /// a boxed handle — identical to [`leek_value_index`] with a boxed string key,
+    /// a boxed handle — identical to `leek_value_index` with a boxed string key,
     /// minus the per-read `Value::String` allocation for the key (and skipping it
     /// entirely on the hot instance-field path; see [`read_member`]).
     pub extern "C" fn leek_field_get(
@@ -263,7 +263,7 @@ shim! {
     }
 }
 
-/// Shared `base[idx] = value` writeback used by [`leek_value_set_index`] (boxed
+/// Shared `base[idx] = value` writeback used by `leek_value_set_index` (boxed
 /// key) and [`leek_field_set`]'s fallback (`&str` key built into a `Value`).
 ///
 /// `idx` is a raw pointer, not a `&Value`, on purpose: `a[a] = x` reaches here
@@ -284,7 +284,7 @@ pub(super) unsafe fn set_member(base: *mut Value, idx: *const Value, value: Valu
     // v4-strict: an out-of-bounds array write is a runtime error
     // (`ARRAY_OUT_OF_BOUND`). Non-strict v4 silently drops the write and
     // v1–v3 promote the array to a sparse map, so the check is gated exactly
-    // like the interpreter's (`exec.rs`). The write below then no-ops on the
+    // like upstream's. The write below then no-ops on the
     // OOB index; `run()` surfaces the recorded error after `main` returns.
     if version >= 4
         && STRICT.with(std::cell::Cell::get)
@@ -318,7 +318,7 @@ shim! {
     /// UNBOXED (`ptr`,`len`). For an instance/object base — the target of `.field`
     /// syntax — writes via `set_field` with the `&str` directly (no `Value::String`
     /// key allocation). Any other base type falls back to the shared [`set_member`]
-    /// (building the boxed key then), identical to [`leek_value_set_index`].
+    /// (building the boxed key then), identical to `leek_value_set_index`.
     pub extern "C" fn leek_field_set(
         base: *mut Value,
         name_ptr: *const u8,
@@ -394,7 +394,7 @@ shim! {
 
 shim! {
     /// Allocate a fresh class instance with no fields set. Reads of unset
-    /// fields return `null` (matching the interpreter's `read_field`), so the
+    /// fields return `null` (matching `leek_runtime`'s `read_field`), so the
     /// emitted `new` only needs to set fields that have initializers. The
     /// field initializers and constructor run as separate emitted calls.
     /// `class_def` is the class's [`ClassId`] raw value; `name_box` is a boxed-string
@@ -414,7 +414,7 @@ shim! {
 
 shim! {
     /// Read a global by name (a null handle → a fresh `null`, matching the
-    /// interpreter's treatment of an unset global).
+    /// upstream's treatment of an unset global).
     pub extern "C" fn leek_global_get(name: *mut Value) -> *mut Value {
         let Some(name) = (unsafe { builtin_name_ref(&name) }) else {
             return handle(Value::Null);
@@ -429,8 +429,13 @@ shim! {
 }
 
 shim! {
-    /// Store a global by name (the handle aliases, matching v4 reference
-    /// semantics; the previous handle is left to leak).
+    /// Store a global by name. The handle aliases rather than being copied,
+    /// matching v4 reference semantics.
+    ///
+    /// The displaced handle is simply dropped from the map: it still belongs
+    /// to the per-run arena, so `free_run_boxes` reclaims it at run end along
+    /// with everything else. Nothing frees it here — freeing at a write site
+    /// is how a handle another local still holds becomes a dangling pointer.
     pub extern "C" fn leek_global_set(name: *mut Value, value: *mut Value) {
         if let Some(name) = unsafe { builtin_name(name) } {
             GLOBALS.with(|g| g.borrow_mut().insert(name, value));

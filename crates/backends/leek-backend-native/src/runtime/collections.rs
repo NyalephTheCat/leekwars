@@ -16,7 +16,7 @@ use std::rc::Rc;
 shim! {
     /// `base[start:end:step]` — slice an array / string / interval. Each bound
     /// is a boxed handle; a `null` handle (absent or null-valued bound) means
-    /// "use the default for that side", matching the interpreter.
+    /// "use the default for that side", matching upstream.
     pub extern "C" fn leek_slice(
         base: *mut Value,
         start: *mut Value,
@@ -209,7 +209,7 @@ shim! {
 
 shim! {
     /// Read `base[idx]` for any indexable value (array / string / map / set /
-    /// object), delegating to the interpreter's `read_index`. `idx` is itself
+    /// object), delegating to `leek_runtime`'s `read_index`. `idx` is itself
     /// a handle (so map string keys work too).
     pub extern "C" fn leek_value_index(base: *mut Value, idx: *mut Value, version: i64) -> *mut Value {
         super::leek_charge_ops(index_read_cost(unsafe { val(&base) }, version));
@@ -284,7 +284,7 @@ shim! {
 
 shim! {
     /// Write `base[idx] = value` for any indexable handle (array / map /
-    /// object), delegating to the interpreter's `set_index`. Both `idx` and
+    /// object), delegating to `leek_runtime`'s `set_index`. Both `idx` and
     /// `value` are handles. If `base` had to morph to hold the write, the new
     /// value is written back into the handle in place.
     pub extern "C" fn leek_value_set_index(
@@ -357,7 +357,7 @@ shim! {
 }
 
 shim! {
-    /// Insert `key → value` into a map, with the interpreter's key
+    /// Insert `key → value` into a map, with `leek_runtime`'s key
     /// canonicalization (so collection keys reduce the same way).
     ///
     /// Charges the legacy per-insert runtime cost for v1–3 (a legacy assoc-array
@@ -439,7 +439,7 @@ shim! {
     /// (a null handle means an unbounded end). `flags` packs inclusivity and
     /// the `Infinity`-forces-real bits: bit0 start-inclusive, bit1
     /// end-inclusive, bit2 start-forces-real, bit3 end-forces-real. Mirrors
-    /// the interpreter's `materialize_interval` (step is ignored, as there).
+    /// upstream's interval materialization (step is ignored, as there).
     pub extern "C" fn leek_interval(start: *mut Value, end: *mut Value, flags: i64) -> *mut Value {
         let bound = |p: *mut Value| -> (Option<f64>, bool) {
             if p.is_null() {

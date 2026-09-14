@@ -71,7 +71,7 @@ pub struct NativeOptions {
     pub version: u8,
     /// Strict typing. In strict mode an untyped `var x = <int>` slot
     /// coerces every later write to the inferred type (so `var a = 10; a
-    /// += 0.5` stays `10`), matching the interpreter's `write_place`.
+    /// += 0.5` stays `10`), matching upstream's typed-slot writes.
     pub strict: bool,
     /// Emit a `leek_dbg_safepoint(offset)` call before every statement so
     /// a debugger can pause at source lines. Off by default (adds a call
@@ -82,8 +82,8 @@ pub struct NativeOptions {
     /// [`crate::game::GameRuntime`] instead of failing with `Unsupported`.
     /// See [`crate::game`].
     pub link_game: bool,
-    /// Operation budget. The JIT'd code charges ops at the same MIR sites the
-    /// interpreter does; exceeding this records `TOO_MUCH_OPERATIONS` (and loop
+    /// Operation budget. The JIT'd code charges ops at the same MIR sites
+    /// upstream does; exceeding this records `TOO_MUCH_OPERATIONS` (and loop
     /// back-edges poll the budget to stop). `u64::MAX` ≈ unlimited — use a high
     /// value to verify op *counts* (program must finish) and a low one to make
     /// a runaway loop fault. Read the charged total with
@@ -91,7 +91,7 @@ pub struct NativeOptions {
     pub op_limit: u64,
     /// Names of top-level zero-arg functions to force-compile as roots even
     /// when nothing in `main` references them, and register so a
-    /// [`Function::User`](leek_runtime::value::Function::User) value can invoke
+    /// [`Function::User`](leek_runtime::Function::User) value can invoke
     /// them through [`crate::run_call`]. This is how the fight generator runs
     /// the `beforeFight()` / `afterFight()` lifecycle hooks: they're never
     /// called from the AI body, so reachability would otherwise prune them.

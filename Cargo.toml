@@ -60,7 +60,7 @@ version       = "0.0.1"
 edition       = "2024"
 rust-version  = "1.94"  # = the rust-toolchain.toml pin; see CONTRIBUTING.md
 license       = "MIT OR Apache-2.0"
-repository    = "https://github.com/chloe/leekscript-rs"
+repository    = "https://github.com/NyalephTheCat/leekwars"
 
 [workspace.dependencies]
 # Internal crates — referenced by other workspace members with `workspace = true`.

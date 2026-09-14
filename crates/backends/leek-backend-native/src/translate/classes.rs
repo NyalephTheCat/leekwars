@@ -46,7 +46,7 @@ pub(super) fn instance_class(decl: &LocalDecl) -> Option<&str> {
 /// Locals proven to hold an object literal (`{f: v}`) — every assignment is a
 /// `Rvalue::Object` or a `Use`/`UseFresh` of an object local (covers `var o =
 /// {…}`, lowered via a temp). Lets `o.field(args)` dispatch as an
-/// object-field-call (read the field, invoke its value) like the interpreter's
+/// object-field-call (read the field, invoke its value) like upstream's
 /// `dispatch_method_call` `Object` arm.
 pub(super) fn object_locals(f: &MirFunction) -> HashSet<LocalId> {
     let mut set: HashSet<LocalId> = HashSet::new();
@@ -271,7 +271,7 @@ pub(super) fn super_locals(f: &MirFunction) -> HashMap<LocalId, (LocalId, String
 }
 
 /// Resolve a *static* method by name (arity-preferring) walking `class_name`
-/// and its parents, mirroring the interpreter's `find_static_method`.
+/// and its parents, mirroring upstream's static-method lookup.
 /// Returns the method's `program.functions` index.
 pub(super) fn resolve_static_method(
     program: &MirProgram,
@@ -305,7 +305,7 @@ pub(super) fn resolve_static_method(
 
 /// Build the value of a class reflective member (`C.fields`, `C.methods`,
 /// `C.static_fields`, `C.static_methods`, `C.constructors`) — all known at
-/// compile time. Walks the class chain child→parent like the interpreter.
+/// compile time. Walks the class chain child→parent like upstream.
 /// Returns `None` for non-reflective members.
 pub(super) fn class_reflect(
     program: &MirProgram,
@@ -599,7 +599,7 @@ pub(super) fn receiver_class<'a>(
 }
 
 /// True if `c` (or an ancestor) extends something that isn't another user
-/// class — i.e. a builtin like `Array`/`Map`. The interpreter collapses
+/// class — i.e. a builtin like `Array`/`Map`. Upstream collapses
 /// `class A extends Array {}` to a real Array; the native backend can't
 /// model that as a plain instance, so such classes skip.
 /// The builtin class name a user class (transitively) extends — `Array` for

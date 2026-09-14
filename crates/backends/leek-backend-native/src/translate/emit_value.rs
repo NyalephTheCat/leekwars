@@ -366,7 +366,7 @@ impl Tx<'_, '_> {
 
         // Arithmetic / comparison involving a dynamically-typed (boxed)
         // operand — e.g. an array element — dispatches at runtime through
-        // the shared `apply_binary`, matching the interpreter exactly.
+        // the shared `leek_runtime` operators, matching upstream exactly.
         if lt == ValTy::Ref || rt == ValTy::Ref {
             let code = self
                 .b
@@ -494,7 +494,7 @@ impl Tx<'_, '_> {
         }
 
         // Bitwise / shift ops are integer-only: a real operand truncates to
-        // an integer (matching the interpreter), so they never take the real
+        // an integer (matching upstream), so they never take the real
         // path even when an operand is typed `real`.
         let bitwise = matches!(
             op,
