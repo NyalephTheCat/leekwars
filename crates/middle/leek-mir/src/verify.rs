@@ -45,10 +45,10 @@
 //! The verifier is pure and allocation-light — one reusable scratch
 //! buffer per function, not one per statement. Callers run it behind a
 //! `debug_assert!` at the lowering boundary to catch malformed IR at
-//! construction rather than as a downstream backend crash; the
-//! [`VerifyMir`](crate::pipeline::VerifyMir) pipeline step runs it in
-//! release builds and reports a [`Diagnostic`](leek_diagnostics::Diagnostic)
-//! instead.
+//! construction rather than as a downstream backend crash;
+//! [`lower_and_optimize`](crate::lower::lower_and_optimize) runs it in
+//! release builds too and reports a
+//! [`Diagnostic`](leek_diagnostics::Diagnostic) instead.
 
 use leek_span::Span;
 
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!(d.code.id(), "E0302");
         assert_eq!(d.severity, leek_diagnostics::Severity::Error);
         // The span is the offending *statement*, not the whole function —
-        // that is what makes the release-mode `VerifyMir` report usable.
+        // that is what makes the release-mode report usable.
         assert_eq!(d.span, at);
         assert!(
             d.message.contains("malformed MIR in `test`"),

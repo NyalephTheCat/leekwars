@@ -59,17 +59,13 @@ impl Step for Lint {
             nursery: self.nursery,
             version: cx.version_byte(),
         };
-        let mut findings = crate::lint_with(hir.0.as_ref(), &opts);
-
-        // Apply `// @allow(LXXXX)` annotation suppression when the
-        // green tree is available. The lint step runs after Parse so
-        // the GreenTreeArtifact is normally present; we only skip
-        // suppression if the pipeline was wired without it.
-        if let Some(green) = cx.get::<GreenTreeArtifact>() {
-            let root = SyntaxNode::new_root(green.0.clone());
-            let allow_map = crate::collect_allows(&root);
-            findings = allow_map.suppress(findings);
-        }
+        // `// @allow(LXXXX)` suppression needs the green tree. The lint
+        // step runs after Parse so the artifact is normally present; a
+        // pipeline wired without it just gets no suppression.
+        let root = cx
+            .get::<GreenTreeArtifact>()
+            .map(|green| SyntaxNode::new_root(green.0.clone()));
+        let findings = crate::lint_file(hir.0.as_ref(), root.as_ref(), &opts);
 
         cx.emit_all(findings.iter().cloned());
         cx.insert(LintFindings(findings));

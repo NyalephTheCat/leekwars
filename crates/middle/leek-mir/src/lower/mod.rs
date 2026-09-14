@@ -39,6 +39,7 @@ use std::collections::HashMap;
 
 use leek_diagnostics::Diagnostic;
 use leek_hir::{DefId, HirFile};
+use leek_pipeline::OptLevel;
 use leek_span::Span;
 use leek_types::Type;
 
@@ -67,12 +68,44 @@ pub fn lower_file(hir: &HirFile) -> (MirProgram, Vec<Diagnostic>) {
     // compiler bug with no user-actionable span, and downgrading it here
     // would let the bad IR reach the backends' unchecked `functions[idx]` /
     // `locals[id.0]` indexing — a worse panic, further from the cause.
-    // Release-mode *reporting* is what `crate::pipeline::VerifyMir` is for.
+    // Release-mode *reporting* is what `lower_and_optimize` is for.
     #[cfg(debug_assertions)]
     if let Err(e) = crate::verify::verify_program(&ctx.program) {
         panic!("{e}");
     }
     (ctx.program, ctx.errors)
+}
+
+/// Lower a HIR file into MIR, run the backend-agnostic passes if `opt`
+/// asks for them, and check the result's structural invariants.
+///
+/// The pure entry point behind [`LowerMir`](crate::pipeline::LowerMir):
+/// everything that step does apart from reading and writing a
+/// [`Context`](leek_pipeline::Context). The returned diagnostics are
+/// [`lower_file`]'s own, plus an `E0302` if the program came out
+/// malformed.
+///
+/// That last check is the release-mode counterpart of the
+/// `debug_assert` inside [`lower_file`]: in a debug build the assert has
+/// already panicked on a malformed program, so the diagnostic is what a
+/// release build reports instead of letting bad IR reach the backends'
+/// unchecked indexing. It runs *after* the optimization passes, so it
+/// covers what those produce too — which is what [`opt`](crate::opt)
+/// asks its callers for.
+pub fn lower_and_optimize(hir: &HirFile, opt: OptLevel) -> (MirProgram, Vec<Diagnostic>) {
+    let (mut program, mut diagnostics) = lower_file(hir);
+    if opt.optimizes() {
+        crate::optimize_program(&mut program);
+    }
+    diagnostics.extend(verify_diagnostic(&program));
+    (program, diagnostics)
+}
+
+/// The `E0302` for a malformed program, or `None` when it verifies.
+fn verify_diagnostic(program: &MirProgram) -> Option<Diagnostic> {
+    crate::verify::verify_program(program)
+        .err()
+        .map(leek_diagnostics::IntoDiagnostic::into_diagnostic)
 }
 
 // ---- Program-level context ----
@@ -161,4 +194,86 @@ pub(crate) struct FnLowerer<'a> {
 pub(crate) struct LoopCtx {
     pub(crate) continue_target: BlockId,
     pub(crate) break_target: BlockId,
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use leek_diagnostics::Diagnostic;
+    use leek_parser::ast::{AstNode, SourceFile};
+    use leek_pipeline::OptLevel;
+    use leek_span::SourceId;
+    use leek_syntax::{SyntaxNode, Version};
+
+    use super::{lower_and_optimize, verify_diagnostic};
+    use crate::ir::{BasicBlock, BlockId, FunctionKind, MirFunction, MirProgram, Terminator};
+
+    fn e0302_count(diags: &[Diagnostic]) -> usize {
+        diags.iter().filter(|d| d.code.id() == "E0302").count()
+    }
+
+    fn hir(src: &str) -> leek_hir::HirFile {
+        let source = SourceId::new(1).unwrap();
+        let parsed = leek_parser::parse(src, source, Version::V4);
+        let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("source file root");
+        let (hir, _) = leek_hir::lower_file_versioned(&ast, source, 4);
+        hir
+    }
+
+    /// A deliberately malformed program: bb0 jumps to a block that does not
+    /// exist. Lowering cannot produce one — its own debug assert fires
+    /// first — so handing a program straight to the verifier is the only way
+    /// to see the release-mode report [`lower_and_optimize`] appends.
+    fn malformed() -> MirProgram {
+        let bad = MirFunction {
+            def_id: None,
+            kind: FunctionKind::Main,
+            name: "main".to_string(),
+            params: Vec::new(),
+            return_ty: leek_types::Type::Void,
+            locals: Vec::new(),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                statements: Vec::new(),
+                statement_spans: Vec::new(),
+                // bb9 does not exist.
+                terminator: Terminator::Goto(BlockId(9)),
+                terminator_span: leek_span::Span::synthetic(),
+            }],
+            entry: BlockId(0),
+            owning_class: None,
+            span: leek_span::Span::synthetic(),
+        };
+        MirProgram {
+            functions: vec![bad],
+            globals: Vec::new(),
+            classes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_malformed_program_is_reported_instead_of_panicking() {
+        let diags: Vec<Diagnostic> = verify_diagnostic(&malformed()).into_iter().collect();
+        assert_eq!(
+            e0302_count(&diags),
+            1,
+            "expected one malformed-MIR diagnostic, got {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("out-of-range block bb9"),
+            "{}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn a_well_formed_program_lowers_and_optimizes_without_a_report() {
+        let file = hir(
+            "class A { real x = 1 int f(n) { for (var i in [1, 2]) { n = n + i } return n } }\n\
+             var g = x -> x + 1\nvar a = new A()\nvar y = g(a.f(2))\n",
+        );
+        for opt in [OptLevel::O0, OptLevel::O1] {
+            let (_program, diags) = lower_and_optimize(&file, opt);
+            assert_eq!(e0302_count(&diags), 0, "{opt:?}: {diags:?}");
+        }
+    }
 }

@@ -22,7 +22,7 @@ leek-recipes     = { workspace = true }
 leek-fmt         = { workspace = true, features = ["salsa"] }
 leek-rewrite     = { workspace = true }
 leek-hir         = { workspace = true, features = ["salsa"] }
-leek-lint        = { workspace = true, features = ["salsa"] }
+leek-lint        = { workspace = true }
 leek-complexity  = { workspace = true, features = ["salsa"] }
 leek-ide         = { workspace = true }
 
