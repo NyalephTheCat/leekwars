@@ -113,6 +113,12 @@ struct Wait {
     ///
     /// [`wake`]: NativeDebugSession::wake
     stopped: bool,
+    /// Set once the session is being torn down — see [`detach`]. Lives under
+    /// the same lock as `stopped` so a stop claimed in the instant before the
+    /// detach is still seen, rather than parking a thread nobody will wake.
+    ///
+    /// [`detach`]: NativeDebugSession::detach
+    detached: bool,
 }
 
 /// One native debug session. Implements [`leek_backend_native::DebugHook`];
@@ -164,7 +170,10 @@ impl NativeDebugSession {
             stop_next: AtomicBool::new(stop_on_entry),
             entry_stop: AtomicBool::new(stop_on_entry),
             step: Mutex::new(Step::None),
-            wait: Mutex::new(Wait { stopped: false }),
+            wait: Mutex::new(Wait {
+                stopped: false,
+                detached: false,
+            }),
             cv: Condvar::new(),
             on_stop,
         }
@@ -224,6 +233,21 @@ impl NativeDebugSession {
             .lock()
             .expect("snapshot lock poisoned")
             .clone()
+    }
+
+    /// Tear the session down: release a parked debuggee and let every later
+    /// safepoint run straight through without announcing a stop.
+    ///
+    /// A `disconnect` sent while the debuggee is parked at a breakpoint would
+    /// otherwise leave its thread on the condvar for the life of the process,
+    /// with the process-global debug hook still installed. Harmless for the
+    /// standalone binary, which exits; fatal for an embedder, and for a test
+    /// binary that runs one session after another.
+    pub(crate) fn detach(&self) {
+        let mut wait = self.wait.lock().expect("debug wait lock poisoned");
+        wait.detached = true;
+        wait.stopped = false;
+        self.cv.notify_all();
     }
 
     /// Release a parked debuggee so it continues running.
@@ -301,7 +325,15 @@ impl NativeDebugSession {
         // `stopped` event with `continue` (or a step) before this thread
         // reaches the condvar; that `wake` clears the flag we just set, so the
         // loop below sees the resume instead of losing it.
-        self.wait.lock().expect("debug wait lock poisoned").stopped = true;
+        {
+            let mut wait = self.wait.lock().expect("debug wait lock poisoned");
+            // A detached session has no client left to answer the stop, and
+            // whoever detached is waiting for this thread to finish.
+            if wait.detached {
+                return;
+            }
+            wait.stopped = true;
+        }
 
         (self.on_stop)(StopInfo {
             line,

@@ -6,8 +6,11 @@
 //! event that follows a stop is emitted by the controller (from the debuggee
 //! thread), so these handlers only need to acknowledge the request.
 //!
-//! Step granularity is statement-level (step-into). Depth-aware step-over /
-//! step-out need a shadow call stack and currently behave like step / run.
+//! Step granularity is one statement — a safepoint — and all three steps are
+//! depth-aware against the controller's shadow call stack: `stepIn` stops at
+//! the next statement wherever it is, `next` stops at the next one in this
+//! frame or a caller (a callee is stepped over whole), and `stepOut` stops
+//! once this frame has returned.
 
 use std::io::{Read, Write};
 

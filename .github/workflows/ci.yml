@@ -98,6 +98,12 @@ jobs:
       # compiler.
       - name: cargo test --workspace (fast)
         run: cargo test --workspace --exclude leek-test-corpus --locked
+      # The debug adapter's fight test plays a whole duel and registers the
+      # leek-wars library process-wide, so it is `#[ignore]`d and runs here in
+      # a process of its own. It replaced tools/dap-fight-smoke.py, which
+      # nothing ever ran.
+      - name: cargo test -p leek-dap (ignored)
+        run: cargo test -p leek-dap --locked -- --ignored
       # The Java-backend parity tests compare against tests/snapshots/ and
       # write everything they produce under target/ (see tools/check.sh); a
       # test run must leave every tracked snapshot byte-identical to what was
