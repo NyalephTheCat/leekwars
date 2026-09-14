@@ -3,19 +3,31 @@
 # regression gate; this file is your own editable mini-corpus.
 #
 # Each [[tests]] row:
-#   id      = "unique name"        (required)
-#   builtin = "name"               (optional — only for builtin-coverage cases;
+#   id       = "unique name"       (required)
+#   builtin  = "name"              (optional — only for builtin-coverage cases;
 #                                    omit it for a plain language/parser test)
-#   version = 4                    (optional, default 4; LeekScript 1..=4)
-#   source  = """ … """            (the program to run)
-#   expect  = one of:
+#   version  = 4                   (optional, default 4; LeekScript 1..=4)
+#   op_limit = N                   (optional — operation budget for the run;
+#                                    default 5_000_000. Set it when the row is
+#                                    about exhausting the budget.)
+#   source   = """ … """           (the program to run)
+#   expect   = one of:
 #       "pass"                     → runs without a runtime error
-#       "error"                    → fails to compile / errors at runtime
-#       { ops_at_most = N }        → runs within N operations
+#       "error"                    → fails to compile, or traps at runtime
 #       { equals = "…" }           → result displays exactly as "…"
 #                                    (version-aware, like the upstream corpus)
+#       { ops_at_most = N }        → runs within N operations
+#       { runtime_error = "CODE" } → traps with exactly this fight error key
+#                                    (TOO_MUCH_OPERATIONS, ARRAY_OUT_OF_BOUND,
+#                                    STACKOVERFLOW, INTERNAL_PANIC)
 #
-# Run:  cargo run -p leek-builtin-suite --bin run-builtin-suite
+# Prefer `equals` over `pass`: `pass` only asserts the program ran, so it
+# holds whatever value the builtin returns. Take expected strings from
+# crates/testing/leek-test-corpus/data/reference.tsv where a row exists —
+# display is version-aware (v1 renders reals with a comma, v2+ with a dot).
+#
+# Run:  cargo test -p leek-builtin-suite
+#  or:  cargo run -p leek-builtin-suite --bin run-builtin-suite
 schema_version = 1
 
 # --- Language: lambda with an explicit return type (`arg => Type body`). ---
@@ -49,29 +61,30 @@ version = 4
 source = "var y = 7 var f = x => y return f(0)"
 expect = { equals = "7" }
 
+# --- Builtin values. Expected strings are the upstream corpus's. ---
+
+# reference.tsv: v1 `4`, v2+ `4.0` — sqrt always returns a real.
 [[tests]]
 id = "sqrt_value"
 builtin = "sqrt"
 version = 4
-source = """
-function main() {
-  debug(sqrt(9));
-  return 0;
-}
-"""
-expect = "pass"
+source = "return sqrt(16)"
+expect = { equals = "4.0" }
 
+[[tests]]
+id = "sqrt_value_v1_comma_display"
+builtin = "sqrt"
+version = 1
+source = "return sqrt(16)"
+expect = { equals = "4" }
+
+# reference.tsv: `return abs(-12);` → `12` at every version.
 [[tests]]
 id = "abs_negative"
 builtin = "abs"
 version = 4
-source = """
-function main() {
-  debug(abs(-3));
-  return 0;
-}
-"""
-expect = "pass"
+source = "return abs(-12)"
+expect = { equals = "12" }
 
 [[tests]]
 id = "sqrt_op_budget"
@@ -89,11 +102,99 @@ expect = { ops_at_most = 20 }
 id = "array_map_batch"
 builtin = "arrayMap"
 version = 4
+source = "var a = [1, 2, 3]; return arrayMap(a, function(x) { return x + 1; });"
+expect = { equals = "[2, 3, 4]" }
+
+# reference.tsv: `var t = [0, 1, 2]; return arraySort(t, …descending…)` →
+# `[2, 1, 0]` at every version.
+[[tests]]
+id = "array_sort_comparator"
+builtin = "arraySort"
+version = 4
+source = "var t = [0, 1, 2]; return arraySort(t,function(e, f){return (e>f)?(-1):(e<f)?1:0;})"
+expect = { equals = "[2, 1, 0]" }
+
+# --- The builtin error channel, end to end (#189). ---
+#
+# The comparator spends far more than the budget on its first invocation, so
+# the run trips TOO_MUCH_OPERATIONS *inside* arraySort. Before the channel was
+# wired, `BuiltinHost::call_value` handed the builtin a null for every
+# remaining comparison and the sort ran its whole O(n²) scan past the fault.
+# The budget is deliberately a round number well under the ~7k operations the
+# first comparator call alone charges.
+[[tests]]
+id = "sort_callback_op_budget"
+builtin = "arraySort"
+version = 4
+op_limit = 2000
 source = """
-function main() {
-  var a = [1, 2, 3];
-  var b = arrayMap(a, function(x) { return x + 1; });
-  return 0;
-}
+var t = [5, 4, 3, 2, 1];
+return arraySort(t, function(a, b) {
+  var s = 0;
+  for (var i = 0; i < 1000; i++) { s += i; }
+  return a - b;
+});
 """
-expect = "pass"
+expect = { runtime_error = "TOO_MUCH_OPERATIONS" }
+
+# The same shape without a callback: the budget is spent in the program's own
+# loop. Pins that `error` accepts a runtime trap, which it could not before
+# (`native_run` collapsed every failure into "no value").
+[[tests]]
+id = "plain_loop_op_budget"
+version = 4
+op_limit = 500
+source = """
+var s = 0;
+for (var i = 0; i < 100000; i++) { s += i; }
+return s;
+"""
+expect = "error"
+
+# --- Builtins with no upstream corpus row (measured here, not sourced): the
+# --- corpus has no case for these names, so the row pins behaviour nothing
+# --- else checks. Keep them to values that are not in doubt. A row naming a
+# --- `builtin` needs catalog.yaml metadata, so the uncatalogued half of the
+# --- gap is covered by leek-runtime's own tests instead.
+
+[[tests]]
+id = "array_distinct_drops_repeats"
+builtin = "arrayDistinct"
+version = 4
+source = "return arrayDistinct([1, 2, 2, 3, 1])"
+expect = { equals = "[1, 2, 3]" }
+
+[[tests]]
+id = "interval_size_counts_its_integers"
+builtin = "intervalSize"
+version = 4
+source = "return intervalSize([1..5])"
+expect = { equals = "5" }
+
+[[tests]]
+id = "interval_is_closed"
+builtin = "intervalIsClosed"
+version = 4
+source = "var open = ]1..5[; return [intervalIsClosed([1..5]), intervalIsClosed(open)]"
+expect = { equals = "[true, false]" }
+
+[[tests]]
+id = "trim_strips_both_ends"
+builtin = "trim"
+version = 4
+# A string result displays quoted at top level, like the corpus's
+# `return substring('bonjour',2,3)` → `"njo"`.
+source = "return trim('  padded  ')"
+expect = { equals = '"padded"' }
+
+[[tests]]
+id = "map_iter_visits_every_entry"
+builtin = "mapIter"
+version = 4
+source = """
+var m = ['a': 1, 'b': 2, 'c': 3];
+var total = 0;
+mapIter(m, function(v, k) { total += v; });
+return total;
+"""
+expect = { equals = "6" }
