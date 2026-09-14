@@ -606,7 +606,6 @@ pub(super) fn format_expr_stmt(node: &SyntaxNode) -> Doc {
 /// `return [?] [expr];`.
 pub(super) fn format_return_stmt(node: &SyntaxNode) -> Doc {
     let mut parts: Vec<Doc> = vec![text("return")];
-    let mut emitted_question = false;
     let mut emitted_expr = false;
     let mut saw_semi = false;
 
@@ -618,7 +617,6 @@ pub(super) fn format_return_stmt(node: &SyntaxNode) -> Doc {
                 S::Question if !emitted_expr => {
                     parts.push(space());
                     parts.push(text("?"));
-                    emitted_question = true;
                 }
                 S::Semicolon => {
                     parts.push(text(";"));
@@ -635,11 +633,9 @@ pub(super) fn format_return_stmt(node: &SyntaxNode) -> Doc {
                 // (or EOL) already delimits the operand.
                 parts.push(group(fmt_node(&peel_context_parens(&child))));
                 emitted_expr = true;
-                emitted_question = true;
             }
         }
     }
-    let _ = emitted_question;
     parts.push(maybe_semicolon(node, saw_semi));
     concat(parts)
 }

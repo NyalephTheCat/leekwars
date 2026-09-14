@@ -165,7 +165,7 @@ fn format_item_sequence_bounded(node: &SyntaxNode, allow_blanks: bool, skip_brac
     // Drain any trailing-only comments (after the last item but
     // before EOF / `}`).
     if !leading.is_empty() {
-        emit_trailing_comments(&mut items, &mut leading, pending, saw_first, allow_blanks);
+        emit_trailing_comments(&mut items, &mut leading, saw_first, allow_blanks);
     }
 
     if items.is_empty() {
@@ -224,7 +224,7 @@ fn emit_item(
         }
         items.push(doc);
     }
-    if !items.is_empty() && saw_first_was_set(items) {
+    if !items.is_empty() {
         // Comments need a hardline before the upcoming item (or the
         // item-separator we just emitted). If the last thing pushed
         // was a comment text, separate with a hardline (or blank if
@@ -237,18 +237,11 @@ fn emit_item(
     items.push(item_doc);
 }
 
-/// True iff `items` ends with something that isn't a separator.
-/// Equivalent to "we just pushed a comment".
-fn saw_first_was_set(items: &[Doc]) -> bool {
-    !items.is_empty()
-}
-
 /// Emit any leading-only trailing comments (after the last item but
 /// before the closing boundary).
 fn emit_trailing_comments(
     items: &mut Vec<Doc>,
     leading: &mut Vec<(Doc, usize, bool)>,
-    _pending: usize,
     saw_first: bool,
     allow_blanks: bool,
 ) {

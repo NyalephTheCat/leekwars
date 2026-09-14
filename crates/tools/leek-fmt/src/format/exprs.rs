@@ -663,7 +663,6 @@ fn format_kv_brackets(
     // (expr, ":", expr) triples. Commas act as entry separators.
     let mut entries: Vec<Doc> = Vec::new();
     let mut current: Vec<Doc> = Vec::new();
-    let mut saw_colon_in_current = false;
     let mut saw_any_colon = false;
 
     let flush = |current: &mut Vec<Doc>, entries: &mut Vec<Doc>| {
@@ -679,19 +678,12 @@ fn format_kv_brackets(
                 S::LBracket | S::RBracket | S::LBrace | S::RBrace => {}
                 S::Colon => {
                     current.push(colon_doc());
-                    saw_colon_in_current = true;
                     saw_any_colon = true;
                 }
-                S::Comma => {
-                    flush(&mut current, &mut entries);
-                    saw_colon_in_current = false;
-                }
+                S::Comma => flush(&mut current, &mut entries),
                 _ => current.push(token_text(&t)),
             },
-            NodeOrToken::Node(child) => {
-                let _ = saw_colon_in_current;
-                current.push(fmt_node(&child));
-            }
+            NodeOrToken::Node(child) => current.push(fmt_node(&child)),
         }
     }
     flush(&mut current, &mut entries);
