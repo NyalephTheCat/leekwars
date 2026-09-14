@@ -3,13 +3,13 @@
 //! requires the golden-output harness, which is its own milestone.
 
 use leek_backend_java::{Options, emit};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn java_for(src: &str, opts: &Options) -> String {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, opts.version);
+    let parsed = parse_with_features(src, source, opts.version, ParseFeatures::default());
     let root = SyntaxNode::new_root(parsed.green);
     let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
     let (hir, _diags) = leek_hir::lower_file(&sf, source);
@@ -77,7 +77,7 @@ return add(1, 2)\n";
 
 #[test]
 fn prelude_builtin_call_uses_directive() {
-    use leek_parser::{ParseFeatures, parse, parse_with_features};
+    use leek_parser::{ParseFeatures, parse_with_features};
     // User code calls `abs` with *no* local declaration — it resolves
     // to the implicit prelude's signature and emits that signature's
     // `@java-backend:` directive.
@@ -99,7 +99,7 @@ function abs(real x) -> real;\n";
     );
     let prelude_ast =
         leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).expect("prelude parse");
-    let u = parse(user_src, source, Version::V4);
+    let u = parse_with_features(user_src, source, Version::V4, ParseFeatures::default());
     let user_ast =
         leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(u.green)).expect("user parse");
 

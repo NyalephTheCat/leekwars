@@ -30,7 +30,7 @@ use std::collections::HashSet;
 
 use leek_diagnostics::{Diagnostic, codes};
 use leek_parser::ast::{AstNode, CallExpr, Expr, SourceFile};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_rewrite::{Edit, EditSet};
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, Version};
@@ -67,7 +67,11 @@ impl MigrationPass for V3ToV4 {
         edits: &mut EditSet,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let parsed = parse(source, source_id, Version::V3);
+        // The migration has no feature-flag channel of its own, so the
+        // experimental toggles still come off the environment here: a
+        // source that only parses with LEEK_EXPERIMENTAL_* set has to
+        // keep migrating.
+        let parsed = parse_with_features(source, source_id, Version::V3, ParseFeatures::from_env());
         let root = SyntaxNode::new_root(parsed.green);
         let Some(file) = SourceFile::cast(root.clone()) else {
             return;

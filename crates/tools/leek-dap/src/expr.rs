@@ -100,7 +100,15 @@ fn expression_source() -> SourceId {
 /// different things across versions, and a condition that disagrees with the
 /// program it is testing is worse than no condition at all.
 pub(crate) fn compile(text: &str, version: u8) -> Result<CondExpr, String> {
-    let parsed = leek_parser::parse(text, expression_source(), Version::from_byte(version));
+    // The debug adapter has no feature-flag channel of its own, so the
+    // experimental toggles still come off the environment here — a
+    // condition must parse under the same grammar the program did.
+    let parsed = leek_parser::parse_with_features(
+        text,
+        expression_source(),
+        Version::from_byte(version),
+        leek_parser::ParseFeatures::from_env(),
+    );
     if let Some(error) = parsed
         .diagnostics
         .iter()

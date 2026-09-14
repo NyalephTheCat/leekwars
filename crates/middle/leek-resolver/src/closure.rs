@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use leek_diagnostics::{Diagnostic, Severity, codes, diag};
-use leek_parser::parse_file_with;
+use leek_parser::{ParseOptions, parse_file_with};
 use leek_span::paths::canonical_or_normalized;
 use leek_span::{FeatureFlags, SourceId, Span};
 use leek_syntax::Version;
@@ -132,7 +132,13 @@ pub fn resolve_include_closure(
         if path == entry_path {
             continue;
         }
-        let parsed = parse_file_with(&text, source, version, flags, &class_names);
+        let parsed = parse_file_with(
+            &text,
+            source,
+            &ParseOptions::new(version)
+                .with_flags(flags)
+                .with_extra_classes(&class_names),
+        );
         // The parse always yields a tree — error recovery builds
         // `ErrorNode`s inside the `SourceFile` root rather than failing
         // the root cast — so a broken include is only visible in the

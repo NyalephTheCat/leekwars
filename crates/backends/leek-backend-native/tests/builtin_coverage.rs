@@ -6,13 +6,13 @@
 
 use leek_backend_native::{NativeOptions, run};
 use leek_hir::lower_file_versioned;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn native(src: &str) -> String {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
     let hir = lower_file_versioned(&sf, source, 4).0;
     let opts = NativeOptions::release().with_lang(4, false);

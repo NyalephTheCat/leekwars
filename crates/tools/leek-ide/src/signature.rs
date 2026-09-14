@@ -371,13 +371,13 @@ fn modifier_prefix(node: &SyntaxNode, table: &[(SyntaxKind, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leek_parser::parse;
+    use leek_parser::{ParseFeatures, parse_with_features};
     use leek_span::SourceId;
     use leek_syntax::{SyntaxNode, Version};
 
     fn first_decl(src: &str, kind: SyntaxKind) -> SyntaxNode {
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
+        let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
         let root = SyntaxNode::new_root(parsed.green);
         root.descendants()
             .find(|n| n.kind() == kind)

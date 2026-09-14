@@ -28,7 +28,7 @@
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{AstNode, SourceFile};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_rewrite::EditSet;
 use leek_span::SourceId;
 use leek_syntax::language::NodeOrToken;
@@ -86,7 +86,11 @@ impl MigrationPass for V1ToV2 {
         });
 
         // ---- CST-level rewrites --------------------------------
-        let parsed = parse(source, source_id, Version::V1);
+        // The migration has no feature-flag channel of its own, so the
+        // experimental toggles still come off the environment here: a
+        // source that only parses with LEEK_EXPERIMENTAL_* set has to
+        // keep migrating.
+        let parsed = parse_with_features(source, source_id, Version::V1, ParseFeatures::from_env());
         let root = SyntaxNode::new_root(parsed.green);
 
         // Walk every token; on a `^=` (CaretEq) swap to `**=`

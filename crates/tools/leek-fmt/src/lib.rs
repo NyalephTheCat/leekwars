@@ -379,16 +379,27 @@ fn strip_quotes(s: &str) -> &str {
 
 /// Lex + parse `text` and format the result.
 ///
-/// Convenience wrapper around [`leek_parser::parse`] + [`format`].
-/// Diagnostics produced during parsing are discarded — the formatter
-/// always succeeds (`ErrorNode`s in the CST are emitted verbatim).
+/// Convenience wrapper around [`leek_parser::parse_with_features`] +
+/// [`format`]. Diagnostics produced during parsing are discarded — the
+/// formatter always succeeds (`ErrorNode`s in the CST are emitted
+/// verbatim).
+///
+/// The experimental grammar toggles still come off the environment here:
+/// this signature has no flag argument to thread, and formatting a file
+/// whose syntax only parses with `LEEK_EXPERIMENTAL_*` set must keep
+/// working. Threading them through `FormatOptions` is the rest of #138.
 pub fn format_source(
     text: &str,
     source: SourceId,
     version: Version,
     opts: &FormatOptions,
 ) -> String {
-    let parsed = leek_parser::parse(text, source, version);
+    let parsed = leek_parser::parse_with_features(
+        text,
+        source,
+        version,
+        leek_parser::ParseFeatures::from_env(),
+    );
     format(&parsed.green, version, opts)
 }
 

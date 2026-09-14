@@ -26,7 +26,12 @@ use leek_syntax::{SyntaxNode, Version};
 
 fn lower(src: &str) -> HirFile {
     let source = SourceId::new(1).unwrap();
-    let parsed = leek_parser::parse(src, source, Version::V4);
+    let parsed = leek_parser::parse_with_features(
+        src,
+        source,
+        Version::V4,
+        leek_parser::ParseFeatures::default(),
+    );
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parses");
     leek_hir::lower_file(&file, source).0
 }

@@ -11,7 +11,7 @@ use leek_diagnostics::{Renderer, Sources};
 use leek_hir::lower_file_versioned;
 use leek_parser::{
     ast::{AstNode, SourceFile},
-    parse,
+    parse_with_features,
 };
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
@@ -25,7 +25,7 @@ fn hir(src: &str, version: u8) -> leek_hir::HirFile {
         1 => Version::V1,
         _ => Version::V4,
     };
-    let parsed = parse(src, source(), syntax);
+    let parsed = parse_with_features(src, source(), syntax, leek_parser::ParseFeatures::default());
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green.clone())).expect("parse");
     lower_file_versioned(&file, source(), version).0
 }

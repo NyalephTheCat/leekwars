@@ -244,7 +244,15 @@ impl Summary {
     fn of(text: &str, version: Version) -> Self {
         // The source id only labels diagnostics, whose spans are unused.
         let source = SourceId::new(1).expect("1 is a valid source id");
-        let parsed = leek_parser::parse(text, source, version);
+        // Same env read as `format_source`: the safety net has to parse
+        // the same grammar the formatter did, experimental toggles and
+        // all, or it would report a spurious token mismatch.
+        let parsed = leek_parser::parse_with_features(
+            text,
+            source,
+            version,
+            leek_parser::ParseFeatures::from_env(),
+        );
         let mut summary = Self {
             tokens: Vec::new(),
             comments: Vec::new(),

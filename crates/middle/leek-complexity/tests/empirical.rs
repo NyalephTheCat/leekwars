@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use leek_complexity::{BigO, analyze_file};
 use leek_diagnostics::Severity;
 use leek_hir::lower_file;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
@@ -37,7 +37,7 @@ use leek_syntax::{SyntaxNode, Version};
 /// parse errors so a malformed fixture surfaces fast.
 fn to_hir(src: &str) -> leek_hir::HirFile {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     assert!(
         !parsed
             .diagnostics

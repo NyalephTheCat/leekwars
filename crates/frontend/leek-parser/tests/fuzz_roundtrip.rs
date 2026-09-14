@@ -6,13 +6,18 @@
 //! harness needed. Covers three sources: hand-picked malformed edge cases,
 //! random token soup, and mutations of valid snippets.
 
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn roundtrips(text: &str) {
     // Parsing must not panic (recursion guard, error recovery) …
-    let result = parse(text, SourceId::new(1).unwrap(), Version::LATEST);
+    let result = parse_with_features(
+        text,
+        SourceId::new(1).unwrap(),
+        Version::LATEST,
+        ParseFeatures::default(),
+    );
     let node = SyntaxNode::new_root(result.green);
     // … and the CST must losslessly reproduce the input.
     assert_eq!(

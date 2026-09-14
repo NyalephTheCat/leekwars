@@ -1931,14 +1931,14 @@ impl Emitter<'_> {
 #[cfg(test)]
 mod tests {
     use crate::{Options, emit};
-    use leek_parser::{ast::AstNode, parse};
+    use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
     use leek_span::SourceId;
     use leek_syntax::{SyntaxNode, Version};
 
     /// Parse → HIR → Java, mirroring the helper in `tests/smoke.rs`.
     fn java_for(src: &str, opts: &Options) -> String {
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, opts.version);
+        let parsed = parse_with_features(src, source, opts.version, ParseFeatures::default());
         let root = SyntaxNode::new_root(parsed.green);
         let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
         let (hir, _diags) = leek_hir::lower_file(&sf, source);

@@ -9,13 +9,13 @@
 use leek_charge::{ChargeOpts, add_charges};
 use leek_hir::{Def, HirFile, Stmt, lower_file};
 use leek_parser::ast::{AstNode, SourceFile};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn lower(src: &str) -> HirFile {
     let source = SourceId::new(1).expect("source id");
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parses");
     lower_file(&file, source).0
 }

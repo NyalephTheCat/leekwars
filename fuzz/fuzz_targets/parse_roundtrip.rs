@@ -10,13 +10,13 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn check(text: &str, version: Version) {
     let source = SourceId::new(1).unwrap();
-    let result = parse(text, source, version);
+    let result = parse_with_features(text, source, version, ParseFeatures::default());
     let node = SyntaxNode::new_root(result.green);
     assert_eq!(
         node.text().to_string(),

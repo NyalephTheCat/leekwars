@@ -333,7 +333,24 @@ pub fn expand_tabs_in(line: &str, tab_width: u32) -> Cow<'_, str> {
 /// Historically each pass read its own `LEEK_EXPERIMENTAL_*` env var — global,
 /// untestable, and (inside salsa-tracked queries) impure: salsa wouldn't re-run
 /// when a flag changed. Carrying the flags as data fixes all three; the env
-/// vars are read exactly once, at a boundary, via [`FeatureFlags::from_env`].
+/// vars are read at a boundary, via [`FeatureFlags::from_env`], and threaded
+/// from there.
+///
+/// "At a boundary" means a driver's entry point — a `main`, a
+/// `leek_project::Input`, a pipeline's config assembly —
+/// and nowhere else. A pass, a query, or a parse entry point takes the
+/// flags as an argument instead, because a value that arrives as data is
+/// testable, overridable per run, and visible to salsa's dependency graph.
+/// `leek-parser` holds to that rule: every entry point takes its
+/// `ParseFeatures` in a `ParseOptions`, and the wrappers that used to fill
+/// them from the environment are deprecated shims.
+///
+/// Where the boundary sits is still moving outwards. Tools whose public
+/// API has no flag parameter yet — `leek-fmt`, `leek-migrate`, `leek-dap`,
+/// and the convenience wrappers in `leek-hir::lower` — call `from_env` at
+/// their own entry rather than hiding it in a pass they call; each such
+/// call is a visible `from_env`, which is the point. Pushing them out to
+/// their callers is the rest of the R2 epic (#346).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct FeatureFlags {
     /// `LEEK_EXPERIMENTAL_FN_SIGNATURES`: bodiless `function f() -> T;`

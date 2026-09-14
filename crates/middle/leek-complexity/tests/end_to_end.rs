@@ -13,13 +13,13 @@
 use leek_complexity::{BigO, Complexity, analyze_file};
 use leek_diagnostics::Severity;
 use leek_hir::lower_file;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn analyze(src: &str) -> Vec<Complexity> {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     assert!(
         !parsed
             .diagnostics

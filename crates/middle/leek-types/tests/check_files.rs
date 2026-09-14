@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use leek_diagnostics::{Code, Diagnostic};
 use leek_parser::ast::{AstNode, SourceFile};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_resolver::FileUnit;
 use leek_resolver::folder::MemFolder;
 use leek_resolver::include_graph::{ResolvedFile, build_include_graph};
@@ -95,7 +95,7 @@ fn check_with(entry: &str, files: &[(&str, &str)], opts: Options) -> Checked {
             path: f.path.clone(),
             source: f.source,
             ast: SourceFile::cast(SyntaxNode::new_root(
-                parse(&f.text, f.source, f.version).green,
+                parse_with_features(&f.text, f.source, f.version, ParseFeatures::default()).green,
             ))
             .expect("source file parses"),
             version: f.version,
@@ -349,11 +349,23 @@ fn without_an_include_graph_every_files_statements_are_still_checked() {
     let a_text = "var a = 1\n";
     let entry_text = "var e = 2\n";
     let a = SourceFile::cast(SyntaxNode::new_root(
-        parse(a_text, SourceId::new(1).unwrap(), Version::V4).green,
+        parse_with_features(
+            a_text,
+            SourceId::new(1).unwrap(),
+            Version::V4,
+            ParseFeatures::default(),
+        )
+        .green,
     ))
     .unwrap();
     let entry = SourceFile::cast(SyntaxNode::new_root(
-        parse(entry_text, SourceId::new(2).unwrap(), Version::V4).green,
+        parse_with_features(
+            entry_text,
+            SourceId::new(2).unwrap(),
+            Version::V4,
+            ParseFeatures::default(),
+        )
+        .green,
     ))
     .unwrap();
     let units = [

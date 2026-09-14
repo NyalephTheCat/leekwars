@@ -226,7 +226,12 @@ mod tests {
     use super::{Comments, is_comment};
 
     fn parse(src: &str) -> SyntaxNode {
-        let parsed = leek_parser::parse(src, SourceId::new(1).unwrap(), Version::V4);
+        let parsed = leek_parser::parse_with_features(
+            src,
+            SourceId::new(1).unwrap(),
+            Version::V4,
+            leek_parser::ParseFeatures::default(),
+        );
         SyntaxNode::new_root(parsed.green)
     }
 

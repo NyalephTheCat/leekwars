@@ -3,7 +3,7 @@
 //! propagates through every nesting level.
 
 use leek_backend_native::{NativeOptions, run};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
@@ -15,7 +15,7 @@ fn eval(src: &str, version: u8) -> String {
         3 => Version::V3,
         _ => Version::V4,
     };
-    let parsed = parse(src, source, syntax_version);
+    let parsed = parse_with_features(src, source, syntax_version, ParseFeatures::default());
     let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
     let (hir, _) = leek_hir::lower_file_versioned(&sf, source, version);
     leek_runtime::DISPLAY_VERSION.with(|c| c.set(version));

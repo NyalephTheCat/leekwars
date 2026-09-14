@@ -5,14 +5,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use leek_backend_native::{GameRuntime, NativeError, NativeOptions, run, set_game_runtime};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_runtime::Value;
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn hir(src: &str) -> leek_hir::HirFile {
     let s = SourceId::new(1).unwrap();
-    let p = parse(src, s, Version::V4);
+    let p = parse_with_features(src, s, Version::V4, ParseFeatures::default());
     let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).expect("parse");
     leek_hir::lower_file_versioned(&sf, s, 4).0
 }

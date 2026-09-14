@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 use leek_hir::{
     Block, Def, DefId, Expr, ExprKind, HirFile, LowerUnit, NameRef, Stmt, lower_file, lower_files,
 };
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::{SyntaxNode, Version};
 
 fn parse_file(src: &str, id: u32) -> (SourceFile, SourceId) {
     let source = SourceId::new(id).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parses");
     (file, source)
 }

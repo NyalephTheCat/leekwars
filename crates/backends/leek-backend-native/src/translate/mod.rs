@@ -2220,7 +2220,7 @@ mod tests {
     //! cases are only the canonical shapes the pass exists for.
 
     use leek_mir::ir::MirProgram;
-    use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+    use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
     use leek_span::SourceId;
     use leek_syntax::{SyntaxNode, Version};
     use leek_types::Type;
@@ -2230,7 +2230,7 @@ mod tests {
     /// Lower `src` (v4) to MIR, optionally running the specializer over it.
     fn lower(src: &str, specialize: bool) -> MirProgram {
         let source = SourceId::new(1).unwrap();
-        let parsed = parse(src, source, Version::V4);
+        let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
         let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
         let hir = leek_hir::lower_file_versioned(&sf, source, 4).0;
         let (mut program, errs) = leek_mir::lower_file(&hir);

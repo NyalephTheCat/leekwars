@@ -7,13 +7,13 @@
 //! used to key on `Builtin` alone and would silently die if it still did.
 
 use leek_hir::{Callee, Def, DefId, Expr, ExprKind, HirFile, NameRef, Stmt, lower_file};
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
 fn lower(src: &str) -> HirFile {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, Version::V4);
+    let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parses");
     lower_file(&file, source).0
 }

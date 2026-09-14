@@ -7,7 +7,7 @@
 
 use leek_backend_native::{NativeOptions, run};
 use leek_hir::lower_file_versioned;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
@@ -19,7 +19,7 @@ fn native_v(src: &str, v: u8) -> String {
         3 => Version::V3,
         _ => Version::V4,
     };
-    let parsed = parse(src, source, ver);
+    let parsed = parse_with_features(src, source, ver, ParseFeatures::default());
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
     let hir = lower_file_versioned(&sf, source, v).0;
     leek_runtime::DISPLAY_VERSION.with(|c| c.set(v));

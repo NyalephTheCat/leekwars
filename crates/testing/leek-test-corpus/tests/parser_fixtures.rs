@@ -82,7 +82,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, parse_pragmas};
 use leek_test_corpus::{
@@ -103,7 +103,7 @@ struct Parsed {
 fn parse_report(text: &str) -> Parsed {
     let src = SourceId::new(1).expect("1 is a valid source id");
     let (pragmas, pragma_diags) = parse_pragmas(text, src);
-    let result = parse(text, src, pragmas.version);
+    let result = parse_with_features(text, src, pragmas.version, ParseFeatures::default());
     let node = SyntaxNode::new_root(result.green);
     let all: Vec<_> = pragma_diags
         .iter()

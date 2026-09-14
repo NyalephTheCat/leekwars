@@ -11,7 +11,7 @@
 use std::fmt::Write as _;
 
 use leek_parser::ast::{AstNode, BinaryExpr, Expr, SourceFile, Stmt};
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxElement, SyntaxNode, Version};
 
@@ -20,7 +20,7 @@ fn src() -> SourceId {
 }
 
 fn parse_str(text: &str) -> (SyntaxNode, Vec<leek_diagnostics::Diagnostic>) {
-    let result = parse(text, src(), Version::LATEST);
+    let result = parse_with_features(text, src(), Version::LATEST, ParseFeatures::default());
     let node = SyntaxNode::new_root(result.green);
     (node, result.diagnostics)
 }
@@ -715,13 +715,23 @@ fn nested_array_access() {
 #[test]
 fn pi_and_lemniscate_literals() {
     let src = SourceId::new(1).unwrap();
-    let r = leek_parser::parse("var x = π;", src, Version::LATEST);
+    let r = leek_parser::parse_with_features(
+        "var x = π;",
+        src,
+        Version::LATEST,
+        ParseFeatures::default(),
+    );
     assert!(
         r.diagnostics.is_empty(),
         "unexpected diagnostics: {:?}",
         r.diagnostics
     );
-    let r = leek_parser::parse("var x = ∞;", src, Version::LATEST);
+    let r = leek_parser::parse_with_features(
+        "var x = ∞;",
+        src,
+        Version::LATEST,
+        ParseFeatures::default(),
+    );
     assert!(
         r.diagnostics.is_empty(),
         "unexpected diagnostics: {:?}",
@@ -1244,7 +1254,8 @@ fn slice_below_v4_is_still_a_slice_node() {
     // at the `:` and left `3]` stranded at the top level; the formatter
     // then closed the subscript with a `]` the source never had (#415).
     for version in [Version::V1, Version::V2, Version::V3] {
-        let result = parse("return a[1:3];", src(), version);
+        let result =
+            parse_with_features("return a[1:3];", src(), version, ParseFeatures::default());
         let node = SyntaxNode::new_root(result.green);
         assert_eq!(node.text().to_string(), "return a[1:3];");
         assert!(

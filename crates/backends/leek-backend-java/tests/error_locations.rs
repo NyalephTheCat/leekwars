@@ -9,7 +9,7 @@
 
 use leek_backend_java::{Options, emit};
 use leek_diagnostics::{Renderer, Severity, Sources};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
@@ -18,7 +18,7 @@ fn source() -> SourceId {
 }
 
 fn hir(src: &str) -> leek_hir::HirFile {
-    let parsed = parse(src, source(), Version::V4);
+    let parsed = parse_with_features(src, source(), Version::V4, ParseFeatures::default());
     let root = SyntaxNode::new_root(parsed.green);
     let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
     leek_hir::lower_file(&sf, source()).0

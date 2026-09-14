@@ -9,7 +9,7 @@ use leek_generator::{
     run_ai, run_ai_with, run_fight, shared,
 };
 use leek_hir::{HirFile, lower_file_versioned};
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
@@ -22,7 +22,12 @@ const CHIP_PROTEIN: i64 = 8; // +80–100 raw strength buff (unscaled), 2 turns
 
 fn compile(src: &str) -> HirFile {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(&format!("// @version: 4\n{src}\n"), source, Version::V4);
+    let parsed = parse_with_features(
+        &format!("// @version: 4\n{src}\n"),
+        source,
+        Version::V4,
+        ParseFeatures::default(),
+    );
     let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("parse");
     lower_file_versioned(&sf, source, 4).0
 }

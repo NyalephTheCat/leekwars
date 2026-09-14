@@ -3,7 +3,7 @@
 //! per-construct charges so the model can't silently drift.
 
 use leek_backend_native::{NativeOptions, ops_used, run};
-use leek_parser::{ast::AstNode, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
@@ -19,7 +19,7 @@ fn ops_v(src: &str, version: u8) -> u64 {
         3 => Version::V3,
         _ => Version::V4,
     };
-    let p = parse(src, s, v);
+    let p = parse_with_features(src, s, v, ParseFeatures::default());
     let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).expect("parse");
     let (h, _) = leek_hir::lower_file_versioned(&sf, s, version);
     leek_runtime::DISPLAY_VERSION.with(|c| c.set(version));
@@ -234,7 +234,7 @@ fn op_budget_stops_a_runaway_loop() {
     // of spinning forever (the runtime-error verification path).
     let s = SourceId::new(1).unwrap();
     let src = "var a = 0 for (var i = 0; i < 100000000; ++i) a = a + 1 return a";
-    let p = parse(src, s, Version::V4);
+    let p = parse_with_features(src, s, Version::V4, ParseFeatures::default());
     let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).unwrap();
     let (h, _) = leek_hir::lower_file_versioned(&sf, s, 4);
     let out = run(
@@ -258,7 +258,7 @@ fn budget_error_within_deadline(src: &'static str) -> String {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let s = SourceId::new(1).unwrap();
-        let p = parse(src, s, Version::V4);
+        let p = parse_with_features(src, s, Version::V4, ParseFeatures::default());
         let sf = leek_parser::ast::SourceFile::cast(SyntaxNode::new_root(p.green)).unwrap();
         let (h, _) = leek_hir::lower_file_versioned(&sf, s, 4);
         let out = run(

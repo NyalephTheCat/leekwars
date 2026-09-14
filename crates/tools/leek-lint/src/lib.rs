@@ -119,7 +119,12 @@ pub(crate) mod testing {
         version: Version,
     ) -> Vec<Diagnostic> {
         let source = SourceId::new(1).unwrap();
-        let parsed = leek_parser::parse(src, source, version);
+        let parsed = leek_parser::parse_with_features(
+            src,
+            source,
+            version,
+            leek_parser::ParseFeatures::default(),
+        );
         let ast = SourceFile::cast(SyntaxNode::new_root(parsed.green)).expect("source file root");
         let (hir, _) = leek_hir::lower_file(&ast, source);
         let opts = crate::LintOptions {
@@ -174,7 +179,12 @@ pub(crate) mod testing {
             let fixed = edits.apply(src).expect("edits apply to their own source");
 
             let source = SourceId::new(1).unwrap();
-            let parsed = leek_parser::parse(&fixed, source, Version::V4);
+            let parsed = leek_parser::parse_with_features(
+                &fixed,
+                source,
+                Version::V4,
+                leek_parser::ParseFeatures::default(),
+            );
             assert!(
                 parsed.diagnostics.is_empty(),
                 "applying {:?} produced unparseable source:\n{fixed}\n{:?}",

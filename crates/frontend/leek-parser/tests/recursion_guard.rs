@@ -11,7 +11,7 @@
 //! a rowan green-tree limitation, independent of this guard, and is not
 //! exercised here (the depths below stay well under that regime).
 
-use leek_parser::parse;
+use leek_parser::{ParseFeatures, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -31,7 +31,7 @@ const DEEP: usize = 1500;
 fn deeply_nested_parens_do_not_overflow() {
     // `((((…1…))))` — recurses through `expr_bp` once per paren.
     let text = format!("return {}1{}", "(".repeat(DEEP), ")".repeat(DEEP));
-    let result = parse(&text, src(), Version::LATEST);
+    let result = parse_with_features(&text, src(), Version::LATEST, ParseFeatures::default());
     // Reaching here at all means we didn't blow the stack while parsing.
     assert!(
         has_depth_error(&result.diagnostics),
@@ -43,7 +43,7 @@ fn deeply_nested_parens_do_not_overflow() {
 fn deeply_nested_unary_prefix_does_not_overflow() {
     // `-----…1` — recurses through `expr_bp` once per prefix operator.
     let text = format!("return {}1", "-".repeat(DEEP));
-    let result = parse(&text, src(), Version::LATEST);
+    let result = parse_with_features(&text, src(), Version::LATEST, ParseFeatures::default());
     assert!(
         has_depth_error(&result.diagnostics),
         "expected a depth-limit diagnostic on {DEEP}-deep unary prefixes",
@@ -54,7 +54,7 @@ fn deeply_nested_unary_prefix_does_not_overflow() {
 fn normal_nesting_still_parses_cleanly() {
     // Well within the budget — must parse without a depth error.
     let text = "return ((((((((((1 + 2))))))))))";
-    let result = parse(text, src(), Version::LATEST);
+    let result = parse_with_features(text, src(), Version::LATEST, ParseFeatures::default());
     assert!(
         !has_depth_error(&result.diagnostics),
         "shallow nesting should not trip the depth guard",

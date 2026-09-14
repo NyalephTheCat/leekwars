@@ -2,7 +2,7 @@
 
 use leek_backend_native::{NativeArtifact, NativeEmit, NativeOptions, compile, run};
 use leek_hir::lower_file_versioned;
-use leek_parser::{ast::AstNode, ast::SourceFile, parse};
+use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version};
 
@@ -17,7 +17,7 @@ fn version_of(byte: u8) -> Version {
 
 fn hir_v(src: &str, version: u8) -> leek_hir::HirFile {
     let source = SourceId::new(1).unwrap();
-    let parsed = parse(src, source, version_of(version));
+    let parsed = parse_with_features(src, source, version_of(version), ParseFeatures::default());
     let file = SourceFile::cast(SyntaxNode::new_root(parsed.green.clone())).expect("parse");
     lower_file_versioned(&file, source, version).0
 }
@@ -74,7 +74,7 @@ function abs(real x) -> real;\n";
         },
     );
     let prelude_ast = SourceFile::cast(SyntaxNode::new_root(p.green)).expect("prelude");
-    let u = parse(user_src, source, Version::V4);
+    let u = parse_with_features(user_src, source, Version::V4, ParseFeatures::default());
     let user_ast = SourceFile::cast(SyntaxNode::new_root(u.green)).expect("user");
     let (h, _d) =
         leek_hir::lower_file_with_prelude(&user_ast, source, 4, &prelude_ast, prelude_source);
@@ -107,7 +107,7 @@ function abs(real x) -> real;\n";
         },
     );
     let prelude_ast = SourceFile::cast(SyntaxNode::new_root(p.green)).expect("prelude");
-    let u = parse(user_src, source, Version::V4);
+    let u = parse_with_features(user_src, source, Version::V4, ParseFeatures::default());
     let user_ast = SourceFile::cast(SyntaxNode::new_root(u.green)).expect("user");
     let (h, _d) =
         leek_hir::lower_file_with_prelude(&user_ast, source, 4, &prelude_ast, prelude_source);
