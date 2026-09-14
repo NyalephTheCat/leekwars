@@ -198,3 +198,75 @@ mapIter(m, function(v, k) { total += v; });
 return total;
 """
 expect = { equals = "6" }
+
+# --- The eight catalogued builtins with neither an upstream corpus case nor a
+# --- row here (#188). Each value below is measured against this runtime, not
+# --- sourced from upstream — which is exactly why they are the boring ones:
+# --- "returns null", "returns 0", "reads back the bracket it was built with".
+# ---
+# --- The rest of the coverage gap is uncatalogued names, and a `builtin` row
+# --- requires catalog.yaml metadata. Adding bare catalog rows to satisfy this
+# --- file would also flip `leek_complexity::native::is_native`, changing what
+# --- `miku analyze` reports — a catalog decision, not a testing one, so it
+# --- stays out of this PR.
+
+[[tests]]
+id = "debug_variants_return_null"
+builtin = "debugC"
+version = 4
+source = "return [debug('a'), debugC('b'), debugW('c'), debugE('d')]"
+expect = { equals = "[null, null, null, null]" }
+
+[[tests]]
+id = "debug_warning_returns_null"
+builtin = "debugW"
+version = 4
+source = "return debugW('warn')"
+expect = { equals = "null" }
+
+[[tests]]
+id = "debug_error_returns_null"
+builtin = "debugE"
+version = 4
+source = "return debugE('err')"
+expect = { equals = "null" }
+
+[[tests]]
+id = "instructions_count_is_zero_outside_a_fight"
+builtin = "getInstructionsCount"
+version = 4
+# No VM instruction counter outside a fight; the runtime answers 0 rather than
+# failing, and `getOperations` is the same dispatch entry.
+source = "return getInstructionsCount()"
+expect = { equals = "0" }
+
+[[tests]]
+id = "get_date_is_zero_outside_a_fight"
+builtin = "getDate"
+version = 4
+# A fight has no wall clock, so both clock reads answer 0. Worth pinning
+# because native now lowers them through the same generic path as
+# `getOperations`, which it previously refused to do.
+source = "return [getDate(), getTime()]"
+expect = { equals = "[0, 0]" }
+
+[[tests]]
+id = "get_time_is_zero_outside_a_fight"
+builtin = "getTime"
+version = 4
+source = "return getTime()"
+expect = { equals = "0" }
+
+[[tests]]
+id = "interval_is_left_closed_reads_the_opening_bracket"
+builtin = "intervalIsLeftClosed"
+version = 4
+source = "var open = ]1..5[; return [intervalIsLeftClosed([1..5]), intervalIsLeftClosed(open)]"
+expect = { equals = "[true, false]" }
+
+[[tests]]
+id = "interval_is_right_closed_reads_the_closing_bracket"
+builtin = "intervalIsRightClosed"
+version = 4
+source = "var open = ]1..5[; return [intervalIsRightClosed([1..5]), intervalIsRightClosed(open)]"
+expect = { equals = "[true, false]" }

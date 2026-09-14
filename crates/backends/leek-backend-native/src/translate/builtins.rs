@@ -28,10 +28,12 @@ pub(super) fn is_generic_builtin(name: &str) -> bool {
         // Pure string operations.
         "charAt"
             | "charCodeAt"
+            | "stringCharCodeAt"
             | "codePointAt"
             | "endsWith"
             | "ord"
             | "repeat"
+            | "stringRepeat"
             | "replace"
             | "split"
             | "startsWith"
@@ -130,6 +132,11 @@ pub(super) fn is_generic_builtin(name: &str) -> bool {
             | "mapPut"
             | "getOperations"
             | "getInstructionsCount"
+            // Clock reads. The runtime answers both with `0` (a fight
+            // has no wall clock), so they are as pure as their
+            // `getOperations` siblings above.
+            | "getDate"
+            | "getTime"
             // In-place array mutation (the backing `Rc<RefCell>` is shared
             // through the boxed handle, so the mutation is visible to the
             // caller's slot — no write-back needed).
@@ -206,6 +213,12 @@ pub(super) fn is_generic_builtin(name: &str) -> bool {
             | "debugC"
             | "debugW"
             | "debugE"
+            // `print`/`println` likewise: the runtime returns null for
+            // both and no game runtime implements either, so routing
+            // them here loses no output and stops a `print` call from
+            // making a whole AI uncompilable.
+            | "print"
+            | "println"
             // RNG: drawn from the per-run persistent `NATIVE_RNG`, the same
             // seeded xorshift sequence the interpreter uses — so native
             // reproduces the interpreter's RNG-dependent results (the corpus
@@ -241,5 +254,6 @@ pub(super) fn is_generic_builtin(name: &str) -> bool {
             // dispatched via the compiled-lambda path).
             | "setMap"
             | "setIter"
+            | "setForEach"
     )
 }
