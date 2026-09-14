@@ -28,6 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{AstNode, ClassDecl, FnDecl, SourceFile, Stmt};
@@ -80,7 +81,10 @@ pub fn resolve_with_version(
 }
 
 /// Options influencing what diagnostics are emitted.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Not `Copy`: [`builtins`](Self::builtins) is a refcounted handle, so the
+/// value is `Clone` and cloning it is a refcount bump.
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Strict mode (`// @strict`) — enables stricter member-existence
     /// checks (`this.unknown`, `instance.unknown`).
@@ -92,9 +96,40 @@ pub struct Options {
     /// `REDECLARED_SYMBOL`. Intended for signature files; arities of
     /// the repeated declarations are unioned. Off by default.
     pub experimental_overloads: bool,
+    /// The dynamically-registered builtins this resolve answers lookups
+    /// against — everything `register_builtin_*` adds on top of the static
+    /// tables in [`builtins`].
+    ///
+    /// A value rather than a global read (#98): the registry is decided once,
+    /// when the options are built, and then travels with the resolve. That
+    /// is what lets two resolves in one process disagree about what a
+    /// builtin is, and it takes the `RwLock` off the per-name lookup path:
+    /// the scope walk reads this `Arc` directly.
+    ///
+    /// [`Default`] snapshots the process-global registry
+    /// ([`builtins::snapshot_dynamic_builtins`]), which is what every caller
+    /// that has not been ported to explicit configuration still wants.
+    pub builtins: Arc<builtins::DynamicBuiltins>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            strict: false,
+            experimental_imports: false,
+            experimental_overloads: false,
+            builtins: builtins::snapshot_dynamic_builtins(),
+        }
+    }
 }
 
 impl Options {
+    /// Resolve against `builtins` instead of the process-global registry.
+    #[must_use]
+    pub fn with_builtins(self, builtins: Arc<builtins::DynamicBuiltins>) -> Self {
+        Self { builtins, ..self }
+    }
+
     /// Build the options from the settings that decide them: the file's
     /// pragmas (`None` when no pragma scan ran), the run's feature flags
     /// and strict mode. The single place the experimental opt-ins are
@@ -111,6 +146,7 @@ impl Options {
             experimental_imports: pragmas
                 .is_some_and(|p| p.experimental.iter().any(|f| f == "imports")),
             experimental_overloads: pragmas.is_some_and(pragma_overloads) || flags.overloads,
+            ..Self::default()
         }
     }
 }
@@ -195,6 +231,14 @@ pub fn resolve_collecting_files(
 }
 
 impl Resolver {
+    /// The builtin registry this resolve was configured with — the
+    /// [`Options::builtins`] snapshot, borrowed. Every builtin question the
+    /// walk asks goes through here, so no lookup touches the process-global
+    /// registry (or its lock).
+    pub(crate) fn builtins(&self) -> &builtins::DynamicBuiltins {
+        &self.opts.builtins
+    }
+
     fn into_result(mut self) -> ResolveResult {
         // References are pushed in walk order; sort by offset so the
         // LSP's cursor-position lookup can binary-search.
@@ -696,6 +740,47 @@ mod index_tests {
             !r.diagnostics
                 .iter()
                 .any(|d| d.code == codes::AI_NOT_EXISTING)
+        );
+    }
+
+    /// Two `Options` carrying different explicit registries resolve the
+    /// same name differently — `Builtin` under one, unknown under the
+    /// other — in the same process, at the same time.
+    ///
+    /// This is the property `register_builtin_*` cannot express: the
+    /// process-global registry is one set of names for everybody, so
+    /// "recognized here, not there" is only reachable once the registry is a
+    /// value on the options (#98). Both registries here are explicit, so the
+    /// assertion does not depend on what else the test binary registered.
+    #[test]
+    fn distinct_option_registries_disagree_about_one_name() {
+        const NAME: &str = "__options_scoped_builtin";
+        // Referenced from inside a class method: that is the scope where an
+        // unresolved bare name is reported as UNKNOWN_VARIABLE.
+        let src = format!("class A {{ m() {{ return {NAME} }} }}");
+
+        let mut registered = builtins::DynamicBuiltins::default();
+        registered.names.insert(NAME.to_string());
+
+        let known = run_with_options(&src, Options::default().with_builtins(Arc::new(registered)));
+        let unknown = run_with_options(
+            &src,
+            Options::default().with_builtins(Arc::new(builtins::DynamicBuiltins::default())),
+        );
+
+        let unresolved = |r: &ResolveResult| {
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::UNKNOWN_VARIABLE)
+        };
+        assert!(
+            !unresolved(&known),
+            "`{NAME}` is registered in this registry, so it should resolve as a builtin: {:?}",
+            known.diagnostics,
+        );
+        assert!(
+            unresolved(&unknown),
+            "`{NAME}` is absent from this registry, so it should be unknown",
         );
     }
 

@@ -153,7 +153,7 @@ impl Resolver {
         let name = ident.text().to_string();
         // Assignment to a known builtin constant is always an error
         // regardless of version — `PI = 12`, `INFINITY = 0`, etc.
-        if builtins::is_builtin_constant(&name) {
+        if builtins::is_builtin_constant_in(self.builtins(), &name) {
             self.err(
                 codes::CANT_ASSIGN_VALUE,
                 self.span_of(ident),
@@ -392,13 +392,13 @@ impl Resolver {
                     .get(name.as_str())
                     .copied()
                     .or_else(|| {
-                        builtins::builtin_fn_meta(&name).map(|(min_args, max_args, min_version)| {
-                            FnMeta {
+                        builtins::builtin_fn_meta_in(self.builtins(), &name).map(
+                            |(min_args, max_args, min_version)| FnMeta {
                                 min_args,
                                 max_args,
                                 min_version,
-                            }
-                        })
+                            },
+                        )
                     })
             }
         });
@@ -416,7 +416,7 @@ impl Resolver {
         // (including ones shadowed by a same-named class method)
         // win — a bare `sqrt(x)` inside a class method targets the
         // global builtin, not the class's `sqrt()`.
-        let shadows_builtin = builtins::is_builtin_name(&name);
+        let shadows_builtin = builtins::is_builtin_name_in(self.builtins(), &name);
         if !shadows_builtin && let Some(class_name) = self.current_class.clone() {
             // Bare-name call inside a subclass that resolves to a
             // private method on an ancestor is a privacy error even

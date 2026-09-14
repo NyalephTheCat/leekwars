@@ -4,11 +4,13 @@
 //! helpers.
 //!
 //! The builtin "scope" is **not** stored as a dynamic HashMap any
-//! more — it lives behind [`BUILTIN_SCOPE`] as a `LazyLock<HashSet>`
-//! shared across every [`Resolver`] instance. Lookups walk the
-//! dynamic scope stack first; misses fall through to the static
-//! set. Construction used to do ~330 `String::from` allocations per
-//! `Resolver::new`; this skips them entirely.
+//! more — the always-visible names live in the static tables in
+//! [`builtins`], shared across every [`Resolver`] instance, and the
+//! runtime-registered ones in the [`Options::builtins`](crate::Options)
+//! registry the resolve carries. Lookups walk the dynamic scope stack
+//! first; misses fall through to those. Construction used to do ~330
+//! `String::from` allocations per `Resolver::new`; this skips them
+//! entirely.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -179,14 +181,19 @@ impl Resolver {
     }
 
     /// Look up a name walking outward through all dynamic scopes.
-    /// Misses fall back to the static [`BUILTIN_SCOPE`] so user
-    /// declarations always win over builtins (the `var search = …`
+    /// Misses fall back to the builtins — the static tables plus this
+    /// resolve's [`Options::builtins`](crate::Options::builtins) registry —
+    /// so user declarations always win over builtins (the `var search = …`
     /// pattern that combat AIs love).
+    ///
+    /// The registry is the `Arc` the resolve was configured with, so a miss
+    /// costs a hash lookup and no lock, however many names the walk asks
+    /// about.
     pub(crate) fn lookup(&self, name: &str) -> Option<SymbolKind> {
         self.lookup_id(name)
             .map(|id| self.symbols[id.0 as usize].kind)
             .or_else(|| {
-                if crate::builtins::is_builtin_name(name)
+                if crate::builtins::is_builtin_name_in(self.builtins(), name)
                     || self.imported_library_symbols.contains(name)
                 {
                     Some(SymbolKind::Builtin)

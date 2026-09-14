@@ -1382,6 +1382,7 @@ name = "leek-resolver"
 version = "0.0.1"
 dependencies = [
  "leek-builtins",
+ "leek-config",
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",

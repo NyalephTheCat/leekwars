@@ -7,6 +7,7 @@ license.workspace = true
 description = "Name resolution and scope analysis for Leekscript."
 
 [dependencies]
+leek-config      = { workspace = true }
 leek-span        = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-lexer       = { workspace = true }
