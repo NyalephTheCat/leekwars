@@ -369,11 +369,17 @@ fn newline(out: &mut String, lvl: usize, opts: &FormatOptions) -> usize {
 
 /// Cheap "does this doc fit in `width` columns when flat?" check.
 ///
-/// Walks the head of the doc in flat mode, counting characters. Stops
-/// as soon as `width` is exceeded or a [`Doc::HardLine`]/
-/// [`Doc::BlankLine`] is encountered (those force a break, so the
-/// answer becomes "no" — except they may also legitimately end this
-/// group's flat measurement; we conservatively report "no").
+/// Walks the head of the doc in flat mode, counting characters, and
+/// answers "no" as soon as `width` is exceeded.
+///
+/// A [`Doc::HardLine`] or [`Doc::BlankLine`] anywhere inside also
+/// answers "no", and that is not a heuristic: flat mode has no effect
+/// on either node — the printer emits their newline whatever mode it
+/// is in — so a group containing one cannot be printed on a single
+/// line however much room is left. A block-bodied lambda or a nested
+/// block inside an argument list is exactly that case; choosing
+/// `Mode::Flat` for its group would join the argument separators onto
+/// one line around a body that still breaks (#199).
 fn fits(doc: &Doc, width: usize) -> bool {
     let mut budget = isize::try_from(width).unwrap_or(isize::MAX);
     let mut stack: Vec<(Mode, &Doc)> = vec![(Mode::Flat, doc)];
@@ -392,7 +398,7 @@ fn fits(doc: &Doc, width: usize) -> bool {
                 Mode::Flat => {}
                 Mode::Break => return true,
             },
-            Doc::HardLine | Doc::BlankLine => return true,
+            Doc::HardLine | Doc::BlankLine => return false,
             Doc::Indent(_, inner) => stack.push((mode, inner)),
             Doc::Group(inner) => stack.push((Mode::Flat, inner)),
             Doc::IfBreak { flat, broken } => {
