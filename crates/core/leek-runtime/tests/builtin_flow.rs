@@ -1,7 +1,7 @@
 //! The builtin error channel, at the `leek-runtime` end.
 //!
 //! Every higher-order builtin invokes its callback through
-//! [`BuiltinHost::call_value`], which returns `Result<Value, BuiltinFlow>`.
+//! [`BuiltinHost::call_value`], which returns a [`BuiltinResult`].
 //! When a callback reports an error the builtin must propagate it *and stop*
 //! — not swallow it and keep calling back for the remaining elements. The
 //! channel had zero producers for a long time (#189), so nothing exercised
@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use leek_runtime::{
-    BuiltinFlow, BuiltinHost, Function, MapData, SetData, Value, call_builtin, is_known_builtin,
+    BuiltinError, BuiltinHost, BuiltinResult, Function, MapData, SetData, Value, call_builtin,
+    is_known_builtin,
 };
 
 /// A host that counts callback invocations and reports an error on the
@@ -51,10 +52,10 @@ impl BuiltinHost for CountingHost {
     fn param_byref_mask(&self, _callee: &Value) -> Option<Vec<bool>> {
         None
     }
-    fn call_value(&mut self, _callee: &Value, _args: Vec<Value>) -> Result<Value, BuiltinFlow> {
+    fn call_value(&mut self, _callee: &Value, _args: Vec<Value>) -> BuiltinResult {
         self.calls += 1;
         if self.calls == self.fail_at {
-            return Err(BuiltinFlow::Error("BOOM".into()));
+            return Err(BuiltinError::new("BOOM"));
         }
         Ok(self.reply.clone())
     }
@@ -101,9 +102,8 @@ fn assert_stops_at_first_error(name: &str, args: &[Value], reply: Value) {
     let mut host = CountingHost::new(FAIL_AT, reply);
     let r = call_builtin(&mut host, name, args);
     match r {
-        Err(BuiltinFlow::Error(code)) => assert_eq!(code, "BOOM", "{name} reported the wrong code"),
+        Err(e) => assert_eq!(e.code, "BOOM", "{name} reported the wrong code"),
         Ok(v) => panic!("{name} swallowed the callback error and returned {v:?}"),
-        Err(other) => panic!("{name} reported {other:?} instead of the callback's error"),
     }
     assert_eq!(
         host.calls, FAIL_AT,

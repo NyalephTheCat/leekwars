@@ -10,13 +10,13 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 use crate::value::{MapData, Value};
-use crate::{BuiltinFlow, BuiltinHost};
+use crate::{BuiltinHost, BuiltinResult};
 
 pub(crate) fn dispatch_array(
     host: &mut dyn BuiltinHost,
     name: &str,
     args: &[Value],
-) -> Result<Option<Value>, BuiltinFlow> {
+) -> BuiltinResult<Option<Value>> {
     Ok(Some(match (name, args.len()) {
         ("count", 1) => count(&args[0], host.version()),
         ("isEmpty", 1) => Value::Bool(match &args[0] {
@@ -723,7 +723,7 @@ pub(crate) fn higher_order_array(
     arr: &Value,
     fun: &Value,
     kind: HoKind,
-) -> Result<Value, BuiltinFlow> {
+) -> BuiltinResult {
     // `arrayMap(map, fn)` returns a Map keyed by the original keys
     // with values transformed by `fn`. Filter on a Map returns a
     // sub-Map with only the kept entries (keys preserved). The
@@ -856,7 +856,7 @@ pub(crate) fn fold(
     fun: &Value,
     init: Value,
     right: bool,
-) -> Result<Value, BuiltinFlow> {
+) -> BuiltinResult {
     let items: Vec<Value> = match arr {
         Value::Array(a) => a.borrow().clone(),
         _ => return Ok(Value::Null),
@@ -876,11 +876,7 @@ pub(crate) fn fold(
     Ok(acc)
 }
 
-pub(crate) fn iter_array(
-    host: &mut dyn BuiltinHost,
-    arr: &Value,
-    fun: &Value,
-) -> Result<Value, BuiltinFlow> {
+pub(crate) fn iter_array(host: &mut dyn BuiltinHost, arr: &Value, fun: &Value) -> BuiltinResult {
     let Value::Array(a) = arr else {
         return Ok(Value::Null);
     };
@@ -947,7 +943,7 @@ pub(crate) fn quantify(
     arr: &Value,
     fun: &Value,
     want_all: bool,
-) -> Result<Value, BuiltinFlow> {
+) -> BuiltinResult {
     let items: Vec<Value> = match arr {
         Value::Array(a) => a.borrow().clone(),
         _ => return Ok(Value::Null),
@@ -1063,11 +1059,7 @@ pub(crate) fn split_string(s: &Value, sep: &Value, limit: Option<&Value>) -> Val
     Value::Array(Rc::new(RefCell::new(parts)))
 }
 
-pub(crate) fn find_array(
-    host: &mut dyn BuiltinHost,
-    arr: &Value,
-    fun: &Value,
-) -> Result<Value, BuiltinFlow> {
+pub(crate) fn find_array(host: &mut dyn BuiltinHost, arr: &Value, fun: &Value) -> BuiltinResult {
     let items: Vec<Value> = match arr {
         Value::Array(a) => a.borrow().clone(),
         _ => return Ok(Value::Null),
@@ -1081,11 +1073,7 @@ pub(crate) fn find_array(
     Ok(Value::Null)
 }
 
-pub(crate) fn partition(
-    host: &mut dyn BuiltinHost,
-    arr: &Value,
-    fun: &Value,
-) -> Result<Value, BuiltinFlow> {
+pub(crate) fn partition(host: &mut dyn BuiltinHost, arr: &Value, fun: &Value) -> BuiltinResult {
     let Value::Array(a) = arr else {
         return Ok(Value::Null);
     };
@@ -1225,7 +1213,7 @@ pub(crate) fn sort_array_with_cmp(
     host: &mut dyn BuiltinHost,
     arr: &Value,
     cmp: &Value,
-) -> Result<Value, BuiltinFlow> {
+) -> BuiltinResult {
     // Map input — sort entries by the comparator's verdict on
     // their (key, value) tuples. 2-arg cb gets `(v, v)`, 4-arg cb
     // gets `(k1, v1, k2, v2)`. Mutates the map in place.

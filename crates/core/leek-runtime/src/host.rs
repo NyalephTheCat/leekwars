@@ -7,26 +7,44 @@
 //! Rather than couple the builtin catalog to a concrete backend, those
 //! needs are abstracted behind [`BuiltinHost`]. The native backend
 //! implements it over its per-run thread-local state: `call_value` enters a
-//! JIT-compiled lambda, and reports the run's recorded runtime error as
-//! [`BuiltinFlow::Error`] so a higher-order builtin stops at the first fault
+//! JIT-compiled lambda, and reports the run's recorded runtime error as a
+//! [`BuiltinError`] so a higher-order builtin stops at the first fault
 //! instead of calling back for every remaining element.
 
 use crate::Value;
 
-/// Abnormal control flow / error escaping a higher-order builtin's
-/// callback — the runtime-level mirror of the interpreter's `Outcome`,
-/// kept free of any backend type so it can live in `leek-runtime`.
-#[derive(Debug, Clone)]
-pub enum BuiltinFlow {
-    /// `return v` bubbling out of the callback.
-    Return(Value),
-    /// Stray `break`.
-    Break,
-    /// Stray `continue`.
-    Continue,
-    /// A runtime error (e.g. `TOO_MUCH_OPERATIONS`).
-    Error(String),
+/// A runtime fault escaping a builtin — in practice one raised inside a
+/// higher-order builtin's callback (`TOO_MUCH_OPERATIONS`, `STACKOVERFLOW`,
+/// …), which is why the channel exists at all.
+///
+/// `code` is a bare *fight* error key, not a sentence: the generator logs it
+/// verbatim, so it stays a `String` rather than becoming an enum the two
+/// sides would have to agree on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinError {
+    pub code: String,
 }
+
+impl BuiltinError {
+    /// A fault reported under the fight error key `code`.
+    pub fn new(code: impl Into<String>) -> Self {
+        Self { code: code.into() }
+    }
+}
+
+impl std::fmt::Display for BuiltinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.code)
+    }
+}
+
+impl std::error::Error for BuiltinError {}
+
+/// What a builtin returns: its value, or the fault that stopped it. Defaults
+/// to `Value` because that is what `call_builtin` and the higher-order
+/// helpers produce; the `dispatch_*` tables use `BuiltinResult<Option<Value>>`
+/// for "not my name".
+pub type BuiltinResult<T = Value> = Result<T, BuiltinError>;
 
 /// Backend capabilities the stdlib builtins draw on.
 pub trait BuiltinHost {
@@ -48,5 +66,5 @@ pub trait BuiltinHost {
     fn param_byref_mask(&self, callee: &Value) -> Option<Vec<bool>>;
 
     /// Invoke a callback value with `args` (for higher-order builtins).
-    fn call_value(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, BuiltinFlow>;
+    fn call_value(&mut self, callee: &Value, args: Vec<Value>) -> BuiltinResult;
 }

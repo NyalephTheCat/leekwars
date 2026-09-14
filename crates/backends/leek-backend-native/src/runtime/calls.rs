@@ -13,7 +13,7 @@ use super::{
     charge_builtin_ops, current_runtime_error, guard::INTERNAL_PANIC, handle, raise_runtime_error,
     read_handle, val,
 };
-use leek_runtime::{BuiltinFlow, BuiltinHost, Function, LambdaCapture, Value};
+use leek_runtime::{BuiltinError, BuiltinHost, BuiltinResult, Function, LambdaCapture, Value};
 use std::cell::RefCell;
 
 /// Apply a class's `string()` override to the *top-level* program result: if
@@ -371,12 +371,12 @@ pub(super) struct NativeHost {
     version: u8,
 }
 
-/// The fault behind the current abort, as a [`BuiltinFlow::Error`]. Only read
-/// once [`aborting`] is true; the `INTERNAL_PANIC` fallback covers the
+/// The fault behind the current abort, as a [`BuiltinError`]. Only read once
+/// [`aborting`] is true; the `INTERNAL_PANIC` fallback covers the
 /// (unreachable) case of an abort with no code recorded, rather than
 /// inventing a success.
-fn recorded_error() -> BuiltinFlow {
-    BuiltinFlow::Error(current_runtime_error().unwrap_or_else(|| INTERNAL_PANIC.to_string()))
+fn recorded_error() -> BuiltinError {
+    BuiltinError::new(current_runtime_error().unwrap_or_else(|| INTERNAL_PANIC.to_string()))
 }
 
 /// Land a builtin's result on the native side: a reported error becomes a
@@ -385,17 +385,13 @@ fn recorded_error() -> BuiltinFlow {
 /// yields the builtin's value. `raise_runtime_error` is first-wins, so
 /// re-raising a code that came out of the error slot in the first place is a
 /// no-op.
-pub(super) fn finish_builtin(r: Result<Value, BuiltinFlow>) -> Value {
+pub(super) fn finish_builtin(r: BuiltinResult) -> Value {
     match r {
         Ok(v) => v,
-        Err(BuiltinFlow::Error(code)) => {
-            raise_runtime_error(&code);
+        Err(e) => {
+            raise_runtime_error(&e.code);
             Value::Null
         }
-        // `return` out of a callback is the callback's own value; a stray
-        // `break`/`continue` can't escape a compiled lambda, so it yields null.
-        Err(BuiltinFlow::Return(v)) => v,
-        Err(BuiltinFlow::Break | BuiltinFlow::Continue) => Value::Null,
     }
 }
 
@@ -463,7 +459,7 @@ impl BuiltinHost for NativeHost {
         }
         None
     }
-    fn call_value(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, BuiltinFlow> {
+    fn call_value(&mut self, callee: &Value, args: Vec<Value>) -> BuiltinResult {
         // A higher-order builtin drives this in a loop, so the run's error
         // state has to reach it: without an `Err` the builtin keeps calling
         // back for every remaining element after the run has already faulted.
@@ -764,8 +760,8 @@ mod tests {
         let callee = Value::Function(Function::Builtin("abs".into()));
         let r = host.call_value(&callee, vec![Value::Int(-1)]);
         match r {
-            Err(BuiltinFlow::Error(code)) => assert_eq!(code, "TOO_MUCH_OPERATIONS"),
-            other => panic!("expected the recorded error, got {other:?}"),
+            Err(e) => assert_eq!(e.code, "TOO_MUCH_OPERATIONS"),
+            Ok(v) => panic!("expected the recorded error, got {v:?}"),
         }
         reset_runtime_error();
     }
@@ -788,7 +784,7 @@ mod tests {
     #[test]
     fn finish_builtin_records_a_reported_error() {
         reset_runtime_error();
-        let v = finish_builtin(Err(BuiltinFlow::Error("BOOM".into())));
+        let v = finish_builtin(Err(BuiltinError::new("BOOM")));
         assert!(matches!(v, Value::Null), "a reported error yields null");
         assert_eq!(take_runtime_error().as_deref(), Some("BOOM"));
         reset_runtime_error();

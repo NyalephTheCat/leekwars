@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::value::Value;
-use crate::{BuiltinFlow, BuiltinHost};
+use crate::{BuiltinHost, BuiltinResult};
 
 use super::array::contains_in;
 
@@ -37,7 +37,7 @@ pub(crate) fn dispatch_misc(
     host: &mut dyn BuiltinHost,
     name: &str,
     args: &[Value],
-) -> Result<Option<Value>, BuiltinFlow> {
+) -> BuiltinResult<Option<Value>> {
     Ok(Some(match (name, args.len()) {
         ("println" | "print", _) => Value::Null,
         // `Object.keys()` / `Object.values()` over an object literal
