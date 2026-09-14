@@ -33,6 +33,14 @@ include!("consts_gen.rs");
 /// Dispatch a leek-wars fight function — the game-side analogue of
 /// `leek_runtime::call_builtin`. Returns [`Value::Null`] for an unknown or
 /// not-yet-modeled function, so the calling AI keeps running.
+///
+/// These are the *approximate* fight functions, written against the frozen
+/// [`Fight`](crate::Fight) sandbox and scheduled for deletion with it (#348);
+/// the official-parity dispatcher is
+/// [`call_official_builtin`](crate::official_builtins::call_official_builtin)
+/// over [`State`](crate::state::State). See [`crate::fight`] for the
+/// divergences this path keeps: effect expiry, the turn-limit draw, and the
+/// ignored `launch_type`.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 // Grid coordinates are small; the i64→f64 cast in `getDistance` can't lose

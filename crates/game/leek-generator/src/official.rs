@@ -25,7 +25,7 @@ pub use leek_game_runtime::state::{
     STAT_MP, STAT_RESISTANCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
 };
 
-use crate::AiPrograms;
+use crate::{AiPrograms, RuntimeGuard};
 use leek_backend_native::ids::fn_id;
 use leek_backend_native::{NativeError, NativeOptions, ops_used};
 use leek_game_runtime::actions::Action;
@@ -70,13 +70,11 @@ fn run_entity_ai(
     opts: &NativeOptions,
 ) -> u64 {
     let result = programs.get(hir, opts).and_then(|program| {
-        leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+        let _guard = RuntimeGuard::install(OfficialRuntime {
             state: Rc::clone(state),
             current: fid,
-        })));
-        let result = program.run(opts);
-        leek_backend_native::set_game_runtime(None);
-        result
+        });
+        program.run(opts)
     });
     harvest_run(state, fid, fid, &result)
 }
@@ -129,13 +127,11 @@ fn run_bulb_ai(
     // The owner's turn module, already compiled — a bulb turn no longer
     // re-JITs the whole owning AI.
     let result = programs.get(hir, opts).and_then(|program| {
-        leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+        let _guard = RuntimeGuard::install(OfficialRuntime {
             state: Rc::clone(state),
             current: fid,
-        })));
-        let result = program.run_call(opts, ai_fn, Vec::new());
-        leek_backend_native::set_game_runtime(None);
-        result
+        });
+        program.run_call(opts, ai_fn, Vec::new())
     });
     harvest_run(state, fid, owner, &result)
 }
@@ -227,13 +223,11 @@ fn run_hooks(
         // codegen key, so the turn module's code stays byte-identical to what
         // it was before hooks existed as a separate compile.
         let result = programs.get(hir, &hook_opts).and_then(|program| {
-            leek_backend_native::set_game_runtime(Some(Box::new(OfficialRuntime {
+            let _guard = RuntimeGuard::install(OfficialRuntime {
                 state: Rc::clone(state),
                 current: fid,
-            })));
-            let result = program.run_call(&hook_opts, &hook_fn, Vec::new());
-            leek_backend_native::set_game_runtime(None);
-            result
+            });
+            program.run_call(&hook_opts, &hook_fn, Vec::new())
         });
         let mut s = state.borrow_mut();
         s.hook_phase = HookPhase::None;

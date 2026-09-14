@@ -1,6 +1,37 @@
-//! The reference world model: [`Fight`] — entities on a `width × height`
+//! The sandbox world model: [`Fight`] — entities on a `width × height`
 //! grid — and its [`GameHost`] implementation, plus the shared [`FightRef`]
 //! handle orchestrators drive it through.
+//!
+//! **Frozen, and deliberately approximate.** [`Fight`] is a self-contained
+//! sandbox engine, not a model of the official one: it was written to be cheap
+//! to set up and to reason about, and cheapness won wherever it met fidelity.
+//! The official-parity engine is [`State`](crate::state::State) — what the
+//! conformance runner drives and the oracle goldens are checked against — and
+//! epic #348 replaces [`Fight`] with it and deletes this module (#144). So:
+//! take no new dependency on [`Fight`], and fix no divergence here. A fix
+//! belongs in [`State`](crate::state::State), or it is thrown away with the
+//! module.
+//!
+//! The divergences known at freeze time, left in place on purpose:
+//!
+//! - **Effects expire on the target's turn**, not the caster's:
+//!   [`Fight::tick_effects`] decrements the durations of the effects an entity
+//!   *carries*, and the turn loop calls it at the start of that entity's own
+//!   turn. `State::start_turn` instead decrements the effects the entity
+//!   *launched*, so a buff or a poison runs out at a different moment here
+//!   than upstream.
+//! - **The turn limit has no tie-break.** Reaching it with more than one team
+//!   alive is a flat draw in the generator's turn loop, where
+//!   [`State::compute_winner`](crate::state::State::compute_winner) awards the
+//!   win to the single team with the most life left and declares a draw only
+//!   when that top life is shared.
+//! - **`launch_type` is ignored.** The use rules check Manhattan range, then
+//!   line of sight, and nothing else (`builtins::UseSpec` carries no launch
+//!   type), so a line-only weapon — launch type 1: pistol, magnum, rifle —
+//!   fires at a target off both its axes, which
+//!   [`Map::verify_range`](crate::map::Map::verify_range) refuses.
+//!
+//! What it does model:
 //!
 //! - **Map**: a square grid, cells numbered row-major. Geometry uses grid
 //!   (Manhattan) distance for movement and Euclidean for `getDistance`. The
@@ -20,6 +51,10 @@ use crate::{ActiveEffect, EffectKind, Entity, GameHost, Stat};
 const DEFAULT_SEED: u64 = 0x2545_f491_4f6c_dd1d;
 
 /// The fight world model — entities on a `width × height` grid.
+///
+/// A deliberately approximate sandbox engine, frozen and scheduled for
+/// deletion once [`State`](crate::state::State) replaces it (#348); see the
+/// [module docs](self) for the divergences it keeps.
 #[derive(Debug, Clone)]
 pub struct Fight {
     entities: Vec<Entity>,

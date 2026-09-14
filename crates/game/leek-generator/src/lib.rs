@@ -129,6 +129,35 @@ impl leek_backend_native::GameRuntime for FightRuntime {
     }
 }
 
+/// Installs a game runtime for as long as the guard lives, and clears it on
+/// the way out — on the error path and while unwinding as much as on the
+/// happy one.
+///
+/// The backend's hook is a thread-local
+/// ([`set_game_runtime`](leek_backend_native::set_game_runtime)), so an
+/// install that isn't paired with a clear leaves a finished fight's runtime —
+/// and the `Rc` to its world it holds — installed on this thread, where the
+/// next AI launched here would call into it. Every launch below therefore
+/// scopes its install to a guard instead of clearing by hand.
+pub(crate) struct RuntimeGuard;
+
+impl RuntimeGuard {
+    /// Install `runtime` as this thread's game runtime until the returned
+    /// guard drops. Generic over the runtime, so the engine-native
+    /// [`FightRuntime`] and the conformance runner's `OfficialRuntime` share
+    /// one guard.
+    pub(crate) fn install<R: leek_backend_native::GameRuntime + 'static>(runtime: R) -> Self {
+        leek_backend_native::set_game_runtime(Some(Box::new(runtime)));
+        Self
+    }
+}
+
+impl Drop for RuntimeGuard {
+    fn drop(&mut self) {
+        leek_backend_native::set_game_runtime(None);
+    }
+}
+
 /// Launch one AI under explicit [`NativeOptions`]: run its compiled `hir`
 /// against `fight` (the fight's current entity is the subject), with the fight
 /// builtins linked in. Returns the AI's value.
@@ -145,10 +174,8 @@ pub fn run_ai_with(
     hir: &HirFile,
     opts: &NativeOptions,
 ) -> Result<Value, NativeError> {
-    leek_backend_native::set_game_runtime(Some(Box::new(FightRuntime(fight.clone()))));
-    let result = leek_backend_native::run(hir, opts);
-    leek_backend_native::set_game_runtime(None);
-    result
+    let _guard = RuntimeGuard::install(FightRuntime(fight.clone()));
+    leek_backend_native::run(hir, opts)
 }
 
 /// Launch one **already-compiled** AI: install the fight runtime and run its
@@ -164,10 +191,8 @@ pub fn run_ai_program(
     program: &CompiledProgram,
     opts: &NativeOptions,
 ) -> Result<Value, NativeError> {
-    leek_backend_native::set_game_runtime(Some(Box::new(FightRuntime(fight.clone()))));
-    let result = program.run(opts);
-    leek_backend_native::set_game_runtime(None);
-    result
+    let _guard = RuntimeGuard::install(FightRuntime(fight.clone()));
+    program.run(opts)
 }
 
 /// Launch one AI with the standard fight options and the official per-turn
