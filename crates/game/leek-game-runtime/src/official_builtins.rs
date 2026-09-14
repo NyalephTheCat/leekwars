@@ -15,8 +15,10 @@ use crate::attack::{EffectType, EntityState};
 use crate::state::{
     ChipSpec, ERROR_HELP_PAGE_LINK, FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
     FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED, FARMER_LOG_LOADOUT_NOT_FOUND,
-    FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, LOG_SSTANDARD,
-    LOG_SWARNING, State, USE_RESURRECT_INVALID_ENTITY,
+    FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, Fighter,
+    LOG_SSTANDARD, LOG_SWARNING, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_DAMAGE_RETURN,
+    STAT_MAGIC, STAT_POWER, STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE, STAT_STRENGTH,
+    STAT_WISDOM, State, USE_RESURRECT_INVALID_ENTITY,
 };
 
 /// Dispatch one official fight function for the entity `current` (the fid
@@ -133,6 +135,96 @@ pub fn call_official_builtin(
         // argument is false (Java's `instanceof Number` + lookup-miss paths).
         "isStatic" => Value::Bool(is_static(state, current, args.first())),
 
+        // ---- EntityClass (characteristics, equipment) ----
+        // Everything in this block resolves its optional entity argument
+        // through `resolve_stat_target`, not `resolve_entity`:
+        // `EntityClass.resolveStatTarget` masks *other* entities for the
+        // duration of a `beforeFight()` hook, so the second AI to execute
+        // can't read the first one's `setLoadout` choice. A masked or
+        // unresolvable target answers `null`.
+        //
+        // `Entity.getStat(id)` is `mBaseStats + mBuffStats`, so every
+        // characteristic below is the entity's *buffed* value, never the
+        // scenario one.
+        "getLife" => masked_int(state, current, args.first(), |f| i64::from(f.life)),
+        // `Entity.getTotalLife()` is `mTotalLife` — the live maximum, which
+        // vitality raises and erosion lowers — and NOT the `STAT_LIFE`
+        // characteristic. `getMaxLife` is not a function of the reference
+        // engine at all (`FightFunctions` registers `getTotalLife` and
+        // nothing else), but it is a name this toolchain's resolver accepts
+        // and `builtins.rs` already answers with the same value, so serving
+        // it as an alias keeps the two engines agreeing.
+        "getTotalLife" | "getMaxLife" => {
+            masked_int(state, current, args.first(), |f| i64::from(f.total_life))
+        }
+        // Remaining TP/MP (`getTotalTP() - usedTP`), not the characteristic.
+        "getTP" => masked_int(state, current, args.first(), |f| i64::from(f.tp())),
+        "getMP" => masked_int(state, current, args.first(), |f| i64::from(f.mp())),
+        "getStrength" => stat_of(state, current, args.first(), STAT_STRENGTH),
+        "getAgility" => stat_of(state, current, args.first(), STAT_AGILITY),
+        "getWisdom" => stat_of(state, current, args.first(), STAT_WISDOM),
+        "getResistance" => stat_of(state, current, args.first(), STAT_RESISTANCE),
+        "getScience" => stat_of(state, current, args.first(), STAT_SCIENCE),
+        "getMagic" => stat_of(state, current, args.first(), STAT_MAGIC),
+        "getPower" => stat_of(state, current, args.first(), STAT_POWER),
+        "getAbsoluteShield" => stat_of(state, current, args.first(), STAT_ABSOLUTE_SHIELD),
+        "getRelativeShield" => stat_of(state, current, args.first(), STAT_RELATIVE_SHIELD),
+        "getDamageReturn" => stat_of(state, current, args.first(), STAT_DAMAGE_RETURN),
+        // The *equipped* weapon (`Entity.weapon`) — `null` when the entity
+        // carries none, which is every entity until its first `setWeapon`.
+        "getWeapon" => match resolve_stat_target(state, current, args.first()) {
+            Some(fid) => state.fighters[fid]
+                .weapon
+                .map_or(Value::Null, |w| Value::Int(i64::from(w))),
+            None => Value::Null,
+        },
+        // Everything owned, in `mWeapons` insertion order (a `List`, not
+        // sorted) …
+        "getWeapons" => match resolve_stat_target(state, current, args.first()) {
+            Some(fid) => int_array(state.fighters[fid].weapons.iter().map(|&w| i64::from(w))),
+            None => Value::Null,
+        },
+        // … whereas `mChips` is a `TreeMap<Integer, Chip>`, so `getChips()`
+        // comes back ordered by chip id — which is what iterating our
+        // `BTreeSet` gives.
+        "getChips" => match resolve_stat_target(state, current, args.first()) {
+            Some(fid) => int_array(state.fighters[fid].chips.iter().map(|&c| i64::from(c))),
+            None => Value::Null,
+        },
+
+        // ---- EntityClass (lobby-visible facts) ----
+        // These resolve with a bare `Fight.getEntity` and are deliberately
+        // NOT masked during `beforeFight()`: they expose nothing that isn't
+        // already on the fight's lobby page or fixed at fight init.
+        "getName" => match resolve_entity(state, current, args.first()) {
+            Some(fid) => Value::String(std::rc::Rc::new(state.fighters[fid].name.clone())),
+            None => Value::Null,
+        },
+        "getLevel" => match resolve_entity(state, current, args.first()) {
+            Some(fid) => Value::Int(i64::from(state.fighters[fid].level)),
+            None => Value::Null,
+        },
+        // The reference engine has no `getTeam`. It spells this one
+        // `getSide` — `Entity.getTeam()`, the 0-based team *index* — and
+        // keeps the real team id under `getTeamID` (`Entity.getTeamId()`).
+        // `getTeam` is another resolver-only name, and `builtins.rs` already
+        // answers it with the team index, so that is what it answers here.
+        "getTeam" => match resolve_entity(state, current, args.first()) {
+            Some(fid) => Value::Int(state.fighters[fid].team as i64),
+            None => Value::Null,
+        },
+        // `isAlive`/`isDead` take a *required* entity and answer `false` —
+        // not `null` — for one that doesn't resolve. Both are false for a
+        // bogus id: `isDead(99999)` is not `true`.
+        "isAlive" => Value::Bool(
+            resolve_entity(state, current, args.first())
+                .is_some_and(|fid| !state.fighters[fid].is_dead()),
+        ),
+        "isDead" => Value::Bool(
+            resolve_entity(state, current, args.first())
+                .is_some_and(|fid| state.fighters[fid].is_dead()),
+        ),
+
         // ---- WeaponClass ----
         "useWeapon" => {
             if deny_during_hook(state, current, "useWeapon") {
@@ -142,6 +234,16 @@ pub fn call_official_builtin(
         }
 
         // ---- ChipClass ----
+        // getCooldown(chip_id[, entity]) — the *chip* comes first, the same
+        // argument order `builtins.rs` uses. `State.getCooldown` reads the
+        // team's table for a team-cooldown chip and the entity's own
+        // otherwise, and answers 0 for a chip the catalog doesn't know
+        // (`Chips.getChip` returns null there). Not masked: `ChipClass`
+        // resolves with a bare `Fight.getEntity`.
+        "getCooldown" => match resolve_entity(state, current, args.get(1)) {
+            Some(fid) => Value::Int(i64::from(state.chip_cooldown(fid, int_arg(0) as i32))),
+            None => Value::Null,
+        },
         "useChip" => {
             // useChip(chip_id[, leek_id]) — the target defaults to self.
             if deny_during_hook(state, current, "useChip") {
@@ -387,6 +489,46 @@ fn resolve_entity(state: &State, current: usize, arg: Option<&Value>) -> Option<
     }
 }
 
+/// `EntityClass.resolveStatTarget` — [`resolve_entity`] plus the
+/// `beforeFight()` mask: while that hook runs, an entity other than the
+/// caller answers `null` for every equipment- and stat-dependent getter, so
+/// the second AI to execute can't react to the first one's `setLoadout`
+/// choice. Self queries and the `afterFight()` hook are unmasked.
+fn resolve_stat_target(state: &State, current: usize, arg: Option<&Value>) -> Option<usize> {
+    let fid = resolve_entity(state, current, arg)?;
+    if state.is_in_before_fight_hook() && fid != current {
+        return None;
+    }
+    Some(fid)
+}
+
+/// One masked `long` getter: resolve through [`resolve_stat_target`], then
+/// read `f` off the fighter. A masked or unresolvable target is `null`.
+fn masked_int(
+    state: &State,
+    current: usize,
+    arg: Option<&Value>,
+    f: impl FnOnce(&Fighter) -> i64,
+) -> Value {
+    match resolve_stat_target(state, current, arg) {
+        Some(fid) => Value::Int(f(&state.fighters[fid])),
+        None => Value::Null,
+    }
+}
+
+/// One masked characteristic (`Entity.getStat` — `mBaseStats + mBuffStats`).
+fn stat_of(state: &State, current: usize, arg: Option<&Value>, stat: usize) -> Value {
+    masked_int(state, current, arg, |f| i64::from(f.stat(stat)))
+}
+
+/// A LeekScript array of ids — the shape every array-returning getter here
+/// builds (`new ArrayLeekValue(ai)` then one `push` per element).
+fn int_array(ids: impl Iterator<Item = i64>) -> Value {
+    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+        ids.map(Value::Int).collect(),
+    )))
+}
+
 /// Whether a chip carries a `TYPE_SUMMON` effect line — the `Fight.useChip`
 /// intercept test.
 fn has_summon_effect(spec: &ChipSpec) -> bool {
@@ -475,13 +617,12 @@ fn get_summons(state: &State, current: usize, arg: Option<&Value>) -> Value {
         return Value::Null;
     };
     let team = &state.teams[state.fighters[fid].team];
-    let summons: Vec<Value> = team
-        .fighters
-        .iter()
-        .filter(|&&f| !state.fighters[f].is_dead() && state.fighters[f].summoner == Some(fid))
-        .map(|&f| Value::Int(f as i64))
-        .collect();
-    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(summons)))
+    int_array(
+        team.fighters
+            .iter()
+            .filter(|&&f| !state.fighters[f].is_dead() && state.fighters[f].summoner == Some(fid))
+            .map(|&f| f as i64),
+    )
 }
 
 /// `ChipClass.useChipOnCell(chip_id, cell_id)` — the chip must be *equipped*
@@ -623,7 +764,11 @@ mod tests {
     use leek_runtime::Value;
 
     use super::call_official_builtin;
-    use crate::state::{Fighter, STAT_LIFE, STAT_MP, STAT_TP, State, Stats};
+    use crate::state::{
+        Fighter, HookPhase, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_DAMAGE_RETURN, STAT_LIFE,
+        STAT_MAGIC, STAT_MP, STAT_POWER, STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE,
+        STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats,
+    };
 
     /// Every extreme an AI can hand a builtin. LeekScript integers are `i64`,
     /// and `Value::to_long` produces any of these from an `Int`, from a
@@ -694,6 +839,30 @@ mod tests {
             "summon",
             "getCellToUseChip",
             "isStatic",
+            "getLife",
+            "getTotalLife",
+            "getMaxLife",
+            "getTP",
+            "getMP",
+            "getStrength",
+            "getAgility",
+            "getWisdom",
+            "getResistance",
+            "getScience",
+            "getMagic",
+            "getPower",
+            "getAbsoluteShield",
+            "getRelativeShield",
+            "getDamageReturn",
+            "getWeapon",
+            "getWeapons",
+            "getChips",
+            "getName",
+            "getLevel",
+            "getTeam",
+            "isAlive",
+            "isDead",
+            "getCooldown",
         ];
         for name in NAMES {
             for &a in EXTREMES {
@@ -842,4 +1011,288 @@ mod tests {
     /// `one_leek`'s mid-board start, so the budget always runs out before
     /// the path does and "how much MP did it spend" is the answer under test.
     const FAR_CELL: i64 = 0;
+
+    /// Two leeks on opposing teams, every characteristic a different number
+    /// so a getter wired to the wrong `STAT_*` fails loudly rather than
+    /// matching by coincidence. Fighter 0 is the one the calls run as; it
+    /// carries a buff, spent TP/MP, damage and a vitality bonus, so no
+    /// getter here can be satisfied by the raw scenario stats. Fighter 1 is
+    /// dead, which is what `isDead`/`isAlive` answer about.
+    fn two_leeks() -> State {
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, 100);
+        stats.set(STAT_TP, 10);
+        stats.set(STAT_MP, 5);
+        stats.set(STAT_STRENGTH, 11);
+        stats.set(STAT_AGILITY, 12);
+        stats.set(STAT_WISDOM, 13);
+        stats.set(STAT_RESISTANCE, 14);
+        stats.set(STAT_SCIENCE, 15);
+        stats.set(STAT_MAGIC, 16);
+        stats.set(STAT_POWER, 17);
+        stats.set(STAT_ABSOLUTE_SHIELD, 18);
+        stats.set(STAT_RELATIVE_SHIELD, 19);
+        stats.set(STAT_DAMAGE_RETURN, 20);
+
+        let mut state = State::new(42);
+        let me = state.add_entity(0, Fighter::new(0, 1, "mine".into(), 0, stats.clone()));
+        state.place_entity(me, 306);
+        let them = state.add_entity(1, Fighter::new(0, 2, "theirs".into(), 1, stats));
+        state.place_entity(them, 300);
+
+        state.fighters[me].level = 42;
+        // Spent TP/MP: `getTP`/`getMP` are the remainder, not the stat.
+        state.fighters[me].use_tp(3);
+        state.fighters[me].use_mp(2);
+        // A buff: `Entity.getStat` is base + buff, so 11 + 100.
+        state.fighters[me].buff_stats.set(STAT_STRENGTH, 100);
+        // Damaged, and vitality-boosted past the `STAT_LIFE` characteristic:
+        // `getLife`, `getTotalLife` and `STAT_LIFE` are three numbers.
+        state.fighters[me].life = 60;
+        state.fighters[me].total_life = 130;
+        // `mWeapons` is a `List` — insertion order, deliberately unsorted.
+        state.fighters[me].weapons = vec![37, 1, 19];
+        state.fighters[me].weapon = Some(19);
+        // `mChips` is a `TreeMap` — inserted unsorted, read back by id.
+        state.fighters[me].chips = [7, 2, 3].into_iter().collect();
+        state.fighters[them].life = 0;
+        state
+    }
+
+    /// Dispatch as fighter 0 of a [`two_leeks`] state.
+    fn call(state: &mut State, name: &str, args: &[Value]) -> Value {
+        call_official_builtin(state, 0, name, args)
+    }
+
+    /// The ids inside an array `Value`, which `identity_eq` can't compare
+    /// (it is pointer equality for arrays).
+    #[track_caller]
+    fn int_vec(v: &Value) -> Vec<i64> {
+        let Value::Array(a) = v else {
+            panic!("expected an array, got {v:?}");
+        };
+        a.borrow().iter().map(Value::to_long).collect()
+    }
+
+    /// Each entity getter reads the field the Java one reads.
+    ///
+    /// The fixture is built so that every expected number is unique: a
+    /// getter pointed at the wrong `STAT_*`, at the base stats instead of
+    /// the buffed ones, or at `STAT_LIFE` instead of `mTotalLife`, lands on
+    /// a value no other getter answers and fails here.
+    #[test]
+    fn entity_getters_read_the_java_field() {
+        let mut state = two_leeks();
+        let cases: &[(&str, Value)] = &[
+            ("getLife", Value::Int(60)),
+            // `mTotalLife`, not `STAT_LIFE` (100) and not current life (60).
+            ("getTotalLife", Value::Int(130)),
+            // Not a reference-engine name; served as `getTotalLife`.
+            ("getMaxLife", Value::Int(130)),
+            ("getTP", Value::Int(7)),
+            ("getMP", Value::Int(3)),
+            // base 11 + buff 100 — `getStat`, not `mBaseStats`.
+            ("getStrength", Value::Int(111)),
+            ("getAgility", Value::Int(12)),
+            ("getWisdom", Value::Int(13)),
+            ("getResistance", Value::Int(14)),
+            ("getScience", Value::Int(15)),
+            ("getMagic", Value::Int(16)),
+            ("getPower", Value::Int(17)),
+            ("getAbsoluteShield", Value::Int(18)),
+            ("getRelativeShield", Value::Int(19)),
+            ("getDamageReturn", Value::Int(20)),
+            ("getWeapon", Value::Int(19)),
+            ("getLevel", Value::Int(42)),
+            // The 0-based team *index*, as `getSide` answers upstream.
+            ("getTeam", Value::Int(0)),
+            ("getName", Value::String(std::rc::Rc::new("mine".into()))),
+            ("isAlive", Value::Bool(true)),
+            ("isDead", Value::Bool(false)),
+        ];
+        for (name, want) in cases {
+            let got = call(&mut state, name, &[]);
+            assert_value(&got, want, &format!("{name}()"));
+            // The explicit-self form must answer identically.
+            let explicit = call(&mut state, name, &[Value::Int(0)]);
+            assert_value(&explicit, want, &format!("{name}(0)"));
+        }
+        // And the other entity is a different answer, so "self" isn't being
+        // hard-coded: fighter 1 is dead and undamaged-at-death.
+        assert_value(
+            &call(&mut state, "isDead", &[Value::Int(1)]),
+            &Value::Bool(true),
+            "isDead(1)",
+        );
+        assert_value(
+            &call(&mut state, "getName", &[Value::Int(1)]),
+            &Value::String(std::rc::Rc::new("theirs".into())),
+            "getName(1)",
+        );
+    }
+
+    /// `getWeapons` keeps `mWeapons`' insertion order; `getChips` comes out
+    /// of a `TreeMap`, so it is sorted by chip id whatever order the chips
+    /// were equipped in.
+    #[test]
+    fn weapon_and_chip_arrays_keep_the_java_orders() {
+        let mut state = two_leeks();
+        assert_eq!(
+            int_vec(&call(&mut state, "getWeapons", &[])),
+            vec![37, 1, 19],
+            "getWeapons() is mWeapons order, not sorted"
+        );
+        assert_eq!(
+            int_vec(&call(&mut state, "getChips", &[])),
+            vec![2, 3, 7],
+            "getChips() is TreeMap order, i.e. by chip id"
+        );
+        // An entity with nothing equipped answers an empty array, not null.
+        assert_eq!(
+            int_vec(&call(&mut state, "getWeapons", &[Value::Int(1)])),
+            Vec::<i64>::new(),
+            "getWeapons(1)"
+        );
+    }
+
+    /// `getCooldown(chip[, entity])` — chip first, and a team-cooldown chip
+    /// reads the team's table rather than the entity's.
+    #[test]
+    fn get_cooldown_takes_the_chip_first() {
+        let mut state = two_leeks();
+        // 3 = bandage (a per-entity cooldown), 73 = puny bulb (a team one).
+        for id in [3, 73] {
+            let spec = crate::official_items::chip_spec(id).expect("catalog chip");
+            state.chip_specs.insert(id, spec);
+        }
+        state.fighters[0].add_cooldown(3, 2);
+        state.teams[0].add_cooldown(73, 4);
+
+        assert_value(
+            &call(&mut state, "getCooldown", &[Value::Int(3)]),
+            &Value::Int(2),
+            "getCooldown(3) reads the entity's table",
+        );
+        assert_value(
+            &call(&mut state, "getCooldown", &[Value::Int(73)]),
+            &Value::Int(4),
+            "getCooldown(73) reads the team's table",
+        );
+        // The second argument is the entity — the enemy shares neither table.
+        assert_value(
+            &call(&mut state, "getCooldown", &[Value::Int(3), Value::Int(1)]),
+            &Value::Int(0),
+            "getCooldown(3, 1)",
+        );
+        assert_value(
+            &call(&mut state, "getCooldown", &[Value::Int(73), Value::Int(1)]),
+            &Value::Int(0),
+            "getCooldown(73, 1)",
+        );
+        // A chip the catalog doesn't know is 0 (`Chips.getChip` → null), an
+        // entity that doesn't resolve is null.
+        assert_value(
+            &call(&mut state, "getCooldown", &[Value::Int(9999)]),
+            &Value::Int(0),
+            "getCooldown(9999)",
+        );
+        assert_value(
+            &call(&mut state, "getCooldown", &[Value::Int(3), Value::Int(99)]),
+            &Value::Null,
+            "getCooldown(3, 99)",
+        );
+    }
+
+    /// `EntityClass.resolveStatTarget` masks *other* entities' stats and
+    /// equipment while a `beforeFight()` hook runs, so the AI that executes
+    /// second can't read what the first one's `setLoadout` picked. Self
+    /// queries, lobby facts and the `afterFight()` hook stay readable.
+    #[test]
+    fn a_before_fight_hook_masks_another_entitys_stats() {
+        let mut state = two_leeks();
+        // Not `getWeapon`: fighter 1 has nothing equipped, so it is null
+        // masked or not, and would prove nothing here.
+        let readable = ["getAgility", "getWeapons", "getChips"];
+        for name in readable {
+            let got = call(&mut state, name, &[Value::Int(1)]);
+            assert!(
+                !matches!(got, Value::Null),
+                "{name}(1) outside a hook must not be null, got {got:?}"
+            );
+        }
+        state.hook_phase = HookPhase::BeforeFight;
+        for name in readable {
+            let got = call(&mut state, name, &[Value::Int(1)]);
+            assert_value(&got, &Value::Null, &format!("{name}(1) in beforeFight"));
+            // Self is never masked.
+            let mine = call(&mut state, name, &[]);
+            assert!(
+                !matches!(mine, Value::Null),
+                "{name}() in beforeFight is a self query, got {mine:?}"
+            );
+        }
+        // Lobby facts are never masked, hook or not.
+        assert_value(
+            &call(&mut state, "getLevel", &[Value::Int(1)]),
+            &Value::Int(1),
+            "getLevel(1) in beforeFight",
+        );
+        assert_value(
+            &call(&mut state, "getTeam", &[Value::Int(1)]),
+            &Value::Int(1),
+            "getTeam(1) in beforeFight",
+        );
+        // afterFight() unmasks again.
+        state.hook_phase = HookPhase::AfterFight;
+        assert_value(
+            &call(&mut state, "getAgility", &[Value::Int(1)]),
+            &Value::Int(12),
+            "getAgility(1) in afterFight",
+        );
+    }
+
+    /// An entity id that resolves to nothing is `null` for every getter —
+    /// except `isAlive`/`isDead`, which take a required entity and answer
+    /// `false` (both of them) rather than `null`.
+    #[test]
+    fn an_unresolvable_entity_is_null_but_never_dead() {
+        let mut state = two_leeks();
+        const NULLABLE: &[&str] = &[
+            "getLife",
+            "getTotalLife",
+            "getMaxLife",
+            "getTP",
+            "getMP",
+            "getStrength",
+            "getAgility",
+            "getWisdom",
+            "getResistance",
+            "getScience",
+            "getMagic",
+            "getPower",
+            "getAbsoluteShield",
+            "getRelativeShield",
+            "getDamageReturn",
+            "getWeapon",
+            "getWeapons",
+            "getChips",
+            "getName",
+            "getLevel",
+            "getTeam",
+        ];
+        for name in NULLABLE {
+            let got = call(&mut state, name, &[Value::Int(99)]);
+            assert_value(&got, &Value::Null, &format!("{name}(99)"));
+        }
+        assert_value(
+            &call(&mut state, "isAlive", &[Value::Int(99)]),
+            &Value::Bool(false),
+            "isAlive(99)",
+        );
+        assert_value(
+            &call(&mut state, "isDead", &[Value::Int(99)]),
+            &Value::Bool(false),
+            "isDead(99) is false too — a missing entity is not a dead one",
+        );
+    }
 }
