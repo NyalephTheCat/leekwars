@@ -23,7 +23,7 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
     // Resolved locally: highlight the declaration (Write) and every

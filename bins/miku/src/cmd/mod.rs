@@ -41,7 +41,7 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
         if cli.libraries.is_empty() {
             None
         } else {
-            let cat = leek_recipes::load_and_register_libraries(&cli.libraries)
+            let cat = leek_session::load_and_register_libraries(&cli.libraries)
                 .map_err(|e| anyhow::anyhow!("loading library: {e}"))?;
             Some(std::sync::Arc::new(cat))
         };

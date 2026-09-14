@@ -127,7 +127,7 @@ pub(crate) fn occurrences_in_file(
     kind: SymbolKind,
 ) -> Vec<Occurrence> {
     let mut out: Vec<Occurrence> = Vec::new();
-    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_recipes::Target::Resolved)
+    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_session::Target::Resolved)
     else {
         return out;
     };
@@ -362,7 +362,7 @@ pub(crate) fn find_top_level_decl(
 ) -> Option<(crate::handlers::program_scope::ScopeFile, Symbol)> {
     for file in crate::handlers::program_scope::program_scope(ws, home_uri) {
         let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Resolved)
+            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Resolved)
         else {
             continue;
         };

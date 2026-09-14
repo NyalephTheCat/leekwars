@@ -155,7 +155,7 @@ impl LanguageServer for LeekLanguageServer {
                 let mut total_fns = 0usize;
                 let mut total_consts = 0usize;
                 let mut any_err = false;
-                for result in leek_recipes::load_register_and_report(&specs) {
+                for result in leek_session::load_register_and_report(&specs) {
                     match result {
                         Ok(s) => {
                             total_fns += s.functions;

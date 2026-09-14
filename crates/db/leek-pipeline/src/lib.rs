@@ -11,7 +11,7 @@
 //!
 //! Each pass crate ships its own `pipeline` module that defines the
 //! step and the artifact it produces. Callers usually use the
-//! [`leek_recipes`] crate (or [`RecipeArtifact`] + [`plan_for`]) to
+//! [`leek_session`] crate (or [`RecipeArtifact`] + [`plan_for`]) to
 //! assemble pipelines; manual `.with(step)` composition remains
 //! supported for custom tooling.
 //!

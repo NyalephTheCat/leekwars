@@ -4,10 +4,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use leek_driver::{DriverConfig, run_entry};
 use leek_pipeline::LintGroups;
 use leek_project::Project;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{DriverConfig, RecipeParams, Target, run_entry};
 
 use crate::cli::{ColorWhen, Lint, MessageFormat};
 
@@ -19,7 +18,7 @@ pub fn run(
     _quiet: bool,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+    if leek_session::report_manifest(&project, color.into(), format.into()) {
         return Ok(ExitCode::from(1));
     }
 

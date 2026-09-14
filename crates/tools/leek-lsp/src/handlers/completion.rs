@@ -86,7 +86,7 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::TypeChecked)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = SyntaxNode::new_root(green.clone());
 
@@ -370,7 +370,7 @@ fn find_class_decl_in_program(cx: &Ctx<'_, '_>, name: &str) -> Option<SyntaxNode
 /// Parse one program-scope file and hand back an *owned* root, so the
 /// node outlives the `Run` that produced its green tree.
 fn file_root(ws: &Workspace, file: &ScopeFile) -> Option<SyntaxNode> {
-    let run = crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Parsed)?;
+    let run = crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Parsed)?;
     let green = run.get::<leek_parser::pipeline::GreenTreeArtifact>()?;
     Some(SyntaxNode::new_root(green.0.clone()))
 }
@@ -619,7 +619,7 @@ fn push_cross_file_items(
     items: &mut Vec<lsp::CompletionItem>,
 ) {
     let Some(run) =
-        crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Resolved)
+        crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Resolved)
     else {
         return;
     };

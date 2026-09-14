@@ -9,7 +9,7 @@ use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::{BackendKind, BackendTable};
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::version::version_from_byte;
 use serde::{Deserialize, Serialize};
@@ -287,7 +287,7 @@ struct CaseRunner {
 impl CaseRunner {
     fn new(source: SourceId) -> Self {
         Self {
-            pipeline: leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive())
+            pipeline: leek_session::pipeline(Target::Hir, &RecipeParams::permissive())
                 .expect("recipe"),
             flags: leek_pipeline::FeatureFlags::from_env(),
             source,
@@ -1314,7 +1314,7 @@ fn first_error_message(case: &TestCase, source: SourceId) -> String {
         strict: case.strict,
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
-    let Ok(pipeline) = leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()) else {
+    let Ok(pipeline) = leek_session::pipeline(Target::Hir, &RecipeParams::permissive()) else {
         return "<pipeline build failed>".into();
     };
     pipeline

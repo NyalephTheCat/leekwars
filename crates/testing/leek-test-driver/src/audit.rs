@@ -3,7 +3,7 @@
 use leek_diagnostics::Severity;
 use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 
 use crate::cases::{CaseAudit, TestCase};
@@ -17,7 +17,7 @@ pub fn audit_case(case: &TestCase, source: SourceId) -> CaseAudit {
         strict: case.strict,
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
-    let Ok(pipeline) = leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()) else {
+    let Ok(pipeline) = leek_session::pipeline(Target::Hir, &RecipeParams::permissive()) else {
         return CaseAudit::default();
     };
     let run = pipeline.run(input);

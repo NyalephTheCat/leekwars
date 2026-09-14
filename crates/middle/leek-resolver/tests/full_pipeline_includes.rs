@@ -1,6 +1,6 @@
 //! The include-aware front-end, driven end to end.
 //!
-//! `leek_recipes::pipeline_with_includes` is the path `leekc`, `miku`,
+//! `leek_session::pipeline_with_includes` is the path `leekc`, `miku`,
 //! the LSP and the DAP take for a multi-file project, and it is the only
 //! one that plans the `resolve` and `type-check` steps with an
 //! [`IncludeGraphArtifact`] in the context. Nothing executed it before
@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use leek_diagnostics::{Diagnostic, codes};
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target, pipeline_with_includes, plan_with_includes};
 use leek_resolver::folder::MemFolder;
 use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::{IncludeGraphArtifact, ResolveIncludes};
+use leek_session::{RecipeParams, Target, pipeline_with_includes, plan_with_includes};
 use leek_span::SourceId;
 use leek_types::pipeline::TypeCheckArtifact;
 
@@ -70,7 +70,7 @@ fn run_to_typecheck(entry_path: &str, files: &[(&str, &str)]) -> Run {
         flags: leek_pipeline::FeatureFlags::none(),
     };
     // The walker interns the entry first, so the counter starts at the
-    // entry's own id — exactly what `leek_driver::includes_step` does.
+    // entry's own id — exactly what `leek_session::includes_step` does.
     // Seeding it past the entry would hand the entry a second `SourceId`
     // and make any span-source assertion here meaningless.
     let includes = ResolveIncludes::new(

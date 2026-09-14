@@ -12,11 +12,10 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use leek_diagnostics::{Applicability, Diagnostic, Reporter, Severity};
-use leek_driver::DriverConfig;
 use leek_pipeline::Input;
 use leek_project::Project;
-use leek_recipes::{RecipeParams, Target};
 use leek_rewrite::EditSet;
+use leek_session::{DriverConfig, RecipeParams, Target};
 use leek_span::SourceId;
 
 use crate::cli::{ColorWhen, Fix, MessageFormat};
@@ -29,7 +28,7 @@ pub fn run(
     quiet: bool,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+    if leek_session::report_manifest(&project, color.into(), format.into()) {
         return Ok(ExitCode::from(1));
     }
 
@@ -48,7 +47,7 @@ pub fn run(
         color: color.into(),
         format: format.into(),
     };
-    let reporter = leek_driver::reporter_for(&project, config.color, config.format)?;
+    let reporter = leek_session::reporter_for(&project, config.color, config.format)?;
 
     let mut changed_files = 0usize;
     let mut total_edits = 0usize;
@@ -56,11 +55,11 @@ pub fn run(
     for (next_source, path) in (1_u32..).zip(&sources) {
         let source = SourceId::new(next_source).unwrap();
         let (src, text) = project.pipeline_input(source, path)?;
-        let pipeline = leek_driver::file_pipeline(&project, path, source, &config)?;
+        let pipeline = leek_session::file_pipeline(&project, path, source, &config)?;
         let result = pipeline.run(Input::from(src));
 
         if has_compile_error(&reporter, result.diagnostics()) {
-            leek_driver::report(&result, &text, &path.display().to_string(), &reporter);
+            leek_session::report(&result, &text, &path.display().to_string(), &reporter);
             skipped.push(path.clone());
             continue;
         }

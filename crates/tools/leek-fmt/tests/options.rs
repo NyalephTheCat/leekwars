@@ -83,6 +83,20 @@ fn trailing_comma_never_in_flat_mode() {
     );
 }
 
+/// A group whose content carries a hard line cannot be printed on one
+/// line, however short the flat measurement looks. `fits` used to say
+/// "yes" the moment it met a `HardLine`, so an argument list wrapping a
+/// block-bodied lambda came out flat around a body that still broke:
+/// `foo(1, () => {` … `}, 2);` (#199). The list must break instead.
+#[test]
+fn a_group_containing_a_block_bodied_lambda_breaks() {
+    let out = fmt_with(&opts(), "foo(1, () => {\n    bar();\n}, 2);\n");
+    assert_eq!(
+        out, "foo(\n    1,\n    () => {\n        bar();\n    },\n    2\n);\n",
+        "argument list must break one argument per line, got: {out:?}"
+    );
+}
+
 #[test]
 fn max_blank_lines_zero_collapses_all() {
     let mut o = opts();

@@ -26,7 +26,7 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Hir)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Hir)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
     let type_table = &run.get::<leek_types::pipeline::TypeCheckArtifact>()?.table;
     let hir = run.get::<HirArtifact>()?;

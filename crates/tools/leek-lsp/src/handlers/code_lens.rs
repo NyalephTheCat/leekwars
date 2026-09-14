@@ -30,7 +30,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::CodeLens>> {
     // `Target::Complexity` plans HIR (and resolve) transitively, and the
     // report it carries is salsa-cached per file revision — a code lens
     // request fires on every scroll. See #165.
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Complexity)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Complexity)?;
     let table = &run.get::<ResolveArtifact>()?.table;
     let complexities = &run.get::<ComplexityArtifact>()?.0;
 
@@ -83,7 +83,7 @@ pub fn resolve(ws: &Workspace, lens: lsp::CodeLens) -> Option<lsp::CodeLens> {
     let uri = lsp::Url::parse(data.get("uri")?.as_str()?).ok()?;
     let offset = u32::try_from(data.get("symbol_offset")?.as_u64()?).ok()?;
     let doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_recipes::Target::Resolved)?;
+    let run = crate::pipeline::run(ws, &uri, leek_session::Target::Resolved)?;
     let table = &run.get::<ResolveArtifact>()?.table;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = leek_syntax::SyntaxNode::new_root(green.clone());
