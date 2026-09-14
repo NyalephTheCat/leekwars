@@ -3,7 +3,7 @@
 //! foreach iterator.
 
 use super::{aborting, handle, member_by_value, set_member, val};
-use leek_runtime::{IntervalValue, MapData, SetData, Value, key_repr};
+use leek_runtime::{IntervalValue, MapData, MapKey, SetData, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -362,7 +362,10 @@ shim! {
         if let Value::Map(m) = unsafe { val(map) } {
             let k = unsafe { val(key) }.clone();
             let v = unsafe { val(value) }.clone();
-            let canon = key_repr(&k);
+            // Canonicalise before the mutable borrow — a composite
+            // key renders through `Display`, which can read the very
+            // map being written (`m[m] = …`).
+            let canon = MapKey::of(&k);
             let mut m = m.borrow_mut();
             if version <= 3 {
                 let cost = if m.index.contains_key(&canon) {

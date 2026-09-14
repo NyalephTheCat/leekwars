@@ -35,7 +35,7 @@ pub(crate) fn dispatch_map(
         },
         ("mapPut", 3) => {
             if let Value::Map(m) = &args[0] {
-                let canon = crate::value::key_repr(&args[1]);
+                let canon = crate::value::MapKey::of(&args[1]);
                 m.borrow_mut()
                     .insert_canonical(canon, args[1].clone(), args[2].clone());
             }
@@ -56,24 +56,10 @@ pub(crate) fn dispatch_map(
         },
         ("mapRemove", 2) => match &args[0] {
             Value::Map(m) => {
-                let canon = crate::value::key_repr(&args[1]);
-                let mut mm = m.borrow_mut();
-                if let Some(&idx) = mm.index.get(&canon) {
-                    let removed = mm.entries.remove(idx).1;
-                    // Reindex.
-                    mm.index.clear();
-                    let canons: Vec<String> = mm
-                        .entries
-                        .iter()
-                        .map(|(k, _)| crate::value::key_repr(k))
-                        .collect();
-                    for (i, c) in canons.into_iter().enumerate() {
-                        mm.index.insert(c, i);
-                    }
-                    removed
-                } else {
-                    Value::Null
-                }
+                let canon = crate::value::MapKey::of(&args[1]);
+                m.borrow_mut()
+                    .remove_canonical(&canon)
+                    .unwrap_or(Value::Null)
             }
             _ => Value::Null,
         },
@@ -174,10 +160,10 @@ pub(crate) fn dispatch_map(
                 let mut out = a.borrow().entries.clone();
                 let mut idx = std::collections::HashMap::new();
                 for (i, (k, _)) in out.iter().enumerate() {
-                    idx.insert(crate::value::key_repr(k), i);
+                    idx.insert(crate::value::MapKey::of(k), i);
                 }
                 for (k, v) in &b.borrow().entries {
-                    let canon = crate::value::key_repr(k);
+                    let canon = crate::value::MapKey::of(k);
                     if let std::collections::hash_map::Entry::Vacant(e) = idx.entry(canon) {
                         e.insert(out.len());
                         out.push((k.clone(), v.clone()));
@@ -198,7 +184,7 @@ pub(crate) fn dispatch_map(
                 let entries = s.borrow().entries.clone();
                 let mut tb = t.borrow_mut();
                 for (k, v) in entries {
-                    let canon = crate::value::key_repr(&k);
+                    let canon = crate::value::MapKey::of(&k);
                     tb.insert_canonical(canon, k, v);
                 }
             }
@@ -219,7 +205,7 @@ pub(crate) fn dispatch_map(
         // (or null if absent).
         ("mapReplace", 3) => match &args[0] {
             Value::Map(m) => {
-                let canon = crate::value::key_repr(&args[1]);
+                let canon = crate::value::MapKey::of(&args[1]);
                 let mut mm = m.borrow_mut();
                 if let Some(&idx) = mm.index.get(&canon) {
                     std::mem::replace(&mut mm.entries[idx].1, args[2].clone())
@@ -237,7 +223,7 @@ pub(crate) fn dispatch_map(
                 let entries = s.borrow().entries.clone();
                 let mut tb = t.borrow_mut();
                 for (k, v) in entries {
-                    let canon = crate::value::key_repr(&k);
+                    let canon = crate::value::MapKey::of(&k);
                     if let Some(&idx) = tb.index.get(&canon) {
                         tb.entries[idx].1 = v;
                     }
@@ -253,15 +239,7 @@ pub(crate) fn dispatch_map(
             if let Value::Map(t) = &args[0] {
                 let mut tb = t.borrow_mut();
                 tb.entries.retain(|(_, v)| !v.loose_eq(&args[1]));
-                tb.index.clear();
-                let canons: Vec<String> = tb
-                    .entries
-                    .iter()
-                    .map(|(k, _)| crate::value::key_repr(k))
-                    .collect();
-                for (i, c) in canons.into_iter().enumerate() {
-                    tb.index.insert(c, i);
-                }
+                tb.reindex();
             }
             Value::Null
         }
@@ -323,7 +301,7 @@ pub(crate) fn dispatch_map(
                 let mut map = MapData::new();
                 for (k, v) in indexed {
                     let key = Value::Int(k);
-                    let ck = crate::value::key_repr(&key);
+                    let ck = crate::value::MapKey::of(&key);
                     map.insert_canonical(ck, key, v);
                 }
                 stash_promotion(Value::Map(Rc::new(RefCell::new(map))));
@@ -362,15 +340,7 @@ pub(crate) fn dispatch_map(
                     };
                     if desc { oa.reverse() } else { oa }
                 });
-                mm.index.clear();
-                let canons: Vec<String> = mm
-                    .entries
-                    .iter()
-                    .map(|(k, _)| crate::value::key_repr(k))
-                    .collect();
-                for (i, c) in canons.into_iter().enumerate() {
-                    mm.index.insert(c, i);
-                }
+                mm.reindex();
             }
             Value::Null
         }
@@ -383,22 +353,14 @@ pub(crate) fn dispatch_map(
                 Value::Map(m) => {
                     let mut mm = m.borrow_mut();
                     mm.entries.reverse();
-                    mm.index.clear();
-                    let canons: Vec<String> = mm
-                        .entries
-                        .iter()
-                        .map(|(k, _)| crate::value::key_repr(k))
-                        .collect();
-                    for (i, c) in canons.into_iter().enumerate() {
-                        mm.index.insert(c, i);
-                    }
+                    mm.reindex();
                 }
                 Value::Array(a) if host.version() <= 3 => {
                     let snap: Vec<Value> = a.borrow().clone();
                     let mut map = MapData::new();
                     for (j, v) in snap.into_iter().enumerate().rev() {
                         let k = Value::Int(crate::len_as_int(j));
-                        let ck = crate::value::key_repr(&k);
+                        let ck = crate::value::MapKey::of(&k);
                         map.insert_canonical(ck, k, v);
                     }
                     stash_promotion(Value::Map(Rc::new(RefCell::new(map))));
@@ -482,7 +444,7 @@ pub(crate) fn map_map(
     let mut out = MapData::new();
     for (k, v) in items {
         let new_v = host.call_value(fun, map_call_args(host, fun, &k, &v))?;
-        let canon = crate::value::key_repr(&k);
+        let canon = crate::value::MapKey::of(&k);
         out.insert_canonical(canon, k, new_v);
     }
     Ok(Value::Map(Rc::new(RefCell::new(out))))
@@ -501,7 +463,7 @@ pub(crate) fn map_filter(
     for (k, v) in items {
         let keep = host.call_value(fun, map_call_args(host, fun, &k, &v))?;
         if keep.is_truthy() {
-            let canon = crate::value::key_repr(&k);
+            let canon = crate::value::MapKey::of(&k);
             out.insert_canonical(canon, k, v);
         }
     }

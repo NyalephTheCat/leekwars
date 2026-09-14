@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::display::key_repr;
+use super::key::MapKey;
 
 /// Identifies a user-defined class inside the program being run.
 ///
@@ -47,11 +47,11 @@ pub enum Value {
     Array(Rc<RefCell<Vec<Value>>>),
     /// Mutable insertion-ordered key/value collection. Internally
     /// stores entries in a `Vec` for stable iteration order plus a
-    /// `HashMap` from canonical key string to position so
+    /// `HashMap` from canonical key ([`MapKey`]) to position so
     /// `get`/`set` are O(1) amortized.
     Map(Rc<RefCell<MapData>>),
     /// Mutable set with insertion order. Backed by a Vec for stable
-    /// iteration plus a HashSet on the canonical key string so
+    /// iteration plus a `HashSet` of canonical keys ([`MapKey`]) so
     /// `contains`/`insert` are O(1) amortised.
     Set(Rc<RefCell<SetData>>),
     /// Object literal — string-keyed records (insertion order).
@@ -160,12 +160,12 @@ impl IntervalValue {
 }
 
 /// Insertion-ordered map with O(1) key lookup. `entries` is the
-/// authoritative storage; `index` maps canonical key strings to
-/// positions in `entries` and is kept in sync with every write.
+/// authoritative storage; `index` maps [`MapKey`]s to positions in
+/// `entries` and is kept in sync with every write.
 #[derive(Debug, Default, Clone)]
 pub struct MapData {
     pub entries: Vec<(Value, Value)>,
-    pub index: std::collections::HashMap<String, usize>,
+    pub index: std::collections::HashMap<MapKey, usize>,
 }
 
 impl MapData {
@@ -183,7 +183,7 @@ impl MapData {
 
     /// Insert when the caller already has the canonical key. The
     /// no-canonical path (e.g. for literals) is [`insert`].
-    pub fn insert_canonical(&mut self, canonical: String, key: Value, value: Value) {
+    pub fn insert_canonical(&mut self, canonical: MapKey, key: Value, value: Value) {
         if let Some(&i) = self.index.get(&canonical) {
             self.entries[i].1 = value;
         } else {
@@ -194,13 +194,51 @@ impl MapData {
     }
 
     pub fn insert(&mut self, key: Value, value: Value) {
-        let canonical = key_repr(&key);
+        let canonical = MapKey::of(&key);
         self.insert_canonical(canonical, key, value);
     }
 
     pub fn get(&self, key: &Value) -> Option<&Value> {
-        let canonical = key_repr(key);
-        self.index.get(&canonical).map(|&i| &self.entries[i].1)
+        self.index
+            .get(&MapKey::of(key))
+            .map(|&i| &self.entries[i].1)
+    }
+
+    pub fn contains_key(&self, key: &Value) -> bool {
+        self.index.contains_key(&MapKey::of(key))
+    }
+
+    /// Drop the entry for `key`, returning its value. Later entries
+    /// keep their relative order (upstream's `LinkedHashMap.remove`),
+    /// so the surviving index slots shift down by one instead of the
+    /// whole index being thrown away and re-canonicalised.
+    pub fn remove(&mut self, key: &Value) -> Option<Value> {
+        self.remove_canonical(&MapKey::of(key))
+    }
+
+    /// [`remove`](Self::remove) for a caller that already holds the
+    /// canonical key.
+    pub fn remove_canonical(&mut self, canonical: &MapKey) -> Option<Value> {
+        let i = self.index.remove(canonical)?;
+        let (_, v) = self.entries.remove(i);
+        for slot in self.index.values_mut() {
+            if *slot > i {
+                *slot -= 1;
+            }
+        }
+        Some(v)
+    }
+
+    /// Rebuild `index` from `entries`. Only needed after a genuine
+    /// permutation of `entries` (a sort or a reverse) — a plain
+    /// removal is handled by [`remove`](Self::remove) without
+    /// re-canonicalising anything.
+    pub fn reindex(&mut self) {
+        self.index.clear();
+        self.index.reserve(self.entries.len());
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            self.index.insert(MapKey::of(k), i);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -313,7 +351,7 @@ impl FromIterator<(String, Value)> for ObjectData {
 #[derive(Debug, Default, Clone)]
 pub struct SetData {
     pub items: Vec<Value>,
-    pub keys: std::collections::HashSet<String>,
+    pub keys: std::collections::HashSet<MapKey>,
 }
 
 impl SetData {
@@ -331,7 +369,7 @@ impl SetData {
     /// Insert if not already present. Returns true if a new element
     /// was added.
     pub fn insert(&mut self, v: Value) -> bool {
-        let k = key_repr(&v);
+        let k = MapKey::of(&v);
         if self.keys.insert(k) {
             self.items.push(v);
             true
@@ -341,17 +379,19 @@ impl SetData {
     }
 
     pub fn contains(&self, v: &Value) -> bool {
-        self.keys.contains(&key_repr(v))
+        self.keys.contains(&MapKey::of(v))
     }
 
     pub fn remove(&mut self, v: &Value) -> bool {
-        let k = key_repr(v);
+        let k = MapKey::of(v);
         if !self.keys.remove(&k) {
             return false;
         }
         // Rare branch — only on `setRemove` etc. We keep iteration
-        // order, so a linear scan is fine here.
-        if let Some(i) = self.items.iter().position(|x| key_repr(x) == k) {
+        // order, so a linear scan is fine here. Canonicalising each
+        // element it walks past is now free for primitive elements,
+        // where it used to mean a `String` malloc apiece.
+        if let Some(i) = self.items.iter().position(|x| MapKey::of(x) == k) {
             self.items.remove(i);
         }
         true

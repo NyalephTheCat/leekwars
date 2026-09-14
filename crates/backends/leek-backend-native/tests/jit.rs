@@ -1312,3 +1312,71 @@ fn v4_strict_out_of_bounds_array_write_is_runtime_error() {
         "[1, 2, 3]"
     );
 }
+
+#[test]
+fn native_map_keys_stay_distinct_per_type() {
+    // Map keys canonicalise by type *and* value (`MapKey`, #239): an
+    // integer, a real, a string, a boolean and null are five separate
+    // entries, and none of them collides with a string that mimics
+    // the canonical form.
+    assert_eq!(
+        jit("var m = [:] m[1] = 'i' m[1.0] = 'r' m['1'] = 's' \
+             m[true] = 'b' m[null] = 'n' return count(m)"),
+        "5"
+    );
+    assert_eq!(
+        jit("var m = [:] m[1] = 'i' m[1.0] = 'r' m['1'] = 's' \
+             m[true] = 'b' m[null] = 'n' return m[1.0]"),
+        "\"r\""
+    );
+    assert_eq!(
+        jit("var m = [:] m[5] = 'int' m['i:5'] = 'str' return count(m) + m[5]"),
+        "\"2int\""
+    );
+    // `0.0` and `-0.0` stay two keys.
+    assert_eq!(
+        jit("var m = [:] m[0.0] = 'p' m[-0.0] = 'n' return count(m)"),
+        "2"
+    );
+}
+
+#[test]
+fn native_self_referential_map_key() {
+    // A composite key still renders through the cycle-aware `Display`
+    // writer, which reads the map being written. The canonical key
+    // has to be built *before* the mutable borrow, or this panics
+    // with a `BorrowMutError`.
+    assert_eq!(jit("var m = [:] m[m] = 1 return count(m)"), "1");
+    assert_eq!(
+        jit("var m = [:] var a = [1, 2] m[a] = 'x' return m[a]"),
+        "\"x\""
+    );
+}
+
+#[test]
+fn native_map_remove_preserves_order() {
+    // `removeKey` / `mapRemove` shift the surviving entries down
+    // instead of rebuilding the key index from scratch, so iteration
+    // order and every survivor's value must be untouched.
+    assert_eq!(
+        jit("var m = [:] m[1] = 'a' m[2] = 'b' m[3] = 'c' removeKey(m, 2) return m"),
+        "[1 : \"a\", 3 : \"c\"]"
+    );
+    assert_eq!(
+        jit("var m = [:] m[1] = 'a' m[2] = 'b' m[3] = 'c' removeKey(m, 2) return m[3]"),
+        "\"c\""
+    );
+    assert_eq!(
+        jit("var m = [:] m[1] = 'a' m[2] = 'b' mapRemove(m, 1) return count(m) + m[2]"),
+        "\"1b\""
+    );
+    // v1-v3 `assocReverse` permutes the entries; the rebuilt index
+    // still has to find each key afterwards.
+    assert_eq!(
+        jit_v(
+            "var m = [:] m[1] = 'a' m[2] = 'b' assocReverse(m) return m[1]",
+            3
+        ),
+        "\"a\""
+    );
+}

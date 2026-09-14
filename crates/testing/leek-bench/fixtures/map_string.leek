@@ -1,0 +1,12 @@
+// @version: 4
+// String-keyed map churn: every write and every read used to copy the
+// key's characters into a fresh canonical String.
+var m = [:]
+for (var i = 0; i < 20000; i++) {
+    m["key-" + i] = i * 3
+}
+var total = 0
+for (var i = 0; i < 20000; i++) {
+    total += m["key-" + i]
+}
+total

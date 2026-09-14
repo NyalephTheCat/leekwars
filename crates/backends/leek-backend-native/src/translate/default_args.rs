@@ -124,7 +124,7 @@ pub(super) enum DefaultArg {
 /// constant arithmetic. Returns `None` when it references a param/`this`/
 /// global, indexes/fields, calls a function, or uses any other rvalue (the
 /// call site then skips). Composite construction mirrors the interpreter's
-/// `Rvalue::{Array,Map,Set,Object}` exactly (same `key_repr` canonicalization),
+/// `Rvalue::{Array,Map,Set,Object}` exactly (same `MapKey` canonicalization),
 /// so the folded value matches. The caller boxes it once and deep-clones per
 /// call, matching the interpreter's fresh-per-call default re-evaluation.
 pub(super) fn const_eval_default(
@@ -212,7 +212,7 @@ fn const_eval_rvalue(
             for (k, v) in pairs {
                 let kv = const_eval_operand(k, scratch, version)?;
                 let vv = const_eval_operand(v, scratch, version)?;
-                let canon = leek_runtime::key_repr(&kv);
+                let canon = leek_runtime::MapKey::of(&kv);
                 m.insert_canonical(canon, kv, vv);
             }
             Some(V::Map(Rc::new(RefCell::new(m))))
