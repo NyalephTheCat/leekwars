@@ -239,7 +239,33 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// Emit a name reference. If the source ever reassigns this builtin name
+    /// (`push = 1` etc.), check the `__shadows` map first and fall through to
+    /// the original builtin reference only when the user hasn't set it — the
+    /// fallback is [`Self::write_name_unshadowed`], wrapped in a ternary.
     pub(crate) fn write_name(&self, buf: &mut String, n: &NameRef, span: Span) {
+        if let NameRef::Builtin(name) | NameRef::Unresolved(name) = n
+            && self.shadowed_builtins.borrow().contains(name)
+        {
+            buf.push_str("(__shadows.containsKey(\"");
+            buf.push_str(name);
+            buf.push_str("\") ? __shadows.get(\"");
+            buf.push_str(name);
+            buf.push_str("\") : (");
+            // The shadow-free entry point, rather than a re-entry with the
+            // shared set emptied: nothing mutates emitter state mid-emission,
+            // so an unwind out of here can't leave the set clobbered.
+            self.write_name_unshadowed(buf, n, span);
+            buf.push_str("))");
+            return;
+        }
+        self.write_name_unshadowed(buf, n, span);
+    }
+
+    /// The name emission proper, with no `__shadows` test: the `else` arm of
+    /// [`Self::write_name`]'s ternary, and the whole emission for a name the
+    /// source never reassigns.
+    fn write_name_unshadowed(&self, buf: &mut String, n: &NameRef, span: Span) {
         match n {
             NameRef::Local(id) => {
                 // Inside a self-recursive lambda body, references
@@ -293,31 +319,6 @@ impl Emitter<'_> {
             // emission below is keyed by name, so a name the resolver never
             // saw still renders exactly as it used to.
             NameRef::Builtin(name) | NameRef::Unresolved(name) => {
-                // If the source ever reassigns this builtin name
-                // (`push = 1` etc.), check the `__shadows` map
-                // first and fall through to the original builtin
-                // ref only when the user hasn't set it. The
-                // fallback is the original emission below, wrapped
-                // in a ternary.
-                if self.shadowed_builtins.borrow().contains(name) {
-                    buf.push_str("(__shadows.containsKey(\"");
-                    buf.push_str(name);
-                    buf.push_str("\") ? __shadows.get(\"");
-                    buf.push_str(name);
-                    buf.push_str("\") : (");
-                    // Recurse with a temporary "no-shadow" so we
-                    // don't infinitely re-enter this branch.
-                    let mut tmp_shadow = self.shadowed_builtins.borrow_mut();
-                    let prev: Vec<String> = tmp_shadow.iter().cloned().collect();
-                    tmp_shadow.clear();
-                    drop(tmp_shadow);
-                    self.write_name(buf, n, span);
-                    let mut tmp_shadow = self.shadowed_builtins.borrow_mut();
-                    tmp_shadow.extend(prev);
-                    drop(tmp_shadow);
-                    buf.push_str("))");
-                    return;
-                }
                 // System constants render to their Java counterparts.
                 // Built-in class names (`Real`, `Number`, `String`, …)
                 // map to the reference's lowercase-singleton form

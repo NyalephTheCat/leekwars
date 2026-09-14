@@ -153,7 +153,10 @@ pub(crate) struct Emitter<'a> {
     /// value instead of the builtin. We route those through a
     /// `__shadows` HashMap field on the AI class — see
     /// `emit_file`. Populated by `collect_shadowed_builtins`
-    /// before the file's statements emit.
+    /// before the file's statements emit, and read-only from then
+    /// on: the fallback arm of a shadow ternary is emitted through
+    /// `write_call_unshadowed` / `write_name_unshadowed` rather
+    /// than by clearing this set and re-entering.
     shadowed_builtins: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Function-local variables that must be heap-boxed (`Object[]`) because a
     /// directly-nested lambda captures *and writes* them. LeekScript closures
