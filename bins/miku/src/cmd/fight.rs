@@ -71,6 +71,7 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
     // `--report` writes the same JSON the `--format json` renderer prints;
     // with no path it lands in the manifest's `[fight].reports_dir`.
     let report_dest = report_dest(args, project.as_ref());
+    let jobs = fight_jobs(args, project.as_ref());
 
     // `--mode` selects the driver (default `single`); the scenario's
     // `[testing]` table supplies that driver's parameters.
@@ -84,19 +85,19 @@ pub fn run(args: &Fight, manifest_path: Option<&Path>, quiet: bool) -> Result<Ex
             quiet,
         ),
         FightMode::Matrix => {
-            let report = run_matrix_mode(args, &scn, &base_dir, hero_team)?;
+            let report = run_matrix_mode(args, &scn, &base_dir, hero_team, jobs)?;
             render_report(&report, args.format);
             write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
             Ok(verdict(&report))
         }
         FightMode::Tournament => {
-            let report = run_tournament_mode(args, &scn, &base_dir)?;
+            let report = run_tournament_mode(args, &scn, &base_dir, jobs)?;
             render_report(&report, args.format);
             write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
             Ok(verdict(&report))
         }
         FightMode::Random => {
-            let report = run_random_mode(args, &scn, &base_dir, hero_team)?;
+            let report = run_random_mode(args, &scn, &base_dir, hero_team, jobs)?;
             render_report(&report, args.format);
             write_report(report_dest.as_deref(), &report_json(&report), quiet)?;
             Ok(verdict(&report))
@@ -282,11 +283,26 @@ fn run_single(
     })
 }
 
+/// Workers the multi-fight modes run on: `-j` wins, then the manifest's
+/// `[fight].jobs`, then whatever `leek_scenario` makes of `LEEK_FIGHT_JOBS`
+/// and this machine. The count never changes a report — only how long it
+/// takes — so the precedence is a convenience, not a semantic.
+fn fight_jobs(args: &Fight, project: Option<&Project>) -> usize {
+    args.jobs
+        .or_else(|| {
+            project
+                .and_then(|p| p.manifest.fight.jobs)
+                .and_then(|n| usize::try_from(n).ok())
+        })
+        .unwrap_or_else(leek_scenario::default_jobs)
+}
+
 fn run_matrix_mode(
     args: &Fight,
     scn: &Scenario,
     base_dir: &Path,
     hero_team: i64,
+    jobs: usize,
 ) -> Result<TestReport> {
     let testing = scn.testing.clone().unwrap_or_default();
     let axes = MatrixAxes {
@@ -294,13 +310,18 @@ fn run_matrix_mode(
         opponents: pick_vec(&args.vs, &testing.opponents),
         profiles: pick_vec(&args.with_profile, &testing.profiles),
     };
-    leek_scenario::run_matrix(scn, base_dir, &axes, hero_team)
+    leek_scenario::run_matrix_with(scn, base_dir, &axes, hero_team, jobs)
 }
 
 /// A tournament has no hero: every entrant is under test, each cell names the
 /// entrant that won that game, and the leaderboard — not the report's win/loss
 /// totals, which stay unset — is the result.
-fn run_tournament_mode(args: &Fight, scn: &Scenario, base_dir: &Path) -> Result<TestReport> {
+fn run_tournament_mode(
+    args: &Fight,
+    scn: &Scenario,
+    base_dir: &Path,
+    jobs: usize,
+) -> Result<TestReport> {
     let testing = scn.testing.clone().unwrap_or_default();
     let entrants = pick_vec(&args.entrant, &testing.entrants);
     // `seeds` and `games` answer the same question, so the command line
@@ -329,7 +350,7 @@ fn run_tournament_mode(args: &Fight, scn: &Scenario, base_dir: &Path) -> Result<
             .or(testing.entrant_scope)
             .unwrap_or_default(),
     };
-    leek_scenario::run_tournament(scn, base_dir, &spec)
+    leek_scenario::run_tournament_with(scn, base_dir, &spec, jobs)
 }
 
 fn run_random_mode(
@@ -337,6 +358,7 @@ fn run_random_mode(
     scn: &Scenario,
     base_dir: &Path,
     hero_team: i64,
+    jobs: usize,
 ) -> Result<TestReport> {
     let testing = scn.testing.clone().unwrap_or_default();
     let file_spec = testing.random.clone();
@@ -369,7 +391,7 @@ fn run_random_mode(
         },
         seed: file_spec.as_ref().map_or(0, |r| r.seed),
     };
-    leek_scenario::run_random(scn, base_dir, &spec, hero_team)
+    leek_scenario::run_random_with(scn, base_dir, &spec, hero_team, jobs)
 }
 
 /// CLI value wins when non-empty, else the scenario's `[testing]` value.

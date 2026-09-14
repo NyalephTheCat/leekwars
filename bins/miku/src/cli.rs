@@ -386,6 +386,13 @@ pub struct Fight {
     #[arg(long, value_enum, default_value_t = FightFormat::Human)]
     pub format: FightFormat,
 
+    /// Worker threads for the multi-fight modes (matrix, tournament, random).
+    /// Default: `[fight].jobs`, else `LEEK_FIGHT_JOBS`, else this machine's
+    /// parallelism capped at 8. `1` runs the fights one at a time, through the
+    /// same code path — the report is the same either way.
+    #[arg(long, short = 'j', value_name = "N")]
+    pub jobs: Option<usize>,
+
     /// Also write the run's JSON report to a file (`--report=<PATH>`). Bare
     /// `--report` writes `<mode>.json` under the manifest's
     /// `[fight].reports_dir` (default `build/fight-reports/`).

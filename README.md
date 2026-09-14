@@ -92,12 +92,19 @@ miku fight duel.toml --mode random \       # fuzz the AI against random point-bu
     --runs 50 --capital 800 --random-stats strength,agility,wisdom
 miku fight duel.toml --emit ./duel-fight   # generate a standalone native executable
 miku fight duel.toml --mode matrix --report   # also write the JSON report to a file
+miku fight duel.toml --mode matrix -j 8    # run the sweep's fights on 8 threads
 ```
+
+The three multi-fight modes spread their fights across worker threads. The
+count comes from `-j/--jobs`, else `[fight].jobs`, else `LEEK_FIGHT_JOBS`, else
+this machine's parallelism capped at 8. It changes nothing about the result:
+each fight is a pure function of its scenario and seed, and the cells are
+merged back in sweep order, so `-j 1` and `-j 8` write the same report.
 
 The manifest's `[fight]` table supplies the defaults: `default_scenario` (what
 a bare `miku fight` plays), `scenarios_dir` (where scenario names are looked
 up), `reports_dir` (where a bare `--report` writes, default
-`build/fight-reports`), and `jobs` (sweep workers).
+`build/fight-reports`), and `jobs` (sweep worker threads, see above).
 
 Turn order follows the fight's seed (the official `StartOrder` draw), not the
 entity ids, and a tournament plays every seed from both sides — so neither the

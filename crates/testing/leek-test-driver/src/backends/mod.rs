@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use leek_backends::version_from_byte;
 use leek_diagnostics::Severity;
@@ -169,7 +168,7 @@ struct CaseContext {
 /// enough to blow the stack a default thread gets, so every thread that
 /// compiles a case needs this. `leek_test_corpus::UPSTREAM_SUITE_STACK`
 /// re-exports this same constant, so the two cannot drift.
-pub const WORKER_STACK: usize = 64 * 1024 * 1024;
+pub use leek_workpool::WORKER_STACK;
 
 /// Cases a worker claims per `fetch_add`. Per-case cost spans orders of
 /// magnitude (a parse-error case versus a JIT-compiled loop), so workers steal
@@ -184,11 +183,6 @@ const BATCH: usize = 16;
 /// it only changes how many threads compute them. That is what makes it safe
 /// to set next to a baseline-diffing gate.
 pub const JOBS_ENV: &str = "LEEK_CORPUS_JOBS";
-
-/// Cap on the *default* worker count. Peak memory scales with the number of
-/// workers (each holds a live JIT module and its own bump arenas), and the
-/// suite is compute-bound, so more than this trades memory for little.
-const MAX_DEFAULT_JOBS: usize = 8;
 
 /// One slice of the manifest, for splitting a run across CI jobs.
 ///
@@ -271,17 +265,9 @@ impl RunConfig {
 }
 
 /// [`JOBS_ENV`] when it parses to a positive number, else this machine's
-/// parallelism capped at [`MAX_DEFAULT_JOBS`].
+/// parallelism capped at [`leek_workpool::MAX_DEFAULT_JOBS`].
 fn default_jobs() -> usize {
-    if let Some(raw) = std::env::var_os(JOBS_ENV)
-        && let Some(n) = raw.to_str().and_then(|s| s.trim().parse::<usize>().ok())
-        && n >= 1
-    {
-        return n;
-    }
-    std::thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
-        .min(MAX_DEFAULT_JOBS)
+    leek_workpool::default_jobs(JOBS_ENV)
 }
 
 /// What a worker needs to compile a case, built once per *worker* instead of
@@ -341,7 +327,9 @@ fn build_context(case: &TestCase, source: SourceId) -> CaseContext {
 /// worker threads, and return the `Some` results **in manifest order**.
 ///
 /// Ordering the merge by case index rather than by completion is what keeps
-/// every caller deterministic: the workers race, the result does not.
+/// every caller deterministic: the workers race, the result does not. The pool
+/// itself lives in `leek-workpool`, shared with the fight sweep drivers
+/// (#134), so there is one concurrency model in the workspace rather than two.
 fn map_cases<T, F>(manifest: &Manifest, cfg: RunConfig, f: F) -> Vec<(usize, T)>
 where
     T: Send,
@@ -350,55 +338,13 @@ where
     let indices: Vec<usize> = (0..manifest.cases.len())
         .filter(|&i| cfg.shard.contains(i))
         .collect();
-    let jobs = cfg.jobs.max(1).min(indices.len().max(1));
-    let cursor = AtomicUsize::new(0);
-    let (f, indices, cursor) = (&f, &indices, &cursor);
-
-    let mut parts: Vec<Vec<(usize, T)>> = Vec::with_capacity(jobs);
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..jobs)
-            .map(|w| {
-                std::thread::Builder::new()
-                    .name(format!("corpus-{w}"))
-                    // Without this the deeply nested cases overflow the stack
-                    // and abort the *process*, turning passes into a crash
-                    // that names no failing case.
-                    .stack_size(WORKER_STACK)
-                    .spawn_scoped(scope, move || {
-                        let runner = CaseRunner::new(SourceId::new(1).unwrap());
-                        let mut out = Vec::new();
-                        loop {
-                            let start = cursor.fetch_add(BATCH, Ordering::Relaxed);
-                            if start >= indices.len() {
-                                break;
-                            }
-                            let end = (start + BATCH).min(indices.len());
-                            for &i in &indices[start..end] {
-                                if let Some(value) = f(&manifest.cases[i], &runner) {
-                                    out.push((i, value));
-                                }
-                            }
-                        }
-                        out
-                    })
-                    .expect("spawn corpus worker")
-            })
-            .collect();
-        for worker in workers {
-            match worker.join() {
-                Ok(part) => parts.push(part),
-                // Re-raise rather than swallow: a worker panic means a case
-                // escaped the harness's own `catch_unwind`, and a run that
-                // quietly lost those cases would diff green against the
-                // baseline.
-                Err(payload) => std::panic::resume_unwind(payload),
-            }
-        }
-    });
-
-    let mut out: Vec<(usize, T)> = parts.into_iter().flatten().collect();
-    out.sort_by_key(|(i, _)| *i);
-    out
+    leek_workpool::Pool::new("corpus", cfg.jobs)
+        .with_batch(BATCH)
+        .map(
+            &indices,
+            || CaseRunner::new(SourceId::new(1).unwrap()),
+            |i, runner| f(&manifest.cases[i], runner),
+        )
 }
 
 /// Run the full manifest on each detected backend, across the default number

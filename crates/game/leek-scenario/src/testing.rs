@@ -22,10 +22,33 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use leek_generator::Outcome;
 use leek_hir::HirFile;
+use leek_workpool::Pool;
 
 use crate::build_gen;
 use crate::load::{build_fight_with_cache, compile_ai};
 use crate::schema::{EntrantScope, RandomSpec, RandomTarget, Scenario};
+
+/// Environment override for the worker count the drivers use when the caller
+/// doesn't name one (see [`default_jobs`]).
+pub const JOBS_ENV: &str = "LEEK_FIGHT_JOBS";
+
+/// Workers [`run_matrix`], [`run_tournament`] and [`run_random`] use:
+/// [`JOBS_ENV`] when it is set to a positive number, else this machine's
+/// parallelism capped at 8. The `_with` variants take an explicit count.
+#[must_use]
+pub fn default_jobs() -> usize {
+    leek_workpool::default_jobs(JOBS_ENV)
+}
+
+/// Every worker reads the base scenario and the compiled-AI cache through a
+/// shared reference, so both have to cross threads. Asserted here so a future
+/// `Rc` in the HIR fails the build naming the type, rather than surfacing as
+/// an unreadable closure-bound error at one of the pool calls below.
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<HirFile>();
+    shareable::<Scenario>();
+};
 
 /// Outcome of a single fight relative to the hero team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +215,11 @@ fn classify(winner: Option<i64>, hero_team: i64) -> FightResult {
 /// The shared unit of work: build the fight from a (cache-backed) scenario and
 /// run it to an [`Outcome`]. Compiles nothing when every AI is in `cache`.
 ///
+/// Runs on a pool worker, so it must touch no process-global state: it goes
+/// through `run_fight_release`, whose runtime tables, RNG and error state are
+/// all thread-local. `run_fight_debug` is the exception — the debug hook it
+/// installs *is* process-global — so a debugged fight must stay off the pool.
+///
 /// # Errors
 /// Only when the fight can't be built (e.g. an AI missing from `cache` fails
 /// to compile); AI errors during the fight are part of the [`Outcome`].
@@ -218,6 +246,10 @@ fn play_one(
 /// An AI that fails to compile is left out rather than failing the run: the
 /// cells that use it retry the compile and report the error as their own
 /// [`CellOutcome::Error`], while the other cells still play.
+///
+/// Always runs on the calling thread, before any pool starts: it is the one
+/// piece of work the cells share, and compiling it once per worker instead
+/// would undo most of what the pool buys on a short sweep.
 fn precompile(
     base: &Scenario,
     base_dir: &Path,
@@ -296,6 +328,8 @@ pub struct MatrixAxes {
 /// fight relative to `hero_team`. A cell whose fight can't be run is reported
 /// as [`CellOutcome::Error`] and the sweep continues.
 ///
+/// Uses [`default_jobs`] workers; [`run_matrix_with`] takes an explicit count.
+///
 /// # Errors
 /// A profile name not found in the scenario (checked before any fight runs).
 pub fn run_matrix(
@@ -304,9 +338,26 @@ pub fn run_matrix(
     axes: &MatrixAxes,
     hero_team: i64,
 ) -> Result<TestReport> {
-    for name in &axes.profiles {
-        base.clone().apply_profile(name)?;
-    }
+    run_matrix_with(base, base_dir, axes, hero_team, default_jobs())
+}
+
+/// [`run_matrix`] across `jobs` worker threads.
+///
+/// The report does not depend on `jobs`. The cells are enumerated up front, in
+/// the seed → opponent → profile order the sweep has always reported in, and
+/// the results are folded back **by cell index**: the workers race, the report
+/// does not. `jobs = 1` is not a separate path, so a serial run exercises the
+/// same code as a parallel one.
+///
+/// # Errors
+/// A profile name not found in the scenario (checked before any fight runs).
+pub fn run_matrix_with(
+    base: &Scenario,
+    base_dir: &Path,
+    axes: &MatrixAxes,
+    hero_team: i64,
+    jobs: usize,
+) -> Result<TestReport> {
     let cache = precompile(base, base_dir, &axes.opponents);
     let opp_team = team_ids(base).into_iter().find(|&t| t != hero_team);
 
@@ -326,28 +377,61 @@ pub fn run_matrix(
         axes.profiles.iter().map(Some).collect()
     };
 
-    let mut report = TestReport::new("matrix", Scoring::Hero);
-    for &seed in &seeds {
-        for opp in &opponents {
-            for prof in &profiles {
-                let mut scn = base.clone();
-                if let Some(name) = prof {
-                    scn.apply_profile(name)?;
-                }
-                scn.seed = Some(seed);
-                if let (Some(opp_path), Some(team)) = (opp, opp_team) {
-                    set_team_ai(&mut scn, team, opp_path, EntrantScope::Lead);
-                }
-                let label = format!(
-                    "seed={seed} opp={} profile={}",
-                    opp.map_or("-", |p| p.to_str().unwrap_or("?")),
-                    prof.map_or("-", String::as_str),
-                );
-                match play_one(&scn, base_dir, &cache) {
-                    Ok(outcome) => report.record_hero(label, seed, &outcome, hero_team),
-                    Err(e) => report.record_failure(label, seed, &e),
-                }
+    // Applying a profile is the one fallible part of building a cell, and an
+    // unknown name still has to be reported before any fight runs — so each
+    // profile is applied once here instead of once per cell. That keeps the
+    // error where it was and leaves the worker body with nothing to handle but
+    // the fight itself.
+    let profiled = profiles
+        .iter()
+        .map(|prof| {
+            let mut scn = base.clone();
+            if let Some(name) = prof {
+                scn.apply_profile(name)?;
             }
+            Ok(scn)
+        })
+        .collect::<Result<Vec<Scenario>>>()?;
+
+    // Seed outer, opponent next, profile inner: cell `i` is the fight the
+    // sequential sweep ran `i`-th, which is what makes the merge below a
+    // no-op on the report rather than a reordering of it.
+    let mut cells: Vec<(u64, Option<&PathBuf>, usize)> =
+        Vec::with_capacity(seeds.len() * opponents.len() * profiled.len());
+    for &seed in &seeds {
+        for &opp in &opponents {
+            for prof in 0..profiled.len() {
+                cells.push((seed, opp, prof));
+            }
+        }
+    }
+
+    let indices: Vec<usize> = (0..cells.len()).collect();
+    let played = Pool::new("fight", jobs).map(
+        &indices,
+        || (),
+        |i, ()| {
+            let (seed, opp, prof) = cells[i];
+            let mut scn = profiled[prof].clone();
+            scn.seed = Some(seed);
+            if let (Some(opp_path), Some(team)) = (opp, opp_team) {
+                set_team_ai(&mut scn, team, opp_path, EntrantScope::Lead);
+            }
+            Some(play_one(&scn, base_dir, &cache))
+        },
+    );
+
+    let mut report = TestReport::new("matrix", Scoring::Hero);
+    for (i, outcome) in played {
+        let (seed, opp, prof) = cells[i];
+        let label = format!(
+            "seed={seed} opp={} profile={}",
+            opp.map_or("-", |p| p.to_str().unwrap_or("?")),
+            profiles[prof].map_or("-", String::as_str),
+        );
+        match outcome {
+            Ok(outcome) => report.record_hero(label, seed, &outcome, hero_team),
+            Err(e) => report.record_failure(label, seed, &e),
         }
     }
     Ok(report)
@@ -408,6 +492,143 @@ fn tournament_seeds(base_seed: u64, spec: &TournamentSpec) -> Result<Vec<u64>> {
         .collect())
 }
 
+/// One game of a pairing: the seed it is played on, and whether the two
+/// entrants swap team slots for it.
+#[derive(Debug, Clone, Copy)]
+struct Game {
+    seed: u64,
+    swapped: bool,
+}
+
+/// The games one pairing plays: every seed from both sides.
+///
+/// The slots aren't interchangeable (starting cells, and the start order is
+/// drawn per team), so playing one leg would hand whoever sits in the first
+/// team the same edge in every pairing (#39).
+fn pairing_games(seeds: &[u64]) -> Vec<Game> {
+    seeds
+        .iter()
+        .flat_map(|&seed| [false, true].map(|swapped| Game { seed, swapped }))
+        .collect()
+}
+
+/// The scenario one game plays, plus the team slot each entrant ended up in.
+fn game_scenario(
+    base: &Scenario,
+    a: &Path,
+    b: &Path,
+    game: Game,
+    teams: (i64, i64),
+    scope: EntrantScope,
+) -> Scenario {
+    let (a_team, b_team) = game_teams(game, teams);
+    let mut scn = base.clone();
+    scn.seed = Some(game.seed);
+    set_team_ai(&mut scn, a_team, a, scope);
+    set_team_ai(&mut scn, b_team, b, scope);
+    scn
+}
+
+fn game_teams(game: Game, teams: (i64, i64)) -> (i64, i64) {
+    if game.swapped {
+        (teams.1, teams.0)
+    } else {
+        teams
+    }
+}
+
+fn game_label(a: &Path, b: &Path, game: Game) -> String {
+    let sides = if game.swapped { "swapped" } else { "as-listed" };
+    format!(
+        "{} vs {} @seed={} sides={sides}",
+        label_of(a),
+        label_of(b),
+        game.seed
+    )
+}
+
+/// Play every game of every pairing in `pairs` on `jobs` workers, and return
+/// the outcomes grouped by pairing, each group in `games` order.
+///
+/// A whole set of pairings goes through one pool pass: a pairing is only a
+/// handful of games, so a pass per pairing would leave most workers idle on a
+/// small bracket. What a pass may *not* span is two single-elimination rounds
+/// — who plays in the next round is exactly what this round decides.
+fn play_pairings(
+    base: &Scenario,
+    base_dir: &Path,
+    cache: &HashMap<PathBuf, Arc<HirFile>>,
+    pairs: &[(PathBuf, PathBuf)],
+    games: &[Game],
+    teams: (i64, i64),
+    scope: EntrantScope,
+    jobs: usize,
+) -> Vec<Vec<Result<Outcome>>> {
+    let mut grouped: Vec<Vec<Result<Outcome>>> = (0..pairs.len()).map(|_| Vec::new()).collect();
+    if games.is_empty() {
+        return grouped;
+    }
+
+    let indices: Vec<usize> = (0..pairs.len() * games.len()).collect();
+    let played = Pool::new("fight", jobs).map(
+        &indices,
+        || (),
+        |k, ()| {
+            let (a, b) = &pairs[k / games.len()];
+            let scn = game_scenario(base, a, b, games[k % games.len()], teams, scope);
+            Some(play_one(&scn, base_dir, cache))
+        },
+    );
+
+    // `map` hands the games back in index order, so each pairing's group comes
+    // out in `games` order and the cells below land where they always did.
+    for (k, outcome) in played {
+        grouped[k / games.len()].push(outcome);
+    }
+    grouped
+}
+
+/// Fold one pairing's `outcomes` into `report`, returning `(a_wins, b_wins,
+/// draws)`. The cells are appended in `games` order, whatever order the games
+/// were actually played in.
+fn record_pairing(
+    report: &mut TestReport,
+    a: &Path,
+    b: &Path,
+    games: &[Game],
+    outcomes: &[Result<Outcome>],
+    teams: (i64, i64),
+) -> (u32, u32, u32) {
+    let (mut aw, mut bw, mut dw) = (0, 0, 0);
+    for (&game, played) in games.iter().zip(outcomes) {
+        let (a_team, _) = game_teams(game, teams);
+        let label = game_label(a, b, game);
+        let outcome = match played {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                report.record_failure(label, game.seed, e);
+                continue;
+            }
+        };
+        let winner = match outcome.winner_team {
+            Some(t) if t == a_team => {
+                aw += 1;
+                Some(label_of(a))
+            }
+            Some(_) => {
+                bw += 1;
+                Some(label_of(b))
+            }
+            None => {
+                dw += 1;
+                None
+            }
+        };
+        report.record_game(label, game.seed, outcome, winner);
+    }
+    (aw, bw, dw)
+}
+
 /// Run a tournament among `entrants`, returning a leaderboard in `standings`.
 /// A game that can't be run is reported as a [`CellOutcome::Error`] cell and
 /// counts for neither side.
@@ -428,6 +649,9 @@ fn tournament_seeds(base_seed: u64, spec: &TournamentSpec) -> Result<Vec<u64>> {
 /// empty — [`TournamentSpec::games`] seeds derived from the scenario's base
 /// seed (see [`tournament_seeds`]).
 ///
+/// Uses [`default_jobs`] workers; [`run_tournament_with`] takes an explicit
+/// count.
+///
 /// # Errors
 /// Needs at least two entrants and two teams in the base scenario, and a seed
 /// list that doesn't contradict itself (see [`tournament_seeds`]).
@@ -436,15 +660,36 @@ pub fn run_tournament(
     base_dir: &Path,
     spec: &TournamentSpec,
 ) -> Result<TestReport> {
+    run_tournament_with(base, base_dir, spec, default_jobs())
+}
+
+/// [`run_tournament`] across `jobs` worker threads.
+///
+/// The report does not depend on `jobs`: games merge back by index within
+/// their pairing, pairings are folded in bracket order, and the standings —
+/// which are awarded on the calling thread, from that fold — come out of the
+/// same `award`/`draw` sequence a serial run produces.
+///
+/// # Errors
+/// Needs at least two entrants and two teams in the base scenario, and a seed
+/// list that doesn't contradict itself (see [`tournament_seeds`]).
+pub fn run_tournament_with(
+    base: &Scenario,
+    base_dir: &Path,
+    spec: &TournamentSpec,
+    jobs: usize,
+) -> Result<TestReport> {
     if spec.entrants.len() < 2 {
         bail!("a tournament needs at least two entrants");
     }
-    let teams = team_ids(base);
-    let (Some(&team_a), Some(&team_b)) = (teams.first(), teams.get(1)) else {
+    let team_ids = team_ids(base);
+    let (Some(&team_a), Some(&team_b)) = (team_ids.first(), team_ids.get(1)) else {
         bail!("the base scenario needs two teams for a tournament");
     };
+    let teams = (team_a, team_b);
 
     let seeds = tournament_seeds(base.seed.unwrap_or(1), spec)?;
+    let games = pairing_games(&seeds);
     let cache = precompile(base, base_dir, &spec.entrants);
 
     let mut report = TestReport::new("tournament", Scoring::Leaderboard);
@@ -462,84 +707,54 @@ pub fn run_tournament(
         );
     }
 
-    // Play A vs B over the seeds; returns (a_wins, b_wins, draws). Each seed
-    // is played twice, with the entrants swapped between the two team slots:
-    // the slots aren't interchangeable (starting cells, and the start order is
-    // drawn per team), so playing one leg would hand whoever sits in `team_a`
-    // the same edge in every pairing (#39).
-    let mut play_match = |a: &Path, b: &Path| -> (u32, u32, u32) {
-        let (mut aw, mut bw, mut dw) = (0, 0, 0);
-        for &seed in &seeds {
-            for swapped in [false, true] {
-                let (a_team, b_team) = if swapped {
-                    (team_b, team_a)
-                } else {
-                    (team_a, team_b)
-                };
-                let mut scn = base.clone();
-                scn.seed = Some(seed);
-                set_team_ai(&mut scn, a_team, a, spec.scope);
-                set_team_ai(&mut scn, b_team, b, spec.scope);
-                let sides = if swapped { "swapped" } else { "as-listed" };
-                let label = format!(
-                    "{} vs {} @seed={seed} sides={sides}",
-                    label_of(a),
-                    label_of(b)
-                );
-                let outcome = match play_one(&scn, base_dir, &cache) {
-                    Ok(outcome) => outcome,
-                    Err(e) => {
-                        report.record_failure(label, seed, &e);
-                        continue;
-                    }
-                };
-                let winner = match outcome.winner_team {
-                    Some(t) if t == a_team => {
-                        aw += 1;
-                        Some(label_of(a))
-                    }
-                    Some(_) => {
-                        bw += 1;
-                        Some(label_of(b))
-                    }
-                    None => {
-                        dw += 1;
-                        None
-                    }
-                };
-                report.record_game(label, seed, &outcome, winner);
-            }
-        }
-        (aw, bw, dw)
-    };
-
     match spec.bracket {
         crate::schema::Bracket::RoundRobin => {
+            // Every pairing is independent of every other, so the whole
+            // round-robin is one pool pass; the fold still walks the pairings
+            // in the order they were enumerated.
+            let mut pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
             for i in 0..spec.entrants.len() {
                 for j in (i + 1)..spec.entrants.len() {
-                    let a = &spec.entrants[i];
-                    let b = &spec.entrants[j];
-                    let (aw, bw, _dw) = play_match(a, b);
-                    let (la, lb) = (label_of(a), label_of(b));
-                    match aw.cmp(&bw) {
-                        std::cmp::Ordering::Greater => award(&mut standings, &la, &lb),
-                        std::cmp::Ordering::Less => award(&mut standings, &lb, &la),
-                        std::cmp::Ordering::Equal => draw(&mut standings, &la, &lb),
-                    }
+                    pairs.push((spec.entrants[i].clone(), spec.entrants[j].clone()));
+                }
+            }
+            let played = play_pairings(
+                base, base_dir, &cache, &pairs, &games, teams, spec.scope, jobs,
+            );
+            for ((a, b), outcomes) in pairs.iter().zip(&played) {
+                let (aw, bw, _dw) = record_pairing(&mut report, a, b, &games, outcomes, teams);
+                let (la, lb) = (label_of(a), label_of(b));
+                match aw.cmp(&bw) {
+                    std::cmp::Ordering::Greater => award(&mut standings, &la, &lb),
+                    std::cmp::Ordering::Less => award(&mut standings, &lb, &la),
+                    std::cmp::Ordering::Equal => draw(&mut standings, &la, &lb),
                 }
             }
         }
         crate::schema::Bracket::SingleElim => {
             let mut round: Vec<PathBuf> = spec.entrants.clone();
             while round.len() > 1 {
+                // One pass per round, never across rounds: round N + 1's
+                // pairings are whoever won round N.
+                let pairs: Vec<(PathBuf, PathBuf)> = round
+                    .chunks(2)
+                    .filter(|pair| pair.len() == 2)
+                    .map(|pair| (pair[0].clone(), pair[1].clone()))
+                    .collect();
+                let played = play_pairings(
+                    base, base_dir, &cache, &pairs, &games, teams, spec.scope, jobs,
+                );
+
                 let mut next = Vec::new();
+                let mut results = played.iter();
                 for pair in round.chunks(2) {
                     if pair.len() == 1 {
                         next.push(pair[0].clone()); // bye
                         continue;
                     }
                     let (a, b) = (&pair[0], &pair[1]);
-                    let (aw, bw, _dw) = play_match(a, b);
+                    let outcomes = results.next().expect("one result group per pairing");
+                    let (aw, bw, _dw) = record_pairing(&mut report, a, b, &games, outcomes, teams);
                     let (la, lb) = (label_of(a), label_of(b));
                     // Someone has to advance; a level match is decided by a
                     // coin that depends on the pair, not on who is listed
@@ -635,6 +850,8 @@ fn label_of(path: &Path) -> String {
 /// as `Loss` cells so the caller can surface them; a build whose fight can't be
 /// run is an `Error` cell.
 ///
+/// Uses [`default_jobs`] workers; [`run_random_with`] takes an explicit count.
+///
 /// # Errors
 /// None today; the `Result` keeps the driver signatures uniform.
 pub fn run_random(
@@ -643,33 +860,70 @@ pub fn run_random(
     spec: &RandomSpec,
     hero_team: i64,
 ) -> Result<TestReport> {
+    run_random_with(base, base_dir, spec, hero_team, default_jobs())
+}
+
+/// [`run_random`] across `jobs` worker threads.
+///
+/// The report does not depend on `jobs`: every build is drawn up front from
+/// `spec.seed` alone, and the fights merge back by run index.
+///
+/// # Errors
+/// None today; the `Result` keeps the driver signatures uniform.
+pub fn run_random_with(
+    base: &Scenario,
+    base_dir: &Path,
+    spec: &RandomSpec,
+    hero_team: i64,
+    jobs: usize,
+) -> Result<TestReport> {
     // AIs are fixed across runs — only stats change — so the cache is built once.
     let cache = precompile(base, base_dir, &[]);
-    let mut report = TestReport::new("random", Scoring::Hero);
 
-    for run in 0..spec.runs {
-        let run_seed = build_gen::mix(spec.seed, u64::from(run));
-        let build = build_gen::gen_build(spec.capital, &spec.stats, spec.min_per_stat, run_seed);
+    // Build generation is pure and costs microseconds, so every build is drawn
+    // here rather than on a worker: it keeps the seed policy in one readable
+    // place (leekwars#293 is about that policy, not about who runs it) and
+    // leaves the worker body to "apply this build and fight".
+    let builds: Vec<(HashMap<crate::schema::StatKind, i64>, u64)> = (0..spec.runs)
+        .map(|run| {
+            let run_seed = build_gen::mix(spec.seed, u64::from(run));
+            let build =
+                build_gen::gen_build(spec.capital, &spec.stats, spec.min_per_stat, run_seed);
+            let fight_seed = base.seed.unwrap_or(1).wrapping_add(u64::from(run));
+            (build, fight_seed)
+        })
+        .collect();
 
-        let mut scn = base.clone();
-        for e in &mut scn.entities {
-            let team = e.team.unwrap_or(0);
-            let hit = match spec.target {
-                RandomTarget::Hero => team == hero_team,
-                RandomTarget::Opponent => team != hero_team,
-                RandomTarget::Both => true,
-            };
-            if hit {
-                build_gen::apply_build(e, &build);
+    let indices: Vec<usize> = (0..builds.len()).collect();
+    let played = Pool::new("fight", jobs).map(
+        &indices,
+        || (),
+        |i, ()| {
+            let (build, fight_seed) = &builds[i];
+            let mut scn = base.clone();
+            for e in &mut scn.entities {
+                let team = e.team.unwrap_or(0);
+                let hit = match spec.target {
+                    RandomTarget::Hero => team == hero_team,
+                    RandomTarget::Opponent => team != hero_team,
+                    RandomTarget::Both => true,
+                };
+                if hit {
+                    build_gen::apply_build(e, build);
+                }
             }
-        }
-        let fight_seed = base.seed.unwrap_or(1).wrapping_add(u64::from(run));
-        scn.seed = Some(fight_seed);
+            scn.seed = Some(*fight_seed);
+            Some(play_one(&scn, base_dir, &cache))
+        },
+    );
 
-        let label = format!("build#{run} {}", fmt_build(&build));
-        match play_one(&scn, base_dir, &cache) {
-            Ok(outcome) => report.record_hero(label, fight_seed, &outcome, hero_team),
-            Err(e) => report.record_failure(label, fight_seed, &e),
+    let mut report = TestReport::new("random", Scoring::Hero);
+    for (run, outcome) in played {
+        let (build, fight_seed) = &builds[run];
+        let (label, seed) = (format!("build#{run} {}", fmt_build(build)), *fight_seed);
+        match outcome {
+            Ok(outcome) => report.record_hero(label, seed, &outcome, hero_team),
+            Err(e) => report.record_failure(label, seed, &e),
         }
     }
     Ok(report)

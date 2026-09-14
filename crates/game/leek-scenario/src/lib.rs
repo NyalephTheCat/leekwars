@@ -34,7 +34,8 @@ pub use schema::{
 };
 pub use testing::{
     CellOutcome, CellResult, FightResult, MatrixAxes, Scoring, Standing, TestReport,
-    TournamentSpec, run_matrix, run_random, run_tournament,
+    TournamentSpec, default_jobs, run_matrix, run_matrix_with, run_random, run_random_with,
+    run_tournament, run_tournament_with,
 };
 
 use std::path::Path;

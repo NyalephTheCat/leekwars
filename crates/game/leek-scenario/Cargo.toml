@@ -12,6 +12,7 @@ leek-hir          = { workspace = true }
 leek-recipes      = { workspace = true }
 leek-pipeline     = { workspace = true }
 leek-span         = { workspace = true }
+leek-workpool     = { workspace = true }
 leek-diagnostics  = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
