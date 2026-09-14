@@ -22,8 +22,9 @@ pub fn compile_hir(input: Input) -> Result<(CompiledHir, Run<'static>)> {
     // benchmark measures the pipeline users actually execute, not an
     // unoptimized one.
     let params = RecipeParams::permissive().with_opt(OptLevel::O1);
-    let pipeline = leek_session::pipeline_timed(Target::Hir, &params, &sink)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pipeline = leek_session::plan(Target::Hir, &params)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .build_with(Some(&sink));
     let run = pipeline.run(input);
     let hir = run
         .get::<HirArtifact>()

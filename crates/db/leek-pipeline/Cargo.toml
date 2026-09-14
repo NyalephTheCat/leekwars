@@ -9,7 +9,6 @@ description = "Compiler pipeline orchestration for Leekscript."
 [dependencies]
 leek-span        = { workspace = true }
 leek-diagnostics = { workspace = true }
-leek-manifest    = { workspace = true }
 leek-project     = { workspace = true }
 salsa            = { version = "0.26", optional = true }
 
@@ -24,8 +23,10 @@ default = []
 # exposes a `salsa` module with a `Db` trait and `LeekDb` concrete
 # database, plus a `SourceFile` input. Steps can dispatch to tracked
 # queries when [`Context::salsa`] returns `Some(db, file)` — useful for
-# cross-run caching (LSP, `miku watch`). Off by default so single-shot
-# users (`leekc`) don't pull the salsa dep.
+# cross-run caching (the LSP re-checking an edited buffer). Off by
+# default so a crate that only ever runs a pipeline once can depend on
+# this one without salsa; note that every front-end shipped here plans
+# through `leek-session`, which turns the feature on unconditionally.
 salsa = ["dep:salsa"]
 
 [lints]

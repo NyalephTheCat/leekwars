@@ -28,13 +28,13 @@
 //! and [`salsa::SourceFile`] input. Pass crates can then expose
 //! tracked queries and dispatch their [`Step`] impl to the tracked
 //! form when [`Context::salsa`] returns `Some` — this is how the LSP
-//! and `miku watch` avoid re-parsing unchanged files. See
+//! avoids re-parsing unchanged files across edits. See
 //! [`Pipeline::run_memoized`].
 
 // Printing is an API decision in a library, not a convenience: a crate that
 // writes to the terminal behind its caller's back is unusable from a language
-// server or a test harness. Every print below is either the tool's *output*
-// or a justified exception, and says which.
+// server or a test harness. This crate prints nothing at all; should a print
+// ever land here, it has to be the tool's *output* and say so.
 #![warn(clippy::print_stdout, clippy::print_stderr)]
 
 mod adapters;
@@ -63,4 +63,4 @@ pub use recipe::{
     ArtifactList, LintGroups, OptLevel, RecipeArtifact, RecipeError, RecipeParams, RecipePlan,
     RecipeStep, pipeline_for as pipeline_for_recipe, plan_for,
 };
-pub use timed::{StepTiming, Timed, TimedBox, TimingSink};
+pub use timed::{StepTiming, TimedBox, TimingSink};

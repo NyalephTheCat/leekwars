@@ -29,6 +29,7 @@ pub fn run(
         params: RecipeParams::default(),
         color: color.into(),
         format: format.into(),
+        timing: None,
     };
     let driver_run = run_entry(&project, &config)?;
     if !driver_run.had_error && native_compat_wanted(args, &project) {

@@ -31,6 +31,7 @@ pub fn run(
         params: RecipeParams::default().with_opt(OptLevel::O1),
         color: color.into(),
         format: format.into(),
+        timing: None,
     };
     let driver_run = run_entry(&project, &config)?;
     if driver_run.had_error {

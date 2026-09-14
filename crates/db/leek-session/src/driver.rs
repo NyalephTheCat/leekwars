@@ -8,7 +8,7 @@ use anyhow::Result;
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter, Sources};
 use leek_diagnostics::{LintLevelError, LintLevels};
 use leek_pipeline::{Input, Pipeline, Run, TimingSink};
-use leek_project::{Project, SourceInput};
+use leek_project::Project;
 
 /// The include-id interner, re-exported so front-ends that own one for
 /// a whole run (`miku test`) do not need a direct `leek-resolver`
@@ -22,6 +22,13 @@ pub struct DriverConfig {
     pub params: RecipeParams,
     pub color: ColorWhen,
     pub format: MessageFormat,
+    /// When set, every step of the pipelines planned from this config
+    /// records its duration into the sink (`miku build --verbose`).
+    ///
+    /// A field rather than a parallel set of `_timed` entry points: the
+    /// timed and untimed paths were two copies of the same planning code,
+    /// and only one of them remembered to merge the manifest's lint groups.
+    pub timing: Option<TimingSink>,
 }
 
 impl Default for DriverConfig {
@@ -31,6 +38,7 @@ impl Default for DriverConfig {
             params: RecipeParams::default(),
             color: ColorWhen::Auto,
             format: MessageFormat::Human,
+            timing: None,
         }
     }
 }
@@ -39,11 +47,6 @@ impl Default for DriverConfig {
 pub struct DriverRun<'a> {
     pub run: Run<'a>,
     pub had_error: bool,
-}
-
-/// Build a [`Pipeline`] for `config`.
-pub fn pipeline_for(config: &DriverConfig) -> Result<Pipeline, crate::recipes::RecipeError> {
-    crate::recipes::pipeline(config.target, &config.params)
 }
 
 /// Run the pipeline on `input`, render diagnostics, return the [`Run`].
@@ -210,8 +213,7 @@ pub fn file_pipeline_shared(
     interner: &Arc<dyn SourceInterner>,
 ) -> Result<(Pipeline, leek_span::SourceId)> {
     let merged = merge_manifest_lints(project, config);
-    let step = includes_step(path, interner);
-    let pipeline = crate::recipes::pipeline_with_includes(merged.target, step, &merged.params)?;
+    let pipeline = build_with(&merged, includes_step(path, interner))?;
     Ok((pipeline, interner.intern(path)))
 }
 
@@ -228,11 +230,19 @@ pub fn standalone_pipeline(
     source_id: leek_span::SourceId,
     config: &DriverConfig,
 ) -> Result<Pipeline> {
-    Ok(crate::recipes::pipeline_with_includes(
-        config.target,
-        includes_step_standalone(path, source_id),
-        &config.params,
-    )?)
+    build_with(config, includes_step_standalone(path, source_id))
+}
+
+/// Plan `config`'s target with `includes` sequenced ahead of parsing, then
+/// build it — timing every step when `config` carries a [`TimingSink`].
+///
+/// The single place a driver pipeline is built, so `--verbose` cannot end up
+/// measuring a different plan from the one the same command runs without it.
+fn build_with(config: &DriverConfig, includes: Box<dyn leek_pipeline::Step>) -> Result<Pipeline> {
+    Ok(
+        crate::recipes::plan_with_includes(config.target, includes, &config.params)?
+            .build_with(config.timing.as_ref()),
+    )
 }
 
 /// Merge the manifest's opt-in lint groups into `config`'s params.
@@ -315,54 +325,6 @@ pub fn run_entry(project: &Project, config: &DriverConfig) -> Result<DriverRun<'
         leek_span::SourceId::new(1).unwrap(),
         config,
     )
-}
-
-/// Like [`run_file`], but records per-step durations into `sink`.
-pub fn run_file_timed(
-    project: &Project,
-    path: &Path,
-    source_id: leek_span::SourceId,
-    config: &DriverConfig,
-    sink: &TimingSink,
-) -> Result<DriverRun<'static>> {
-    let (src, text) = project.pipeline_input(source_id, path)?;
-    let reporter = reporter_for(project, config.color, config.format)?;
-    let merged = merge_manifest_lints(project, config);
-    let pipeline = crate::recipes::pipeline_with_includes_timed(
-        merged.target,
-        includes_step_standalone(path, source_id),
-        &merged.params,
-        sink,
-    )?;
-    let label = path.display().to_string();
-    Ok(run_with_reporter(
-        &pipeline,
-        Input::from(src),
-        &text,
-        &label,
-        &reporter,
-    ))
-}
-
-/// Like [`run_entry`], but records per-step durations into `sink`.
-pub fn run_entry_timed(
-    project: &Project,
-    config: &DriverConfig,
-    sink: &TimingSink,
-) -> Result<DriverRun<'static>> {
-    let entry = project.entry_path();
-    run_file_timed(
-        project,
-        &entry,
-        leek_span::SourceId::new(1).unwrap(),
-        config,
-        sink,
-    )
-}
-
-/// Build [`Input`] from [`SourceInput`].
-pub fn input_from(src: SourceInput) -> Input {
-    Input::from(src)
 }
 
 #[cfg(test)]
@@ -528,6 +490,7 @@ mod tests {
             params: RecipeParams::default().with_opt(crate::recipes::OptLevel::O1),
             color: ColorWhen::Never,
             format: MessageFormat::Json,
+            timing: None,
         };
         let merged = merge_manifest_lints(&project, &cli);
         assert_eq!(merged.target, Target::Mir);
@@ -794,6 +757,54 @@ mod tests {
                 .step_names(),
             standalone
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `miku build --verbose` must time the pipeline the plain build runs —
+    /// same steps, one entry each — and must still get the manifest's lint
+    /// groups. The old `run_file_timed` re-inlined the planning code, so
+    /// either half could drift from `file_pipeline` unnoticed.
+    #[test]
+    fn a_timing_sink_records_the_same_plan_the_untimed_config_builds() {
+        let dir = scratch("timed");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        let project = project_at(dir.clone(), "[lint]\npedantic = true\n");
+
+        let untimed = DriverConfig {
+            color: ColorWhen::Never,
+            ..DriverConfig::default()
+        };
+        let plain = run_entry(&project, &untimed).expect("untimed run");
+        let expected = file_pipeline(
+            &project,
+            &project.entry_path(),
+            SourceId::new(1).unwrap(),
+            &untimed,
+        )
+        .expect("pipeline")
+        .step_names();
+
+        let sink = TimingSink::new();
+        let timed = run_entry(
+            &project,
+            &DriverConfig {
+                timing: Some(sink.clone()),
+                ..untimed
+            },
+        )
+        .expect("timed run");
+
+        let names: Vec<&str> = sink.entries().iter().map(|e| e.step).collect();
+        assert_eq!(
+            names, expected,
+            "the sink must see every step of the untimed plan, once each"
+        );
+        assert_eq!(timed.had_error, plain.had_error);
+        // The manifest's `pedantic = true` reached the timed plan too: the
+        // lint step is planned, so the merge happened on this path as well.
+        assert!(names.contains(&"lint"), "{names:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
