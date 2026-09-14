@@ -389,12 +389,17 @@ fn fn_like(node: &SyntaxNode, _leading_keyword: Option<&'static str>) -> Doc {
     concat(parts)
 }
 
-/// `(param, param, ...)` — call-style break-on-overflow group.
-pub(super) fn format_param_list(node: &SyntaxNode) -> Doc {
-    let params: Vec<Doc> = child_nodes(node)
+/// The `Param` children of a parameter list, each already formatted.
+fn param_docs(node: &SyntaxNode) -> Vec<Doc> {
+    child_nodes(node)
         .filter(|n| n.kind() == S::Param)
         .map(|n| fmt_node(&n))
-        .collect();
+        .collect()
+}
+
+/// `(param, param, ...)` — call-style break-on-overflow group.
+pub(super) fn format_param_list(node: &SyntaxNode) -> Doc {
+    let params = param_docs(node);
 
     if params.is_empty() {
         return text("()");
@@ -407,6 +412,29 @@ pub(super) fn format_param_list(node: &SyntaxNode) -> Doc {
         softline(),
         text(")"),
     ]))
+}
+
+/// `param, param, ...` — the parameters alone, with no parens of their
+/// own.
+///
+/// The usual [`format_param_list`] synthesizes the `(`…`)` pair because
+/// the enclosing function/lambda formatter drops the literal delimiter
+/// tokens. That is wrong for the legacy `(params -> body)` lambda, whose
+/// parens wrap the *whole* lambda rather than the parameters: there the
+/// enclosing formatter keeps its own tokens and needs the bare form, or
+/// the output grows a second, misplaced pair.
+pub(super) fn param_list_inner(node: &SyntaxNode) -> Doc {
+    // Reaching this formatter directly bypasses `fmt_node`'s comment
+    // safety net, so apply it here: a comment sitting in the list would
+    // otherwise be dropped. The raw text is already paren-free.
+    if super::has_unplaced_comment(node) {
+        return super::format_raw(node);
+    }
+    let params = param_docs(node);
+    if params.is_empty() {
+        return text("");
+    }
+    group(crate::doc::join(&comma_sep(), params))
 }
 
 /// `[@] [type] IDENT [= expr]`.

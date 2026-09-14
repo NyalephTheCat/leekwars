@@ -8,7 +8,4 @@
 # total=101
 code/catch_else.leek	unsafe	formatting would change token #8: `<end of file>` becomes `:`
 code/french.leek	unsafe	formatting would drop 1 comment(s): `/*…`; formatting would introduce 1 comment(s): `/*…`
-code/french.min.leek	unsafe	formatting would change token #73: `x` becomes `]`
-euler/pe025.leek	unsafe	formatting would change token #20: `KwVar` becomes `>`
 euler/pe064.leek	unsafe	formatting would change token #71: `..` becomes `]`
-french.leek	unsafe	formatting would change token #73: `x` becomes `]`

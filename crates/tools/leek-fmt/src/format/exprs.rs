@@ -374,8 +374,51 @@ pub(super) fn format_field(node: &SyntaxNode) -> Doc {
     concat(parts)
 }
 
-/// `(params) => body` / `param -> body`.
+/// True when the `(`…`)` tokens hanging off a `LambdaExpr` delimit the
+/// whole lambda rather than its parameter list.
+///
+/// Leekscript spells a parenthesised lambda two ways, and the parser
+/// builds a `LambdaExpr` owning paren tokens for both:
+///
+/// - `(a, b) -> body` — `decls::param_list` emits `(` and `)` around the
+///   `ParamList`, so **both** land before the arrow. They are the
+///   parameter delimiters, and `format_param_list` re-synthesizes them.
+/// - `(a, b -> body)` — `lambda_paren_inner_arrow` emits `(` before the
+///   `ParamList` and the matching `)` *after* the body. They wrap the
+///   entire lambda, and dropping them changes the parse: in callee
+///   position `(x -> x + 1)(2)` would re-parse as `(x) -> x + 1(2)`,
+///   swallowing the call into the lambda body.
+///
+/// The two are told apart by where the closing paren sits: a `)` seen
+/// before the arrow means the param-list form. Keying on the *absence*
+/// of an early `)` rather than on the presence of a late one also does
+/// the right thing for error-recovered input, where the trailing `)` of
+/// the inner-arrow form is missing entirely.
+fn lambda_parens_wrap_whole(node: &SyntaxNode) -> bool {
+    let mut seen_lparen = false;
+    for t in node
+        .children_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+    {
+        if is_trivia(&t) {
+            continue;
+        }
+        match t.kind() {
+            S::LParen => seen_lparen = true,
+            S::RParen => return false,
+            S::Arrow | S::FatArrow => return seen_lparen,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// `(params) => body` / `param -> body` / `(params -> body)`.
 pub(super) fn format_lambda(node: &SyntaxNode) -> Doc {
+    // When the lambda's own parens wrap the whole construct they are
+    // load-bearing and must be printed where the parser found them; the
+    // `ParamList` child then renders bare so the pair is not doubled.
+    let wrapping_parens = lambda_parens_wrap_whole(node);
     let mut parts: Vec<Doc> = Vec::new();
     let mut last_was_space = true;
     for el in node.children_with_tokens() {
@@ -398,14 +441,18 @@ pub(super) fn format_lambda(node: &SyntaxNode) -> Doc {
                 // that also hang directly off the `LambdaExpr` must be dropped,
                 // else they double-wrap (`(a, b)` → `((a, b))`) — which is both
                 // wrong and non-idempotent (the re-parse mangles it).
-                S::LParen | S::RParen => {}
+                S::LParen | S::RParen if !wrapping_parens => {}
                 _ => {
                     parts.push(token_text(&t));
                     last_was_space = false;
                 }
             },
             NodeOrToken::Node(child) => {
-                parts.push(fmt_node(&child));
+                if wrapping_parens && child.kind() == S::ParamList {
+                    parts.push(super::stmts::param_list_inner(&child));
+                } else {
+                    parts.push(fmt_node(&child));
+                }
                 last_was_space = false;
             }
         }
@@ -525,7 +572,34 @@ fn bracketed_list(node: &SyntaxNode, open: &'static str, close: &'static str) ->
     bracketed_list_with(node, open, close)
 }
 
+/// True when `node`'s outermost significant tokens really are `open`
+/// and `close`.
+///
+/// The bracketed-list printers emit their delimiters as synthesized
+/// text rather than echoing the source tokens, so on error-recovered
+/// input they happily *invent* a bracket the parser never consumed. In
+/// `while |n| < 1000 { … }`, for instance, the `<` opens an angle set
+/// literal that never closes; printing it as a set literal would add a
+/// `>` that is not in the source and changes what the file means.
+/// Callers fall back to verbatim output when this returns false.
+fn delimiters_consumed(node: &SyntaxNode, open: &str, close: &str) -> bool {
+    let mut toks = node
+        .descendants_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+        .filter(|t| !is_trivia(t));
+    let Some(first) = toks.next() else {
+        return false;
+    };
+    if first.text() != open {
+        return false;
+    }
+    toks.last().is_some_and(|t| t.text() == close)
+}
+
 fn bracketed_list_with(node: &SyntaxNode, open: &'static str, close: &'static str) -> Doc {
+    if !delimiters_consumed(node, open, close) {
+        return super::format_verbatim(node);
+    }
     let elements: Vec<Doc> = child_nodes(node).map(|n| fmt_node(&n)).collect();
     if elements.is_empty() {
         // `[]` / `{}` — but `[:]` for empty map. Detect by looking
@@ -560,6 +634,9 @@ fn format_kv_brackets(
     close: &'static str,
     empty_is_colon: bool,
 ) -> Doc {
+    if !delimiters_consumed(node, open, close) {
+        return super::format_verbatim(node);
+    }
     // Collect entries by walking children_with_tokens and grouping
     // (expr, ":", expr) triples. Commas act as entry separators.
     let mut entries: Vec<Doc> = Vec::new();
