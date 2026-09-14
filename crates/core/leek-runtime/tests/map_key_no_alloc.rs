@@ -6,10 +6,10 @@
 //! Lookups, membership tests, overwriting inserts and removals on
 //! primitive-keyed collections must come out at *exactly zero*.
 //!
-//! Every test also carries its own control that exercises the old
-//! `key_repr`-string path over the same workload, so a broken harness
-//! (one that silently counts nothing) fails loudly instead of passing
-//! vacuously.
+//! Every test also carries its own control that renders each key to a
+//! `String` over the same workload — what the old string-keyed path did
+//! per probe — so a broken harness (one that silently counts nothing)
+//! fails loudly instead of passing vacuously.
 
 // The counting allocator has to implement `GlobalAlloc`, which is an
 // unsafe trait. Same carve-out as `src/builtin.rs`'s `no_mangle` shims.
@@ -19,7 +19,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::rc::Rc;
 
-use leek_runtime::{MapData, MapKey, SetData, Value, key_repr};
+use leek_runtime::{MapData, MapKey, SetData, Value};
 
 thread_local! {
     /// Allocations on *this* thread. Per-thread (rather than one
@@ -101,12 +101,12 @@ fn int_key_lookup_allocates_nothing() {
     // assertion above proves nothing.
     let control = allocations(|| {
         for i in 0..PROBES {
-            std::hint::black_box(key_repr(&Value::Int(i % N)));
+            std::hint::black_box(Value::Int(i % N).to_string());
         }
     });
     assert!(
         control >= u64::try_from(PROBES).unwrap(),
-        "counting allocator is not working: {PROBES} key_repr calls counted {control} allocations"
+        "counting allocator is not working: {PROBES} key renderings counted {control} allocations"
     );
 }
 
@@ -135,7 +135,7 @@ fn string_key_lookup_allocates_nothing() {
 
     let control = allocations(|| {
         for i in 0..PROBES {
-            std::hint::black_box(key_repr(&keys[usize::try_from(i % N).unwrap()]));
+            std::hint::black_box(keys[usize::try_from(i % N).unwrap()].to_string());
         }
     });
     assert!(
@@ -225,10 +225,11 @@ fn fresh_inserts_allocate_only_for_growth() {
         "{N} fresh inserts made {n} allocations; expected only container growth"
     );
 
-    // Same workload keyed the old way, for the size of the win.
+    // Same workload rendering a key per insert, the old way, for the
+    // size of the win.
     let control = allocations(|| {
         for i in 0..N {
-            std::hint::black_box(key_repr(&Value::Int(i)));
+            std::hint::black_box(Value::Int(i).to_string());
         }
     });
     assert!(

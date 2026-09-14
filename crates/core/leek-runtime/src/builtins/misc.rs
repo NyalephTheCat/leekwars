@@ -67,13 +67,28 @@ pub(crate) fn dispatch_misc(
             (Some(r), Some(g), Some(b)) => Value::Int((r << 16) | (g << 8) | b),
             _ => Value::Null,
         },
+        // Not an upstream builtin. `hash` and `hashCode` appear
+        // nowhere in `LeekFunctions.java` — the generator's whole
+        // function table — nor anywhere else in the generator tree;
+        // the `hashCode`s in that source are Java's own
+        // `Object.hashCode` overrides on the value classes, which the
+        // language never exposes. So this is a local extension, and
+        // its result is ours to define: a djb2 digest (`h = h*33 + c`
+        // from 5381, wrapped into the signed `integer` domain) over
+        // the value's `Display` rendering. That rendering is the
+        // language's own `string()` form, quotes included, so
+        // `hash("a")` digests `"a"` with the quotes — three
+        // characters — and never agrees with the digest of the
+        // character on its own. `tests/builtin_hash.rs` pins the
+        // shape.
         ("hash" | "hashCode", 1) => {
             let s = args[0].to_string();
             let mut h: u64 = 5381;
             for c in s.chars() {
                 h = h.wrapping_mul(33).wrapping_add(u64::from(c));
             }
-            // djb2 hash reinterpreted into the signed `integer` domain.
+            // The wrap into the signed domain is the definition, not
+            // an accident of the cast.
             #[allow(clippy::cast_possible_wrap)]
             Value::Int(h as i64)
         }
@@ -724,6 +739,80 @@ pub(crate) fn value_as_concat_string_for_join(v: &Value) -> String {
     }
 }
 
+/// Ordering key for a v1-v3 `jsonDecode` object.
+///
+/// Upstream collected those entries into a Java `TreeMap`
+/// (`LegacyMapLeekValue`), so iteration came out sorted by the
+/// rendered key. This reproduces that order and nothing else: the
+/// string is compared only by [`Ord`] inside the sort below, never
+/// stored and never used to decide whether two keys are the same
+/// key. Map identity itself lives in [`MapKey`](crate::MapKey),
+/// which keys primitives by value and composites by object identity.
+///
+/// The primitive arms are kept verbatim from the retired public
+/// `key_repr` they came from — type-prefixed, so the integer `5` and
+/// the string `"5"` sort into different runs rather than tying — but
+/// with nothing reading them for equality any more, their exact
+/// spelling matters only to sort stability. Composites fall through
+/// to the cycle-aware `Display` writer, which a self-referential map
+/// would otherwise send into a loop.
+fn json_map_key_order(v: &Value) -> String {
+    use std::fmt::Write;
+
+    // Primitive keys (int/real/bool/string/null) skip the formatter
+    // entirely, as they did when this was the map lookup path.
+    match v {
+        Value::Int(i) => {
+            let mut s = String::with_capacity(20);
+            s.push('i');
+            s.push(':');
+            let _ = write!(&mut s, "{i}");
+            s
+        }
+        Value::Real(r) => {
+            let mut s = String::with_capacity(24);
+            s.push('r');
+            s.push(':');
+            let _ = write!(&mut s, "{r}");
+            s
+        }
+        Value::Bool(b) => {
+            if *b {
+                "b:true".into()
+            } else {
+                "b:false".into()
+            }
+        }
+        Value::String(st) => {
+            let mut s = String::with_capacity(st.len() + 2);
+            s.push('s');
+            s.push(':');
+            s.push_str(st);
+            s
+        }
+        Value::Null => "null".into(),
+        // A capital prefix, because `5` and `5L` are two entries
+        // upstream (`BigIntegerValue.equals` only matches another
+        // `BigIntegerValue`) and so must not tie here. The full
+        // decimal, not the cropped display form, so two equal
+        // bignums order alike however far their display crops.
+        Value::BigInt(b) => {
+            let mut s = String::with_capacity(24);
+            s.push('I');
+            s.push(':');
+            let _ = write!(&mut s, "{}", crate::value::big_full_decimal(b));
+            s
+        }
+        // Composite keys — the Display call here might trip into a
+        // self-referential map, so keep the cycle-aware writer.
+        _ => {
+            let mut s = String::new();
+            let _ = write!(&mut s, "{v}");
+            s
+        }
+    }
+}
+
 pub(crate) fn json_decode(s: &str, version: u8) -> Option<Value> {
     let mut chars = s.chars().peekable();
     json_parse_depth(&mut chars, version, 0)
@@ -873,7 +962,7 @@ pub(crate) fn json_parse(
                         chars.next();
                         let mut map = crate::value::MapData::new();
                         pairs.sort_by(|(a, _), (b, _)| {
-                            crate::value::key_repr(a).cmp(&crate::value::key_repr(b))
+                            json_map_key_order(a).cmp(&json_map_key_order(b))
                         });
                         for (k, v) in pairs {
                             map.insert(k, v);

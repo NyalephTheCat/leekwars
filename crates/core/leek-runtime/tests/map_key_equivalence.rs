@@ -3,26 +3,53 @@
 //! Maps and sets key on [`MapKey`], and the relation it defines has
 //! two halves that need different oracles.
 //!
-//! For **primitives** it is the same relation the canonical string
-//! [`key_repr`] builds, so the two must agree *exactly*: for every
-//! pair of primitive values, `MapKey::of(a) == MapKey::of(b)` iff
-//! `key_repr(a) == key_repr(b)`. A single disagreement silently
-//! merges or splits map entries, and the damage is data-dependent
-//! rather than a compile error — hence the exhaustive pairwise sweep
-//! over an adversarial corpus, with `key_repr` kept as the oracle.
+//! For **primitives** it is the relation a type-prefixed rendering of
+//! the value builds, so the two must agree *exactly*: for every pair
+//! of primitive values, `MapKey::of(a) == MapKey::of(b)` iff the two
+//! renderings match. A single disagreement silently merges or splits
+//! map entries, and the damage is data-dependent rather than a
+//! compile error — hence the exhaustive pairwise sweep over an
+//! adversarial corpus, against [`rendered_key`] as the oracle.
 //!
-//! For **composites** there is no string oracle any more, and that is
+//! That oracle is spelled out in this file rather than imported. It
+//! used to be a public canonical-string function in the crate, back
+//! when maps really did key on strings; now that nothing does,
+//! sharing an implementation with the crate under test would only
+//! let one future edit move both at once. An independent restatement
+//! here is what an oracle is supposed to be.
+//!
+//! For **composites** there is no string oracle at all, and that is
 //! the fix rather than a gap: upstream keys arrays, maps, sets,
 //! objects, instances, intervals and functions by object identity
 //! (`ArrayLeekValue.java:1093-1101`), so two structurally-equal
-//! arrays are two keys while `key_repr` renders them the same. Those
-//! are asserted directly below.
+//! arrays are two keys while any rendering makes them one. Those are
+//! asserted directly below.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use leek_runtime::{MapKey, Value, big_from_decimal, key_repr};
+use leek_runtime::{MapKey, Value, big_from_decimal};
+
+/// The primitive oracle: a type-prefixed rendering, in which two
+/// values are the same key exactly when their strings match. Each arm
+/// carries the distinction it exists to make — a prefix per type so a
+/// string never collides with the number it spells, the full decimal
+/// for `big_integer` so two equal bignums agree whatever their
+/// display form crops to, and `{}` on `f64`, whose shortest
+/// round-trip output keeps `-0` apart from `0` and collapses every
+/// `NaN` onto one spelling.
+fn rendered_key(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => format!("b:{b}"),
+        Value::Int(i) => format!("i:{i}"),
+        Value::Real(r) => format!("r:{r}"),
+        Value::String(s) => format!("s:{s}"),
+        Value::BigInt(b) => format!("I:{}", leek_runtime::big_full_decimal(b)),
+        other => panic!("{other:?} is not a primitive; the oracle does not cover it"),
+    }
+}
 
 fn s(t: &str) -> Value {
     Value::String(Rc::new(t.to_string()))
@@ -34,7 +61,7 @@ fn arr(items: Vec<Value>) -> Value {
 
 /// Primitive values chosen to attack every way the two
 /// canonicalisations could drift apart: each primitive arm's boundary
-/// values, strings that mimic another arm's `key_repr` prefix,
+/// values, strings that mimic another arm's rendered prefix,
 /// `big_integer` against the same integer, NaN payloads and signed
 /// zero.
 fn primitive_corpus() -> Vec<(&'static str, Value)> {
@@ -57,7 +84,7 @@ fn primitive_corpus() -> Vec<(&'static str, Value)> {
         ("real NaN", Value::Real(f64::NAN)),
         ("real -NaN", Value::Real(-f64::NAN)),
         // A NaN with a non-default payload: distinct bits, same
-        // `key_repr` ("r:NaN"), so it must be the same key.
+        // rendering ("r:NaN"), so it must be the same key.
         (
             "real NaN payload",
             Value::Real(f64::from_bits(0x7ff8_0000_0000_0001)),
@@ -89,48 +116,47 @@ fn primitive_corpus() -> Vec<(&'static str, Value)> {
 }
 
 #[test]
-fn map_key_matches_key_repr_on_every_primitive_pair() {
+fn map_key_matches_the_rendered_oracle_on_every_primitive_pair() {
     let corpus = primitive_corpus();
     for (na, a) in &corpus {
         for (nb, b) in &corpus {
             let typed = MapKey::of(a) == MapKey::of(b);
-            let string = key_repr(a) == key_repr(b);
+            let string = rendered_key(a) == rendered_key(b);
             assert_eq!(
                 typed,
                 string,
-                "{na} vs {nb}: MapKey says {typed}, key_repr says {string} \
+                "{na} vs {nb}: MapKey says {typed}, the oracle says {string} \
                  ({:?} / {:?} vs {:?} / {:?})",
                 MapKey::of(a),
-                key_repr(a),
+                rendered_key(a),
                 MapKey::of(b),
-                key_repr(b),
+                rendered_key(b),
             );
         }
     }
 }
 
 #[test]
-fn map_key_hashes_agree_with_key_repr_classes() {
+fn map_key_hashes_agree_with_the_oracle_classes() {
     // `HashMap` needs `Hash` to be consistent with `Eq`: equal keys
     // must land in the same bucket. Checked by round-tripping the
     // whole corpus through a `HashSet` and comparing the number of
-    // distinct buckets against the number of distinct `key_repr`
-    // strings.
+    // distinct buckets against the number of distinct oracle strings.
     let corpus = primitive_corpus();
     let typed: HashSet<MapKey> = corpus.iter().map(|(_, v)| MapKey::of(v)).collect();
-    let strings: HashSet<String> = corpus.iter().map(|(_, v)| key_repr(v)).collect();
+    let strings: HashSet<String> = corpus.iter().map(|(_, v)| rendered_key(v)).collect();
     assert_eq!(typed.len(), strings.len());
 
     // And every value must find its own class back through a hash
     // lookup, not merely compare equal.
     let mut by_key: HashMap<MapKey, String> = HashMap::new();
     for (_, v) in &corpus {
-        by_key.insert(MapKey::of(v), key_repr(v));
+        by_key.insert(MapKey::of(v), rendered_key(v));
     }
     for (name, v) in &corpus {
         assert_eq!(
             by_key.get(&MapKey::of(v)).map(String::as_str),
-            Some(key_repr(v).as_str()),
+            Some(rendered_key(v).as_str()),
             "{name} did not hash back to its own key class"
         );
     }
@@ -167,12 +193,12 @@ fn known_upstream_distinctions_survive() {
 
 #[test]
 fn structurally_equal_composites_are_two_keys() {
-    // The half `key_repr` can no longer arbitrate: upstream's
-    // `equals` on a composite is `object == this`, so two arrays that
-    // render identically are still two keys.
+    // The half no rendering can arbitrate: upstream's `equals` on a
+    // composite is `object == this`, so two arrays that render
+    // identically are still two keys.
     let a = arr(vec![Value::Int(1), Value::Int(2)]);
     let b = arr(vec![Value::Int(1), Value::Int(2)]);
-    assert_eq!(key_repr(&a), key_repr(&b), "the two should render alike");
+    assert_eq!(a.to_string(), b.to_string(), "the two should render alike");
     assert_ne!(MapKey::of(&a), MapKey::of(&b));
 
     // …and the same `Rc`, however many `Value` handles point at it,
@@ -183,13 +209,13 @@ fn structurally_equal_composites_are_two_keys() {
     // Which also means the key survives a mutation of the contents,
     // where a rendered key would have moved.
     let before_key = MapKey::of(&a);
-    let before_text = key_repr(&a);
+    let before_text = a.to_string();
     if let Value::Array(inner) = &a {
         inner.borrow_mut().push(Value::Int(3));
     }
     assert_ne!(
         before_text,
-        key_repr(&a),
+        a.to_string(),
         "the mutation should have moved the rendered form"
     );
     assert_eq!(before_key, MapKey::of(&a));
