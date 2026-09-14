@@ -12,9 +12,9 @@ use leek_diagnostics::Severity;
 use leek_generator::{Entity, Fight};
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::{FeatureFlags, Input};
+use leek_project::Input;
 use leek_session::Target;
-use leek_span::SourceId;
+use leek_span::{FeatureFlags, SourceId};
 
 use crate::schema::{EntitySpec, Scenario};
 

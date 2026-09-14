@@ -210,7 +210,7 @@ pub fn lower_hir_query(
             diagnostics: Vec::new(),
         };
     };
-    let flags = leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db));
+    let flags = leek_span::FeatureFlags::from_bits(file.flags_bits(db));
     let version_byte = file.version_byte(db);
     let prelude = prelude_tree(flags.prelude, Version::from_byte(version_byte));
     let (hir, diagnostics) = lower_one(

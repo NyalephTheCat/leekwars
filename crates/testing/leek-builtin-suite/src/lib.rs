@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use leek_diagnostics::Severity;
 use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use serde::Deserialize;
@@ -150,7 +150,7 @@ fn run_case(case: &Case, file_id: usize) -> Result<Outcome> {
         text: case.source.clone().into(),
         version_byte: case.version,
         strict: false,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     };
 
     let pipeline =

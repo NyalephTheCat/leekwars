@@ -12,7 +12,7 @@ leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
 leek-diagnostics    = { workspace = true }
 leek-hir            = { workspace = true }
-leek-pipeline       = { workspace = true }
+leek-project        = { workspace = true }
 leek-session        = { workspace = true }
 leek-span           = { workspace = true }
 serde               = { workspace = true }

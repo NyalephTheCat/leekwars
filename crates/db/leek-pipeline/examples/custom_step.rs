@@ -5,7 +5,8 @@
 
 use leek_hir::pipeline::HirArtifact;
 use leek_hir::{Block, Stmt};
-use leek_pipeline::{Artifact, Context, Input, Step, StepError};
+use leek_pipeline::{Artifact, Context, Step, StepError};
+use leek_project::Input;
 use leek_session::{RecipeParams, Target};
 
 /// Output of [`CountIfs`].
@@ -58,7 +59,7 @@ fn main() {
         text: "if (1 > 0) { var a = 1; } if (a == 1) { var b = 2; }".into(),
         version_byte: 4,
         strict: false,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     });
 
     let count = run.get::<IfCount>().map_or(0, |c| c.0);

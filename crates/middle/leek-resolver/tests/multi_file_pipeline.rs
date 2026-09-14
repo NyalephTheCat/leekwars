@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use leek_hir::pipeline::HirArtifact;
 use leek_hir::{Def, ExprKind, Literal, Stmt};
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_resolver::folder::MemFolder;
 use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::ResolveIncludes;
@@ -31,7 +31,7 @@ fn run_pipeline(entry_path: &str, files: &[(&str, &str)]) -> Arc<leek_hir::HirFi
         text: entry_text.into(),
         version_byte: 4,
         strict: false,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     };
 
     let resolve_includes = ResolveIncludes::new(
@@ -114,7 +114,7 @@ fn input(text: &str, version_byte: u8) -> Input {
         text: text.to_string().into(),
         version_byte,
         strict: false,
-        flags: leek_pipeline::FeatureFlags::none(),
+        flags: leek_span::FeatureFlags::none(),
     }
 }
 
@@ -179,7 +179,7 @@ fn step_pipeline_without_resolveincludes_stays_single_file() {
             .into(),
         version_byte: 4,
         strict: false,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     };
     let pipeline = pipeline_hir_from_parse(&RecipeParams::permissive()).expect("recipe");
     let run = pipeline.run(input);

@@ -285,7 +285,7 @@ pub fn resolve_query(
     let builtins = crate::builtins::snapshot_dynamic_builtins();
     let opts = Options::from_settings(
         Some(&pragmas),
-        leek_pipeline::FeatureFlags::from_bits(file.flags_bits(db)),
+        leek_span::FeatureFlags::from_bits(file.flags_bits(db)),
         file.strict(db),
     )
     .with_builtins(builtins);

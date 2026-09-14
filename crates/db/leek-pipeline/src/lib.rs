@@ -51,13 +51,14 @@ pub mod salsa;
 
 pub use adapters::{IfPresent, RepeatUntilStable, RequireArtifact, StopOnDiagnostics, Tap};
 pub use combinators::{Chain, Optional, RecipeStepStopOnError, StopOnError};
-pub use context::{Artifact, Context, Input};
-// Re-exported so Input-constructing crates can set `flags` without a direct
-// `leek-span` dependency.
+pub use context::{Artifact, Context};
+// `Input` and `FeatureFlags` live in `leek-project` and `leek-span`; both
+// re-exports are compatibility shims for callers still spelling them through
+// this crate.
 pub use leek_span::FeatureFlags;
 pub use pipeline::{Pipeline, Run, Step, StepError};
 pub use project::{
-    LoadedProjectFile, Project, ProjectError, ProjectIndex, SourceInput, walk_leek_files,
+    Input, LoadedProjectFile, Project, ProjectError, ProjectIndex, SourceInput, walk_leek_files,
 };
 pub use recipe::{
     ArtifactList, LintGroups, OptLevel, RecipeArtifact, RecipeError, RecipeParams, RecipePlan,

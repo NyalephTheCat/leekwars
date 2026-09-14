@@ -205,7 +205,7 @@ impl NativeOptions {
     /// the input's settled language version **and** strict mode (so `miku
     /// run`, `miku test` and `leekc --emit run` can't drift from each other or
     /// from `miku build --backend native`), with the given op budget.
-    pub fn jit_for_input(input: &leek_pipeline::Input, op_limit: u64) -> Self {
+    pub fn jit_for_input(input: &leek_project::Input, op_limit: u64) -> Self {
         Self::debug()
             .with_emit(NativeEmit::Jit)
             .with_lang(input.version_byte, input.strict)
@@ -475,12 +475,12 @@ mod tests {
         // Regression: `miku run` / `miku test` built `NativeOptions::debug()`
         // and set only the version, so a `@strict` file (or `strict = true`
         // manifest) ran non-strict under the JIT.
-        let input = leek_pipeline::Input {
+        let input = leek_project::Input {
             source: leek_span::SourceId::new(1).unwrap(),
             text: "".into(),
             version_byte: 2,
             strict: true,
-            flags: leek_pipeline::FeatureFlags::none(),
+            flags: leek_span::FeatureFlags::none(),
         };
         let opts = NativeOptions::jit_for_input(&input, 1234);
         assert_eq!(opts.version, 2);

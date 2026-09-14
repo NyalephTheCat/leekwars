@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::{Input, Run, TimingSink};
+use leek_pipeline::{Run, TimingSink};
+use leek_project::Input;
 use leek_session::{OptLevel, RecipeParams, Target};
 
 /// HIR plus per-step prepare timings from a standard compile pipeline.
@@ -54,7 +55,7 @@ pub fn compile_hir_file(
         text: text.into(),
         version_byte,
         strict,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     })?;
     // The permissive pipeline still produces HIR alongside error diagnostics
     // (error-tolerant lowering). Executing that HIR benchmarks garbage — an

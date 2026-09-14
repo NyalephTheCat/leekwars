@@ -28,9 +28,9 @@
 
 use leek_backend_native::{NativeOptions, check_native_compat, compile_program};
 use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::{FeatureFlags, Input};
+use leek_project::Input;
 use leek_session::{RecipeParams, Target};
-use leek_span::SourceId;
+use leek_span::{FeatureFlags, SourceId};
 use leek_test_cases::TestCase;
 use leek_test_corpus::{embedded_manifest, run_on_large_stack};
 

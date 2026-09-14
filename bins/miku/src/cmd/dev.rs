@@ -70,7 +70,8 @@ fn run_tool(script: &str, extra_args: &[&str], quiet: bool) -> Result<ExitCode> 
 }
 
 fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
-    use leek_pipeline::{Input, TimingSink};
+    use leek_pipeline::TimingSink;
+    use leek_project::Input;
     use leek_session::{RecipeParams, Target};
     use leek_span::SourceId;
 
@@ -95,7 +96,7 @@ fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
         text: text.into(),
         version_byte: lang.version,
         strict: lang.strict,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     });
     if !quiet {
         eprintln!("Pipeline timings for {}:", path.display());

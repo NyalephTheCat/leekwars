@@ -29,7 +29,7 @@ use leek_complexity::pipeline::ComplexityArtifact;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
 use leek_ide::signature::signature_for;
 use leek_parser::pipeline::GreenTreeArtifact;
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_session::{DriverConfig, Target};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, SyntaxNode};

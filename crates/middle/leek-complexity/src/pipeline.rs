@@ -197,8 +197,9 @@ mod tests {
     use leek_hir::pipeline::LowerHir;
     use leek_lexer::pipeline::Lex;
     use leek_parser::pipeline::Parse;
-    use leek_pipeline::{FeatureFlags, Input, Pipeline};
-    use leek_span::SourceId;
+    use leek_pipeline::Pipeline;
+    use leek_project::Input;
+    use leek_span::{FeatureFlags, SourceId};
     use leek_syntax::pipeline::Pragma;
 
     fn input(text: &str) -> Input {

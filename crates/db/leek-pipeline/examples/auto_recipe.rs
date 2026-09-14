@@ -3,7 +3,8 @@
 //! Run with: `cargo run -p leek-pipeline --example auto_recipe`
 
 use leek_mir::pipeline::MirArtifact;
-use leek_pipeline::{Input, RecipeParams, pipeline_for_recipe};
+use leek_pipeline::{RecipeParams, pipeline_for_recipe};
+use leek_project::Input;
 use leek_span::SourceId;
 
 fn main() {
@@ -14,7 +15,7 @@ fn main() {
         text: "function add(a, b) { return a + b; }\nvar x = add(1, 2);\n".into(),
         version_byte: 4,
         strict: false,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     });
 
     println!("mir? {}", run.get::<MirArtifact>().is_some());

@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use leek_diagnostics::{Diagnostic, Severity, codes};
 use leek_pipeline::{
-    Artifact, Context, FeatureFlags, IfPresent, Input, Pipeline, RepeatUntilStable,
-    RequireArtifact, Step, StepError, StopOnDiagnostics, StopOnError, Tap,
+    Artifact, Context, IfPresent, Pipeline, RepeatUntilStable, RequireArtifact, Step, StepError,
+    StopOnDiagnostics, StopOnError, Tap,
 };
-use leek_span::{SourceId, Span};
+use leek_project::Input;
+use leek_span::{FeatureFlags, SourceId, Span};
 
 fn input() -> Input {
     Input {

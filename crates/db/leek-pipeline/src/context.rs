@@ -3,9 +3,9 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use leek_diagnostics::Diagnostic;
+use leek_project::Input;
 use leek_span::{FeatureFlags, SourceId};
 
 use crate::pipeline::StepError;
@@ -21,28 +21,6 @@ use crate::pipeline::StepError;
 /// impl leek_pipeline::Artifact for MyLintFindings {}
 /// ```
 pub trait Artifact: 'static {}
-
-/// Configuration for a single pipeline run.
-///
-/// One source file, one version, one strict-mode setting. Multiple
-/// files = multiple pipeline runs (the include graph layer composes
-/// those itself).
-/// The pipeline stores the language version as a byte (1..=4) to
-/// avoid taking a dependency on `leek-syntax`'s `Version` enum (which
-/// would introduce a cycle, since `leek-syntax` ships its own pipeline
-/// step). Pass crates convert to their preferred enum form.
-#[derive(Debug, Clone)]
-pub struct Input {
-    pub source: SourceId,
-    pub text: Arc<str>,
-    pub version_byte: u8,
-    pub strict: bool,
-    /// Opt-in experimental language features for this run. Threaded through the
-    /// pipeline (and the salsa input) instead of read from process-global env
-    /// vars deep inside the passes. Construct with [`FeatureFlags::from_env`] at
-    /// the entry boundary (or `FeatureFlags::none()` / explicit flags in tests).
-    pub flags: FeatureFlags,
-}
 
 /// Mutable state threaded through every step.
 ///

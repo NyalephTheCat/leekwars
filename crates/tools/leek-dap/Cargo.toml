@@ -15,7 +15,7 @@ leek-hir         = { workspace = true }
 # which source lines the backend emits a debug safepoint on.
 leek-mir         = { workspace = true }
 leek-span        = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-project     = { workspace = true }
 leek-diagnostics = { workspace = true }
 # Compile the way the rest of the toolchain does: the project manifest
 # settles the language defaults and `leek-session`'s include step resolves

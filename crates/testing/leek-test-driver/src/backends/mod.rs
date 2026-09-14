@@ -8,7 +8,7 @@ use leek_diagnostics::Severity;
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::{BackendKind, BackendTable};
-use leek_pipeline::Input;
+use leek_project::Input;
 use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::version::version_from_byte;
@@ -280,7 +280,7 @@ fn default_jobs() -> usize {
 /// across cases is the same contract the pipeline already documents.
 struct CaseRunner {
     pipeline: leek_pipeline::Pipeline,
-    flags: leek_pipeline::FeatureFlags,
+    flags: leek_span::FeatureFlags,
     source: SourceId,
 }
 
@@ -289,7 +289,7 @@ impl CaseRunner {
         Self {
             pipeline: leek_session::pipeline(Target::Hir, &RecipeParams::permissive())
                 .expect("recipe"),
-            flags: leek_pipeline::FeatureFlags::from_env(),
+            flags: leek_span::FeatureFlags::from_env(),
             source,
         }
     }
@@ -1312,7 +1312,7 @@ fn first_error_message(case: &TestCase, source: SourceId) -> String {
         text: case.code.clone().into(),
         version_byte: case.version,
         strict: case.strict,
-        flags: leek_pipeline::FeatureFlags::from_env(),
+        flags: leek_span::FeatureFlags::from_env(),
     };
     let Ok(pipeline) = leek_session::pipeline(Target::Hir, &RecipeParams::permissive()) else {
         return "<pipeline build failed>".into();
