@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::recipes::{RecipeParams, Target};
 use anyhow::Result;
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter, Sources};
 use leek_diagnostics::{LintLevelError, LintLevels};
 use leek_pipeline::{Input, Pipeline, Run, TimingSink};
 use leek_project::{Project, SourceInput};
-use leek_recipes::{RecipeParams, Target};
 
 /// The include-id interner, re-exported so front-ends that own one for
 /// a whole run (`miku test`) do not need a direct `leek-resolver`
@@ -42,8 +42,8 @@ pub struct DriverRun<'a> {
 }
 
 /// Build a [`Pipeline`] for `config`.
-pub fn pipeline_for(config: &DriverConfig) -> Result<Pipeline, leek_recipes::RecipeError> {
-    leek_recipes::pipeline(config.target, &config.params)
+pub fn pipeline_for(config: &DriverConfig) -> Result<Pipeline, crate::recipes::RecipeError> {
+    crate::recipes::pipeline(config.target, &config.params)
 }
 
 /// Run the pipeline on `input`, render diagnostics, return the [`Run`].
@@ -211,7 +211,7 @@ pub fn file_pipeline_shared(
 ) -> Result<(Pipeline, leek_span::SourceId)> {
     let merged = merge_manifest_lints(project, config);
     let step = includes_step(path, interner);
-    let pipeline = leek_recipes::pipeline_with_includes(merged.target, step, &merged.params)?;
+    let pipeline = crate::recipes::pipeline_with_includes(merged.target, step, &merged.params)?;
     Ok((pipeline, interner.intern(path)))
 }
 
@@ -228,7 +228,7 @@ pub fn standalone_pipeline(
     source_id: leek_span::SourceId,
     config: &DriverConfig,
 ) -> Result<Pipeline> {
-    Ok(leek_recipes::pipeline_with_includes(
+    Ok(crate::recipes::pipeline_with_includes(
         config.target,
         includes_step_standalone(path, source_id),
         &config.params,
@@ -328,7 +328,7 @@ pub fn run_file_timed(
     let (src, text) = project.pipeline_input(source_id, path)?;
     let reporter = reporter_for(project, config.color, config.format)?;
     let merged = merge_manifest_lints(project, config);
-    let pipeline = leek_recipes::pipeline_with_includes_timed(
+    let pipeline = crate::recipes::pipeline_with_includes_timed(
         merged.target,
         includes_step_standalone(path, source_id),
         &merged.params,
@@ -376,7 +376,7 @@ mod tests {
 
     fn scratch(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "leek-driver-{label}-{}-{:?}",
+            "leek-session-driver-{label}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -525,13 +525,13 @@ mod tests {
         let project = project("[lint]\npedantic = true\n");
         let cli = DriverConfig {
             target: Target::Mir,
-            params: RecipeParams::default().with_opt(leek_recipes::OptLevel::O1),
+            params: RecipeParams::default().with_opt(crate::recipes::OptLevel::O1),
             color: ColorWhen::Never,
             format: MessageFormat::Json,
         };
         let merged = merge_manifest_lints(&project, &cli);
         assert_eq!(merged.target, Target::Mir);
-        assert_eq!(merged.params.opt, leek_recipes::OptLevel::O1);
+        assert_eq!(merged.params.opt, crate::recipes::OptLevel::O1);
         assert!(matches!(merged.format, MessageFormat::Json));
         assert!(merged.params.lints.pedantic);
     }

@@ -33,7 +33,7 @@ pub fn handle(
 ) -> Option<lsp::request::GotoImplementationResponse> {
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Hir)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Hir)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
     let hir = run.get::<HirArtifact>()?;
 
@@ -143,7 +143,7 @@ fn program_classes(ws: &Workspace, home_uri: &lsp::Url) -> Vec<ProgClass> {
     let mut out: Vec<ProgClass> = Vec::new();
     for file in crate::handlers::program_scope::program_scope(ws, home_uri) {
         let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Hir)
         else {
             continue;
         };

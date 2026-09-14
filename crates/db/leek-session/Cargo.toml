@@ -1,0 +1,34 @@
+[package]
+name        = "leek-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Compiler session: pre-built pipeline recipes plus the driver that runs them over project sources."
+
+[dependencies]
+leek-complexity  = { workspace = true, features = ["salsa"] }
+leek-diagnostics = { workspace = true }
+leek-environment = { workspace = true }
+leek-fmt         = { workspace = true, features = ["salsa"] }
+leek-hir         = { workspace = true }
+leek-lexer       = { workspace = true }
+leek-lint        = { workspace = true }
+leek-mir         = { workspace = true }
+leek-parser      = { workspace = true }
+leek-pipeline    = { workspace = true, features = ["salsa"] }
+leek-prelude     = { workspace = true }
+leek-project     = { workspace = true }
+leek-resolver    = { workspace = true }
+leek-span        = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-types       = { workspace = true }
+anyhow           = { workspace = true }
+
+[dev-dependencies]
+# Tests build a `Project` from a manifest string; the driver itself only
+# ever sees one that `leek-project` already loaded.
+leek-manifest    = { workspace = true }
+
+[lints]
+workspace = true

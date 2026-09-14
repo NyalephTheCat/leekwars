@@ -21,10 +21,10 @@ use leek_hir::pipeline::HirArtifact;
 use leek_hir::{LowerUnit, lower_files};
 use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse, parse_with_features};
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, pipeline_hir_with_includes};
 use leek_resolver::folder::MemFolder;
 use leek_resolver::interner::PathInterner;
 use leek_resolver::pipeline::ResolveIncludes;
+use leek_session::{RecipeParams, pipeline_hir_with_includes};
 use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::{SyntaxNode, Version};
 

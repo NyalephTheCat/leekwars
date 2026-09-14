@@ -94,7 +94,7 @@ fn edits_for_document(
     known: &HashSet<PathBuf>,
     renamed: &HashMap<PathBuf, PathBuf>,
 ) -> Vec<lsp::TextEdit> {
-    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_recipes::Target::Parsed)
+    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_session::Target::Parsed)
     else {
         return Vec::new();
     };

@@ -36,10 +36,9 @@ use leek_backend_native::{NativeArtifact, NativeError};
 use leek_hir::pipeline::HirArtifact;
 
 use leek_diagnostics::{Code, Reporter, Severity};
-use leek_driver::{DriverConfig, PathInterner, SourceInterner};
 use leek_pipeline::Input;
 use leek_project::Project;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{DriverConfig, PathInterner, RecipeParams, SourceInterner, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Test};
 
@@ -54,7 +53,7 @@ pub fn run(
     quiet: bool,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+    if leek_session::report_manifest(&project, color.into(), format.into()) {
         return Ok(ExitCode::from(1));
     }
     // Tests compile through the same driver entry points as `miku check`:
@@ -66,7 +65,7 @@ pub fn run(
         color: color.into(),
         format: format.into(),
     };
-    let reporter = leek_driver::reporter_for(&project, config.color, config.format)?;
+    let reporter = leek_session::reporter_for(&project, config.color, config.format)?;
 
     let tests = project.walk_tests();
     if tests.is_empty() {
@@ -170,7 +169,7 @@ fn run_one(
 ) -> Result<TestOutcome> {
     // Plan first: the pipeline interns the entry, and its id is what this
     // file's `Input` — and so every span it raises — has to carry.
-    let (pipeline, source) = leek_driver::file_pipeline_shared(project, path, config, interner)?;
+    let (pipeline, source) = leek_session::file_pipeline_shared(project, path, config, interner)?;
     let (src, text) = project.pipeline_input(source, path)?;
     let input = Input::from(src);
     let annotations = parse_annotations(&text);
@@ -195,7 +194,7 @@ fn run_one(
         if errors.contains(&code.as_str()) {
             return Ok(TestOutcome::Pass);
         }
-        leek_driver::report(&result, &text, &label, reporter);
+        leek_session::report(&result, &text, &label, reporter);
         return Ok(TestOutcome::Fail(if errors.is_empty() {
             format!("expected compile error {code} but the program compiled")
         } else {
@@ -203,7 +202,7 @@ fn run_one(
         }));
     }
 
-    let had_compile_error = leek_driver::report(&result, &text, &label, reporter);
+    let had_compile_error = leek_session::report(&result, &text, &label, reporter);
     if had_compile_error {
         return Ok(TestOutcome::Fail("compile error".into()));
     }

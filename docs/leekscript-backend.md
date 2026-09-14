@@ -12,7 +12,7 @@ Entry point: `emit(&HirFile, &Options) -> EmittedLeekScript`.
 
 When an include graph ran — which is every project path: `miku build
 --backend leekscript`, `leekc`, anything built on
-`leek_recipes::pipeline_hir_with_includes` — the HIR handed to this crate has
+`leek_session::pipeline_hir_with_includes` — the HIR handed to this crate has
 already been *bundled*. `leek_hir::lower::lower_files` merges every included
 file's definitions into one `HirFile` and splices each `include("name")` site
 into the included file's main-block statements, so the emitted `.leek` defines

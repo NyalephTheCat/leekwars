@@ -7,8 +7,8 @@
 //! `container`, so the class name is recovered structurally from the
 //! CST via [`enclosing_class_name`](crate::handlers::enclosing_class_name).
 
-use leek_recipes::Target;
 use leek_resolver::SymbolKind;
+use leek_session::Target;
 use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 

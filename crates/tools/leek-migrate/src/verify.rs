@@ -18,7 +18,7 @@
 
 use leek_diagnostics::{Diagnostic, Severity, codes};
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -31,7 +31,7 @@ fn compile_errors(text: &str, source_id: SourceId, version: Version) -> Vec<Diag
         strict: false,
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
-    let Ok(pipeline) = leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()) else {
+    let Ok(pipeline) = leek_session::pipeline(Target::Hir, &RecipeParams::permissive()) else {
         return Vec::new();
     };
     pipeline

@@ -448,7 +448,7 @@ mod tests {
                 .any(|(n, t)| *n == "CELL_EMPTY" && *t == "integer")
         );
         assert!(consts.iter().any(|(n, _)| *n == "WEAPON_PISTOL"));
-        // The free accessor used by leek-recipes matches.
+        // The free accessor used by leek-session matches.
         assert_eq!(leekwars_constants().len(), consts.len());
     }
 

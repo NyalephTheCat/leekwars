@@ -64,7 +64,7 @@ type Entry = (u32, u32, u32, u32);
 /// Collect every colorable span in the file, sorted by start offset.
 /// Shared by all three request flavors.
 fn collect_entries(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<Entry>> {
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
     let mut entries: Vec<Entry> = Vec::new();

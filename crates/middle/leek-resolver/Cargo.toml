@@ -39,7 +39,7 @@ leek-hir         = { workspace = true }
 # `Target::TypeChecked`, so they assert on the type checker's artifact.
 leek-types       = { workspace = true }
 leek-diagnostics = { workspace = true }
-leek-recipes     = { workspace = true }
+leek-session     = { workspace = true }
 leek-pipeline    = { workspace = true }
 
 [lints]

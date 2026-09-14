@@ -61,7 +61,7 @@ two workspace members:
 Existing violations are listed, each with a justification, in
 [`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt). Today that
 includes every frontend and middle stage depending on `leek-pipeline` and
-`leek-recipes` → `leek-fmt`/`leek-lint`. The
+`leek-session` → `leek-fmt`/`leek-lint`. The
 list may only shrink: an entry whose edge no longer breaks the rule fails the
 check, so remove it in the same change that fixes the edge.
 
@@ -123,11 +123,11 @@ A `.leek` program flows down the layers:
      the backends consume.
    - `leek-charge` models LeekWars' per-operation "ops" budget; `leek-complexity`
      derives per-function big-O / cost estimates (`miku analyze`).
-3. **db** (`leek-pipeline`, `leek-recipes`, `leek-driver`) is the orchestration
-   layer — a query/recipe system that wires the stages together, caches
-   artifacts, and is what the binaries call into. `leek-pipeline` is the
-   generic engine; `leek-recipes` defines the concrete steps; `leek-driver`
-   ties it to a project/manifest.
+3. **db** (`leek-pipeline`, `leek-session`) is the orchestration layer — a
+   query/recipe system that wires the stages together, caches artifacts, and
+   is what the binaries call into. `leek-pipeline` is the generic engine;
+   `leek-session` defines the concrete steps (its `recipes` module) and ties
+   them to a project/manifest (its `driver` module).
 4. **Backends** consume MIR:
    - `leek-backend-native` is a Cranelift JIT/AOT backend (`miku run`, and
      `leekc --emit` for a standalone executable, linked via `cc`). Scalars

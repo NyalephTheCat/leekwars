@@ -23,8 +23,8 @@ use leek_diagnostics::Severity;
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::Input;
-use leek_recipes::Target;
 use leek_resolver::pipeline::IncludeGraphArtifact;
+use leek_session::Target;
 use leek_span::paths::canonical_or_normalized;
 use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
 use leek_span::{LineTable, SourceId, Span};
@@ -157,7 +157,7 @@ impl NativeTarget {
 
         let lang = settle_language(&source, &self.config, manifest_defaults(path));
         // The entry keeps id 1 and the include walker hands out 2, 3, … —
-        // the same numbering `leek-driver` uses, so spans line up with the
+        // the same numbering `leek-session` uses, so spans line up with the
         // rest of the toolchain.
         let src_id = SourceId::new(1).expect("source id 1 is non-zero");
         let input = Input {
@@ -168,10 +168,10 @@ impl NativeTarget {
             flags: leek_pipeline::FeatureFlags::from_env(),
         };
 
-        let pipeline = match leek_recipes::pipeline_with_includes(
+        let pipeline = match leek_session::pipeline_with_includes(
             Target::Hir,
-            leek_driver::includes_step_standalone(path, src_id),
-            &leek_recipes::driver_params(),
+            leek_session::includes_step_standalone(path, src_id),
+            &leek_session::driver_params(),
         ) {
             Ok(pipeline) => pipeline,
             Err(e) => return Err(RunOutcome::failed(format!("building pipeline: {e}"))),

@@ -65,7 +65,7 @@ pub fn run() -> Result<ExitCode> {
         if cli.libraries.is_empty() {
             None
         } else {
-            let cat = leek_recipes::load_and_register_libraries(&cli.libraries)
+            let cat = leek_session::load_and_register_libraries(&cli.libraries)
                 .context("loading library")?;
             Some(std::sync::Arc::new(cat))
         };
@@ -101,7 +101,7 @@ pub fn run() -> Result<ExitCode> {
     for code in cli.deny.iter().chain(&cli.warn).chain(&cli.allow) {
         resolve_code(code)?;
     }
-    // Diagnostics render through the same `Reporter` + `leek_driver::report`
+    // Diagnostics render through the same `Reporter` + `leek_session::report`
     // as every `miku` subcommand, so one raised inside an included file is
     // shown against *that* file's text and path, not the entry's.
     let reporter = Reporter::new(
@@ -119,7 +119,7 @@ pub fn run() -> Result<ExitCode> {
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     let file_label = cli.input.display().to_string();
-    let had_error = leek_driver::report(&result, &text, &file_label, &reporter);
+    let had_error = leek_session::report(&result, &text, &file_label, &reporter);
 
     match cli.emit {
         Emit::Check => {}
@@ -378,6 +378,6 @@ fn report_backend_diagnostics(
     if diagnostics.is_empty() {
         return false;
     }
-    let sources = leek_driver::run_sources(result, text, file_label);
+    let sources = leek_session::run_sources(result, text, file_label);
     reporter.emit(diagnostics, &sources)
 }

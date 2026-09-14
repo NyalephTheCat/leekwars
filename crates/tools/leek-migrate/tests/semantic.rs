@@ -18,8 +18,8 @@ use leek_diagnostics::Severity;
 use leek_hir::pipeline::HirArtifact;
 use leek_migrate::migrate_text;
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target};
 use leek_runtime::Value;
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -49,7 +49,7 @@ fn run(src: &str, version: Version) -> Value {
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
     let pipeline =
-        leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
+        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
     let outcome = pipeline.run(input);
     let fatal: Vec<_> = outcome
         .diagnostics()

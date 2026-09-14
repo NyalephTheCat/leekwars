@@ -32,7 +32,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
 
     // TypeChecked (not just Resolved): a method callee needs the type
     // table to resolve its receiver's class.
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::TypeChecked)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = SyntaxNode::new_root(green.clone());
 

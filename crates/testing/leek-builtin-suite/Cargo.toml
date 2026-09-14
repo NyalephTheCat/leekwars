@@ -13,7 +13,7 @@ leek-runtime        = { workspace = true }
 leek-diagnostics    = { workspace = true }
 leek-hir            = { workspace = true }
 leek-pipeline       = { workspace = true }
-leek-recipes        = { workspace = true }
+leek-session        = { workspace = true }
 leek-span           = { workspace = true }
 serde               = { workspace = true }
 toml                = { version = "0.8", default-features = false, features = ["parse"] }

@@ -636,9 +636,9 @@ mod tests {
                 (
                     "leek-resolver",
                     "crates/middle/leek-resolver",
-                    &[("leek-recipes", Some("dev"))],
+                    &[("leek-session", Some("dev"))],
                 ),
-                ("leek-recipes", "crates/db/leek-recipes", &[]),
+                ("leek-session", "crates/db/leek-session", &[]),
                 (
                     "leek-migrate",
                     "crates/tools/leek-migrate",
