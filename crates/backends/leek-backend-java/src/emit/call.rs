@@ -49,16 +49,23 @@ impl super::Emitter<'_> {
             buf.push_str("\")");
             self.write_execute_args(buf, &c.args);
             buf.push_str(") : (");
-            // Fall through to the original builtin call by
-            // re-entering write_call with shadowing
-            // temporarily disabled so we don't infinite-loop.
-            let prev: Vec<String> = self.shadowed_builtins.borrow().iter().cloned().collect();
-            self.shadowed_builtins.borrow_mut().clear();
-            self.write_call(buf, c);
-            self.shadowed_builtins.borrow_mut().extend(prev);
+            // Fall through to the original builtin call via the shadow-free
+            // entry point. Re-entering `write_call` with the shared set
+            // emptied also un-shadowed every *other* name reached from here
+            // (the arguments), and left the set clobbered if emission unwound.
+            self.write_call_unshadowed(buf, c);
             buf.push_str("))");
             return;
         }
+        self.write_call_unshadowed(buf, c);
+    }
+
+    /// The builtin / user-function dispatch for `c`, with no `__shadows` test
+    /// on the callee name: the `else` arm of [`Self::write_call`]'s ternary,
+    /// and the whole emission for a callee the source never reassigns.
+    /// Arguments go out through the normal paths, so a shadowed name nested
+    /// inside one keeps its own shadow test.
+    fn write_call_unshadowed(&self, buf: &mut String, c: &Call) {
         match &c.callee {
             // A name no binding claims. `Unresolved` shares this arm: before
             // the two tags were split every such callee was `Builtin`, and the
