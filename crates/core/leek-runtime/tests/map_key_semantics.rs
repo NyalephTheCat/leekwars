@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use leek_runtime::{
     ClassId, DISPLAY_VERSION, Function, Instance, LambdaCapture, MapData, ObjectData, SetData,
-    Value, big_from_decimal, key_repr,
+    Value, big_from_decimal,
 };
 
 fn s(t: &str) -> Value {
@@ -343,11 +343,11 @@ fn a_composite_key_survives_a_display_version_change() {
 
     DISPLAY_VERSION.with(|v| v.set(1));
     m.insert(k.clone(), s("written under v1"));
-    let v1_text = key_repr(&k);
+    let v1_text = k.to_string();
     assert!(m.contains_key(&k));
 
     DISPLAY_VERSION.with(|v| v.set(4));
-    let v4_text = key_repr(&k);
+    let v4_text = k.to_string();
     assert_ne!(
         v1_text, v4_text,
         "pick a key whose rendering actually depends on the version"

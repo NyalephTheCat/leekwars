@@ -12,7 +12,6 @@
 // float comparisons here are deliberate.
 #![allow(clippy::float_cmp)]
 
-use std::fmt::Write as _;
 use std::rc::Rc;
 
 use super::key::MapKey;
@@ -650,61 +649,4 @@ thread_local! {
     /// prints `test`, not `"test"`).
     pub static DISPLAY_TOP_LEVEL_BARE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
-}
-
-/// Canonical map-key form. Two values are considered equal keys iff
-/// their `key_repr` strings match.
-pub fn key_repr(v: &Value) -> String {
-    // Hot path: primitive keys (int/real/bool/string/null) skip the
-    // formatter entirely. This matters for stress tests that do
-    // millions of `map[i] = ...` writes.
-    match v {
-        Value::Int(i) => {
-            let mut s = String::with_capacity(20);
-            s.push('i');
-            s.push(':');
-            let _ = write!(&mut s, "{i}");
-            s
-        }
-        Value::Real(r) => {
-            let mut s = String::with_capacity(24);
-            s.push('r');
-            s.push(':');
-            let _ = write!(&mut s, "{r}");
-            s
-        }
-        Value::Bool(b) => {
-            if *b {
-                "b:true".into()
-            } else {
-                "b:false".into()
-            }
-        }
-        Value::String(st) => {
-            let mut s = String::with_capacity(st.len() + 2);
-            s.push('s');
-            s.push(':');
-            s.push_str(st);
-            s
-        }
-        Value::Null => "null".into(),
-        // big_integer keys are distinct from integer keys upstream
-        // (`BigIntegerValue.equals` only matches other BigIntegerValue),
-        // so `5` and `5L` coexist in a map — hence the capital prefix.
-        // Uses the full decimal, not the cropped display form.
-        Value::BigInt(b) => {
-            let mut s = String::with_capacity(24);
-            s.push('I');
-            s.push(':');
-            let _ = write!(&mut s, "{}", super::bigint::big_full_decimal(b));
-            s
-        }
-        // Composite keys — the Display call here might trip into a
-        // self-referential map, so keep the cycle-aware writer.
-        _ => {
-            let mut s = String::new();
-            let _ = write!(&mut s, "{v}");
-            s
-        }
-    }
 }

@@ -11,8 +11,7 @@
 //! real carry their payload inline and allocate nothing; string and
 //! `big_integer` keys share the `Value`'s existing `Rc`, so building
 //! one is a refcount bump. This half is the hot path — stress tests
-//! hammer it with millions of `map[i] = …` writes — and over it the
-//! equivalence with [`key_repr`](super::key_repr) still holds exactly.
+//! hammer it with millions of `map[i] = …` writes.
 //!
 //! **Composites are keyed by identity.** An array, map, set, object,
 //! instance or interval is one key iff it is *the same object*.
@@ -71,17 +70,19 @@
 //! not arise; if cells ever do become storable, they need an identity
 //! of their own rather than a peel.
 //!
-//! ## What `key_repr` is now
+//! ## What became of the canonical string
 //!
-//! `key_repr` stays the canonical *string* form, and it stays the
-//! oracle for primitives: over the primitive corpus,
-//! `MapKey::of(a) == MapKey::of(b)` exactly when
-//! `key_repr(a) == key_repr(b)` (see `tests/map_key_equivalence.rs`).
-//! For composites the two deliberately disagree, and the disagreement
-//! is the point: `MapKey` is identity, `key_repr` is text. One happy
-//! consequence is that a lookup no longer depends on the
-//! `DISPLAY_VERSION` thread-local — a key inserted while rendering as
-//! v1 is still found under v4.
+//! Nothing keys on a string any more, so the crate no longer publishes
+//! one. Over primitives the old relation was the right one, and
+//! `tests/map_key_equivalence.rs` still checks `MapKey` against a
+//! type-prefixed rendering it spells out itself, pair by pair over an
+//! adversarial corpus. Over composites the two deliberately disagree,
+//! and that disagreement is the whole point: `MapKey` is identity,
+//! text is text. One happy consequence is that a lookup no longer
+//! depends on the `DISPLAY_VERSION` thread-local — a key inserted
+//! while rendering as v1 is still found under v4. The one place that
+//! still wants a rendered key is `jsonDecode`'s v1-v3 `TreeMap`
+//! ordering, which keeps a private copy next to its own use.
 
 use std::rc::Rc;
 
@@ -90,10 +91,10 @@ use super::types::{ClassId, FnId, Function, Value};
 /// Canonical key of a map entry or set element.
 ///
 /// Two values are the same key iff their `MapKey`s compare equal.
-/// The variant discriminant stands in for the type prefix `key_repr`
-/// writes for primitives (`i:`, `r:`, `b:`, `s:`, `I:`), so keys of
-/// different kinds can never collide however their contents are
-/// spelled — the string `"i:5"` is still a different key from the
+/// The variant discriminant stands in for the type prefix a rendered
+/// key would need for primitives (`i:`, `r:`, `b:`, `s:`, `I:`), so
+/// keys of different kinds can never collide however their contents
+/// are spelled — the string `"i:5"` is still a different key from the
 /// integer `5`. Composite variants carry an identity token instead of
 /// any rendering of the contents (see the module docs).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -103,10 +104,10 @@ pub enum MapKey {
     Int(i64),
     /// Raw `f64` bits. Bits rather than the value because `f64` is
     /// neither `Eq` nor `Hash`, and because the bit pattern
-    /// reproduces `key_repr`'s two special cases for free: `-0.0`
-    /// keeps its sign bit so it stays a different key from `0.0`
-    /// (`r:-0` vs `r:0`), and every `NaN` is normalised to one
-    /// pattern so all of them are the same key (`r:NaN`). Otherwise
+    /// reproduces the two special cases for free: `-0.0` keeps its
+    /// sign bit so it stays a different key from `0.0` (`r:-0` vs
+    /// `r:0` as text), and every `NaN` is normalised to one pattern
+    /// so all of them are the same key (`r:NaN`). Otherwise
     /// `{}` on `f64` is shortest-round-trip, so distinct bits print
     /// distinctly.
     Real(u64),
@@ -116,8 +117,8 @@ pub enum MapKey {
     /// `big_integer` keys are distinct from integer keys upstream
     /// (`BigIntegerValue.equals` only matches another
     /// `BigIntegerValue`), so `5` and `5L` coexist in one map.
-    /// `BigInt: Eq` is full-precision, matching `key_repr`'s use of
-    /// the uncropped decimal rather than the cropped display form.
+    /// `BigInt: Eq` is full-precision, so two equal bignums are one
+    /// key however the cropped display form would have spelled them.
     BigInt(Rc<num_bigint::BigInt>),
     /// Pointer identity of an `Array`/`Map`/`Set`/`Object`/
     /// `Instance`/`Interval` — the `Rc`'s address, never
