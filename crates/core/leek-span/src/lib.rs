@@ -4,6 +4,7 @@
 //! Spans are cheap to copy (12 bytes). A [`LineTable`] lazily computed from
 //! the source text converts byte offsets to (line, column) on demand.
 
+use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::ops::Range;
 
@@ -150,8 +151,21 @@ pub fn offset(n: usize) -> u32 {
     u32::try_from(n).expect("source larger than 4 GiB")
 }
 
-/// One-based line/column. Columns count UTF-8 bytes for now; multi-byte
-/// awareness comes when we wire up the LSP.
+/// One-based line/column, where `col` is a **byte** column: the number of
+/// UTF-8 bytes from the start of the line, plus one.
+///
+/// A byte column is the right unit for slicing source text, and the wrong one
+/// for showing a human or an editor. Two conversions live on [`LineTable`] and
+/// are the only supported ways to leave byte space:
+///
+/// - [`LineTable::display_col`] — the column a terminal draws at, counting
+///   characters and expanding tabs. The diagnostic renderer pads carets with
+///   it, and prints it in the `--> file:line:col` header.
+/// - [`LineTable::utf16_col`] — UTF-16 code units, the unit LSP `Position`
+///   speaks.
+///
+/// The three agree on pure-ASCII, tab-free lines and diverge everywhere else,
+/// so a value's unit must travel with it rather than be assumed.
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineCol {
@@ -203,6 +217,68 @@ impl LineTable {
         self.line_starts.get(line_idx).copied()
     }
 
+    /// One-based **display** column of `offset`: the column a terminal draws
+    /// that character at, counting characters (not bytes) and expanding a tab
+    /// to the next multiple of `tab_width`.
+    ///
+    /// This is the column the diagnostic renderer pads carets to. An `offset`
+    /// past the end of its line clamps to just after the line's last
+    /// character; a `tab_width` of 0 is treated as 1.
+    pub fn display_col(&self, source: &str, offset: u32, tab_width: u32) -> u32 {
+        let tab_width = tab_width.max(1);
+        let mut col = 0u32;
+        self.walk_line_to(source, offset, |ch| {
+            col = if ch == '\t' {
+                // Advance to the next tab stop, never by less than one cell.
+                (col / tab_width + 1) * tab_width
+            } else {
+                col + 1
+            };
+        });
+        col + 1
+    }
+
+    /// One-based **UTF-16** column of `offset` — the unit an LSP `Position`
+    /// counts in. An `offset` past the end of its line clamps to the line end.
+    ///
+    /// This differs from [`display_col`](Self::display_col) for any character
+    /// outside the BMP (`𝄞` is two UTF-16 units but one display cell) and for
+    /// tabs (one UTF-16 unit, `tab_width` cells).
+    pub fn utf16_col(&self, source: &str, offset: u32) -> u32 {
+        let mut col = 0u32;
+        self.walk_line_to(source, offset, |ch| col += crate::offset(ch.len_utf16()));
+        col + 1
+    }
+
+    /// Call `step` once per character of `offset`'s line that lies strictly
+    /// before `offset` — the shared walk behind the column conversions.
+    fn walk_line_to(&self, source: &str, offset: u32, mut step: impl FnMut(char)) {
+        let lc = self.line_col(offset);
+        let byte_col = (lc.col - 1) as usize;
+        let line = self.line_text(source, (lc.line - 1) as usize).unwrap_or("");
+        let mut byte = 0usize;
+        for ch in line.chars() {
+            if byte >= byte_col {
+                break;
+            }
+            byte += ch.len_utf8();
+            step(ch);
+        }
+    }
+
+    /// [`line_text`](Self::line_text) with tabs expanded to spaces at
+    /// multiples of `tab_width`, so a rendered source line lines up with a
+    /// caret padded by [`display_col`](Self::display_col). `None` for an
+    /// out-of-range index; borrows the original when the line holds no tab.
+    pub fn expand_tabs<'a>(
+        &self,
+        source: &'a str,
+        line_idx: usize,
+        tab_width: u32,
+    ) -> Option<Cow<'a, str>> {
+        Some(expand_tabs_in(self.line_text(source, line_idx)?, tab_width))
+    }
+
     /// Slice of `source` covering line `line_idx` (0-based), without
     /// the trailing `\n`. `None` if the index is out of range.
     pub fn line_text<'a>(&self, source: &'a str, line_idx: usize) -> Option<&'a str> {
@@ -224,6 +300,29 @@ impl LineTable {
         };
         source.get(start..end)
     }
+}
+
+/// Expand every tab in `line` to spaces, each advancing to the next multiple
+/// of `tab_width`. Borrows when there is nothing to expand.
+#[must_use]
+pub fn expand_tabs_in(line: &str, tab_width: u32) -> Cow<'_, str> {
+    if !line.contains('\t') {
+        return Cow::Borrowed(line);
+    }
+    let tab_width = (tab_width.max(1)) as usize;
+    let mut out = String::with_capacity(line.len() + tab_width);
+    let mut col = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let next = (col / tab_width + 1) * tab_width;
+            out.extend(std::iter::repeat_n(' ', next - col));
+            col = next;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Opt-in experimental language features, threaded explicitly through the
@@ -375,6 +474,85 @@ mod tests {
         assert_ne!(Span::synthetic().source, first_real);
         assert_eq!(Span::synthetic().source, Span::SYNTHETIC_SOURCE);
         assert_eq!(Span::SYNTHETIC_SOURCE.get(), u32::MAX);
+    }
+
+    #[test]
+    fn display_col_counts_characters_not_bytes() {
+        // `é` is two UTF-8 bytes, so the byte column and the display column
+        // disagree from that character onward. Carets pad by display column.
+        let text = "var café = 1\n";
+        let table = LineTable::new(text);
+        let at_one = offset(text.find('1').unwrap());
+        assert_eq!(table.line_col(at_one).col, 13, "byte column");
+        assert_eq!(table.display_col(text, at_one, 4), 12, "display column");
+        assert_eq!(table.utf16_col(text, at_one), 12, "UTF-16 column");
+    }
+
+    #[test]
+    fn display_and_utf16_columns_diverge_outside_the_bmp() {
+        // `𝄞` is one display cell but two UTF-16 code units (a surrogate
+        // pair), so the renderer's unit and the LSP's unit are not the same
+        // quantity and must not be conflated.
+        let text = "a𝄞b\n";
+        let table = LineTable::new(text);
+        let at_b = offset(text.find('b').unwrap());
+        assert_eq!(table.line_col(at_b).col, 6, "byte column");
+        assert_eq!(table.display_col(text, at_b, 4), 3);
+        assert_eq!(table.utf16_col(text, at_b), 4);
+    }
+
+    #[test]
+    fn display_col_expands_tabs_to_the_next_stop() {
+        let text = "\treturn x\n";
+        let table = LineTable::new(text);
+        let at_return = 1;
+        assert_eq!(table.line_col(at_return).col, 2, "byte column");
+        assert_eq!(table.display_col(text, at_return, 4), 5);
+        assert_eq!(table.display_col(text, at_return, 8), 9);
+        // A tab mid-line advances to the stop, not by a full width.
+        let text = "ab\tc\n";
+        let table = LineTable::new(text);
+        let at_c = offset(text.find('c').unwrap());
+        assert_eq!(table.display_col(text, at_c, 4), 5);
+    }
+
+    #[test]
+    fn expand_tabs_lines_up_with_display_col() {
+        let text = "\tif (a)\n";
+        let table = LineTable::new(text);
+        let expanded = table.expand_tabs(text, 0, 4).unwrap();
+        assert_eq!(expanded, "    if (a)");
+        // The caret pad is `display_col - 1`; it must index the expanded line.
+        let at_if = 1;
+        let pad = (table.display_col(text, at_if, 4) - 1) as usize;
+        assert_eq!(&expanded[pad..pad + 2], "if");
+        // Nothing to expand: borrow rather than allocate.
+        assert!(matches!(
+            expand_tabs_in("plain", 4),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn columns_ignore_the_crlf_terminator() {
+        let text = "var x = 1\r\nvar y = 2\r\n";
+        let table = LineTable::new(text);
+        let at_y = offset(text.rfind('y').unwrap());
+        assert_eq!(table.line_col(at_y), LineCol { line: 2, col: 5 });
+        assert_eq!(table.display_col(text, at_y, 4), 5);
+        assert_eq!(table.utf16_col(text, at_y), 5);
+    }
+
+    #[test]
+    fn an_offset_past_the_line_end_clamps_instead_of_running_on() {
+        // The end offset of a span covering the last token sits on the
+        // newline, and an EOF span sits past every line.
+        let text = "abc\ndef\n";
+        let table = LineTable::new(text);
+        assert_eq!(table.display_col(text, 3, 4), 4, "on the newline");
+        // Past EOF lands on the empty line after the final newline.
+        assert_eq!(table.display_col(text, 99, 4), 1, "past EOF");
+        assert_eq!(table.utf16_col(text, 99), 1);
     }
 
     #[test]

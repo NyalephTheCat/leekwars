@@ -3,6 +3,7 @@
 use leek_diagnostics::{Diagnostic as LeekDiagnostic, Severity};
 use leek_pipeline::salsa::SourceFile;
 use leek_recipes::Target;
+use leek_span::SourceId;
 use tower_lsp::lsp_types as lsp;
 
 use crate::util::position::{PosMap, span_to_range};
@@ -52,9 +53,62 @@ pub fn file_diagnostics(
         .collect()
 }
 
+/// Every file a label may point into, by `SourceId`.
+///
+/// A diagnostic's labels are not confined to the document it was raised in
+/// — a "previously declared here" label can name a symbol in an included
+/// file — so each one needs *its* file's URI and *its* file's text to
+/// convert a byte span to a UTF-16 range. Anchoring them all to the open
+/// document sent the client to a line number from the wrong file.
+#[derive(Default)]
+pub struct LabelSources<'a> {
+    rows: Vec<(SourceId, &'a lsp::Url, PosMap<'a>)>,
+}
+
+impl<'a> LabelSources<'a> {
+    /// Every document the workspace analyses — open buffers and indexed
+    /// project files alike, which is exactly the include closure the
+    /// diagnostics were produced from.
+    #[must_use]
+    pub fn from_workspace(ws: &'a Workspace) -> Self {
+        let mut rows = Vec::new();
+        for target in ws.analysis_targets() {
+            // `PosMap::new` from the target's own borrows, not
+            // `target.pos_map()`, which would borrow the loop temporary.
+            rows.push((
+                target.source_file.source(&ws.db),
+                target.uri,
+                PosMap::new(target.line_table, target.text),
+            ));
+        }
+        Self { rows }
+    }
+
+    pub fn push(&mut self, source: SourceId, uri: &'a lsp::Url, pm: PosMap<'a>) {
+        self.rows.push((source, uri, pm));
+    }
+
+    fn get(&self, source: SourceId) -> Option<(&'a lsp::Url, PosMap<'a>)> {
+        self.rows
+            .iter()
+            .find(|(id, _, _)| *id == source)
+            .map(|(_, uri, pm)| (*uri, *pm))
+    }
+}
+
 /// Map a Leek diagnostic to the LSP wire shape, including catalog
 /// metadata and secondary labels as `relatedInformation`.
-pub fn to_lsp(diag: &LeekDiagnostic, pm: PosMap<'_>, uri: Option<&lsp::Url>) -> lsp::Diagnostic {
+///
+/// `pm`/`uri` describe the document the diagnostic's *primary* span belongs
+/// to; each label is resolved through `labels` instead, and one whose file
+/// the workspace cannot name is dropped rather than pinned to `uri` at a
+/// range computed from the wrong text.
+pub fn to_lsp(
+    diag: &LeekDiagnostic,
+    pm: PosMap<'_>,
+    uri: Option<&lsp::Url>,
+    labels: &LabelSources<'_>,
+) -> lsp::Diagnostic {
     // Link the code to its extended write-up when one exists — the
     // `explain/<ID>.md` file the build embeds (and `miku explain`
     // prints). Codes without a write-up get no link.
@@ -74,18 +128,32 @@ pub fn to_lsp(diag: &LeekDiagnostic, pm: PosMap<'_>, uri: Option<&lsp::Url>) -> 
         if diag.labels.is_empty() {
             return None;
         }
-        Some(
-            diag.labels
-                .iter()
-                .map(|label| lsp::DiagnosticRelatedInformation {
+        let related: Vec<lsp::DiagnosticRelatedInformation> = diag
+            .labels
+            .iter()
+            .filter_map(|label| {
+                // The open document is the answer only when the label
+                // really belongs to it.
+                let (label_uri, label_pm) = labels
+                    .get(label.span.source)
+                    .or_else(|| (label.span.source == diag.span.source).then_some((doc_uri, pm)))?;
+                Some(lsp::DiagnosticRelatedInformation {
                     location: lsp::Location {
-                        uri: doc_uri.clone(),
-                        range: span_to_range(pm, label.span),
+                        uri: label_uri.clone(),
+                        range: span_to_range(label_pm, label.span),
                     },
                     message: label.message.clone(),
                 })
-                .collect(),
-        )
+            })
+            .collect();
+        if related.len() != diag.labels.len() && crate::trace_enabled() {
+            eprintln!(
+                "leek-lsp: dropped {} label(s) of {} with no known source file",
+                diag.labels.len() - related.len(),
+                diag.code.id()
+            );
+        }
+        (!related.is_empty()).then_some(related)
     });
 
     lsp::Diagnostic {
@@ -103,5 +171,71 @@ pub fn to_lsp(diag: &LeekDiagnostic, pm: PosMap<'_>, uri: Option<&lsp::Url>) -> 
         related_information,
         tags: None,
         data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LabelSources, to_lsp};
+    use crate::util::position::PosMap;
+    use leek_diagnostics::{Code, Diagnostic};
+    use leek_span::{LineTable, SourceId, Span};
+    use tower_lsp::lsp_types as lsp;
+
+    fn url(name: &str) -> lsp::Url {
+        lsp::Url::parse(&format!("file:///tmp/{name}")).unwrap()
+    }
+
+    /// A label pointing into an included file must carry that file's URI
+    /// and a range converted against *its* text — not the open document's.
+    #[test]
+    fn a_label_in_an_include_gets_the_includes_uri_and_range() {
+        let main_text = "include('inc')\nvar x = 1\n";
+        let inc_text = "// a much longer first line in the include\nvar x = 2\n";
+        let (main_lt, inc_lt) = (LineTable::new(main_text), LineTable::new(inc_text));
+        let (main_uri, inc_uri) = (url("main.leek"), url("inc.leek"));
+        let (main_id, inc_id) = (SourceId::new(1).unwrap(), SourceId::new(2).unwrap());
+
+        let mut labels = LabelSources::default();
+        labels.push(main_id, &main_uri, PosMap::new(&main_lt, main_text));
+        labels.push(inc_id, &inc_uri, PosMap::new(&inc_lt, inc_text));
+
+        let at_inc_x = leek_span::offset(inc_text.rfind('x').unwrap());
+        let diag = Diagnostic::error(Code("E0200"), Span::new(main_id, 19, 20), "redeclared")
+            .with_label(Span::new(inc_id, at_inc_x, at_inc_x + 1), "first here");
+
+        let out = to_lsp(
+            &diag,
+            PosMap::new(&main_lt, main_text),
+            Some(&main_uri),
+            &labels,
+        );
+        let related = out.related_information.expect("related information");
+        assert_eq!(related[0].location.uri, inc_uri);
+        assert_eq!(related[0].location.range.start.line, 1);
+        assert_eq!(related[0].location.range.start.character, 4);
+    }
+
+    /// A label whose file the workspace cannot name is dropped: a wrong
+    /// location sends the editor somewhere real and wrong, which is worse
+    /// than no location at all.
+    #[test]
+    fn a_label_with_an_unknown_source_is_dropped_not_reanchored() {
+        let main_text = "var x = 1\n";
+        let main_lt = LineTable::new(main_text);
+        let main_uri = url("main.leek");
+        let main_id = SourceId::new(1).unwrap();
+        let mut labels = LabelSources::default();
+        labels.push(main_id, &main_uri, PosMap::new(&main_lt, main_text));
+
+        let diag = Diagnostic::error(Code("E0200"), Span::new(main_id, 4, 5), "bad")
+            .with_label(Span::new(SourceId::new(9).unwrap(), 0, 1), "elsewhere");
+        let out = to_lsp(
+            &diag,
+            PosMap::new(&main_lt, main_text),
+            Some(&main_uri),
+            &labels,
+        );
+        assert!(out.related_information.is_none());
     }
 }

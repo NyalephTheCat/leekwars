@@ -68,6 +68,9 @@ pub fn handle(
     let mut actions: Vec<lsp::CodeActionOrCommand> = Vec::new();
 
     let only = context.only.as_ref();
+    // Built once: a label's file is looked up per diagnostic, and the
+    // workspace does not change inside one request.
+    let label_sources = crate::diagnostics::LabelSources::from_workspace(ws);
 
     // ---- Quick fixes (range-scoped) ----
     if kind_requested(only, &lsp::CodeActionKind::QUICKFIX) {
@@ -76,7 +79,7 @@ pub fn handle(
             if !ranges_overlap(diag.span.start, diag.span.end, req_start, req_end) {
                 continue;
             }
-            let lsp_diag = to_lsp(diag, doc.pos_map(), Some(uri));
+            let lsp_diag = to_lsp(diag, doc.pos_map(), Some(uri), &label_sources);
             if !client_shows(&client_diags, &lsp_diag) {
                 continue;
             }
