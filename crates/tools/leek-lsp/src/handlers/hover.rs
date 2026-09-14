@@ -1,8 +1,7 @@
 //! `textDocument/hover` — show the inferred type and (when on a
 //! declaration) the full signature plus any leading doc-comment.
 
-use leek_complexity::analyze_file;
-use leek_hir::pipeline::HirArtifact;
+use leek_complexity::pipeline::ComplexityArtifact;
 use leek_span::Span;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
@@ -22,7 +21,11 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     let doc = ws.doc(uri)?;
     let offset = position_to_offset(doc.pos_map(), pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Hir)?;
+    // `Target::Complexity` rather than `Target::Hir`: the plan is a strict
+    // superset (the complexity artifact requires HIR, which requires resolve
+    // and type-check), and the report it carries is salsa-cached per file
+    // revision instead of rebuilt on every hover. See #165.
+    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Complexity)?;
 
     let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>();
     let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
@@ -145,7 +148,8 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
         // the lowered HIR. Constant-time functions get a trivial line
         // but it's still useful next to a multi-line body.
         if is_top_level_fn
-            && let Some(complexity_md) = complexity_section(run.get::<HirArtifact>(), &sym.name)
+            && let Some(complexity_md) =
+                complexity_section(run.get::<ComplexityArtifact>(), &sym.name)
         {
             sections.push(complexity_md);
         }
@@ -281,7 +285,8 @@ fn cross_file_sections(
     file: &crate::handlers::program_scope::ScopeFile,
     sym: &leek_resolver::Symbol,
 ) -> Vec<String> {
-    let Some(run) = crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Hir)
+    let Some(run) =
+        crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Complexity)
     else {
         return Vec::new();
     };
@@ -320,7 +325,7 @@ fn cross_file_sections(
         if let Some(t) = function_type_string(&type_art.signatures, &sym.name) {
             sections.push(format!("*type:* `{t}`"));
         }
-        if let Some(c) = complexity_section(run.get::<HirArtifact>(), &sym.name) {
+        if let Some(c) = complexity_section(run.get::<ComplexityArtifact>(), &sym.name) {
             sections.push(c);
         }
     } else if sym.kind == leek_resolver::SymbolKind::Class {
@@ -539,16 +544,14 @@ fn symbol_kind_label(kind: leek_resolver::SymbolKind) -> &'static str {
 }
 
 /// Render the complexity row for a function name. Returns `None` when
-/// `hir` is absent (lowering failed) or the function isn't found.
+/// `report` is absent (lowering failed) or the function isn't found.
 ///
-/// Uses the file-level analysis (not the standalone `analyze_function`)
+/// Uses the file-level report (not the standalone `analyze_function`)
 /// so a call to another user function substitutes the callee's formula
 /// instead of collapsing to `O(?)` — matching what the codeLens,
 /// `leek.showComplexity` command, and `miku analyze` already report.
-fn complexity_section(hir: Option<&HirArtifact>, name: &str) -> Option<String> {
-    let hir = hir?;
-    let report = analyze_file(&hir.0);
-    let complexity = report.iter().find(|c| c.name == name)?;
+fn complexity_section(report: Option<&ComplexityArtifact>, name: &str) -> Option<String> {
+    let complexity = report?.0.iter().find(|c| c.name == name)?;
     // For a constant-cost function the operation count is more useful
     // than a bare `O(1)` — the formula has already simplified to that
     // scalar, so show it as the cost directly.

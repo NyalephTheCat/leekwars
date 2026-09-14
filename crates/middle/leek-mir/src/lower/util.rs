@@ -216,7 +216,7 @@ pub(crate) fn placeholder_function(span: Span) -> MirFunction {
     MirFunction {
         def_id: None,
         kind: FunctionKind::User,
-        name: "<lambda-placeholder>".into(),
+        name: crate::verify::LAMBDA_PLACEHOLDER_NAME.into(),
         params: Vec::new(),
         return_ty: Type::Any,
         locals: Vec::new(),

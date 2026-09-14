@@ -14,13 +14,22 @@ leek-span     = { workspace = true }
 salsa         = { version = "0.26", optional = true }
 
 [dev-dependencies]
+# Self dev-dependency: turns this crate's own `salsa` feature on whenever
+# it is built as a test target, so `complexity_query` and the memoization
+# tests in `pipeline.rs` actually compile. Without it nothing in a
+# `-p leek-complexity` build requests the feature and those tests vanish
+# silently. Must be `path`, not `workspace`; cargo rejects a workspace
+# self-reference.
+leek-complexity  = { path = ".", features = ["salsa"] }
 leek-diagnostics = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
-leek-lexer       = { workspace = true }
-leek-parser      = { workspace = true }
+# Cascade memoization tests pull salsa-enabled frontend stages and use
+# the input setter.
+leek-lexer       = { workspace = true, features = ["salsa"] }
+leek-parser      = { workspace = true, features = ["salsa"] }
 leek-resolver    = { workspace = true }
-leek-syntax      = { workspace = true }
+leek-syntax      = { workspace = true, features = ["salsa"] }
 leek-types       = { workspace = true }
 
 [features]

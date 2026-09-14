@@ -20,8 +20,7 @@
 //! discards an `executeCommand` result it did not ask for, so a lens
 //! click would otherwise show nothing.
 
-use leek_complexity::analyze_file;
-use leek_hir::pipeline::HirArtifact;
+use leek_complexity::pipeline::ComplexityArtifact;
 use serde_json::Value as Json;
 use tower_lsp::lsp_types as lsp;
 
@@ -45,10 +44,9 @@ fn show_complexity(ws: &Workspace, args: &[Json]) -> Option<Json> {
     let fn_name = args.get(1)?.as_str()?;
     let uri = lsp::Url::parse(uri_str).ok()?;
     let _doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_recipes::Target::Hir)?;
-    let hir = run.get::<HirArtifact>()?;
-    let report = analyze_file(&hir.0);
-    let c = report.iter().find(|c| c.name == fn_name)?;
+    let run = crate::pipeline::run(ws, &uri, leek_recipes::Target::Complexity)?;
+    let report = run.get::<ComplexityArtifact>()?;
+    let c = report.0.iter().find(|c| c.name == fn_name)?;
     Some(Json::String(format!("{} — ops: {}", c.big_o, c.formula)))
 }
 
@@ -58,11 +56,11 @@ fn analyze(ws: &Workspace, args: &[Json]) -> Option<Json> {
     let uri_str = args.first()?.as_str()?;
     let uri = lsp::Url::parse(uri_str).ok()?;
     let _doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_recipes::Target::Hir)?;
-    let hir = run.get::<HirArtifact>()?;
-    let report = analyze_file(&hir.0);
+    let run = crate::pipeline::run(ws, &uri, leek_recipes::Target::Complexity)?;
+    let report = run.get::<ComplexityArtifact>()?;
     let entries: Vec<Json> = report
-        .into_iter()
+        .0
+        .iter()
         .map(|c| {
             let params: Vec<Json> = c
                 .params
