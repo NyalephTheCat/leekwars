@@ -16,7 +16,8 @@
 //! rather than failing extraction. We aim for ~90%+ coverage of the
 //! upstream corpus on the first pass and iterate from there.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use leek_test_cases::{Expectation, Manifest, SkippedCall, TestCase};
 
@@ -190,13 +191,116 @@ const PREFIXES: &[HelperPrefix] = &[
 /// We skip past them looking for the real expectation.
 const CHAIN_SETTERS: &[&str] = &["debug", "max_ops", "max_ram"];
 
-/// Extract every `Test*.java` file in `dir` into one manifest. Files
-/// in `overlay` (the pristine-submodule instrumentation under
-/// `tools/java-emitter/overlay/src/test/java/test`) shadow same-named
-/// upstream files and contribute their own — exactly the source set
-/// the `tools/java-emitter` scripts compile.
-pub fn extract_all(dir: &Path, overlay: Option<&Path>) -> anyhow::Result<Manifest> {
-    let mut manifest = Manifest::empty();
+/// The `file(...)` helper forms `TestCommon.java` declares, longest name
+/// first so prefix-matching picks the most specific one.
+///
+/// `DISABLED_file` and `DISABLED_file_v2_` are deliberately absent: they
+/// are how upstream switches a fixture *off*, and the whole point of
+/// [`enabled_fixtures`] is to read that decision rather than guess at
+/// it. They are never matched by accident either — a helper name is only
+/// tried at a word boundary, and the `_` before `file` is a word
+/// character, so `DISABLED_file(` is consumed as one identifier.
+const FILE_HELPERS: &[&str] = &["file_v2_", "file_v4_", "file_v1", "file_v3", "file"];
+
+/// Resource prefix of the `.leek` fixture tree inside
+/// `src/test/resources`. A `file(...)` argument outside it names a
+/// resource this crate does not sweep, so it is ignored rather than
+/// recorded under a path no fixture id could ever match.
+const FIXTURE_RESOURCE_PREFIX: &str = "ai/";
+
+/// Fixture ids — relative to `src/test/resources/ai`, forward slashes,
+/// the same spelling `fixture_id` produces — that the upstream JUnit
+/// suite actually **runs**.
+///
+/// This is upstream's own enablement decision, read off its source
+/// rather than restated here: a `file("ai/…")`, `file_v1(…)`,
+/// `file_v2_(…)`, `file_v3(…)` or `file_v4_(…)` call site counts, and a
+/// `DISABLED_file(…)` or a commented-out line does not. The scan skips
+/// comments and string literals exactly as [`extract_file`] does, so
+/// `// file("ai/code/euler1.leek")` contributes nothing.
+///
+/// A call whose argument is not a string literal (there are none today)
+/// is skipped rather than guessed at. Noticing that the set came back
+/// implausibly small is the caller's job, not this function's.
+pub fn enabled_fixtures(dir: &Path, overlay: Option<&Path>) -> anyhow::Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for path in java_sources(dir, overlay)?.values() {
+        enabled_fixtures_in_source(&std::fs::read_to_string(path)?, &mut out);
+    }
+    Ok(out)
+}
+
+/// [`enabled_fixtures`] for one Java source's text.
+pub fn enabled_fixtures_in_source(text: &str, out: &mut BTreeSet<String>) {
+    let mut scanner = Scanner::new(text);
+
+    while let Some(c) = scanner.peek() {
+        // Comments and literals may hold false matches for `file(`.
+        if c == '/' && scanner.peek_at(1) == Some('/') {
+            scanner.skip_line_comment();
+            continue;
+        }
+        if c == '/' && scanner.peek_at(1) == Some('*') {
+            scanner.skip_block_comment();
+            continue;
+        }
+        if c == '"' {
+            scanner.skip_java_string();
+            continue;
+        }
+        if c == '\'' {
+            scanner.skip_java_char();
+            continue;
+        }
+
+        if c.is_ascii_alphabetic() || c == '_' {
+            if scanner.prev_is_word_boundary()
+                && let Some(helper) = find_file_helper(scanner.remaining())
+            {
+                scanner.bump_n(helper.len());
+                scanner.skip_ws();
+                scanner.bump(); // '(', guaranteed by `find_file_helper`
+                scanner.skip_ws();
+                if let Ok(resource) = parse_string_concat(&mut scanner)
+                    && let Some(rel) = resource.strip_prefix(FIXTURE_RESOURCE_PREFIX)
+                {
+                    out.insert(rel.to_string());
+                }
+                continue;
+            }
+            // Skip the identifier so we don't re-examine its tail.
+            scanner.consume_ident();
+            continue;
+        }
+
+        scanner.bump();
+    }
+}
+
+/// Longest-match a [`FILE_HELPERS`] name at the scanner's cursor,
+/// requiring a complete word followed by `(`.
+fn find_file_helper(remaining: &str) -> Option<&'static str> {
+    for name in FILE_HELPERS {
+        let Some(rest) = remaining.strip_prefix(name) else {
+            continue;
+        };
+        let next = rest.as_bytes().first().copied();
+        if matches!(next, Some(b) if (b as char).is_ascii_alphanumeric() || b == b'_') {
+            continue;
+        }
+        if rest.trim_start().starts_with('(') {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// The `Test*.java` source set, as `file name -> path`, with `overlay`
+/// entries (the pristine-submodule instrumentation under
+/// `tools/java-emitter/overlay/src/test/java/test`) shadowing same-named
+/// upstream files — exactly the source set the `tools/java-emitter`
+/// scripts compile.
+fn java_sources(dir: &Path, overlay: Option<&Path>) -> anyhow::Result<BTreeMap<String, PathBuf>> {
     let list_tests = |d: &Path| -> anyhow::Result<Vec<std::fs::DirEntry>> {
         Ok(std::fs::read_dir(d)?
             .filter_map(Result::ok)
@@ -207,8 +311,7 @@ pub fn extract_all(dir: &Path, overlay: Option<&Path>) -> anyhow::Result<Manifes
             })
             .collect())
     };
-    // name -> path, overlay entries replacing upstream ones.
-    let mut files = std::collections::BTreeMap::new();
+    let mut files = BTreeMap::new();
     for entry in list_tests(dir)? {
         files.insert(
             entry.file_name().to_string_lossy().to_string(),
@@ -225,8 +328,14 @@ pub fn extract_all(dir: &Path, overlay: Option<&Path>) -> anyhow::Result<Manifes
             );
         }
     }
+    Ok(files)
+}
 
-    for (name, path) in files {
+/// Extract every `Test*.java` file in `dir` into one manifest, over the
+/// [`java_sources`] set.
+pub fn extract_all(dir: &Path, overlay: Option<&Path>) -> anyhow::Result<Manifest> {
+    let mut manifest = Manifest::empty();
+    for (name, path) in java_sources(dir, overlay)? {
         manifest.source_files.push(name.clone());
         let text = std::fs::read_to_string(path)?;
         extract_file(&name, &text, &mut manifest);
@@ -976,5 +1085,85 @@ public void concat() {
 "#,
         );
         assert_eq!(m.cases[0].code, "part one part two");
+    }
+
+    // -----------------------------------------------------------------
+    // `enabled_fixtures` — upstream's own on/off decision per fixture
+    // -----------------------------------------------------------------
+
+    fn enabled_one(src: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        enabled_fixtures_in_source(src, &mut out);
+        out
+    }
+
+    /// Every live `file*` form contributes, under the fixture-relative
+    /// id (the `ai/` resource prefix stripped).
+    #[test]
+    fn every_file_helper_form_is_recognised() {
+        let ids = enabled_one(
+            r#"
+public void run() {
+    file("ai/code/gcd.leek").equals("151");
+    file_v1("ai/code/knapsack.leek").equals("761");
+    file_v2_("ai/code/primes.leek").equals("78498");
+    file_v3("ai/code/three.leek").equals("3");
+    file_v4_("ai/euler/pe008.leek").equals("23514624000");
+}
+"#,
+        );
+        assert_eq!(
+            ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "code/gcd.leek",
+                "code/knapsack.leek",
+                "code/primes.leek",
+                "code/three.leek",
+                "euler/pe008.leek",
+            ]
+        );
+    }
+
+    /// The two ways upstream switches a fixture off. Both have to read as
+    /// off, or the clean-parse gate would demand this toolchain parse a
+    /// file upstream itself does not run.
+    #[test]
+    fn disabled_and_commented_out_fixtures_are_not_enabled() {
+        let ids = enabled_one(
+            r#"
+public void run() {
+    // DISABLED_file("ai/code/primes_gmp.leek").equals("9591");
+    DISABLED_file("ai/code/text_analysis.leek").equals("[3, 47, 338]");
+    DISABLED_file_v2_("ai/code/swap.leek").equals("[]");
+    // file("ai/code/euler1.leek").equals("2333316668");
+    /* file("ai/code/quine.leek").quine(); */
+    file("ai/code/gcd.leek").equals("151");
+}
+"#,
+        );
+        assert_eq!(
+            ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["code/gcd.leek"]
+        );
+    }
+
+    /// `file(...)` arguments naming something outside the swept fixture
+    /// tree, or not a string literal at all, are ignored — recording
+    /// them would put ids in the set that no fixture can ever match.
+    #[test]
+    fn non_fixture_arguments_are_ignored() {
+        let ids = enabled_one(
+            r#"
+public void run() {
+    file("test/code/legacy.leek").equals("1");
+    file(someVariable).equals("2");
+    file("ai/code/gcd.leek").equals("151");
+}
+"#,
+        );
+        assert_eq!(
+            ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["code/gcd.leek"]
+        );
     }
 }
