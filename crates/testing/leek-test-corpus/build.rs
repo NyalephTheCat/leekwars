@@ -1,5 +1,7 @@
 //! Build script: extract the upstream JUnit suite into
-//! `OUT_DIR/upstream_cases.toml`, embedded at compile time.
+//! `OUT_DIR/upstream_cases.toml`, and upstream's per-fixture enablement
+//! into `OUT_DIR/enabled_fixtures.txt`. Both are embedded at compile
+//! time.
 //!
 //! That is deliberately *all* it does. The official-LeekScript reference
 //! dataset is not staged, regenerated or embedded here (#148): producing
@@ -66,13 +68,43 @@ fn main() {
         panic!("failed to write {}: {}", out_path.display(), e);
     }
 
+    // Which `ai/…` fixtures upstream's own suite runs — the scope of the
+    // clean-parse property in `tests/parser_fixtures.rs`. Same sources,
+    // same scan, same cost; it rides along with the manifest rather than
+    // being a second read of the Java tree.
+    let enabled = if upstream.exists() {
+        match extract::enabled_fixtures(&upstream, Some(&overlay)) {
+            Ok(set) => set,
+            Err(e) => {
+                println!("cargo:warning=upstream fixture-enablement scan failed: {e}");
+                std::collections::BTreeSet::new()
+            }
+        }
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let enabled_path = Path::new(&out_dir_path).join("enabled_fixtures.txt");
+    let mut enabled_text = String::new();
+    for id in &enabled {
+        enabled_text.push_str(id);
+        enabled_text.push('\n');
+    }
+    if let Err(e) = std::fs::write(&enabled_path, enabled_text) {
+        panic!("failed to write {}: {}", enabled_path.display(), e);
+    }
+
     // Plain stdout, not `cargo:warning=`: this is progress information,
     // and `cargo clippy --workspace --all-targets` is required to be
-    // silent (tools/check.sh). Only the two failure branches above warn.
+    // silent (tools/check.sh). Only the failure branches above warn.
     println!(
         "extracted {} upstream test cases (skipped {} calls) -> {}",
         manifest.cases.len(),
         manifest.skipped.len(),
         out_path.display(),
+    );
+    println!(
+        "extracted {} upstream-enabled fixture(s) -> {}",
+        enabled.len(),
+        enabled_path.display(),
     );
 }
