@@ -112,6 +112,15 @@ fn harvest_run(
 /// the owner's `runTurn` resets its entity back at its next turn, which our
 /// per-run `current` models for free.
 ///
+/// The run is charged to the owner at both ends: its operations land on the
+/// owner's counter, and it is given only what is left of the owner's budget
+/// for this turn — `owner_turn_ops` is what the owner has already spent in it.
+/// `mAIFunction.run(mOwnerAI, …)` charges `mOwnerAI.mOperations`, and the only
+/// `resetCounter()` that clears *that* counter is the owner's own
+/// `EntityAI.runTurn`: `BulbAI` inherits `runTurn`, so the counter its reset
+/// clears is the bulb's own unused one. A bulb therefore shares one
+/// `AI.MAX_OPERATIONS` with its owner instead of being handed a second one.
+///
 /// An error is contained like [`run_entity_ai`]'s. `BulbAI` shares its
 /// owner's `LeekLog`, so the log entry carries the owner's fid while the
 /// `ActionAIError` names the bulb.
@@ -123,15 +132,27 @@ fn run_bulb_ai(
     ai_fn: &Value,
     hir: &HirFile,
     opts: &NativeOptions,
+    owner_turn_ops: u64,
 ) -> u64 {
+    // `opts.op_limit` already carries the reach-the-budget adjustment of
+    // [`crate::fight_op_limit`], so the per-turn budget it was built from is
+    // one above it; feeding the owner's remainder back through the same helper
+    // reproduces Java's boundary on the counter they share.
+    let budget = opts.op_limit.saturating_add(1);
+    let run_opts = opts
+        .clone()
+        .with_op_limit(crate::fight_op_limit(budget.saturating_sub(owner_turn_ops)));
     // The owner's turn module, already compiled — a bulb turn no longer
-    // re-JITs the whole owning AI.
+    // re-JITs the whole owning AI. The lookup stays keyed on the *unnarrowed*
+    // `opts`: `op_limit` is armed per run by `run_call` and is deliberately no
+    // part of `CodegenKey`, and keying on a budget that shrinks every turn
+    // would compile a fresh module per bulb turn again (#112).
     let result = programs.get(hir, opts).and_then(|program| {
         let _guard = RuntimeGuard::install(OfficialRuntime {
             state: Rc::clone(state),
             current: fid,
         });
-        program.run_call(opts, ai_fn, Vec::new())
+        program.run_call(&run_opts, ai_fn, Vec::new())
     });
     harvest_run(state, fid, owner, &result)
 }
@@ -262,6 +283,11 @@ pub fn run_official_fight(
     // Total operations per fid, reported once at the end like
     // `Actions.addOpsAndTimes(state.statistics)`.
     let mut total_ops: HashMap<usize, u64> = HashMap::new();
+    // Operations each AI has spent *within the turn it is in* — `AI.mOperations`,
+    // which `EntityAI.runTurn` resets at the start of its entity's turn. Only
+    // the bulbs read it (see [`run_bulb_ai`]): their runs continue their
+    // owner's count instead of starting a second budget.
+    let mut turn_ops: HashMap<usize, u64> = HashMap::new();
 
     state.borrow_mut().init();
 
@@ -293,7 +319,8 @@ pub fn run_official_fight(
                 // through the owner's module (`BulbAI`); one summoned via
                 // `useChip` has no entry and idles (BULB_WITHOUT_AI). Ops
                 // land on the owner's counter, like `mAIFunction.run(
-                // mOwnerAI, …)`.
+                // mOwnerAI, …)`, and come out of what the owner has left of
+                // its budget for this turn.
                 let summon = {
                     let s = state.borrow();
                     s.fighters[fid]
@@ -302,12 +329,32 @@ pub fn run_official_fight(
                 };
                 if let Some((owner, ai_fn)) = summon {
                     if let (Some(ai_fn), Some(hir)) = (ai_fn, ais.get(&owner)) {
-                        let ops = run_bulb_ai(&state, &mut programs, fid, owner, &ai_fn, hir, opts);
+                        let spent = turn_ops.get(&owner).copied().unwrap_or(0);
+                        let ops = run_bulb_ai(
+                            &state,
+                            &mut programs,
+                            fid,
+                            owner,
+                            &ai_fn,
+                            hir,
+                            opts,
+                            spent,
+                        );
                         *total_ops.entry(owner).or_insert(0) += ops;
+                        // The bulb's ops stay on the owner's turn counter: a
+                        // second bulb of the same owner gets what these leave.
+                        *turn_ops.entry(owner).or_insert(0) += ops;
                     }
-                } else if let Some(hir) = ais.get(&fid) {
-                    let ops = run_entity_ai(&state, &mut programs, fid, hir, opts);
-                    *total_ops.entry(fid).or_insert(0) += ops;
+                } else {
+                    // `EntityAI.runTurn` opens the entity's turn with
+                    // `resetCounter()`, whether or not the run then errors —
+                    // this is the reset the bulbs above spend against.
+                    turn_ops.insert(fid, 0);
+                    if let Some(hir) = ais.get(&fid) {
+                        let ops = run_entity_ai(&state, &mut programs, fid, hir, opts);
+                        *total_ops.entry(fid).or_insert(0) += ops;
+                        turn_ops.insert(fid, ops);
+                    }
                 }
                 let mut s = state.borrow_mut();
                 s.end_entity_turn(fid);
