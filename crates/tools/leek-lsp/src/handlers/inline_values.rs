@@ -20,7 +20,7 @@ use leek_resolver::SymbolKind;
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{PosMap, position_to_offset, span_to_range};
+use crate::util::position::PosMap;
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -34,8 +34,8 @@ pub fn handle(
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
-    let range_start = position_to_offset(pm, range.start)?;
-    let range_end = position_to_offset(pm, range.end)?;
+    let range_start = pm.to_offset(range.start)?;
+    let range_end = pm.to_offset(range.end)?;
     // Inline values are shown up to the stopped line (its end position
     // denotes the line). Occurrences past it haven't executed.
     let stop_line = stopped_location.end.line;
@@ -78,7 +78,7 @@ pub fn handle(
 
 fn variable_lookup(pm: PosMap<'_>, span: Span, name: &str) -> lsp::InlineValue {
     lsp::InlineValue::VariableLookup(lsp::InlineValueVariableLookup {
-        range: span_to_range(pm, span),
+        range: pm.span_range(span),
         // The name is also extractable from the range text, but stating
         // it makes the debugger's lookup unambiguous.
         variable_name: Some(name.to_string()),

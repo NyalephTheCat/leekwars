@@ -128,7 +128,7 @@ pub(crate) fn safe_chars(name: &str) -> String {
         } else {
             // `_uXXXX` escape, matching docs/java-backend.md §4.
             for unit in c.to_string().encode_utf16() {
-                write!(out, "_u{unit:04X}").unwrap();
+                let _ = write!(out, "_u{unit:04X}");
             }
         }
     }

@@ -74,7 +74,7 @@ mod tests {
         use std::fmt::Write;
         let mut src = String::from("function f() {\n");
         for i in 0..n {
-            writeln!(src, "  var x{i} = {i}\n  debug(x{i})").unwrap();
+            let _ = writeln!(src, "  var x{i} = {i}\n  debug(x{i})");
         }
         src.push_str("}\n");
         src

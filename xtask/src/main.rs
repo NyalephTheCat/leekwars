@@ -3,6 +3,7 @@
 
 mod artifacts;
 mod errors;
+mod fmt_idiom;
 mod layers;
 mod toolchain;
 
@@ -13,6 +14,7 @@ const USAGE: &str = "usage: cargo xtask <task>
 tasks:
   check-artifacts  check generated output stays untracked and ignored
   check-errors     keep `anyhow` out of the library layers (see docs/architecture.md)
+  check-fmt-idiom  keep `write!` into a `String` on one spelling: `let _ = write!(…)`
   check-layers     enforce the crate layering rule (see docs/architecture.md)
   check-toolchain  check the Rust pin and the advertised MSRV agree";
 
@@ -21,6 +23,7 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("check-artifacts") => artifacts::run(),
         Some("check-errors") => errors::run(),
+        Some("check-fmt-idiom") => fmt_idiom::run(),
         Some("check-layers") => layers::run(),
         Some("check-toolchain") => toolchain::run(),
         Some("-h" | "--help") => {

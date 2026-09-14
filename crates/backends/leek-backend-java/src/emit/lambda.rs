@@ -120,11 +120,10 @@ impl super::Emitter<'_> {
                 // if one was passed (the v1 runtime passes element boxes to `@`
                 // callbacks), else box a copy. Reads/writes of `x` then route
                 // through `Box` methods so mutations propagate.
-                write!(
+                let _ = write!(
                     buf,
                     "Box {pname} = {src} instanceof Box ? (Box) ({src}) : new Box(ai, load({src}));"
-                )
-                .unwrap();
+                );
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else if matches!(self.opts.version, leek_syntax::Version::V1) {
                 // Plain v1 lambda param: bind through the 2-arg Box ctor like
@@ -135,16 +134,16 @@ impl super::Emitter<'_> {
                 // copy AND its data-dependent op charge. A fresh value is
                 // stored directly: no copy, no charge beyond the ctor's 1
                 // (which replaces this param's share of `v1_param_box_ops`).
-                write!(buf, "Box {pname} = new Box(ai, {src});").unwrap();
+                let _ = write!(buf, "Box {pname} = new Box(ai, {src});");
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else if leek_hir::captured_by_nested_lambda_body(&l.body, p.def) {
                 // Param captured by an inner lambda (`x -> y -> x + 1`) →
                 // bind through a runtime `Box`; the 2-arg ctor charges the
                 // same 1 op as upstream's `new Box<>(AI.this, p)` wrap.
-                write!(buf, "final Box {pname} = new Box(ai, {src});").unwrap();
+                let _ = write!(buf, "final Box {pname} = new Box(ai, {src});");
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else {
-                write!(buf, "var {pname} = {src};").unwrap();
+                let _ = write!(buf, "var {pname} = {src};");
             }
         }
         // Bump lambda nesting so `ai_this()` returns `ai` inside the
@@ -159,7 +158,7 @@ impl super::Emitter<'_> {
                     // through Box ctors above, which charge at runtime.)
                     let cost = self.emit_cost(e);
                     if cost > 0 {
-                        write!(buf, "ops(1);ops({cost}); ").unwrap();
+                        let _ = write!(buf, "ops(1);ops({cost}); ");
                     } else {
                         buf.push_str("ops(1); ");
                     }
@@ -285,26 +284,25 @@ impl super::Emitter<'_> {
             let pname = mangle::local(self.opts, &p.name);
             let src = format!("(values.length > {i} ?  values[{i}] : null)");
             if self.is_v1_ref_param(p) {
-                write!(
+                let _ = write!(
                     factory_buf,
                     "Box {pname} = {src} instanceof Box ? (Box) ({src}) : new Box(ai, load({src}));"
-                )
-                .unwrap();
+                );
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else if matches!(self.opts.version, leek_syntax::Version::V1) {
                 // Plain v1 lambda param: 2-arg Box ctor binding — see
                 // `write_lambda_inline` for the clone/charge semantics.
-                write!(factory_buf, "Box {pname} = new Box(ai, {src});").unwrap();
+                let _ = write!(factory_buf, "Box {pname} = new Box(ai, {src});");
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else if !matches!(self.opts.version, leek_syntax::Version::V1)
                 && leek_hir::captured_by_nested_lambda_stmts(&body.stmts, p.def)
             {
                 // Param captured by an inner lambda → Box-bind (same shape
                 // and 1-op ctor charge as upstream's `new Box<>(AI.this, p)`).
-                write!(factory_buf, "final Box {pname} = new Box(ai, {src});").unwrap();
+                let _ = write!(factory_buf, "final Box {pname} = new Box(ai, {src});");
                 self.ref_boxes.borrow_mut().insert(p.def);
             } else {
-                write!(factory_buf, "var {pname} = {src};").unwrap();
+                let _ = write!(factory_buf, "var {pname} = {src};");
             }
         }
         self.lambda_depth.set(self.lambda_depth.get() + 1);

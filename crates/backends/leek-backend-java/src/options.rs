@@ -150,6 +150,14 @@ impl Options {
         format!("AI_{}", self.ai_id)
     }
 
+    /// How string *literals* escape under the file's `@version`. v1 keeps a
+    /// backslash before an embedded quote as a literal character at runtime;
+    /// v2 and later process the escape. Only literals carry this history —
+    /// emitter-authored strings (the source path, map keys) are always v2+.
+    pub fn escape_mode(&self) -> leek_text::EscapeMode {
+        leek_text::EscapeMode::from_version(self.version_byte())
+    }
+
     pub fn version_byte(&self) -> u8 {
         match self.version {
             Version::V1 => 1,

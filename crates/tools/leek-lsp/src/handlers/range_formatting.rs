@@ -9,13 +9,12 @@
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<lsp::TextEdit>> {
     let doc = ws.doc(uri)?;
-    let start = position_to_offset(doc.pos_map(), range.start)?;
-    let end = position_to_offset(doc.pos_map(), range.end)?;
+    let start = doc.pos_map().to_offset(range.start)?;
+    let end = doc.pos_map().to_offset(range.end)?;
     if start > end {
         return Some(Vec::new());
     }
@@ -50,7 +49,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
         target_range.end,
     );
     Some(vec![lsp::TextEdit {
-        range: span_to_range(doc.pos_map(), span),
+        range: doc.pos_map().span_range(span),
         new_text: replacement,
     }])
 }

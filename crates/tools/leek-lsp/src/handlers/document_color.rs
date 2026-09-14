@@ -22,7 +22,6 @@ use leek_span::Span;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::span_to_range;
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::ColorInformation>> {
@@ -75,7 +74,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::ColorInformatio
             u32::from(nr.end()),
         );
         out.push(lsp::ColorInformation {
-            range: span_to_range(doc.pos_map(), span),
+            range: doc.pos_map().span_range(span),
             color: rgb_to_lsp(r as u8, g as u8, b as u8),
         });
     }
@@ -109,7 +108,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::ColorInformatio
             u32::from(r_range.end()),
         );
         out.push(lsp::ColorInformation {
-            range: span_to_range(doc.pos_map(), span),
+            range: doc.pos_map().span_range(span),
             color: rgb_to_lsp(r, g, b),
         });
     }

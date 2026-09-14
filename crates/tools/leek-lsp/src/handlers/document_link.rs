@@ -17,7 +17,6 @@ use leek_span::Span;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::span_to_range;
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::DocumentLink>> {
@@ -36,7 +35,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::DocumentLink>> 
         let Some((name, span)) = string_arg(&node) else {
             continue;
         };
-        let range = span_to_range(doc.pos_map(), span);
+        let range = doc.pos_map().span_range(span);
         let target = resolve_target(uri, &name);
         out.push(lsp::DocumentLink {
             range,

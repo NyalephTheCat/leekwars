@@ -17,7 +17,6 @@ use leek_span::Span;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -27,7 +26,7 @@ pub fn handle(
     trigger: &str,
 ) -> Option<Vec<lsp::TextEdit>> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Parsed)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
@@ -56,7 +55,7 @@ pub fn handle(
         target_range.end,
     );
     Some(vec![lsp::TextEdit {
-        range: span_to_range(doc.pos_map(), span),
+        range: doc.pos_map().span_range(span),
         new_text: replacement,
     }])
 }

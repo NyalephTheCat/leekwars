@@ -23,7 +23,6 @@ use leek_resolver::SymbolKind;
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::position_to_offset;
 use crate::workspace::Workspace;
 
 /// Legend, in fixed order. The client maps each index to a theme
@@ -148,8 +147,8 @@ pub fn handle_range(
 ) -> Option<lsp::SemanticTokensRangeResult> {
     let entries = collect_entries(ws, uri)?;
     let doc = ws.doc(uri)?;
-    let from = position_to_offset(doc.pos_map(), range.start).unwrap_or(0);
-    let to = position_to_offset(doc.pos_map(), range.end).unwrap_or(u32::MAX);
+    let from = doc.pos_map().to_offset(range.start).unwrap_or(0);
+    let to = doc.pos_map().to_offset(range.end).unwrap_or(u32::MAX);
     // Keep a token if any part of it lies within [from, to).
     let in_range: Vec<Entry> = entries
         .into_iter()

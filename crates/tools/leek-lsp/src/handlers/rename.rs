@@ -12,7 +12,6 @@ use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
 use crate::handlers::refusal::Refusable;
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -24,7 +23,7 @@ pub fn handle(
     let Some(doc) = ws.doc(uri) else {
         return Ok(None);
     };
-    let Some(offset) = position_to_offset(doc.pos_map(), pos) else {
+    let Some(offset) = doc.pos_map().to_offset(pos) else {
         return Ok(None);
     };
 
@@ -109,7 +108,7 @@ pub fn handle(
     let mut edits: Vec<lsp::TextEdit> = Vec::new();
     if let Some(sym) = table.symbol(target_id) {
         edits.push(lsp::TextEdit {
-            range: span_to_range(doc.pos_map(), sym.def_span),
+            range: doc.pos_map().span_range(sym.def_span),
             new_text: new_name.to_string(),
         });
     }
@@ -121,7 +120,7 @@ pub fn handle(
                 r.name_offset + r.name_len,
             );
             edits.push(lsp::TextEdit {
-                range: span_to_range(doc.pos_map(), span),
+                range: doc.pos_map().span_range(span),
                 new_text: new_name.to_string(),
             });
         }

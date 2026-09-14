@@ -19,7 +19,6 @@ use leek_resolver::SymbolKind;
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 /// A Leekscript identifier: a letter or `_` followed by word chars.
@@ -33,7 +32,7 @@ pub fn handle(
     pos: lsp::Position,
 ) -> Option<lsp::LinkedEditingRanges> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
@@ -61,7 +60,7 @@ pub fn handle(
         return None;
     }
 
-    let mut ranges: Vec<lsp::Range> = vec![span_to_range(doc.pos_map(), sym.def_span)];
+    let mut ranges: Vec<lsp::Range> = vec![doc.pos_map().span_range(sym.def_span)];
     for r in &table.references {
         if r.target == target_id {
             let span = Span::new(
@@ -69,7 +68,7 @@ pub fn handle(
                 r.name_offset,
                 r.name_offset + r.name_len,
             );
-            ranges.push(span_to_range(doc.pos_map(), span));
+            ranges.push(doc.pos_map().span_range(span));
         }
     }
 

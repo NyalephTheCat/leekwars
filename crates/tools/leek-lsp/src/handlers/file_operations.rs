@@ -31,7 +31,6 @@ use leek_span::paths::normalize_lexical;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::span_to_range;
 use crate::workspace::{Workspace, uri_to_path};
 
 /// Compute the include-rewrite edits for a batch of renames. Returns
@@ -140,7 +139,7 @@ fn edits_for_document(
             continue;
         }
         edits.push(lsp::TextEdit {
-            range: span_to_range(pm, inner_span),
+            range: pm.span_range(inner_span),
             new_text: new_content,
         });
     }

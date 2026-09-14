@@ -6,7 +6,7 @@ use leek_recipes::Target;
 use leek_span::SourceId;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{PosMap, span_to_range};
+use crate::util::position::PosMap;
 use crate::workspace::Workspace;
 
 /// The `source` field we stamp on every diagnostic we publish. Handlers
@@ -141,7 +141,7 @@ pub fn to_lsp(
                 Some(lsp::DiagnosticRelatedInformation {
                     location: lsp::Location {
                         uri: label_uri.clone(),
-                        range: span_to_range(label_pm, label.span),
+                        range: label_pm.span_range(label.span),
                     },
                     message: label.message.clone(),
                 })
@@ -158,7 +158,7 @@ pub fn to_lsp(
     });
 
     lsp::Diagnostic {
-        range: span_to_range(pm, diag.span),
+        range: pm.span_range(diag.span),
         severity: Some(match diag.severity {
             Severity::Error => lsp::DiagnosticSeverity::ERROR,
             Severity::Warning => lsp::DiagnosticSeverity::WARNING,

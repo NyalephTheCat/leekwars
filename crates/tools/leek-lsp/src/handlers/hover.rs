@@ -11,7 +11,6 @@ use super::member::{
     enclosing_class_of, enclosing_decl_node, field_access_at, find_member_in_chain,
     initializer_type, member_decl_name, node_covering,
 };
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
 use leek_ide::signature::signature_for_with;
@@ -19,7 +18,7 @@ use leek_types::InferredSignatures;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp::Hover> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     // `Target::Complexity` rather than `Target::Hir`: the plan is a strict
     // superset (the complexity artifact requires HIR, which requires resolve
@@ -270,7 +269,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
             kind: lsp::MarkupKind::Markdown,
             value,
         }),
-        range: span_for_range.map(|s| span_to_range(doc.pos_map(), s)),
+        range: span_for_range.map(|s| doc.pos_map().span_range(s)),
     })
 }
 

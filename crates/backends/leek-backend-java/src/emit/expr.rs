@@ -7,8 +7,8 @@ use leek_types::Type;
 use std::fmt::Write as _;
 
 use super::{
-    Emitter, builtin_fn_wrapper, escape_string, is_div_expr, is_primitive_number,
-    is_primitive_number_expr, is_string_expr, java_class_name, user_fn_wrapper,
+    Emitter, builtin_fn_wrapper, is_div_expr, is_primitive_number, is_primitive_number_expr,
+    is_string_expr, java_class_name, user_fn_wrapper,
 };
 use crate::mangle;
 
@@ -228,7 +228,7 @@ impl Emitter<'_> {
             ExprKind::Ternary(c, t, e) => self.write_ternary(buf, c, t, e),
             ExprKind::Interval(iv) => self.write_interval(buf, iv),
             ExprKind::Cast(x, ty) => {
-                write!(buf, "(({}) ", java_class_name(ty)).unwrap();
+                let _ = write!(buf, "(({}) ", java_class_name(ty));
                 self.write_expr(buf, x, false);
                 buf.push(')');
             }
@@ -1615,7 +1615,9 @@ impl Emitter<'_> {
                 buf.push_str(", ");
             }
             buf.push('"');
-            buf.push_str(&escape_string(k, true));
+            // A map key is written out by the emitter, not parsed from
+            // a v1 literal, so it escapes as v2+ regardless of `@version`.
+            buf.push_str(&leek_text::escape_java(k, leek_text::EscapeMode::V2Plus));
             buf.push('"');
         }
         buf.push_str(" }, new Object[] { ");
@@ -1642,7 +1644,7 @@ impl Emitter<'_> {
         if branch_ops && then_cost > 0 {
             buf.push_str("ops(");
             self.write_expr(buf, t, false);
-            write!(buf, ", {then_cost})").unwrap();
+            let _ = write!(buf, ", {then_cost})");
         } else {
             self.write_expr(buf, t, false);
         }
@@ -1650,7 +1652,7 @@ impl Emitter<'_> {
         if branch_ops && else_cost > 0 {
             buf.push_str("ops(");
             self.write_expr(buf, e, false);
-            write!(buf, ", {else_cost})").unwrap();
+            let _ = write!(buf, ", {else_cost})");
         } else {
             self.write_expr(buf, e, false);
         }

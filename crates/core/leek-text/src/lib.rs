@@ -132,13 +132,13 @@ pub fn escape_java(s: &str, mode: EscapeMode) -> String {
             c => {
                 let code = c as u32;
                 if code <= 0xFFFF {
-                    write!(out, "\\u{code:04X}").unwrap();
+                    let _ = write!(out, "\\u{code:04X}");
                 } else {
                     // Supplementary plane → surrogate pair.
                     let v = code - 0x10000;
                     let hi = 0xD800 + (v >> 10);
                     let lo = 0xDC00 + (v & 0x3FF);
-                    write!(out, "\\u{hi:04X}\\u{lo:04X}").unwrap();
+                    let _ = write!(out, "\\u{hi:04X}\\u{lo:04X}");
                 }
             }
         }

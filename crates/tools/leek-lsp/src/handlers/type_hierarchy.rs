@@ -14,7 +14,7 @@ use leek_resolver::SymbolKind;
 use leek_span::{LineTable, Span};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{PosMap, position_to_offset, span_to_range};
+use crate::util::position::PosMap;
 use crate::workspace::Workspace;
 
 pub fn prepare(
@@ -23,7 +23,7 @@ pub fn prepare(
     pos: lsp::Position,
 ) -> Option<Vec<lsp::TypeHierarchyItem>> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
@@ -175,8 +175,8 @@ fn item_for(
         tags: None,
         detail: None,
         uri: uri.clone(),
-        range: span_to_range(pm, full_span),
-        selection_range: span_to_range(pm, def_span),
+        range: pm.span_range(full_span),
+        selection_range: pm.span_range(def_span),
         data: None,
     }
 }

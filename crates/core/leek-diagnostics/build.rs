@@ -38,7 +38,7 @@ fn main() {
         let Some(yaml_entries) = map.get(key).and_then(|v| v.as_sequence()) else {
             continue;
         };
-        writeln!(sections, "    {key}: {{").unwrap();
+        let _ = writeln!(sections, "    {key}: {{");
         for entry in yaml_entries {
             let id = entry["id"].as_str().unwrap().to_string();
             let name = entry["name"].as_str().unwrap().to_string();
@@ -51,11 +51,10 @@ fn main() {
                 "hint" => "Hint",
                 other => panic!("unknown severity {other} for {id}"),
             };
-            writeln!(
+            let _ = writeln!(
                 sections,
                 "        {const_name} = (\"{id}\", \"{name}\", {sev_rust}),"
-            )
-            .unwrap();
+            );
             entries.push(Entry {
                 id: id.clone(),
                 catalog_index,
@@ -67,12 +66,11 @@ fn main() {
 
     let mut lookup_arms = String::new();
     for e in &entries {
-        writeln!(
+        let _ = writeln!(
             lookup_arms,
             "        \"{}\" => Some(&CATALOG[{}]),",
             e.id, e.catalog_index
-        )
-        .unwrap();
+        );
     }
 
     // Extended `--explain` write-ups: one markdown file per code under
@@ -98,13 +96,12 @@ fn main() {
                 "explain/{stem}.md does not match any diagnostic code in catalog.yaml"
             );
             println!("cargo:rerun-if-changed={}", path.display());
-            writeln!(
+            let _ = writeln!(
                 explain_arms,
                 "        \"{}\" => Some(include_str!(r\"{}\")),",
                 stem,
                 path.display()
-            )
-            .unwrap();
+            );
         }
     }
 

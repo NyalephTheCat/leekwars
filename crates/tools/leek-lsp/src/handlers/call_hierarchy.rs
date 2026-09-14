@@ -25,7 +25,7 @@ use leek_span::{LineTable, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, language::NodeOrToken};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{PosMap, position_to_offset, span_to_range};
+use crate::util::position::PosMap;
 use crate::workspace::Workspace;
 
 /// Resolve the cursor → a function (local or cross-file) → an item.
@@ -35,7 +35,7 @@ pub fn prepare(
     pos: lsp::Position,
 ) -> Option<Vec<lsp::CallHierarchyItem>> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
@@ -211,10 +211,10 @@ pub fn outgoing(
         };
         let Some(callee) = callee else { continue };
         let end = u32::from(tok.text_range().end());
-        buckets.entry(callee).or_default().push(span_to_range(
-            pm,
-            Span::new(home.source_file.source(&ws.db), start, end),
-        ));
+        buckets
+            .entry(callee)
+            .or_default()
+            .push(pm.span_range(Span::new(home.source_file.source(&ws.db), start, end)));
     }
 
     let mut out = Vec::new();
@@ -325,8 +325,8 @@ fn item_for(
         tags: None,
         detail: None,
         uri: uri.clone(),
-        range: span_to_range(pm, full_span),
-        selection_range: span_to_range(pm, def_span),
+        range: pm.span_range(full_span),
+        selection_range: pm.span_range(def_span),
         data: None,
     }
 }

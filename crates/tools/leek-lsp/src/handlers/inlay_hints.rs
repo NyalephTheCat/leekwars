@@ -7,7 +7,6 @@ use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::offset_to_position;
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<lsp::InlayHint>> {
@@ -24,8 +23,8 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = SyntaxNode::new_root(green.clone());
 
-    let from_offset = position_to_offset_local(doc, range.start);
-    let to_offset = position_to_offset_local(doc, range.end);
+    let from_offset = doc.pos_map().to_offset(range.start);
+    let to_offset = doc.pos_map().to_offset(range.end);
 
     let mut out: Vec<lsp::InlayHint> = Vec::new();
     for sym in &resolve_art.table.symbols {
@@ -61,7 +60,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
         }
         let type_name = format_type(&inferred);
         out.push(lsp::InlayHint {
-            position: offset_to_position(doc.pos_map(), sym.def_span.end),
+            position: doc.pos_map().to_position(sym.def_span.end),
             label: lsp::InlayHintLabel::String(format!(": {type_name}")),
             kind: Some(lsp::InlayHintKind::TYPE),
             text_edits: None,
@@ -91,10 +90,6 @@ pub fn resolve(mut hint: lsp::InlayHint) -> lsp::InlayHint {
         }));
     }
     hint
-}
-
-fn position_to_offset_local(doc: &crate::documents::DocHandle, pos: lsp::Position) -> Option<u32> {
-    crate::util::position::position_to_offset(doc.pos_map(), pos)
 }
 
 /// Byte range of the initializer expression for the declaration whose

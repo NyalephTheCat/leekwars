@@ -10,7 +10,6 @@ use leek_span::Span;
 use leek_syntax::{SyntaxNode, SyntaxToken};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -26,7 +25,7 @@ pub fn handle(
     let out: Vec<lsp::SelectionRange> = positions
         .into_iter()
         .map(|pos| {
-            let offset = position_to_offset(doc.pos_map(), pos).unwrap_or(0);
+            let offset = doc.pos_map().to_offset(pos).unwrap_or(0);
             chain_for_offset(&root, offset, doc.pos_map())
         })
         .collect();
@@ -60,7 +59,7 @@ fn chain_for_offset(
             u32::from(r.start()),
             u32::from(r.end()),
         );
-        let lsp_range = span_to_range(pm, span);
+        let lsp_range = pm.span_range(span);
         if ranges.last() != Some(&lsp_range) {
             ranges.push(lsp_range);
         }
@@ -103,5 +102,5 @@ fn token_range(t: &SyntaxToken, pm: crate::util::position::PosMap<'_>) -> lsp::R
         u32::from(r.start()),
         u32::from(r.end()),
     );
-    span_to_range(pm, span)
+    pm.span_range(span)
 }

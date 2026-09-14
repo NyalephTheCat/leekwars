@@ -48,7 +48,8 @@ pub(crate) mod salsa_probe {
     pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
 }
 
-use idents::{is_ident_start, special_ident_kind};
+use idents::special_ident_kind;
+use leek_syntax::is_ident_start;
 
 /// Lex `text` into a flat token list with attached diagnostics.
 ///

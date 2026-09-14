@@ -8,6 +8,7 @@
 //! flat `Vec<Token>`.
 
 pub mod doc;
+pub mod ident;
 pub mod kind;
 pub mod language;
 pub mod pipeline;
@@ -15,6 +16,7 @@ pub mod pragma;
 pub mod token;
 pub mod version;
 
+pub use ident::{is_ident_continue, is_ident_start};
 pub use kind::SyntaxKind;
 pub use language::{LeekLanguage, SyntaxElement, SyntaxNode, SyntaxToken, build_flat_tree};
 pub use pragma::{Pragmas, parse_pragmas};

@@ -1,7 +1,7 @@
 //! Identifier and keyword lexing.
 
 use leek_syntax::kind::keyword_lookup;
-use leek_syntax::{SyntaxKind, Token};
+use leek_syntax::{SyntaxKind, Token, is_ident_continue};
 
 use crate::Lexer;
 
@@ -24,27 +24,6 @@ impl Lexer<'_> {
         self.tokens
             .push(Token::new(kind, self.span(start, self.pos)));
     }
-}
-
-/// Identifier-start character. Matches `LexicalParser.java:432–434`:
-/// ASCII letters, underscore, plus the Latin-1 letter blocks.
-pub(crate) fn is_ident_start(c: char) -> bool {
-    if c.is_ascii_alphabetic() || c == '_' {
-        return true;
-    }
-    matches!(
-        c,
-        '\u{00C0}'..='\u{00D6}' // À–Ö
-        | '\u{00D8}'..='\u{00DD}' // Ø–Ý
-        | '\u{00E0}'..='\u{00F6}' // à–ö
-        | '\u{00F8}'..='\u{00FD}' // ø–ý
-        | '\u{0152}'..='\u{0153}' // Œ–œ
-        | '\u{00FF}'                // ÿ
-    )
-}
-
-pub(crate) fn is_ident_continue(c: char) -> bool {
-    is_ident_start(c) || c.is_ascii_digit()
 }
 
 /// Maps the special standalone identifier characters (∞ and π) to

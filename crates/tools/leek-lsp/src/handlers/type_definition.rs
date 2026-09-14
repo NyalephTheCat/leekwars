@@ -16,7 +16,6 @@ use leek_types::Type;
 use tower_lsp::lsp_types as lsp;
 
 use super::member::{self, class_name_of_type};
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -25,7 +24,7 @@ pub fn handle(
     pos: lsp::Position,
 ) -> Option<lsp::request::GotoTypeDefinitionResponse> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Hir)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
@@ -89,7 +88,7 @@ pub fn handle(
         .iter()
         .find(|s| s.kind == SymbolKind::Class && s.name == class_name)?;
 
-    let range = span_to_range(doc.pos_map(), class_sym.def_span);
+    let range = doc.pos_map().span_range(class_sym.def_span);
     Some(lsp::request::GotoTypeDefinitionResponse::Scalar(
         lsp::Location {
             uri: uri.clone(),
