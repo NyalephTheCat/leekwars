@@ -2,9 +2,9 @@ use std::fmt::Write as _;
 
 use leek_hir::{Field, Function, MethodDef};
 
-use super::lambda::captured_by_nested_lambda_stmts;
 use super::{ends_with_return, java_type_for, sanitize_ident};
 use crate::mangle;
+use leek_hir::captured_by_nested_lambda_stmts;
 
 impl<'a> super::Emitter<'a> {
     /// The parameter name to declare in a Java method signature. It must match

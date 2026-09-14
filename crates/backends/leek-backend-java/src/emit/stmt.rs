@@ -3,9 +3,9 @@ use leek_hir::{
     VarDecl, WhileStmt,
 };
 
-use super::lambda::captured_by_nested_lambda_stmts;
 use super::{Emitter, JavaWriter, is_pure_value_expr, is_terminator, is_valid_statement_expr};
 use crate::mangle;
+use leek_hir::captured_by_nested_lambda_stmts;
 
 impl Emitter<'_> {
     pub(crate) fn emit_stmt(&mut self, s: &Stmt) {
