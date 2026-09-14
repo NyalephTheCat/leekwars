@@ -5,13 +5,18 @@ use leek_pipeline::{Artifact, Context, Step, StepError};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStepStopOnError};
 use leek_syntax::SyntaxNode;
 use leek_syntax::language::GreenNode;
-use leek_syntax::version::Version;
 use leek_syntax::version::version_from_byte;
 
 use crate::ast::{AstNode, SourceFile};
 use crate::parse_tokens_with_classes;
 
 /// The parser's green tree.
+///
+/// One producer today: the [`Parse`] step publishes this and
+/// [`AstArtifact`] together, from a single parse. Later in R1 the pair
+/// becomes two queries over one green tree — the tree stays the single
+/// parse result, and the AST view is a cast on top of it — so treat
+/// them as two views of one artifact, never two parses.
 #[derive(Debug, Clone)]
 pub struct GreenTreeArtifact(pub GreenNode);
 impl Artifact for GreenTreeArtifact {}
@@ -29,6 +34,9 @@ impl GreenTreeArtifact {
 /// opens a `SourceFile` node before any production and closes it on every
 /// path, so the root cast cannot fail. Recovery from a syntax error builds
 /// an `ErrorNode` *inside* that root.
+///
+/// Shares its producer with [`GreenTreeArtifact`] today, and becomes the
+/// second of two queries over that one green tree later in R1.
 #[derive(Debug, Clone)]
 pub struct AstArtifact(pub SourceFile);
 impl Artifact for AstArtifact {}
@@ -45,48 +53,12 @@ impl Artifact for AstArtifact {}
 pub struct KnownClassesArtifact(pub Vec<String>);
 impl Artifact for KnownClassesArtifact {}
 
-/// Shared parse outcome for a single source file (disk or buffer).
-#[derive(Debug, Clone)]
-pub struct ParsedFile {
-    pub green: GreenNode,
-    pub ast: SourceFile,
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-/// Parse `text` at `version`, returning a green tree, its AST view,
-/// and diagnostics. Used by include resolution and the project index
-/// so every file goes through the same parse path.
-pub fn parse_file(text: &str, source: leek_span::SourceId, version: Version) -> ParsedFile {
-    parse_file_with_classes(text, source, version, &[])
-}
-
-/// Like [`parse_file`] but with extra known class names from the rest
-/// of the program (see [`KnownClassesArtifact`]).
-pub fn parse_file_with_classes(
-    text: &str,
-    source: leek_span::SourceId,
-    version: Version,
-    extra_classes: &[String],
-) -> ParsedFile {
-    let lexed = leek_lexer::lex(text, source, version);
-    let mut result = parse_tokens_with_classes(
-        text,
-        source,
-        &lexed.tokens,
-        version,
-        crate::ParseFeatures::from_env(),
-        extra_classes,
-    );
-    let mut diagnostics = lexed.diagnostics;
-    diagnostics.append(&mut result.diagnostics);
-    let ast = SourceFile::cast(SyntaxNode::new_root(result.green.clone()))
-        .expect("grammar::source_file always opens a SourceFile root");
-    ParsedFile {
-        green: result.green,
-        ast,
-        diagnostics,
-    }
-}
+/// The parse entry points now live in the crate's `entry` module and are
+/// re-exported here so importers of `leek_parser::pipeline::parse_file*`
+/// keep compiling. New callers should use [`parse_file_with`], which
+/// takes its [`FeatureFlags`](leek_span::FeatureFlags) as an argument
+/// instead of off the environment.
+pub use crate::entry::{ParsedFile, parse_file, parse_file_with, parse_file_with_classes};
 
 /// Parser step. Lexes internally; produces a green tree + AST view.
 ///
@@ -203,6 +175,18 @@ pub struct ParseQueryResult {
 /// [`SourceFile`](leek_pipeline::salsa::SourceFile) changes: `text`,
 /// `version_byte`, `flags_bits` or `extra_classes`. (`strict` is *not*
 /// read here — it only reaches the type checker.)
+///
+/// Deliberately *not* [`crate::parse_file_with`], and deliberately
+/// asymmetric with [`parse_project_file_query`] below:
+///
+/// * it lexes through [`leek_lexer::pipeline::lex_query`] so the memoized
+///   lex is shared with the [`Lex`](leek_lexer::pipeline::Lex) step
+///   instead of re-lexed here;
+/// * it returns the parser's diagnostics *only*, because on this path the
+///   `Lex` step already emitted the lexer's. `parse_file_with` prepends
+///   them, so routing this query through it would double-report every lex
+///   diagnostic. `parse_project_file_query` *does* merge them because
+///   nothing else emits them for an on-disk project file.
 #[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn parse_query(
