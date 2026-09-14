@@ -284,8 +284,104 @@ pub fn compile_ai_source(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_world, compile_ai_source};
-    use crate::schema::Scenario;
+    use super::{build_entity, build_world, compile_ai_source};
+    use crate::schema::{EntitySpec, Scenario};
+
+    /// A spec with nothing but the two fields every entity needs, so each case
+    /// below adds exactly the one field it is about.
+    fn spec() -> EntitySpec {
+        EntitySpec {
+            id: Some(7),
+            cell: Some(3),
+            ..EntitySpec::default()
+        }
+    }
+
+    /// The spec → [`Entity`](leek_generator::Entity) mapping, field by field: a
+    /// field a scenario sets reaches the entity, and one it leaves out keeps
+    /// the engine default — including the *other* half of a paired builder
+    /// like `with_points`, which takes MP and TP together whether or not the
+    /// scenario named both.
+    #[test]
+    fn build_entity_maps_the_fields_a_spec_sets_and_defaults_the_rest() {
+        let bare = build_entity(&spec()).expect("entity");
+        assert_eq!((bare.id, bare.cell, bare.team), (7, 3, 0));
+        assert_eq!(bare.name, "entity7", "the id names an unnamed entity");
+        assert_eq!((bare.life, bare.mp, bare.tp, bare.level), (100, 5, 10, 1));
+
+        // `mp` alone must not zero the TP the engine gave the leek, nor `tp`
+        // the MP: each is applied against the current value of the other.
+        let mp_only = build_entity(&EntitySpec {
+            mp: Some(9),
+            ..spec()
+        })
+        .expect("entity");
+        assert_eq!(
+            (mp_only.mp, mp_only.max_mp, mp_only.tp, mp_only.max_tp),
+            (9, 9, 10, 10)
+        );
+        let tp_only = build_entity(&EntitySpec {
+            tp: Some(21),
+            ..spec()
+        })
+        .expect("entity");
+        assert_eq!(
+            (tp_only.mp, tp_only.max_mp, tp_only.tp, tp_only.max_tp),
+            (5, 5, 21, 21)
+        );
+
+        // Weapons are owned but not equipped, exactly like a real leek: the AI
+        // has to `setWeapon(getWeapons()[0])` first.
+        let armed = build_entity(&EntitySpec {
+            weapons: vec![37, 45],
+            ..spec()
+        })
+        .expect("entity");
+        assert_eq!(armed.inventory, vec![37, 45]);
+        assert_eq!(armed.weapon, None, "a scenario weapon is not pre-equipped");
+
+        // Chips need no equip step; `with_chips` owns them and drops repeats.
+        let chipped = build_entity(&EntitySpec {
+            chips: vec![2, 2, 3],
+            ..spec()
+        })
+        .expect("entity");
+        assert_eq!(chipped.chips, vec![2, 3]);
+        assert!(chipped.inventory.is_empty(), "chips are not weapons");
+
+        // The stats with no builder go straight to the public fields.
+        let statted = build_entity(&EntitySpec {
+            agility: Some(41),
+            power: Some(42),
+            level: Some(43),
+            damage_return: Some(44),
+            ..spec()
+        })
+        .expect("entity");
+        assert_eq!(
+            (
+                statted.agility,
+                statted.power,
+                statted.level,
+                statted.damage_return
+            ),
+            (41, 42, 43, 44)
+        );
+
+        // The two fields that aren't optional at all.
+        let no_id =
+            build_entity(&EntitySpec { id: None, ..spec() }).expect_err("an entity needs an id");
+        assert!(no_id.to_string().contains("missing an `id`"), "{no_id}");
+        let no_cell = build_entity(&EntitySpec {
+            cell: None,
+            ..spec()
+        })
+        .expect_err("an entity needs a cell");
+        assert!(
+            no_cell.to_string().contains("missing a `cell`"),
+            "{no_cell}"
+        );
+    }
 
     /// Regression (#38): the scenario had no op-budget setting and fights ran
     /// unbounded. `max_ops_per_turn` defaults to the official 20M, can be set
