@@ -8,8 +8,9 @@ use leek_fmt::FormatOptions;
 use leek_pipeline::Run;
 use leek_pipeline::salsa::SourceFile;
 use leek_recipes::{self, Target};
-use leek_resolver::folder::{Folder, LoadError, LoadedFile, MemFolder, canonical_or_normalized};
+use leek_resolver::folder::{Folder, LoadError, LoadedFile, MemFolder};
 use leek_span::SourceId;
+use leek_span::paths::canonical_or_normalized;
 use tower_lsp::lsp_types as lsp;
 
 use crate::workspace::Workspace;

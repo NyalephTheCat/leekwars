@@ -22,7 +22,9 @@
 //! callers don't open the file again separately.
 
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+
+use leek_span::paths::{canonical_or_normalized, normalize_lexical};
 
 /// Outcome of `Folder::load`. Carries both the canonical path and
 /// the bytes so callers don't double-stat or double-read.
@@ -108,26 +110,6 @@ pub trait Folder: Send + Sync {
     fn load(&self, includer: &Path, name: &str) -> Result<LoadedFile, LoadError>;
 }
 
-/// Normalize `.` and `..` without touching the filesystem.
-pub fn normalize_path(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-/// Canonicalize a real path, or lexically normalize a virtual/nonexistent one.
-pub fn canonical_or_normalized(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| normalize_path(path))
-}
-
 /// Resolves include names against the filesystem, treating each
 /// name as a `.leek` file relative to the includer's directory.
 /// `name` may contain `/` segments for sub-folders.
@@ -179,7 +161,8 @@ impl MemFolder {
     /// callers should pass the same form they'd pass as the
     /// `includer` to `load`.
     pub fn insert(&mut self, path: impl Into<PathBuf>, text: impl Into<String>) {
-        self.files.insert(normalize_path(&path.into()), text.into());
+        self.files
+            .insert(normalize_lexical(&path.into()), text.into());
     }
 
     /// Build with a single entry shortcut.
@@ -202,9 +185,9 @@ impl Folder for MemFolder {
         // Candidate paths in priority order — matches DiskFolder's
         // policy (sibling `.leek`, sibling bare, raw name).
         let candidates = [
-            normalize_path(&parent.join(format!("{name}.leek"))),
-            normalize_path(&parent.join(name)),
-            normalize_path(Path::new(name)),
+            normalize_lexical(&parent.join(format!("{name}.leek"))),
+            normalize_lexical(&parent.join(name)),
+            normalize_lexical(Path::new(name)),
         ];
         for c in &candidates {
             if let Some(text) = self.files.get(c) {

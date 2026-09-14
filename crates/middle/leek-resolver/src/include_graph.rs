@@ -28,10 +28,11 @@ use std::path::{Path, PathBuf};
 
 use leek_diagnostics::{Diagnostic, IntoDiagnostic, codes, diag};
 use leek_lexer::lex;
+use leek_span::paths::canonical_or_normalized;
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, Version, parse_pragmas};
 
-use crate::folder::{Folder, IncludeError, LoadedFile, canonical_or_normalized};
+use crate::folder::{Folder, IncludeError, LoadedFile};
 
 /// Build outcome — the ordered file list plus the forward edge
 /// map and any diagnostics raised during the walk.

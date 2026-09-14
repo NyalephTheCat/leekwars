@@ -214,7 +214,9 @@ fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfi
 /// resolve includes and number sources exactly as the `miku` commands here
 /// do.
 pub fn includes_step(path: &Path, source_id: leek_span::SourceId) -> Box<dyn leek_pipeline::Step> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // The same key rule the include graph itself uses, so the entry
+    // and its includes cannot land in the graph under two shapes (#181).
+    let canonical = leek_span::paths::canonical_or_normalized(path);
     Box::new(leek_resolver::pipeline::ResolveIncludes::with_counter(
         std::sync::Arc::new(leek_resolver::folder::DiskFolder),
         canonical,

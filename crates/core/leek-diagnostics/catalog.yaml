@@ -6,6 +6,7 @@ lexer:
   - { id: E0002, name: InvalidNumber, severity: error }
   - { id: E0003, name: UnexpectedChar, severity: error }
   - { id: E0004, name: MultipleNumericSeparators, severity: error }
+  - { id: W0005, name: BlockCommentNotClosed, severity: warning }
 
 pragma:
   - { id: E0010, name: PragmaDuplicate, severity: error }

@@ -14,6 +14,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+leek-lexer = { path = "../crates/frontend/leek-lexer" }
 leek-parser = { path = "../crates/frontend/leek-parser" }
 leek-span = { path = "../crates/core/leek-span" }
 leek-syntax = { path = "../crates/frontend/leek-syntax" }
@@ -21,6 +22,13 @@ leek-syntax = { path = "../crates/frontend/leek-syntax" }
 [[bin]]
 name = "parse_roundtrip"
 path = "fuzz_targets/parse_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lex_invariants"
+path = "fuzz_targets/lex_invariants.rs"
 test = false
 doc = false
 bench = false

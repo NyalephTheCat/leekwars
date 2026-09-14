@@ -54,6 +54,10 @@ fn malformed_edge_cases_dont_panic_and_roundtrip() {
         "a.b.c.d.e.f.g",
         "  // trailing comment",
         "é à ü 漢字 🦀",
+        // A bad-char run adjacent to a real token: the run is one
+        // `Error` token, and it must not swallow the `x` (#140).
+        "var 漢字x = 1",
+        "漢 字",
         "var \u{0}x = 1",
         "for(;;)",
         ";;;;;;",

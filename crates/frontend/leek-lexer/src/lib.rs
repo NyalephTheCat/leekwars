@@ -174,17 +174,62 @@ impl<'a> Lexer<'a> {
     /// Emit an `Error` token covering one full UTF-8 character
     /// starting at `start`. Multi-byte safe — single-byte advance
     /// would split a code point and panic on the next `&str` slice.
+    ///
+    /// A *run* of such characters — a line of CJK pasted where an
+    /// identifier belongs, a wall of emoji — collapses into one token
+    /// and one diagnostic instead of one per character (#140). The
+    /// merge is keyed on the previous token being an `Error` that ends
+    /// exactly where this one starts; since this is the only place in
+    /// the workspace that emits `SyntaxKind::Error`, that can only be
+    /// the immediately preceding `bad_char`, and its `UNEXPECTED_CHAR`
+    /// is therefore the last diagnostic. Adjacency is by span, so
+    /// `漢 字` (whitespace between) still reports twice.
     fn bad_char(&mut self, start: usize) {
         let ch = self.peek_char().unwrap_or('\0');
         let n = ch.len_utf8().max(1);
         self.pos += n;
         let span = self.span(start, self.pos);
+        if self.extend_bad_char_run(start, span) {
+            return;
+        }
         self.diagnostics.push(diag!(
             codes::UNEXPECTED_CHAR,
             span,
             "unexpected character: {ch:?}",
         ));
         self.tokens.push(Token::new(SyntaxKind::Error, span));
+    }
+
+    /// Fold `span` into the `Error` token that ends at `start`, if
+    /// there is one. Returns whether the fold happened; on `false`
+    /// the caller pushes a fresh token and diagnostic.
+    fn extend_bad_char_run(&mut self, start: usize, span: Span) -> bool {
+        let Some(last) = self.tokens.last() else {
+            return false;
+        };
+        if last.kind != SyntaxKind::Error || last.span.end != leek_span::offset(start) {
+            return false;
+        }
+        if self
+            .diagnostics
+            .last()
+            .is_none_or(|d| d.code != codes::UNEXPECTED_CHAR)
+        {
+            return false;
+        }
+        let merged = Span::new(last.span.source, last.span.start, span.end);
+        // A byte that is not valid UTF-8 at all (`peek_char` returned
+        // `None`, so the run would not be printable) keeps its own
+        // token and its own message rather than joining the run.
+        let Ok(run) = std::str::from_utf8(&self.text[merged.range()]) else {
+            return false;
+        };
+        let count = run.chars().count();
+        self.tokens.last_mut().expect("checked above").span = merged;
+        let diagnostic = self.diagnostics.last_mut().expect("checked above");
+        diagnostic.span = merged;
+        diagnostic.message = format!("{count} unexpected characters: {run:?}");
+        true
     }
 
     // ---- Tiny cursor / token helpers used by every submodule ----
@@ -343,6 +388,150 @@ mod tests {
         let result = lex("\"oops", src, Version::LATEST);
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].code, codes::STRING_NOT_CLOSED);
+    }
+
+    /// The token still runs to EOF (upstream scans through newlines),
+    /// and the label is what points the editor at the opening quote.
+    #[test]
+    fn unterminated_string_labels_the_opening_quote() {
+        let src = SourceId::new(1).unwrap();
+        let text = "var a = 1\nvar b = \"oops\nvar c = 2\n";
+        let result = lex(text, src, Version::LATEST);
+        let quote = text.find('"').expect("a quote");
+
+        let strings: Vec<_> = result
+            .tokens
+            .iter()
+            .filter(|t| t.kind == S::StringLiteral)
+            .collect();
+        assert_eq!(strings.len(), 1, "one token, not one per line");
+        assert_eq!(strings[0].span.range(), quote..text.len());
+
+        assert_eq!(result.diagnostics.len(), 1);
+        let d = &result.diagnostics[0];
+        assert_eq!(d.code, codes::STRING_NOT_CLOSED);
+        assert_eq!(d.labels.len(), 1, "the opening quote must be labelled");
+        assert_eq!(d.labels[0].span.range(), quote..quote + 1);
+    }
+
+    /// A *closed* literal may legitimately span lines — the newline is
+    /// an ordinary string character, so this is one token and no
+    /// diagnostic at all.
+    #[test]
+    fn closed_string_may_span_newlines() {
+        let src = SourceId::new(1).unwrap();
+        let result = lex("\"a\nb\"", src, Version::LATEST);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(lex_kinds("\"a\nb\""), [S::StringLiteral]);
+        assert_eq!(result.tokens[0].span.range(), 0..5);
+    }
+
+    #[test]
+    fn unterminated_block_comment_warns_and_labels_the_opener() {
+        let src = SourceId::new(1).unwrap();
+        let text = "var a = 1\n/* disabled\nvar b = 2\n";
+        let result = lex(text, src, Version::LATEST);
+        let open = text.find("/*").expect("an opener");
+
+        assert_eq!(result.diagnostics.len(), 1);
+        let d = &result.diagnostics[0];
+        assert_eq!(d.code, codes::BLOCK_COMMENT_NOT_CLOSED);
+        // Upstream accepts the unterminated form, so this must not be
+        // an error: an error flips `has_compile_error` for programs the
+        // reference compiler runs happily.
+        assert_eq!(d.severity, leek_diagnostics::Severity::Warning);
+        assert_eq!(d.span.range(), open..text.len());
+        assert_eq!(d.labels.len(), 1);
+        assert_eq!(d.labels[0].span.range(), open..open + 2);
+
+        // The token still covers every byte to EOF — `leek-fmt` reads
+        // that extent to decide the file ends unclosed (#417, #419).
+        let comment = result
+            .tokens
+            .iter()
+            .find(|t| t.kind == S::BlockComment)
+            .expect("a comment token");
+        assert_eq!(comment.span.range(), open..text.len());
+    }
+
+    #[test]
+    fn closed_block_comment_has_no_diagnostic() {
+        let src = SourceId::new(1).unwrap();
+        let result = lex("/* fine */ var a = 1", src, Version::LATEST);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    /// `/*/` is a *complete* comment in v1 only, so only v2+ may warn.
+    #[test]
+    fn v1_three_char_block_comment_is_closed() {
+        let src = SourceId::new(1).unwrap();
+        let v1 = lex("/*/ return 1", src, Version::V1);
+        assert!(v1.diagnostics.is_empty(), "{:?}", v1.diagnostics);
+
+        let v2 = lex("/*/ return 1", src, Version::V2);
+        assert_eq!(v2.diagnostics.len(), 1);
+        assert_eq!(v2.diagnostics[0].code, codes::BLOCK_COMMENT_NOT_CLOSED);
+    }
+
+    #[test]
+    fn adjacent_bad_chars_merge_into_one_token_and_one_diagnostic() {
+        let src = SourceId::new(1).unwrap();
+        let result = lex("§§§", src, Version::LATEST);
+        let errors: Vec<_> = result
+            .tokens
+            .iter()
+            .filter(|t| t.kind == S::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "one token for the whole run");
+        assert_eq!(errors[0].span.range(), 0..6); // three 2-byte chars
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, codes::UNEXPECTED_CHAR);
+        assert_eq!(result.diagnostics[0].span.range(), 0..6);
+        assert!(
+            result.diagnostics[0]
+                .message
+                .starts_with("3 unexpected characters"),
+            "{}",
+            result.diagnostics[0].message,
+        );
+    }
+
+    /// Adjacency is by span: anything between the bad characters —
+    /// even whitespace — keeps them separate reports.
+    #[test]
+    fn separated_bad_chars_stay_separate() {
+        let src = SourceId::new(1).unwrap();
+        let result = lex("§ §", src, Version::LATEST);
+        assert_eq!(
+            result.tokens.iter().filter(|t| t.kind == S::Error).count(),
+            2,
+        );
+        assert_eq!(result.diagnostics.len(), 2);
+        assert!(
+            result.diagnostics[0]
+                .message
+                .starts_with("unexpected character")
+        );
+    }
+
+    /// A run must not absorb the valid token that follows it, and the
+    /// spans must still tile the input with no gap or overlap.
+    #[test]
+    fn bad_char_run_stops_at_the_next_real_token() {
+        let src = SourceId::new(1).unwrap();
+        let text = "var 漢字x = 1";
+        let result = lex(text, src, Version::LATEST);
+        assert_eq!(result.diagnostics.len(), 1);
+
+        let kinds = lex_kinds(text);
+        assert_eq!(kinds, [S::KwVar, S::Error, S::Ident, S::Eq, S::IntLiteral]);
+
+        let mut cursor = 0;
+        for token in &result.tokens {
+            assert_eq!(token.span.range().start, cursor, "gap before {token:?}");
+            cursor = token.span.range().end;
+        }
+        assert_eq!(cursor, text.len());
     }
 
     #[test]

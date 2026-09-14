@@ -1,7 +1,7 @@
 //! Test support shared by the handler and server tests.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,19 @@ impl Write for SharedOut {
     }
 }
 
+/// A fixture directory in the shape the adapter will report it back in.
+///
+/// The adapter keys and reports every source path through
+/// [`leek_span::paths::canonical_or_normalized`], so a test that compares a
+/// reported path with a raw `temp_dir()` one compares two spellings of the
+/// same directory. On macOS that actually differs — the temp dir is
+/// `/var/folders/…` while `/var` links to `/private/var` — so the mismatch
+/// fails there and passes on Linux. Going through the one shared helper is
+/// what keeps the two sides in the same shape on every platform (#181).
+fn reported_shape(dir: &Path) -> PathBuf {
+    leek_span::paths::canonical_or_normalized(dir)
+}
+
 /// A throw-away project directory holding `main.leek` (which includes
 /// `lib.leek`) plus a `Miku.toml` naming the entry. `name` keeps concurrent
 /// tests out of each other's directory.
@@ -39,11 +52,7 @@ pub(crate) fn project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("leek-dap-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp project");
-    // The server canonicalises every source path it reports, so hand back the
-    // canonical directory: on macOS the temp dir is `/var/folders/…` while
-    // `/var` is a symlink to `/private/var`, and a test comparing the reported
-    // path with this one string-for-string would fail there but pass on Linux.
-    let dir = dir.canonicalize().unwrap_or(dir);
+    let dir = reported_shape(&dir);
     std::fs::write(
         dir.join("Miku.toml"),
         "[project]\nname = \"dbg\"\nversion = \"0.1.0\"\nentry = \"main.leek\"\n\n[paths]\nsrc = \".\"\n",
@@ -106,10 +115,7 @@ pub(crate) fn project_with(name: &str, files: &[(&str, &str)]) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("leek-dap-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp project");
-    // Canonical, for the same reason `project` canonicalises: the adapter
-    // reports canonical paths, and macOS's temp dir is reached through a
-    // symlink.
-    let dir = dir.canonicalize().unwrap_or(dir);
+    let dir = reported_shape(&dir);
     std::fs::write(
         dir.join("Miku.toml"),
         "[project]\nname = \"dbg\"\nversion = \"0.1.0\"\nentry = \"main.leek\"\n\n[paths]\nsrc = \".\"\n",

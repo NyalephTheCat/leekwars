@@ -291,8 +291,8 @@ mod tests {
 
     use super::*;
     use crate::breakpoints::BreakpointStore;
-    use crate::target::native::canonical;
     use crate::testing::{SharedOut, project};
+    use leek_span::paths::canonical_or_normalized;
 
     /// Drive `configurationDone` for a launch config and return the session
     /// plus everything the adapter wrote to the client.
@@ -364,7 +364,7 @@ mod tests {
         let lib_id = program
             .sources
             .iter()
-            .find(|file| canonical(&file.path) == canonical(&lib))
+            .find(|file| canonical_or_normalized(&file.path) == canonical_or_normalized(&lib))
             .expect("the included file is one of the program's sources")
             .source
             .get();

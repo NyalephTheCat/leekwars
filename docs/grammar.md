@@ -375,11 +375,11 @@ StringLiteral ::
     "'" SingleStringChar* "'"
 
 DoubleStringChar ::
-    SourceCharacter but not one of '"' or '\' or LineTerminator
+    SourceCharacter but not one of '"' or '\'
     '\' SourceCharacter
 
 SingleStringChar ::
-    SourceCharacter but not one of "'" or '\' or LineTerminator
+    SourceCharacter but not one of "'" or '\'
     '\' SourceCharacter
 ```
 
@@ -388,9 +388,15 @@ SingleStringChar ::
   (`"say \"hi\""`, `'it\'s'`). The **lexer does not interpret** escape sequences;
   the backslash and escaped character are preserved verbatim in the token text
   (interpretation happens later).
-- Strings are **single-line**. An unterminated string (a `LineTerminator` or
-  `EOF` before the closing quote) raises `STRING_NOT_CLOSED`; the token is still
-  emitted.
+- Strings **may span lines**: a `LineTerminator` is an ordinary string
+  character, not a terminator. `LexicalParser.tryParseString` scans through
+  newlines by design (its own comment: *"les strings peuvent contenir des
+  newlines"*), counting them only to keep its line/column cursor honest.
+- Only `EOF` before the closing quote is an error: it raises
+  `STRING_NOT_CLOSED` and the token is still emitted, covering everything from
+  the opening quote to the end of the file. Ending it at the first newline
+  instead would put a token boundary where upstream never puts one, so the
+  diagnostic carries a label on the opening quote rather than a shorter token.
 
 ### 3.6 Comments
 
@@ -411,7 +417,10 @@ BlockCommentChar ::
 - **Line comments** run to (but do not include) the end of line.
 - **Block comments** are **not nestable**: the first `*/` closes the comment
   regardless of any intervening `/*`. An unterminated block comment extends to
-  `EOF`.
+  `EOF` and raises `BLOCK_COMMENT_NOT_CLOSED`. That is a *warning*, not an
+  error: `LexicalParser.tryParseComments` accepts the unterminated form
+  silently, and upstream AI fixtures rely on it to comment out a trailing
+  block of code.
 - **v1 quirk:** in v1 only, `/*/` is a complete block comment.
 - There is no distinct doc-comment token; documentation comments are ordinary
   line/block comments.

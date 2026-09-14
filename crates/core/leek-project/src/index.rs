@@ -141,11 +141,16 @@ impl ProjectIndex {
     }
 
     pub fn load_file(&mut self, path: &Path) -> Result<LoadedProjectFile, ProjectError> {
-        let canonical = Self::canonicalize(path);
-        let text = std::fs::read_to_string(&canonical).map_err(|e| ProjectError::Io {
-            path: canonical.clone(),
+        // Read the caller's own spelling, not the canonical form: the
+        // canonical form of a path that does *not* resolve is the
+        // lexically normalized one, and `a/link/..` is not `a` when
+        // `link` is a symlink (#181). Canonicalization is for the map
+        // key and the reported path, never for the `open`.
+        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io {
+            path: path.to_path_buf(),
             message: e.to_string(),
         })?;
+        let canonical = Self::canonicalize(path);
         let source = self.source_for_path(&canonical);
         let lang = self.language_settings(&text);
         let line_table = LineTable::new(&text);
@@ -167,8 +172,13 @@ impl ProjectIndex {
         LanguageSettings::resolve(text, None, self.default_version_byte, self.default_strict)
     }
 
+    /// The index's file-identity key. Delegates to the workspace-wide
+    /// [`leek_span::paths::canonical_or_normalized`] so the index, the
+    /// include graph and the LSP agree on when two spellings name the
+    /// same file — they used to disagree for any path that does not
+    /// exist yet, because only the resolver normalized `..` (#181).
     pub fn canonicalize(path: &Path) -> PathBuf {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        leek_span::paths::canonical_or_normalized(path)
     }
 
     pub fn walk_leek_under(&self, dir: &Path) -> Vec<PathBuf> {
@@ -434,6 +444,52 @@ mod tests {
         let index = ProjectIndex::from_manifest(dir.clone(), &manifest);
         assert_eq!(index.tests_root, Some(dir.join("spec")));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #181: an include target that does not exist yet — one being
+    /// typed, or an unsaved buffer — used to get two ids here, because
+    /// `ProjectIndex::canonicalize` left `..` alone while the
+    /// resolver's own helper collapsed it. Both now go through
+    /// `leek_span::paths`, so the two spellings are one file.
+    #[test]
+    fn nonexistent_paths_with_parent_components_share_one_source_id() {
+        let dir = scratch("nonexistent-parent");
+        let direct = dir.join("Code.leek");
+        let indirect = dir.join("sub").join("..").join("Code.leek");
+        assert!(!direct.exists(), "the file must not exist for this case");
+
+        let mut index = v4_index(&dir);
+        let id = index.source_for_path(&direct);
+        assert_eq!(index.source_for_path(&indirect), id);
+        assert_eq!(index.files().len(), 1, "{:?}", index.files());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `load_file` must open the caller's spelling and only *key* by
+    /// the canonical one: reading the canonical path would follow a
+    /// lexically-collapsed `..` somewhere else entirely.
+    #[cfg(unix)]
+    #[test]
+    fn load_file_reads_through_a_linked_directory() {
+        let dir = scratch("load-linked");
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).expect("create real dir");
+        std::fs::write(real.join("main.leek"), "return 42;\n").expect("write");
+        let alias = dir.join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("link the directory");
+
+        let mut index = v4_index(&dir);
+        let loaded = index.load_file(&alias.join("main.leek")).expect("load");
+        assert_eq!(loaded.text, "return 42;\n");
+        // Keyed by the real file, so the same file reached both ways
+        // is one entry.
+        assert_eq!(
+            loaded.path,
+            ProjectIndex::canonicalize(&real.join("main.leek"))
+        );
+        let through_real = index.load_file(&real.join("main.leek")).expect("load");
+        assert_eq!(through_real.source, loaded.source);
         std::fs::remove_dir_all(&dir).ok();
     }
 
