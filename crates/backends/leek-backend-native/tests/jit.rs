@@ -414,10 +414,13 @@ fn foreach_over_every_source_kind() {
              for (var k : var v in new A()) { r = r + k + v } return r"),
         "\"x1y2\""
     );
-    // A string's key is its position.
+    // A string is not iterable, so the body never runs and `r` stays
+    // empty — upstream's `AI.isIterable` (`AI.java:1801-1807`) does not
+    // list strings and `ForeachKeyBlock.java:191` guards the walk with it
+    // (#268).
     assert_eq!(
         jit("var r = '' for (var i : var c in 'abc') { r = r + i + c } return r"),
-        "\"0a1b2c\""
+        "\"\""
     );
     // As is an interval's.
     assert_eq!(
@@ -552,10 +555,13 @@ fn strings() {
     assert_eq!(jit("return length('hello')"), "5");
     // Indexing (a one-char substring).
     assert_eq!(jit("var s = 'abc' return s[1]"), "\"b\"");
-    // foreach over a string, building a reversed copy.
+    // A string is not iterable (#268): the loop body never runs, so the
+    // "reversed copy" comes back empty. `AI.isIterable` (`AI.java:1801-1807`)
+    // admits only array / map / set / interval, and `ForeachBlock.java:148`
+    // wraps the whole walk in it.
     assert_eq!(
         jit("var s = '' for (var c in 'abc') { s = c + s } return s"),
-        "\"cba\""
+        "\"\""
     );
     // v1 is gated; v2+ works.
     assert_eq!(jit_v("return 'a' + 'b'", 1), "\"ab\"");

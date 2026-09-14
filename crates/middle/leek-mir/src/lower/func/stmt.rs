@@ -362,10 +362,11 @@ impl FnLowerer<'_> {
     pub(crate) fn lower_foreach(&mut self, fe: &ForeachStmt) {
         // Snapshot the iterable and walk the snapshot with a normal
         // index loop. This keeps the loop's shape uniform across
-        // array / map / set / interval / string / object sources;
-        // the runtime materialises the snapshot at MakeForeachIter
-        // time, and the loop reads elements out of it directly —
-        // no per-element pair to allocate or unpack (#111).
+        // array / map / set / interval / object sources; the runtime
+        // materialises the snapshot at MakeForeachIter time, and the
+        // loop reads elements out of it directly — no per-element pair
+        // to allocate or unpack (#111). A non-iterable — a string
+        // included (#268) — snapshots to nothing, so the walk is empty.
         let iter_val = self.lower_expr_to_operand(&fe.iter);
         let iter_local = self.fresh_temp(Type::Any, fe.span);
         self.push_stmt(Statement::Assign(
