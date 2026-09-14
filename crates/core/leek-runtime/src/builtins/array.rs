@@ -103,7 +103,7 @@ pub(crate) fn dispatch_array(
                                 continue;
                             }
                             let k = Value::Int(crate::len_as_int(j));
-                            let ck = crate::value::key_repr(&k);
+                            let ck = crate::value::MapKey::of(&k);
                             map.insert_canonical(ck, k, v.clone());
                         }
                         stash_promotion(Value::Map(Rc::new(RefCell::new(map))));
@@ -137,23 +137,8 @@ pub(crate) fn dispatch_array(
                 } else {
                     args[1].clone()
                 };
-                let canon = crate::value::key_repr(&key);
-                let mut mm = m.borrow_mut();
-                if let Some(&idx) = mm.index.get(&canon) {
-                    mm.entries.remove(idx);
-                    mm.index.clear();
-                    let canons: Vec<String> = mm
-                        .entries
-                        .iter()
-                        .map(|(k, _)| crate::value::key_repr(k))
-                        .collect();
-                    for (i, c) in canons.into_iter().enumerate() {
-                        mm.index.insert(c, i);
-                    }
-                    Value::Bool(true)
-                } else {
-                    Value::Bool(false)
-                }
+                let canon = crate::value::MapKey::of(&key);
+                Value::Bool(m.borrow_mut().remove_canonical(&canon).is_some())
             }
             _ => Value::Bool(false),
         },
@@ -652,8 +637,14 @@ pub(crate) fn dispatch_array(
             if let Value::Array(a) = &args[0] {
                 let mut out = MapData::new();
                 for v in a.borrow().iter() {
-                    let canon = crate::value::key_repr(v);
-                    let current = out.get(v).cloned().unwrap_or(Value::Int(0));
+                    // One canonicalisation per element: the `index`
+                    // probe for the running count and the write-back
+                    // share it.
+                    let canon = crate::value::MapKey::of(v);
+                    let current = out
+                        .index
+                        .get(&canon)
+                        .map_or(Value::Int(0), |&i| out.entries[i].1.clone());
                     let next = match current {
                         Value::Int(n) => Value::Int(n + 1),
                         _ => Value::Int(1),
@@ -1263,15 +1254,7 @@ pub(crate) fn sort_array_with_cmp(
         }
         let mut mm = m.borrow_mut();
         mm.entries = buf;
-        mm.index.clear();
-        let canons: Vec<String> = mm
-            .entries
-            .iter()
-            .map(|(k, _)| crate::value::key_repr(k))
-            .collect();
-        for (i, c) in canons.into_iter().enumerate() {
-            mm.index.insert(c, i);
-        }
+        mm.reindex();
         return Ok(Value::Map(Rc::clone(m)));
     }
     let Value::Array(a) = arr else {

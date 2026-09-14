@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 use crate::value::{Instance, IntervalValue, MapData, ObjectData, SetData};
-use crate::{Value, key_repr};
+use crate::{MapKey, Value};
 
 // ---- slicing (`a[start:end:step]`) ----
 
@@ -470,10 +470,10 @@ pub fn set_index(base: &Value, index: &Value, value: Value, version: u8) -> Opti
                     let mut map = MapData::new();
                     for (j, v) in a.borrow().iter().enumerate() {
                         let k = Value::Int(crate::len_as_int(j));
-                        map.insert_canonical(key_repr(&k), k, v.clone());
+                        map.insert_canonical(MapKey::of(&k), k, v.clone());
                     }
                     let k = Value::Int(raw);
-                    map.insert_canonical(key_repr(&k), k, value);
+                    map.insert_canonical(MapKey::of(&k), k, value);
                     return Some(Value::Map(Rc::new(RefCell::new(map))));
                 }
                 return None;
@@ -492,10 +492,10 @@ pub fn set_index(base: &Value, index: &Value, value: Value, version: u8) -> Opti
                 let mut map = MapData::new();
                 for (j, v) in arr.iter().enumerate() {
                     let k = Value::Int(crate::len_as_int(j));
-                    map.insert_canonical(key_repr(&k), k, v.clone());
+                    map.insert_canonical(MapKey::of(&k), k, v.clone());
                 }
                 let k = Value::Int(crate::len_as_int(i));
-                map.insert_canonical(key_repr(&k), k, value);
+                map.insert_canonical(MapKey::of(&k), k, value);
                 drop(arr);
                 Some(Value::Map(Rc::new(RefCell::new(map))))
             }
@@ -512,8 +512,9 @@ pub fn set_index(base: &Value, index: &Value, value: Value, version: u8) -> Opti
                 value
             };
             // Compute the canonical key *before* taking the mutable borrow
-            // — `key_repr` may itself read the map (e.g. `m[m] = …`).
-            let canonical = key_repr(&key);
+            // — a composite key renders through `Display`, which may
+            // itself read the map (e.g. `m[m] = …`).
+            let canonical = MapKey::of(&key);
             m.borrow_mut().insert_canonical(canonical, key, stored);
             None
         }
@@ -549,7 +550,7 @@ pub fn deep_clone(v: &Value) -> Value {
         Value::Map(m) => {
             let mut out = MapData::new();
             for (k, val) in &m.borrow().entries {
-                out.insert_canonical(key_repr(k), deep_clone(k), deep_clone(val));
+                out.insert_canonical(MapKey::of(k), deep_clone(k), deep_clone(val));
             }
             Value::Map(Rc::new(RefCell::new(out)))
         }

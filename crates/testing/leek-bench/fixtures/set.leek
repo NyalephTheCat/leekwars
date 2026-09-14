@@ -1,0 +1,16 @@
+// @version: 4
+// Set key churn: 50k fresh inserts, 50k duplicate inserts (pure key
+// lookups), then a batch of removals. Every one of those used to build
+// a throwaway canonical String, and `setRemove` re-derived one for each
+// element it walked past.
+var s = Set()
+for (var i = 0; i < 50000; i++) {
+    setPut(s, i)
+}
+for (var i = 0; i < 50000; i++) {
+    setPut(s, i)
+}
+for (var i = 0; i < 2000; i++) {
+    setRemove(s, i)
+}
+setSize(s)
