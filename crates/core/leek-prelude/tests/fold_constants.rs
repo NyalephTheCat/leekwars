@@ -4,7 +4,8 @@
 //! `tests/libraries.rs` — the whole sequence is a single `#[test]` in its
 //! own binary.
 
-use leek_prelude::{activate_fold_constants, fold_constants};
+use leek_config::FoldSet;
+use leek_prelude::{activate_fold_constants, active_fold_set, fold_constants};
 
 #[test]
 fn registration_replaces_by_name_and_keeps_insertion_order() {
@@ -12,8 +13,19 @@ fn registration_replaces_by_name_and_keeps_insertion_order() {
         fold_constants().is_empty(),
         "folding is off until a driver registers something"
     );
+    assert_eq!(
+        active_fold_set(),
+        FoldSet::NONE,
+        "an empty map reads back as no catalog folded (#98, #184)"
+    );
 
     activate_fold_constants([("WEAPON_PISTOL", "37"), ("CHIP_BANDAGE", "1")]);
+    assert_eq!(
+        active_fold_set(),
+        FoldSet::LEEKWARS,
+        "every production activation registers the leek-wars catalog, \
+         so a non-empty map reads back as that bit"
+    );
     assert_eq!(
         fold_constants(),
         vec![
