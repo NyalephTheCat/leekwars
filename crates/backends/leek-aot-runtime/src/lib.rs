@@ -101,5 +101,15 @@ pub extern "C" fn leek_aot_force_link() -> usize {
     // The AOT startup table-installer lives in `leek-backend-native`; reference
     // it so it survives static-archive creation (the program's C `main` calls it).
     acc ^= leek_backend_native::aot_meta::leek_aot_install as *const () as usize;
+    // Same for the ABI anchor, whose *name* carries a hash of the shim
+    // signatures this archive was built from: the generated C `main` calls it,
+    // so an archive from a different revision fails the link rather than
+    // corrupting shim arguments at run time. Measured, today's rustc keeps it
+    // without this line — a `#[unsafe(no_mangle)]` item in an upstream rlib
+    // survives staticlib creation on its own. It is here for the same
+    // belt-and-braces reason as the installer above, and
+    // `tests/aot_exec.rs::the_static_runtime_archive_exports_this_builds_abi_anchor`
+    // is what actually holds the guarantee.
+    acc ^= leek_backend_native::aot::abi_marker() as usize;
     acc
 }

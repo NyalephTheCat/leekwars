@@ -40,22 +40,17 @@ fn hir_v4(src: &str) -> HirFile {
     leek_hir::lower_file_versioned(&sf, source, 4).0
 }
 
-/// The directory holding `libleek_aot_runtime.a`, resolved the same way
-/// `aot::locate_static_runtime` does — EXCEPT that we never fall through to its
-/// on-demand `cargo build`. That branch would spawn a nested cargo under
-/// `cargo test`, which deadlocks on the target-directory lock; resolving the
-/// archive ourselves and skipping when it is absent makes it unreachable from
-/// a test. A normal workspace build (what CI does before `cargo test`) produces
-/// it, so this test really runs there.
+/// The directory holding `libleek_aot_runtime.a`, from the backend's own
+/// resolution — `aot::prebuilt_runtime_dir` is exactly what the AOT path uses,
+/// minus the on-demand `cargo build`. That branch would spawn a nested cargo
+/// under `cargo test`, which deadlocks on the target-directory lock, so the
+/// test skips instead when no archive is built. A normal workspace build (what
+/// CI does before `cargo test`) produces it, so this test really runs there.
+///
+/// This used to re-implement the search, which meant the test could pass
+/// against an archive the compiler would never have chosen.
 fn static_runtime_dir() -> Option<PathBuf> {
-    let root =
-        std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).ok()?;
-    let target =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
-    ["release", "debug"]
-        .into_iter()
-        .map(|p| target.join(p))
-        .find(|d| d.join("libleek_aot_runtime.a").is_file())
+    aot::prebuilt_runtime_dir()
 }
 
 /// Whether a C compiler is actually invocable, so a missing one skips instead
@@ -133,6 +128,40 @@ fn check_all(dir: &Path) {
         out.stdout.is_empty(),
         "a faulting program must print no value, got: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The ABI anchor must really be **in the archive**, not merely defined in the
+/// backend crate. Nothing else notices if it is dropped: the generated C would
+/// still call it, the link would still succeed against a matching archive, and
+/// the guard would simply stop guarding. `leek_aot_force_link` is what retains
+/// it, and that is one reference away from being deleted as dead code.
+#[test]
+fn the_static_runtime_archive_exports_this_builds_abi_anchor() {
+    let Some(dir) = static_runtime_dir() else {
+        eprintln!("skipping the ABI-anchor check: libleek_aot_runtime.a is not built");
+        return;
+    };
+    let archive = dir.join("libleek_aot_runtime.a");
+    let out = match Command::new("nm")
+        .arg("--defined-only")
+        .arg(&archive)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        _ => {
+            eprintln!("skipping the ABI-anchor check: no working `nm`");
+            return;
+        }
+    };
+    let symbols = String::from_utf8_lossy(&out.stdout);
+    let sym = aot::abi_symbol_name();
+    assert!(
+        symbols.lines().any(|l| l.ends_with(&format!(" {sym}"))),
+        "{} does not export the ABI anchor {sym}; the guard in the generated C \
+         would fail every link (or, if it were dropped, guard nothing)",
+        archive.display()
     );
 }
 
