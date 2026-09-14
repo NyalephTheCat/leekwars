@@ -65,6 +65,7 @@ cargo fmt --all                          # format (--check to verify only)
 cargo xtask check-toolchain              # Rust pin and MSRV agree, and are exact
 cargo xtask check-layers                 # enforce the crate-layering rule
 cargo xtask check-errors                 # keep `anyhow` out of the library layers
+cargo xtask check-fmt-idiom              # one spelling for `write!` into a `String`
 cargo xtask check-artifacts              # generated output stays untracked
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude leek-test-corpus   # fast tests

@@ -51,6 +51,9 @@ cargo xtask check-layers
 step "error-convention check (cargo xtask check-errors)"
 cargo xtask check-errors
 
+step "formatting-idiom check (cargo xtask check-fmt-idiom)"
+cargo xtask check-fmt-idiom
+
 step "generated-artifact check (cargo xtask check-artifacts)"
 cargo xtask check-artifacts
 
