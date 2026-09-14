@@ -282,7 +282,7 @@ fn walk(dir: &Path, out: &mut Vec<Violation>, errors: &mut Vec<String>) {
             return;
         }
     };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
     paths.sort();
     for path in paths {
         if path.is_dir() {

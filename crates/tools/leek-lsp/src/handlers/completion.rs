@@ -225,7 +225,7 @@ fn member_receiver(text: &str, offset: u32) -> Option<(&str, u32)> {
 
     // Back over the `.`, then over any space between it and the receiver.
     let end = trimmed.len() - '.'.len_utf8();
-    let end = end - trailing_len(&trimmed[..end], |c| c.is_whitespace());
+    let end = end - trailing_len(&trimmed[..end], char::is_whitespace);
     let start = end - trailing_ident_len(&trimmed[..end]);
     if start == end {
         return None;
