@@ -289,3 +289,39 @@ fn a_local_named_like_a_builtin_class_does_not_shadow_it_in_instanceof() {
         name_of(instanceof_rhs(&hir))
     );
 }
+
+// ---- globals are never left to the fallback --------------------------------
+
+/// A `global` can be declared *below* every use of it and still bind them,
+/// which makes it the name most at risk of falling through to the
+/// `Builtin`/`Unresolved` fallback. Lowering registers every `global` before
+/// it lowers any expression, so it never does — `propagate_const_globals`
+/// relies on that to key its disqualification rules on `DefId` alone (#53).
+#[test]
+fn a_global_is_never_tagged_unresolved() {
+    // Read above its own `global` statement.
+    let hir = lower("var y = G\nglobal G = 1\nreturn G\n");
+    assert!(
+        matches!(name_of(main_return(&hir)), NameRef::Global(_)),
+        "got {:?}",
+        name_of(main_return(&hir))
+    );
+    // An overloaded bodiless signature's parameter default is the last
+    // expression lowering resolves before the globals are registered: the
+    // body pass refills only the last same-named declaration, so pass 1 is
+    // the only place the earlier overload's default is ever lowered.
+    let hir = lower("global G = 1\nfunction f(x = G);\nfunction f(a, b);\nreturn G\n");
+    let Some(Def::Function(f)) = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d, Def::Function(f) if f.params.len() == 1))
+    else {
+        panic!("expected the one-parameter overload")
+    };
+    let default = f.params[0].default.as_ref().expect("has a default");
+    assert!(
+        matches!(name_of(default), NameRef::Global(_)),
+        "got {:?}",
+        name_of(default)
+    );
+}

@@ -11,7 +11,7 @@ use super::traits::LowerExpr;
 use super::util::{
     collect_modifiers, field_name, first_ident_after, fn_return_type, method_name, parse_int_text,
 };
-use super::{ClassCtx, Lowerer, NameKind};
+use super::{ClassCtx, Lowerer, NameKind, PendingSignature};
 
 impl Lowerer {
     // ---- First-pass: register top-level items ----
@@ -23,33 +23,41 @@ impl Lowerer {
         let name = name_tok.text().to_string();
         let span = self.span_of_node(decl.syntax());
         let backend_directives = self.fn_backend_directives(decl, span);
-        // A bodiless signature's parameter/return types are captured here so
-        // each overload's DefId carries them (the body pass only fills the
-        // last same-named decl via `file_decls`, which would otherwise drop
-        // earlier overloads' signatures). Functions with a body keep the
-        // empty placeholder — the body pass populates them.
+        // A bodiless signature's return type is captured here so each
+        // overload's DefId carries it (the body pass only fills the last
+        // same-named decl via `file_decls`, which would otherwise drop
+        // earlier overloads' signatures). Its parameters are queued instead
+        // of lowered: their defaults are expressions, and pass 1 must not
+        // resolve a name against a `file_decls` it is still building — see
+        // `Lowerer::lower_pending_signatures`. Functions with a body keep
+        // the empty placeholder — the body pass populates them.
         let has_body = decl
             .syntax()
             .children()
             .any(|c| c.kind() == SyntaxKind::Block);
-        let (params, return_type) = if has_body {
-            (Vec::new(), None)
+        let return_type = if has_body {
+            None
         } else {
-            self.push_function_scope();
-            let params = self.lower_params(decl.syntax());
-            self.pop_scope();
-            (params, fn_return_type(decl.syntax()))
+            fn_return_type(decl.syntax())
         };
         let id = self.alloc_def(Def::Function(Function {
             name: name.clone(),
             span,
-            params,
+            params: Vec::new(),
             return_type,
             body: None,
             backend_directives,
         }));
         self.out.items.push(id);
         self.file_decls.insert(name, NameKind::Function(id));
+        if !has_body {
+            self.pending_signatures.push(PendingSignature {
+                source: self.source,
+                version: self.version,
+                def: id,
+                decl: decl.clone(),
+            });
+        }
     }
 
     /// Read `@<backend>-backend:` directives from a function's doc
