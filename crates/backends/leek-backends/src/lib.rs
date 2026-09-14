@@ -42,11 +42,18 @@ pub fn resolve_run_backend(cli_backend: Option<&str>) -> Result<()> {
     }
 }
 
-/// Output directory for emitted Java sources.
-pub fn pick_java_out_dir(
+/// Where a backend writes: the `--out-dir` override, else the manifest's
+/// `[backend.<kind>].out_dir`, else `default`.
+///
+/// A relative path from either override resolves against the project root,
+/// never the process CWD — `miku build --out-dir out` has to land in the
+/// same place whichever directory of the project it was run from, and
+/// whichever backend it selected.
+pub fn pick_out_dir(
     project: &Project,
     cli_out_dir: Option<&Path>,
     settings: &BackendSettings,
+    default: PathBuf,
 ) -> PathBuf {
     if let Some(dir) = cli_out_dir {
         return if dir.is_absolute() {
@@ -62,7 +69,22 @@ pub fn pick_java_out_dir(
             project.root.join(dir)
         };
     }
-    project.build_dir().join("java")
+    default
+}
+
+/// Output directory for emitted Java sources — [`pick_out_dir`] with the
+/// Java backend's `<build>/java` default.
+pub fn pick_java_out_dir(
+    project: &Project,
+    cli_out_dir: Option<&Path>,
+    settings: &BackendSettings,
+) -> PathBuf {
+    pick_out_dir(
+        project,
+        cli_out_dir,
+        settings,
+        project.build_dir().join("java"),
+    )
 }
 
 /// Map a pipeline version byte to [`Version`].

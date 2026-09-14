@@ -452,6 +452,88 @@ where
 }
 
 #[cfg(test)]
+mod recipe_shape_tests {
+    //! The three recipes that are *not* derived from the artifact graph.
+    //!
+    //! `plan` gets its ordering checked target-by-target in
+    //! leek-pipeline/tests/real_recipes.rs. These three build their plans
+    //! by hand, so nothing else catches a step added, dropped or
+    //! resequenced in them.
+
+    use super::{
+        Target, driver_params, pipeline_formatted, pipeline_hir_from_parse,
+        pipeline_hir_with_includes, pipeline_timed,
+    };
+    use leek_pipeline::{Context, Step, Tap, TimingSink};
+
+    fn fake_includes() -> Box<dyn Step> {
+        Box::new(Tap::new("resolve-includes", |_: &mut Context<'_>| {}))
+    }
+
+    #[test]
+    fn the_single_file_hir_recipe_skips_resolve_and_type_check() {
+        // leek-resolver's multi-file tests depend on this chain staying
+        // parse-only: adding `resolve` here would make every caller of
+        // `pipeline_hir_from_parse` resolve names it deliberately doesn't
+        // have yet.
+        assert_eq!(
+            pipeline_hir_from_parse(&driver_params())
+                .expect("plan")
+                .step_names(),
+            ["pragma", "lex", "parse", "lower-hir"]
+        );
+    }
+
+    #[test]
+    fn the_include_aware_hir_recipe_resolves_includes_before_parsing() {
+        assert_eq!(
+            pipeline_hir_with_includes(fake_includes(), &driver_params())
+                .expect("plan")
+                .step_names(),
+            ["pragma", "lex", "resolve-includes", "parse", "lower-hir"]
+        );
+    }
+
+    #[test]
+    fn formatting_runs_last_on_top_of_the_parsed_chain() {
+        // `leekc --emit fmt` and the LSP's formatting request both read the
+        // `FormattedArtifact` this appends; `fmt` needs the green tree, so
+        // it can only ever be the final step.
+        assert_eq!(
+            pipeline_formatted(leek_fmt::FormatOptions::default(), &driver_params())
+                .expect("plan")
+                .step_names(),
+            ["pragma", "lex", "parse", "fmt"]
+        );
+    }
+
+    #[test]
+    fn timing_wraps_every_step_and_changes_none_of_them() {
+        // `miku dev --verbose` and leek-bench read the sink. The wrapper
+        // must be transparent: same steps, same names, one entry each.
+        for target in [
+            Target::Tokens,
+            Target::Parsed,
+            Target::Resolved,
+            Target::TypeChecked,
+            Target::Hir,
+            Target::Linted,
+            Target::Mir,
+            Target::Complexity,
+        ] {
+            let plain = super::pipeline(target, &driver_params())
+                .unwrap_or_else(|e| panic!("{target:?}: {e}"))
+                .step_names();
+            let sink = TimingSink::new();
+            let timed = pipeline_timed(target, &driver_params(), &sink)
+                .unwrap_or_else(|e| panic!("{target:?}: {e}"))
+                .step_names();
+            assert_eq!(plain, timed, "{target:?}: timing changed the plan");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

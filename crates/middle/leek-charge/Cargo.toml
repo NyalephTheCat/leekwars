@@ -23,5 +23,17 @@ salsa = [
   "leek-span/salsa",
 ]
 
+[dev-dependencies]
+# Self dev-dependency: nothing in the workspace requests
+# `leek-charge/salsa`, so without this `charge_query` is never compiled by
+# `cargo test --workspace` or linted by `clippy --all-targets`. Same fix,
+# same reason, as crates/middle/leek-mir/Cargo.toml.
+leek-charge = { path = ".", features = ["salsa"] }
+# The memoization test drives a real pipeline, so it needs the
+# salsa-enabled frontend stages and the input setter.
+leek-syntax = { workspace = true, features = ["salsa"] }
+leek-lexer  = { workspace = true, features = ["salsa"] }
+leek-parser = { workspace = true, features = ["salsa"] }
+
 [lints]
 workspace = true

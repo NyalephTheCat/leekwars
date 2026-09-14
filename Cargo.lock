@@ -1073,9 +1073,13 @@ dependencies = [
 name = "leek-charge"
 version = "0.0.1"
 dependencies = [
+ "leek-charge",
  "leek-hir",
+ "leek-lexer",
+ "leek-parser",
  "leek-pipeline",
  "leek-span",
+ "leek-syntax",
  "salsa",
 ]
 
@@ -1321,6 +1325,7 @@ dependencies = [
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
+ "leek-mir",
  "leek-parser",
  "leek-pipeline",
  "leek-span",

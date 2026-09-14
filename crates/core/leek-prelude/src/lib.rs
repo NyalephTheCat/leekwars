@@ -104,3 +104,21 @@ where
 pub fn fold_constants() -> Vec<(String, String)> {
     FOLD_CONSTANTS.lock().expect("fold lock").clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_spans_cannot_be_mistaken_for_a_real_or_sentinel_source() {
+        // Library spans are reported against the user's file only if this
+        // id collides with one, so it must miss every id anyone else hands
+        // out: `ProjectIndex` counts up from 1, and leek-span reserves the
+        // top two for the manifest and for "no location".
+        let id = source_id();
+        assert_eq!(id.get(), 0xF00D);
+        assert_ne!(id, leek_span::SourceId::new(1).expect("nonzero"));
+        assert_ne!(id, leek_span::Span::MANIFEST_SOURCE);
+        assert_ne!(id, leek_span::Span::SYNTHETIC_SOURCE);
+    }
+}

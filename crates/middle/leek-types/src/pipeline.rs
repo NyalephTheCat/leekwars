@@ -110,9 +110,11 @@ fn type_options(cx: &Context<'_>) -> Options {
     }
 }
 
-/// Salsa-tracked entry point for type checking. Re-runs only when the
-/// upstream [`parse_query`](leek_parser::pipeline::parse_query)'s
-/// green tree changes or the `strict` flag flips.
+/// Salsa-tracked entry point for type checking. Re-runs when the upstream
+/// [`parse_query`](leek_parser::pipeline::parse_query)'s green tree
+/// changes, or when an input field this body reads off the
+/// [`SourceFile`](leek_pipeline::salsa::SourceFile) changes: `strict`,
+/// `flags_bits`, `source_id` or `version_byte`.
 #[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn typecheck_query(
@@ -153,5 +155,106 @@ pub fn typecheck_query(
         diagnostics,
         table,
         signatures,
+    }
+}
+
+/// Which [`SourceFile`](leek_pipeline::salsa::SourceFile) inputs
+/// [`typecheck_query`] depends on.
+///
+/// The interesting cases are the ones the parser is indifferent to:
+/// `strict` and the experimental `flags_bits` change what type-checking
+/// *means* without changing a single token, so the green tree comes back
+/// backdated and unchanged while this query still has to re-run. Getting
+/// that wrong leaves the LSP showing yesterday's diagnostics after a
+/// `// @strict` pragma is added.
+#[cfg(all(test, feature = "salsa"))]
+mod salsa_invalidation_tests {
+    use std::sync::atomic::Ordering;
+
+    use leek_parser::pipeline::Parse;
+    use leek_pipeline::Pipeline;
+    use leek_pipeline::salsa::{LeekDb, SourceFile};
+    use salsa::Setter;
+
+    use super::TypeCheck;
+    use crate::salsa_probe::{SERIAL, TYPECHECK_QUERY_CALLS};
+
+    const SRC: &str = "var x = 5;\nreturn x + 1;\n";
+
+    /// Prime the cache, apply `edit`, run again, and report how many times
+    /// `typecheck_query` executed on the second run.
+    fn reruns_after(edit: impl FnOnce(&mut LeekDb, SourceFile)) -> usize {
+        let _guard = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut db = LeekDb::default();
+        let file = SourceFile::new(&db, 1, SRC.to_string(), 4, false, 0, Vec::new());
+        // No `Resolve` step: without an `IncludeGraphArtifact` in the
+        // context `TypeCheck` takes the single-file salsa branch, which is
+        // the one under test.
+        let pipeline = Pipeline::new().with(Parse).with(TypeCheck);
+
+        let before = TYPECHECK_QUERY_CALLS.load(Ordering::Relaxed);
+        let _ = pipeline.run_memoized(&db, file);
+        let primed = TYPECHECK_QUERY_CALLS.load(Ordering::Relaxed);
+        assert_eq!(primed - before, 1, "the first run must execute the query");
+
+        edit(&mut db, file);
+
+        let _ = pipeline.run_memoized(&db, file);
+        TYPECHECK_QUERY_CALLS.load(Ordering::Relaxed) - primed
+    }
+
+    #[test]
+    fn an_untouched_input_reuses_the_cached_type_check() {
+        assert_eq!(reruns_after(|_, _| {}), 0);
+    }
+
+    #[test]
+    fn flipping_strict_rechecks_even_though_the_tree_is_unchanged() {
+        assert_eq!(
+            reruns_after(|db, file| {
+                file.set_strict(db).to(true);
+            }),
+            1,
+            "`strict` is read straight off the input, not through the parse"
+        );
+    }
+
+    #[test]
+    fn changing_the_experimental_feature_flags_rechecks() {
+        assert_eq!(
+            reruns_after(|db, file| {
+                file.set_flags_bits(db).to(0b1111_1111);
+            }),
+            1,
+            "the experimental flags select the inference rules"
+        );
+    }
+
+    #[test]
+    fn an_edit_that_changes_no_token_does_not_recheck() {
+        // Re-setting `text` to the same string bumps the revision, so the
+        // parse re-runs — but its green tree is unchanged, salsa backdates
+        // it, and type checking is skipped. This is the whole point of
+        // routing the type checker through `parse_query` rather than
+        // keying it on the raw text.
+        assert_eq!(
+            reruns_after(|db, file| {
+                file.set_text(db).to(SRC.to_string());
+            }),
+            0
+        );
+    }
+
+    #[test]
+    fn a_semantic_edit_rechecks() {
+        assert_eq!(
+            reruns_after(|db, file| {
+                file.set_text(db)
+                    .to("var y = \"s\";\nreturn y + 1;\n".to_string());
+            }),
+            1
+        );
     }
 }

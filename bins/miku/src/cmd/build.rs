@@ -4,7 +4,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use leek_backends::{java_clean_mode, pick_java_out_dir, resolve_backend, version_from_byte};
+use leek_backends::{
+    java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_backend, version_from_byte,
+};
 use leek_driver::{DriverConfig, run_entry, run_entry_timed};
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
@@ -93,7 +95,8 @@ pub fn run(
 }
 
 /// AOT-compile the project to a standalone native executable. The output path
-/// is `--out-dir` if given, else `<project root>/<project name>`.
+/// is `--out-dir` if given, else `[backend.native].out_dir`, else
+/// `<project root>/<project name>`.
 fn emit_native(
     project: &Project,
     result: &leek_pipeline::Run<'_>,
@@ -104,22 +107,19 @@ fn emit_native(
         .get::<HirArtifact>()
         .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
     let input = result.input();
-    let out = args
-        .out_dir
-        .clone()
-        .unwrap_or_else(|| project.root.join(&project.manifest.project.name));
+    let settings = project.manifest.backend.native.clone().unwrap_or_default();
+    let out = pick_out_dir(
+        project,
+        args.out_dir.as_deref(),
+        &settings,
+        project.root.join(&project.manifest.project.name),
+    );
 
     let mut opts = leek_backend_native::NativeOptions::release()
         .with_lang(input.version_byte, input.strict)
         // A standalone binary runs unbounded — no per-turn op budget.
         .with_op_limit(u64::MAX);
-    if let Some(depth) = project
-        .manifest
-        .backend
-        .native
-        .as_ref()
-        .and_then(|s| s.max_call_depth)
-    {
+    if let Some(depth) = settings.max_call_depth {
         opts.max_call_depth = depth;
     }
     leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, quiet)
@@ -128,7 +128,8 @@ fn emit_native(
 }
 
 /// Emit desugared official LeekScript source for the project. Writes
-/// `<entry-stem>.leek` to `--out-dir` (or `<build>/leekscript`).
+/// `<entry-stem>.leek` to `--out-dir`, else `[backend.leekscript].out_dir`,
+/// else `<build>/leekscript`.
 fn emit_leekscript(
     project: &Project,
     result: &leek_pipeline::Run<'_>,
@@ -152,11 +153,18 @@ fn emit_leekscript(
 
     let out = leek_backend_leekscript::emit(hir.0.as_ref(), &opts);
 
-    let out_dir = match &args.out_dir {
-        Some(dir) if dir.is_absolute() => dir.clone(),
-        Some(dir) => project.root.join(dir),
-        None => project.build_dir().join("leekscript"),
-    };
+    let settings = project
+        .manifest
+        .backend
+        .leekscript
+        .clone()
+        .unwrap_or_default();
+    let out_dir = pick_out_dir(
+        project,
+        args.out_dir.as_deref(),
+        &settings,
+        project.build_dir().join("leekscript"),
+    );
     std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
 
     let stem = project

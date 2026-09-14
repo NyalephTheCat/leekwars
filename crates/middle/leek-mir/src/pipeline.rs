@@ -66,6 +66,11 @@ impl RecipeArtifact for MirArtifact {
 }
 
 fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>> {
+    // NOTE(#428): unlike `LowerHir` / `TypeCheck`, this branch does not
+    // check for an include-aware run, so a memoized `Target::Mir` pipeline
+    // built by `pipeline_with_includes` would lower MIR from the entry
+    // file alone. Dormant: the only `run_memoized` caller is the LSP, which
+    // never asks for this target.
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let out = lower_mir_query(db, file);
@@ -107,8 +112,8 @@ pub struct LoweredMir(pub Arc<MirProgram>);
 /// changes.
 #[cfg(feature = "salsa")]
 #[salsa::tracked]
-pub fn lower_mir_query<'db>(
-    db: &'db dyn leek_pipeline::salsa::Db,
+pub fn lower_mir_query(
+    db: &dyn leek_pipeline::salsa::Db,
     file: leek_pipeline::salsa::SourceFile,
 ) -> LowerMirQueryResult {
     #[cfg(test)]
@@ -120,6 +125,19 @@ pub fn lower_mir_query<'db>(
         diagnostics,
     }
 }
+
+// The salsa cascade tests below are `#[cfg(feature = "salsa")]`, and a
+// cfg'd-out test is an absent test, not a passing one — which is how
+// `lower_mir_query` and its two tests went unbuilt in every gate for as
+// long as nothing in the workspace requested `leek-mir/salsa`. The self
+// dev-dependency in `Cargo.toml` turns the feature on for test builds;
+// refusing to build the test target without it makes losing that line a
+// loud failure rather than two tests quietly disappearing.
+#[cfg(all(test, not(feature = "salsa")))]
+compile_error!(
+    "leek-mir's test build needs the `salsa` feature — restore the self \
+     dev-dependency in crates/middle/leek-mir/Cargo.toml"
+);
 
 #[cfg(all(test, feature = "salsa"))]
 mod salsa_probe {
