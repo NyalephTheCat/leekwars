@@ -770,7 +770,6 @@ fn corpus_value_matches_snapshot() {
     let path = fixtures_dir().join("ops/snapshot.tsv");
     let contents = fs::read_to_string(&path).expect("read tracked snapshot.tsv");
 
-    let mut total = 0u32;
     let mut value_ok = 0u32;
     let mut value_mismatch = 0u32;
     let mut interp_err = 0u32;
@@ -780,42 +779,27 @@ fn corpus_value_matches_snapshot() {
     let mut mismatches = String::new();
     let mut ops_diffs: Vec<(usize, u8, String, i64, u64, u64)> = Vec::new();
 
-    for (lineno, line) in contents.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let cols: Vec<&str> = line.splitn(6, '\t').collect();
-        if cols.len() != 6 {
-            continue;
-        }
-        let version_byte: u8 = match cols[0].trim().parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        // Skip strict-mode rows — strict typing narrows compound
-        // assigns (`var a = 100; a /= 5;` → 20 not 20.0) and we
-        // don't yet replicate that pipeline.
-        if cols[1] == "S" {
-            continue;
-        }
-        let kind = cols[2];
-        if kind != "equals" {
-            continue;
-        }
-        let expected_value = unescape(cols[3]);
-        let expected_ops: u64 = cols[4].trim().parse().unwrap_or(u64::MAX);
-        let code = unescape(cols[5]);
+    let rows = corpus_rows(&contents);
+    let total = u32::try_from(rows.len()).expect("corpus row count fits u32");
+    // Run every row on the worker pool, then account for them in file order:
+    // the reports below are goldens, so a row's place in them must not depend
+    // on which worker happened to finish first.
+    let outcomes = run_corpus_rows(&rows);
 
-        total += 1;
-
-        // Run via the Rust interpreter.
-        let outcome = run_via_interp(&code, version_byte);
+    for (row, outcome) in rows.iter().zip(outcomes) {
+        let CorpusRow {
+            lineno,
+            version_byte,
+            expected_value,
+            expected_ops,
+            code,
+        } = row;
+        let (version_byte, expected_ops) = (*version_byte, *expected_ops);
         match outcome {
             InterpOutcome::Ok { value, ops } => {
-                if value == expected_value {
+                if value == *expected_value {
                     value_ok += 1;
-                    if is_rng_dependent(&code) {
+                    if is_rng_dependent(code) {
                         ops_nondet += 1;
                     } else if expected_ops == ops {
                         ops_match += 1;
@@ -824,7 +808,7 @@ fn corpus_value_matches_snapshot() {
                         let delta =
                             i64::try_from(ops).unwrap() - i64::try_from(expected_ops).unwrap();
                         ops_diffs.push((
-                            lineno + 1,
+                            *lineno,
                             version_byte,
                             code.clone(),
                             delta,
@@ -837,12 +821,8 @@ fn corpus_value_matches_snapshot() {
                     if mismatches.lines().count() < 50 {
                         let _ = writeln!(
                             mismatches,
-                            "snapshot:{} v{}: code={:?}\n  expected={:?}\n  got={:?}",
-                            lineno + 1,
-                            version_byte,
-                            code,
-                            expected_value,
-                            value
+                            "snapshot:{lineno} v{version_byte}: code={code:?}\n  \
+                             expected={expected_value:?}\n  got={value:?}",
                         );
                     }
                 }
@@ -852,10 +832,7 @@ fn corpus_value_matches_snapshot() {
                 if mismatches.lines().count() < 50 {
                     let _ = writeln!(
                         mismatches,
-                        "snapshot:{} v{}: code={:?} interp err: {msg}",
-                        lineno + 1,
-                        version_byte,
-                        code,
+                        "snapshot:{lineno} v{version_byte}: code={code:?} interp err: {msg}",
                     );
                 }
             }
@@ -909,6 +886,122 @@ enum InterpOutcome {
     Err(String),
 }
 
+/// One `equals` row of `snapshot.tsv` selected for the cross-check.
+struct CorpusRow {
+    /// 1-based line in `snapshot.tsv`, as the reports cite it.
+    lineno: usize,
+    version_byte: u8,
+    expected_value: String,
+    expected_ops: u64,
+    code: String,
+}
+
+/// The rows of a `snapshot.tsv` the cross-check runs, in file order.
+fn corpus_rows(contents: &str) -> Vec<CorpusRow> {
+    let mut rows = Vec::new();
+    for (lineno, line) in contents.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let cols: Vec<&str> = line.splitn(6, '\t').collect();
+        if cols.len() != 6 {
+            continue;
+        }
+        let Ok(version_byte) = cols[0].trim().parse::<u8>() else {
+            continue;
+        };
+        // Skip strict-mode rows — strict typing narrows compound
+        // assigns (`var a = 100; a /= 5;` → 20 not 20.0) and we
+        // don't yet replicate that pipeline.
+        if cols[1] == "S" {
+            continue;
+        }
+        let kind = cols[2];
+        if kind != "equals" {
+            continue;
+        }
+        rows.push(CorpusRow {
+            lineno: lineno + 1,
+            version_byte,
+            expected_value: unescape(cols[3]),
+            expected_ops: cols[4].trim().parse().unwrap_or(u64::MAX),
+            code: unescape(cols[5]),
+        });
+    }
+    rows
+}
+
+/// Wall-clock cap for one row on its worker. Rust can't kill a stuck thread,
+/// so this is a watchdog, not a kill switch: it bounds how long a row whose
+/// parse / lower / JIT runs away can hold the suite up.
+const ROW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A long-lived interpreter worker: a thread that runs whatever rows it is
+/// handed, one at a time, and answers each on its own result channel. Every
+/// piece of native-runtime state a row touches (op counter, globals, dispatch
+/// tables, RNG seed) is thread-local and re-armed per run, so a reused thread
+/// sees exactly what a fresh one would.
+struct InterpWorker {
+    jobs: std::sync::mpsc::Sender<(String, u8)>,
+    results: std::sync::mpsc::Receiver<InterpOutcome>,
+}
+
+impl InterpWorker {
+    fn spawn() -> Self {
+        let (jobs, inbox) = std::sync::mpsc::channel::<(String, u8)>();
+        let (outbox, results) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (code, version_byte) in inbox {
+                // A retired worker has no listener left — stop rather than
+                // hold its arena and channel open for nobody.
+                if outbox.send(run_via_interp(&code, version_byte)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { jobs, results }
+    }
+}
+
+/// Run every row on a fixed pool of workers, returning the outcomes **in row
+/// order**.
+///
+/// A row that outruns [`ROW_TIMEOUT`] becomes an error row, exactly as the
+/// thread-per-row version did. Its worker is then *retired* — dropped and
+/// replaced — so the pool stays its fixed width instead of gaining a leaked
+/// thread per slow row; the stuck thread ends itself once its send fails.
+fn run_corpus_rows(rows: &[CorpusRow]) -> Vec<InterpOutcome> {
+    let width = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(8);
+    let mut pool: Vec<InterpWorker> = (0..width).map(|_| InterpWorker::spawn()).collect();
+    let mut outcomes = Vec::with_capacity(rows.len());
+    for batch in rows.chunks(width) {
+        for (worker, row) in pool.iter().zip(batch) {
+            worker
+                .jobs
+                .send((row.code.clone(), row.version_byte))
+                .expect("worker takes its row");
+        }
+        // The batch starts together, so one deadline covers every row in it —
+        // each still gets its own `ROW_TIMEOUT` of wall clock from dispatch.
+        let deadline = std::time::Instant::now() + ROW_TIMEOUT;
+        for worker in pool.iter_mut().take(batch.len()) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if let Ok(outcome) = worker.results.recv_timeout(left) {
+                outcomes.push(outcome);
+            } else {
+                outcomes.push(InterpOutcome::Err("timeout".into()));
+                *worker = InterpWorker::spawn();
+            }
+        }
+    }
+    outcomes
+}
+
+/// Parse, lower and JIT-run one row **on the calling thread**, mapping a panic
+/// on either side to an error row rather than a test-process abort.
 fn run_via_interp(code: &str, version_byte: u8) -> InterpOutcome {
     // Convert byte to the syntax Version enum the parser wants.
     let version = match version_byte {
@@ -918,45 +1011,31 @@ fn run_via_interp(code: &str, version_byte: u8) -> InterpOutcome {
         4 => Version::V4,
         _ => return InterpOutcome::Err(format!("unsupported version byte {version_byte}")),
     };
-    // Run on a worker thread with a wall-clock cap. Rust can't kill
-    // a stuck thread safely, so on timeout we leak the worker and
-    // move on — the leak is bounded by how many corpus rows trip
-    // a parser / lowerer infinite loop. `catch_unwind` still wraps
-    // the worker body so panics on either side become error rows
-    // rather than a test-process abort.
-    let code = code.to_string();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let source = SourceId::new(1).unwrap();
-            let parsed = parse(&code, source, version);
-            let root = SyntaxNode::new_root(parsed.green);
-            let Some(sf) = leek_parser::ast::SourceFile::cast(root) else {
-                return Err("parse failed".to_string());
-            };
-            let (hir, _diags) = leek_hir::lower_file_versioned(&sf, source, version_byte);
-            leek_runtime::DISPLAY_VERSION.with(|c| c.set(version_byte));
-            let mut opts = leek_backend_native::NativeOptions::release();
-            opts.version = version_byte;
-            opts.op_limit = SNAPSHOT_OP_LIMIT;
-            opts.emit = leek_backend_native::NativeEmit::Jit;
-            match leek_backend_native::compile(&hir, &opts) {
-                Ok(leek_backend_native::NativeArtifact::Value(v)) => {
-                    Ok((v.to_string(), leek_backend_native::ops_used()))
-                }
-                Ok(_) => Err("native produced no value".to_string()),
-                Err(e) => Err(e.to_string()),
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let source = SourceId::new(1).unwrap();
+        let parsed = parse(code, source, version);
+        let root = SyntaxNode::new_root(parsed.green);
+        let Some(sf) = leek_parser::ast::SourceFile::cast(root) else {
+            return Err("parse failed".to_string());
+        };
+        let (hir, _diags) = leek_hir::lower_file_versioned(&sf, source, version_byte);
+        leek_runtime::DISPLAY_VERSION.with(|c| c.set(version_byte));
+        let mut opts = leek_backend_native::NativeOptions::release();
+        opts.version = version_byte;
+        opts.op_limit = SNAPSHOT_OP_LIMIT;
+        opts.emit = leek_backend_native::NativeEmit::Jit;
+        match leek_backend_native::compile(&hir, &opts) {
+            Ok(leek_backend_native::NativeArtifact::Value(v)) => {
+                Ok((v.to_string(), leek_backend_native::ops_used()))
             }
-        }));
-        let _ = tx.send(match outcome {
-            Ok(Ok((value, ops))) => InterpOutcome::Ok { value, ops },
-            Ok(Err(msg)) => InterpOutcome::Err(msg),
-            Err(_) => InterpOutcome::Err("panic during interp".into()),
-        });
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-        Ok(outcome) => outcome,
-        Err(_) => InterpOutcome::Err("timeout".into()),
+            Ok(_) => Err("native produced no value".to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }));
+    match outcome {
+        Ok(Ok((value, ops))) => InterpOutcome::Ok { value, ops },
+        Ok(Err(msg)) => InterpOutcome::Err(msg),
+        Err(_) => InterpOutcome::Err("panic during interp".into()),
     }
 }
 

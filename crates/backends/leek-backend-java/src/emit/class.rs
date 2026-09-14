@@ -26,6 +26,39 @@ impl<'a> super::Emitter<'a> {
     }
 
     pub(crate) fn emit_function(&mut self, f: &Function) {
+        self.emit_function_with(f, &f.params, &[]);
+
+        // Per-arity overloads for default parameter values. Leek
+        // accepts `function f(x = 5) { … } f()` — Java doesn't have
+        // default args, so for each call arity in [first_default,
+        // full_arity) emit a forwarding overload that fills the
+        // missing params with their default expressions.
+        let first_default = f.params.iter().position(|p| p.default.is_some());
+        if let Some(min_arity) = first_default {
+            let full_arity = f.params.len();
+            for arity in min_arity..full_arity {
+                self.emit_default_overload(f, arity);
+            }
+        }
+    }
+
+    /// Emit one Java method for `f`, declaring exactly `params` — a *prefix* of
+    /// `f.params`, shorter than the whole list for a default-arity overload —
+    /// and running `extra_leading` (an overload's synthetic default bindings)
+    /// ahead of the body's own statements.
+    ///
+    /// Borrowing the parameters as a slice is what lets
+    /// [`Self::emit_default_overload`] emit a lower arity without cloning the
+    /// entire [`Function`], body included, once per default value. The
+    /// default-arity loop lives in [`Self::emit_function`] — the only
+    /// full-arity caller — so emitting an overload can never recursively
+    /// re-emit the lower ones.
+    fn emit_function_with(
+        &mut self,
+        f: &Function,
+        params: &[leek_hir::Param],
+        extra_leading: &[leek_hir::Stmt],
+    ) {
         let name = mangle::function(self.opts, &f.name);
         // Exact mode declares params `p_x` then rebinds `var u_x = p_x;` so the
         // body can refer to them as `u_x` (like other locals). Clean mode has no
@@ -39,16 +72,19 @@ impl<'a> super::Emitter<'a> {
         // rebind entirely, which silently dropped a write made inside the
         // lambda (the closure got a by-value copy, or the emit fell back to a
         // `return null` stub).
-        let boxed: Vec<bool> = f
-            .params
+        // `extra_leading` is part of the body this method emits, so a lambda
+        // inside a default expression captures just like one in the body.
+        let boxed: Vec<bool> = params
             .iter()
-            .map(|p| param_needs_box(f.body.as_ref(), p))
+            .map(|p| {
+                captured_by_nested_lambda_stmts(extra_leading, p.def)
+                    || param_needs_box(f.body.as_ref(), p)
+            })
             .collect();
         // At v1 args are passed by value, so a `p_x` slot + a copy/box rebind is
         // needed for every param (a `@x` aliases instead of copying). At v2+
         // only exact mode and a boxed param rebind (`var u_x = p_x`).
-        let params = f
-            .params
+        let sig_params = params
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -61,7 +97,7 @@ impl<'a> super::Emitter<'a> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let rebinds = f.params.iter().enumerate().fold(String::new(), |mut acc, (i, p)| {
+        let rebinds = params.iter().enumerate().fold(String::new(), |mut acc, (i, p)| {
             let safe = sanitize_ident(&p.name);
             let body = mangle::local(self.opts, &p.name);
             let ai = self.ai_this();
@@ -128,7 +164,7 @@ impl<'a> super::Emitter<'a> {
             acc
         });
         self.writer.add_line(&format!(
-            "private Object {name}({params}) throws LeekRunException {{{rebinds}"
+            "private Object {name}({sig_params}) throws LeekRunException {{{rebinds}"
         ));
         if self.opts.is_clean() {
             self.writer.push_indent();
@@ -139,11 +175,12 @@ impl<'a> super::Emitter<'a> {
             // `writer.addCounter(1)`). Concatenated with the first body line.
             if self.opts.emit_ops {
                 self.writer.add_code("ops(1);");
-                let pb = self.v1_param_box_ops(&f.params);
+                let pb = self.v1_param_box_ops(params);
                 if !pb.is_empty() {
                     self.writer.add_code(&pb);
                 }
             }
+            self.emit_stmts(extra_leading);
             self.emit_stmts(&body.stmts);
             if !ends_with_return(&body.stmts, self.opts.emit_ops) {
                 self.writer.add_line("return null;");
@@ -156,22 +193,12 @@ impl<'a> super::Emitter<'a> {
             self.writer.pop_indent();
         }
         self.writer.add_line("}");
-
-        // Per-arity overloads for default parameter values. Leek
-        // accepts `function f(x = 5) { … } f()` — Java doesn't have
-        // default args, so for each call arity in [first_default,
-        // full_arity) emit a forwarding overload that fills the
-        // missing params with their default expressions.
-        let first_default = f.params.iter().position(|p| p.default.is_some());
-        if let Some(min_arity) = first_default {
-            let full_arity = f.params.len();
-            for arity in min_arity..full_arity {
-                self.emit_default_overload(f, &name, arity);
-            }
-        }
     }
 
-    pub(crate) fn emit_default_overload(&mut self, f: &Function, _name: &str, arity: usize) {
+    /// Emit the `arity`-parameter overload of a function with default values:
+    /// the same body, preceded by a local binding per omitted parameter
+    /// initialized to its default expression.
+    fn emit_default_overload(&mut self, f: &Function, arity: usize) {
         // Upstream duplicates the whole body per arity, binding each omitted
         // param as a *local* initialized to its default expression (`var u_a
         // = new Box(AI.this, <default>); …` — no `copy(p_a)` re-bind, since
@@ -180,22 +207,14 @@ impl<'a> super::Emitter<'a> {
         // deep-copy, over-charging by a full clone (OPS_DRIFT L3153/L3157).
         // The decl shape is charge-identical to upstream's: `ops(<default>,
         // cost+1)` statically vs. Box-ctor 1 + `ops(cost);` runtime.
-        let mut g = f.clone();
-        g.params.truncate(arity);
-        // Clear remaining defaults so `emit_function` doesn't recursively
-        // re-emit the lower-arity overloads (the outer loop already covers
-        // every arity — leaving them produced duplicate methods).
-        for p in &mut g.params {
-            p.default = None;
-        }
-        if let Some(body) = &mut g.body {
+        let decls: Vec<leek_hir::Stmt> = if f.body.is_some() {
             // Mark the spliced defs so `emit_var_decl` knows to drop the +1
             // declaration tick at v2+ (upstream binds an omitted param with
             // only the default expression's own cost).
             for p in &f.params[arity..] {
                 self.synthetic_default_decls.insert(p.def);
             }
-            let decls: Vec<leek_hir::Stmt> = f.params[arity..]
+            f.params[arity..]
                 .iter()
                 .map(|p| {
                     leek_hir::Stmt::VarDecl(leek_hir::VarDecl {
@@ -207,10 +226,13 @@ impl<'a> super::Emitter<'a> {
                         span: p.span,
                     })
                 })
-                .collect();
-            body.stmts.splice(0..0, decls);
-        }
-        self.emit_function(&g);
+                .collect()
+        } else {
+            // A bodiless function emits `return null;` — there is nowhere for
+            // the default bindings to go, so none are marked synthetic.
+            Vec::new()
+        };
+        self.emit_function_with(f, &f.params[..arity], &decls);
     }
 
     /// Emit a user class as a `NativeObjectLeekValue` subclass — real public
