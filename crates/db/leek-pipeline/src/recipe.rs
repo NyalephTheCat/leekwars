@@ -98,15 +98,11 @@ impl RecipeParams {
     /// completion, and go-to-def all go dark the moment the buffer
     /// stops parsing cleanly.
     pub fn lsp() -> Self {
-        Self {
-            stop_on_diagnostics: None,
-            opt: OptLevel::O0,
-            lints: LintGroups::default(),
-            want: None,
-        }
+        Self::permissive()
     }
 
-    /// No stop-on-error wrapping (e.g. best-effort tooling).
+    /// No stop-on-error wrapping (e.g. best-effort tooling): every planned
+    /// step runs even after an earlier one reported an error.
     pub fn permissive() -> Self {
         Self {
             stop_on_diagnostics: None,
@@ -114,11 +110,6 @@ impl RecipeParams {
             lints: LintGroups::default(),
             want: None,
         }
-    }
-
-    pub fn without_stop_on_error(mut self) -> Self {
-        self.stop_on_diagnostics = None;
-        self
     }
 
     /// Request an [`OptLevel`] for this recipe (codegen drivers use
@@ -247,18 +238,22 @@ impl RecipePlan {
     }
 
     pub fn build(self) -> Pipeline {
-        let mut p = Pipeline::new();
-        for s in self.steps {
-            p = p.with_boxed(s);
-        }
-        p
+        self.build_with(None)
     }
 
-    /// Like [`build`](Self::build), but wraps each planned step in [`TimedBox`].
-    pub fn build_timed(self, sink: &TimingSink) -> Pipeline {
+    /// [`build`](Self::build), wrapping each planned step in [`TimedBox`]
+    /// when `timing` carries a sink.
+    ///
+    /// One builder for both shapes on purpose: a timed pipeline is the
+    /// untimed one plus a stopwatch, and a second `build` that re-walked the
+    /// steps is how the two drift apart.
+    pub fn build_with(self, timing: Option<&TimingSink>) -> Pipeline {
         let mut p = Pipeline::new();
         for s in self.steps {
-            p = p.with_boxed(TimedBox::sink(s, sink.clone()));
+            p = p.with_boxed(match timing {
+                Some(sink) => TimedBox::sink(s, sink.clone()),
+                None => s,
+            });
         }
         p
     }

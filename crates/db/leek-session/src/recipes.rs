@@ -63,15 +63,6 @@ pub fn plan(
     }
 }
 
-/// Like [`pipeline`], but records per-step durations into `sink`.
-pub fn pipeline_timed(
-    target: Target,
-    params: &RecipeParams,
-    sink: &TimingSink,
-) -> Result<Pipeline, RecipeError> {
-    Ok(plan(target, params)?.build_timed(sink))
-}
-
 /// Parse, then lower HIR without resolve/types (single-file path).
 pub fn pipeline_hir_from_parse(params: &RecipeParams) -> Result<Pipeline, RecipeError> {
     let mut plan = leek_pipeline::RecipePlan::new();
@@ -129,16 +120,6 @@ pub fn pipeline_with_includes(
     params: &RecipeParams,
 ) -> Result<Pipeline, RecipeError> {
     plan_with_includes(target, includes, params).map(leek_pipeline::RecipePlan::build)
-}
-
-/// Like [`pipeline_with_includes`], but records per-step durations into `sink`.
-pub fn pipeline_with_includes_timed(
-    target: Target,
-    includes: Box<dyn leek_pipeline::Step>,
-    params: &RecipeParams,
-    sink: &TimingSink,
-) -> Result<Pipeline, RecipeError> {
-    Ok(plan_with_includes(target, includes, params)?.build_timed(sink))
 }
 
 /// Formatting is separate because [`Fmt`] carries per-project options.
@@ -462,7 +443,7 @@ mod recipe_shape_tests {
 
     use super::{
         Target, driver_params, pipeline_formatted, pipeline_hir_from_parse,
-        pipeline_hir_with_includes, pipeline_timed,
+        pipeline_hir_with_includes,
     };
     use leek_pipeline::{Context, Step, Tap, TimingSink};
 
@@ -525,8 +506,9 @@ mod recipe_shape_tests {
                 .unwrap_or_else(|e| panic!("{target:?}: {e}"))
                 .step_names();
             let sink = TimingSink::new();
-            let timed = pipeline_timed(target, &driver_params(), &sink)
+            let timed = super::plan(target, &driver_params())
                 .unwrap_or_else(|e| panic!("{target:?}: {e}"))
+                .build_with(Some(&sink))
                 .step_names();
             assert_eq!(plain, timed, "{target:?}: timing changed the plan");
         }

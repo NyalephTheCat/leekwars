@@ -46,6 +46,7 @@ pub fn run(
         params: RecipeParams::default(),
         color: color.into(),
         format: format.into(),
+        timing: None,
     };
     let reporter = leek_session::reporter_for(&project, config.color, config.format)?;
 

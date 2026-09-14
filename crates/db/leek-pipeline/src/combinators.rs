@@ -4,6 +4,7 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 
 use crate::Step;
+use crate::adapters::StopOnDiagnostics;
 use crate::recipe::{
     ArtifactList, RecipeArtifact, RecipeError, RecipeParams, RecipePlan, RecipeStep,
 };
@@ -43,37 +44,30 @@ impl<A: RecipeArtifact> ArtifactList for Optional<A> {
     }
 }
 
-/// A producer step wrapped to stop the pipeline on new diagnostics.
-pub struct StopOnError<S: Step> {
-    inner: S,
-    min: leek_diagnostics::Severity,
-}
+/// The recipe-level spelling of [`StopOnDiagnostics::abort`]: a producer
+/// step wrapped to abort the run when it emits a new diagnostic at or above
+/// `min`.
+///
+/// A constructor rather than a wrapper type of its own — the two had
+/// identical `run` bodies, and one of them was going to grow a fix the other
+/// missed.
+pub struct StopOnError;
 
-impl<S: Step> StopOnError<S> {
-    pub fn wrap(inner: S, min: leek_diagnostics::Severity) -> Self {
-        Self { inner, min }
+impl StopOnError {
+    /// Wrap `inner` so that a new diagnostic at or above `min` aborts the
+    /// pipeline once `inner` has finished.
+    pub fn wrap<S: Step>(inner: S, min: leek_diagnostics::Severity) -> StopOnDiagnostics<S> {
+        StopOnDiagnostics::abort(inner, min)
     }
 }
 
-impl<S: Step> Step for StopOnError<S> {
-    fn name(&self) -> &'static str {
-        self.inner.name()
-    }
-
-    fn run(&self, cx: &mut crate::Context<'_>) -> Result<(), crate::StepError> {
-        let before = cx.diagnostics().len();
-        self.inner.run(cx)?;
-        if cx.diagnostics()[before..]
-            .iter()
-            .any(|d| d.severity <= self.min)
-        {
-            cx.abort();
-        }
-        Ok(())
-    }
-}
-
-/// [`RecipeStep`] helper: wrap `build_inner` with [`StopOnError`] when configured.
+/// [`RecipeStep`] helper: wrap `build_inner` with [`StopOnError`] when
+/// [`RecipeParams::stop_on_diagnostics`] is set.
+///
+/// Exactly one production step opts in — `leek_parser::pipeline::Parse` — so
+/// that a file which does not parse stops the run instead of handing a
+/// truncated tree to resolution and type-checking. Every other pass
+/// implements [`RecipeStep`] directly and keeps running after diagnostics.
 pub trait RecipeStepStopOnError: Step + Sized + 'static {
     fn build_inner(params: &RecipeParams) -> Self;
 }

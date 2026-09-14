@@ -32,6 +32,7 @@ pub fn run(
         }),
         color: color.into(),
         format: format.into(),
+        timing: None,
     };
     let driver_run = run_entry(&project, &config)?;
     Ok(if driver_run.had_error {

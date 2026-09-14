@@ -8,7 +8,7 @@ use leek_backends::{java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_ba
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
 use leek_project::Project;
-use leek_session::{DriverConfig, RecipeParams, Target, run_entry, run_entry_timed};
+use leek_session::{DriverConfig, RecipeParams, Target, run_entry};
 use leek_syntax::version::version_from_byte;
 
 use crate::cli::{Build, ColorWhen, MessageFormat};
@@ -48,15 +48,18 @@ pub fn run(
         leek_session::OptLevel::O1
     };
 
+    // `--verbose` times the very pipeline the plain build runs: the sink
+    // rides along on the config rather than selecting a separate entry point.
+    let sink = verbose.then(leek_pipeline::TimingSink::new);
     let config = DriverConfig {
         target: Target::Linted,
         params: RecipeParams::default().with_opt(opt),
         color: color.into(),
         format: format.into(),
+        timing: sink.clone(),
     };
-    let driver_run = if verbose {
-        let sink = leek_pipeline::TimingSink::new();
-        let run = run_entry_timed(&project, &config, &sink)?;
+    let driver_run = run_entry(&project, &config)?;
+    if let Some(sink) = &sink {
         eprintln!(
             "miku build: pipeline timings for {}:",
             project.entry_path().display()
@@ -67,10 +70,7 @@ pub fn run(
             eprintln!("  {:>14}: {:?}", entry.step, entry.duration);
         }
         eprintln!("  {:>14}: {:?}", "total", total);
-        run
-    } else {
-        run_entry(&project, &config)?
-    };
+    }
     if driver_run.had_error {
         return Ok(ExitCode::from(1));
     }

@@ -1349,7 +1349,6 @@ version = "0.0.1"
 dependencies = [
  "leek-diagnostics",
  "leek-hir",
- "leek-manifest",
  "leek-mir",
  "leek-project",
  "leek-session",

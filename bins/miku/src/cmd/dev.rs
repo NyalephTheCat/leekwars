@@ -87,8 +87,9 @@ fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
         false,
     );
     let sink = TimingSink::new();
-    let pipeline = leek_session::pipeline_timed(Target::Hir, &RecipeParams::permissive(), &sink)
-        .expect("recipe");
+    let pipeline = leek_session::plan(Target::Hir, &RecipeParams::permissive())
+        .expect("recipe")
+        .build_with(Some(&sink));
     let _run = pipeline.run(Input {
         source: SourceId::new(1).unwrap(),
         text: text.into(),
