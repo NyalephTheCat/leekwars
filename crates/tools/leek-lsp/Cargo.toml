@@ -20,7 +20,7 @@ leek-fmt         = { workspace = true, features = ["salsa"] }
 leek-rewrite     = { workspace = true }
 leek-hir         = { workspace = true, features = ["salsa"] }
 leek-lint        = { workspace = true, features = ["salsa"] }
-leek-complexity  = { workspace = true }
+leek-complexity  = { workspace = true, features = ["salsa"] }
 leek-ide         = { workspace = true }
 
 tower-lsp        = "0.20"

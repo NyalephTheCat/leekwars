@@ -53,8 +53,11 @@ fn run_analyze(cx: &Context<'_>) -> Option<Arc<Vec<Complexity>>> {
     // NOTE(#428): unlike `LowerHir` / `TypeCheck`, this branch does not
     // check for an include-aware run, so a memoized `Target::Complexity` pipeline
     // built by `pipeline_with_includes` would measure complexity from the entry
-    // file alone. Dormant: the only `run_memoized` caller is the LSP, which
-    // never asks for this target.
+    // file alone. Still dormant, but for a narrower reason than it used to be:
+    // since #165 the LSP *does* ask for this target, from hover, code lens and
+    // `leek.showComplexity` — only ever through `crate::pipeline::run` /
+    // `run_on_file`, which build a plain `leek_recipes::pipeline`. Nothing
+    // routes `Target::Complexity` through `pipeline_with_includes` yet.
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         return Some(complexity_query(db, file).0);
@@ -78,8 +81,114 @@ pub fn complexity_query(
     db: &dyn leek_pipeline::salsa::Db,
     file: leek_pipeline::salsa::SourceFile,
 ) -> ComplexityReport {
+    #[cfg(test)]
+    salsa_probe::COMPLEXITY_QUERY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let hir = leek_hir::pipeline::lower_hir_query(db, file);
     ComplexityReport(Arc::new(analyze_file(hir.hir.as_ref())))
+}
+
+// The salsa cascade tests below are `#[cfg(feature = "salsa")]`, and a
+// cfg'd-out test is an absent test, not a passing one. The self
+// dev-dependency in `Cargo.toml` turns the feature on for test builds;
+// refusing to build the test target without it makes losing that line a
+// loud failure rather than the caching proof quietly disappearing. (The
+// same trap leek-mir's `lower_mir_query` fell into — see
+// `leek_mir::pipeline`.)
+#[cfg(all(test, not(feature = "salsa")))]
+compile_error!(
+    "leek-complexity's test build needs the `salsa` feature — restore the self \
+     dev-dependency in crates/middle/leek-complexity/Cargo.toml"
+);
+
+#[cfg(all(test, feature = "salsa"))]
+mod salsa_probe {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    pub(super) static COMPLEXITY_QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static SERIAL: Mutex<()> = Mutex::new(());
+}
+
+#[cfg(all(test, feature = "salsa"))]
+mod salsa_tests {
+    use std::sync::atomic::Ordering;
+
+    use leek_hir::pipeline::LowerHir;
+    use leek_lexer::pipeline::Lex;
+    use leek_parser::pipeline::Parse;
+    use leek_pipeline::Pipeline;
+    use leek_pipeline::salsa::{LeekDb, SourceFile};
+    use leek_syntax::pipeline::Pragma;
+    use salsa::Setter;
+
+    use super::Analyze;
+    use super::salsa_probe::{COMPLEXITY_QUERY_CALLS, SERIAL};
+
+    fn source(db: &mut LeekDb, text: &str) -> SourceFile {
+        SourceFile::new(db, 1, text.to_string(), 4, false, 0, Vec::new())
+    }
+
+    fn pipeline() -> Pipeline {
+        Pipeline::new()
+            .with(Pragma)
+            .with(Lex)
+            .with(Parse)
+            .with(LowerHir::default())
+            .with(Analyze)
+    }
+
+    #[test]
+    fn full_cascade_caches_complexity() {
+        let _guard = SERIAL.lock().unwrap();
+        let mut db = LeekDb::default();
+        let file = source(
+            &mut db,
+            "function sum(arr) { var t = 0 for (var x in arr) { t = t + x } return t }\n",
+        );
+        let pipeline = pipeline();
+
+        let before = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);
+        let _ = pipeline.run_memoized(&db, file);
+        let after_first = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);
+        let _ = pipeline.run_memoized(&db, file);
+        let after_second = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);
+
+        assert_eq!(
+            after_first - before,
+            1,
+            "first run executes the analysis once"
+        );
+        assert_eq!(
+            after_second - after_first,
+            0,
+            "a second identical run must hit the salsa cache — this is what \
+             lets the LSP ask for the report on every hover and code lens"
+        );
+    }
+
+    #[test]
+    fn semantic_edit_reruns_complexity() {
+        let _guard = SERIAL.lock().unwrap();
+        let mut db = LeekDb::default();
+        let file = source(&mut db, "function f() { return 1 }\n");
+        let pipeline = pipeline();
+
+        let before = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);
+        let _ = pipeline.run_memoized(&db, file);
+        let after_first = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);
+
+        file.set_text(&mut db)
+            .to("function f(n) { for (var i = 0; i < n; i++) { } return 1 }\n".to_string());
+
+        let _ = pipeline.run_memoized(&db, file);
+        let after_second = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);
+
+        assert_eq!(after_first - before, 1);
+        assert_eq!(
+            after_second - after_first,
+            1,
+            "a semantic change must re-execute the analysis"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -66,6 +66,10 @@ types:
 lowering:
   - { id: E0300, name: LoweringUnsupported, severity: error }
   - { id: E0301, name: BackendDirectiveNotAllowed, severity: warning }
+  # Raised by leek-mir's `VerifyMir` step when lowered MIR breaks a
+  # structural invariant the backends index on without bounds checks.
+  # Always a compiler bug, never something the user's source can cause.
+  - { id: E0302, name: MalformedMir, severity: error }
 
 manifest:
   # E0400 stays the raw-TOML syntax failure; the rest name *which* part of the

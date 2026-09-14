@@ -6,10 +6,9 @@
 //!     with this one — far too much for a request the editor fires on
 //!     every scroll. [`resolve`] fills in the title and the command for
 //!     the handful of lenses the editor is about to draw.
-//!  2. `Complexity: O(...)` / `Cost: N operations` (from
-//!     [`leek_complexity::analyze_file`]), matched to the declaration by
-//!     span so a method never borrows a same-named free function's
-//!     record.
+//!  2. `Complexity: O(...)` / `Cost: N operations` (from the pipeline's
+//!     [`ComplexityArtifact`]), matched to the declaration by span so a
+//!     method never borrows a same-named free function's record.
 //!
 //! The resolved reference lens carries `leek.showReferences` with the
 //! `(uri, position, locations)` triple `editor.action.showReferences`
@@ -17,8 +16,8 @@
 //! peek view. The complexity lens carries `leek.showComplexity`, which
 //! the server answers in `workspace/executeCommand`.
 
-use leek_complexity::{Complexity, analyze_file};
-use leek_hir::pipeline::HirArtifact;
+use leek_complexity::Complexity;
+use leek_complexity::pipeline::ComplexityArtifact;
 use leek_resolver::pipeline::ResolveArtifact;
 use leek_resolver::{Symbol, SymbolKind};
 use leek_span::Span;
@@ -29,10 +28,12 @@ use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::CodeLens>> {
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Hir)?;
+    // `Target::Complexity` plans HIR (and resolve) transitively, and the
+    // report it carries is salsa-cached per file revision — a code lens
+    // request fires on every scroll. See #165.
+    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Complexity)?;
     let table = &run.get::<ResolveArtifact>()?.table;
-    let hir = run.get::<HirArtifact>()?;
-    let complexities = analyze_file(&hir.0);
+    let complexities = &run.get::<ComplexityArtifact>()?.0;
 
     let mut out: Vec<lsp::CodeLens> = Vec::new();
     for sym in &table.symbols {
@@ -50,7 +51,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::CodeLens>> {
                 "symbol_offset": sym.def_span.start,
             })),
         });
-        if let Some(c) = complexity_for(&complexities, sym) {
+        if let Some(c) = complexity_for(complexities, sym) {
             // For a constant-cost function/method the operation count is
             // more useful than `O(1)` — show the cost directly (mirrors
             // the hover row).
@@ -150,7 +151,7 @@ pub fn resolve(ws: &Workspace, lens: lsp::CodeLens) -> Option<lsp::CodeLens> {
 
 /// The complexity record for the declaration `sym` names.
 ///
-/// Matched by span, not by name: [`analyze_file`] registers a method
+/// Matched by span, not by name: the report registers a method
 /// under `Class.method` while a free function keeps its bare name, so a
 /// name lookup misses every method and silently hands it a same-named
 /// top-level function's record instead. A declaration's span covers its

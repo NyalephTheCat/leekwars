@@ -13,3 +13,10 @@ use crate::{Diagnostic, codes};
 pub fn lowering_unsupported(span: Span, message: impl Into<String>) -> Diagnostic {
     Diagnostic::at(codes::LOWERING_UNSUPPORTED, span, message)
 }
+
+/// Build a malformed-MIR diagnostic at `span`. Raised by leek-mir's
+/// verifier; `span` points at the offending function (or, where the
+/// verifier can narrow it, the offending statement).
+pub fn malformed_mir(span: Span, message: impl Into<String>) -> Diagnostic {
+    Diagnostic::at(codes::MALFORMED_MIR, span, message)
+}

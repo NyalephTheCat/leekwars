@@ -450,12 +450,17 @@ pub enum LocalKind {
 pub struct BasicBlock {
     pub id: BlockId,
     pub statements: Vec<Statement>,
-    /// Source span of each statement, parallel to `statements` (same
-    /// length). Populated by the lowering's `push_stmt`; used by the
-    /// native backend's debug build to map machine code back to source
-    /// lines for breakpoints. Blocks built outside the lowering (test
+    /// Source span of each statement, parallel to `statements`.
+    /// Populated by the lowering's `push_stmt`; used by the native
+    /// backend's debug build to map machine code back to source lines
+    /// for breakpoints. Blocks built outside the lowering (test
     /// helpers, synthetic thunks) may leave this empty — readers must
     /// tolerate a missing entry.
+    ///
+    /// Empty, or exactly parallel — never partially filled. A short
+    /// vector would make `statement_spans.get(i)` hand out some other
+    /// statement's location instead of falling back, so
+    /// [`crate::verify`] rejects that shape.
     pub statement_spans: Vec<Span>,
     pub terminator: Terminator,
     /// Source span of the terminator (e.g. the `return` line). Lets the

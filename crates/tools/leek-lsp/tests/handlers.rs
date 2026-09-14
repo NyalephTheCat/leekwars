@@ -790,6 +790,95 @@ fn execute_command_analyze_returns_array() {
     assert!(arr.is_array(), "expected array, got {arr}");
 }
 
+/// Hover, the code lens and `leek.showComplexity` all read the same
+/// per-revision `ComplexityArtifact` now, so they cannot disagree about
+/// a function's formula. Before #165 each recomputed the report on its
+/// own; three independent recomputations happened to agree, but nothing
+/// held them together.
+#[test]
+fn hover_code_lens_and_command_report_the_same_formula() {
+    let text = "function sum(arr) {\n    var t = 0\n    for (var x in arr) { t = t + x }\n    return t\n}\n";
+    let ws = open(text);
+
+    // Cursor on `sum` on line 0, column 9.
+    let hover = hover::handle(
+        &ws,
+        &url(),
+        lsp::Position {
+            line: 0,
+            character: 9,
+        },
+    )
+    .expect("hover");
+    let lsp::HoverContents::Markup(m) = hover.contents else {
+        panic!("expected markdown contents");
+    };
+
+    let lens_title = code_lens::handle(&ws, &url())
+        .expect("lenses")
+        .iter()
+        .find_map(|l| {
+            l.command
+                .as_ref()
+                .filter(|c| c.command == "leek.showComplexity")
+                .map(|c| c.title.clone())
+        })
+        .expect("complexity lens");
+
+    let command = execute_command::handle(
+        &ws,
+        "leek.showComplexity",
+        &[
+            serde_json::Value::String(url().to_string()),
+            serde_json::Value::String("sum".into()),
+        ],
+    )
+    .expect("command response")
+    .as_str()
+    .expect("string response")
+    .to_string();
+
+    // The big-O is what all three render; the hover and the command also
+    // carry the ops formula.
+    for (what, rendered) in [
+        ("hover", m.value.as_str()),
+        ("code lens", lens_title.as_str()),
+        ("leek.showComplexity", command.as_str()),
+    ] {
+        assert!(
+            rendered.contains("O(arr)"),
+            "{what} disagrees about sum's complexity: {rendered}"
+        );
+    }
+}
+
+/// The three complexity handlers must go through the pipeline's
+/// `ComplexityArtifact`, never call `analyze_file` themselves: the
+/// artifact is salsa-cached per file revision, a direct call is a full
+/// re-analysis per request (#165). A behavioural test cannot see the
+/// difference — both routes return the same numbers — so assert on the
+/// source, the way `leek-test-corpus`'s build-script hygiene test does.
+#[test]
+fn complexity_handlers_do_not_call_analyze_file_directly() {
+    const HANDLERS: [(&str, &str); 3] = [
+        ("hover.rs", include_str!("../src/handlers/hover.rs")),
+        ("code_lens.rs", include_str!("../src/handlers/code_lens.rs")),
+        (
+            "execute_command.rs",
+            include_str!("../src/handlers/execute_command.rs"),
+        ),
+    ];
+    for (name, src) in HANDLERS {
+        assert!(
+            !src.contains("analyze_file("),
+            "{name} calls analyze_file directly — that recomputes the whole-file \
+             complexity analysis on every request. Read \
+             `leek_complexity::pipeline::ComplexityArtifact` off a \
+             `Target::Complexity` run instead (#165)."
+        );
+    }
+}
+
 #[test]
 fn execute_command_unknown_returns_none() {
     let ws = open("");

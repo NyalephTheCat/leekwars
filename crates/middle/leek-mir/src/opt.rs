@@ -203,10 +203,27 @@ fn remap_terminator(term: Terminator, remap: &HashMap<u32, u32>) -> Terminator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BasicBlock, FunctionKind};
+    use crate::ir::{BasicBlock, FunctionKind, LocalDecl, LocalKind};
     use crate::verify::verify_function;
     use leek_span::Span;
     use leek_types::Type;
+
+    /// One synthetic temporary, so a fixture whose terminator reads `_0`
+    /// declares the slot it reads. The verifier bounds-checks local
+    /// references now, and a fixture that skipped the declaration was
+    /// never a shape the lowering can produce.
+    fn temp() -> LocalDecl {
+        LocalDecl {
+            name: None,
+            ty: Type::Any,
+            kind: LocalKind::Temp,
+            span: Span::synthetic(),
+            default_init: None,
+            inferred_ty: None,
+            is_shared: false,
+            is_by_ref: false,
+        }
+    }
 
     fn block(id: u32, term: Terminator) -> BasicBlock {
         BasicBlock {
@@ -348,6 +365,7 @@ mod tests {
             ],
             0,
         );
+        f.locals = vec![temp()];
         optimize_function(&mut f);
         verify_function(&f).expect("well-formed");
         assert_eq!(f.blocks.len(), 3, "no block removed");

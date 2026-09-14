@@ -53,9 +53,18 @@ mod util;
 pub fn lower_file(hir: &HirFile) -> (MirProgram, Vec<Diagnostic>) {
     let mut ctx = ProgramCtx::new(hir);
     ctx.lower();
-    // Catch malformed IR (bad block ids / out-of-range jumps) at construction
-    // in debug/test builds, instead of as a downstream backend panic or
-    // miscompile. Compiled out in release. See `crate::verify`.
+    // Catch malformed IR at construction in debug/test builds, instead of as
+    // a downstream backend panic or miscompile: bad block ids, out-of-range
+    // jumps, out-of-range locals in any place / rvalue / callee / terminator,
+    // drifted statement-span parity, non-`Param` params, and dangling
+    // function indices or unpatched lambda placeholders. Compiled out in
+    // release. See `crate::verify`.
+    //
+    // A panic, not a diagnostic, and deliberately so: malformed MIR is a
+    // compiler bug with no user-actionable span, and downgrading it here
+    // would let the bad IR reach the backends' unchecked `functions[idx]` /
+    // `locals[id.0]` indexing — a worse panic, further from the cause.
+    // Release-mode *reporting* is what `crate::pipeline::VerifyMir` is for.
     #[cfg(debug_assertions)]
     if let Err(e) = crate::verify::verify_program(&ctx.program) {
         panic!("{e}");
