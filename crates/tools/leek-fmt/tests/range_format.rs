@@ -1,7 +1,7 @@
 //! Tests for `format_range` — partial-document formatting used by
 //! the LSP's `textDocument/rangeFormatting`.
 
-use leek_fmt::{FormatOptions, format_range, format_source};
+use leek_fmt::{FormatOptions, IndentStyle, format_range, format_source};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -9,14 +9,45 @@ fn opts() -> FormatOptions {
     FormatOptions::default()
 }
 
+fn tab_opts() -> FormatOptions {
+    FormatOptions {
+        indent_style: IndentStyle::Tabs,
+        ..FormatOptions::default()
+    }
+}
+
 fn fmt_range(src: &str, start: u32, end: u32) -> Option<(std::ops::Range<u32>, String)> {
+    fmt_range_with(src, &opts(), start, end)
+}
+
+fn fmt_range_with(
+    src: &str,
+    opts: &FormatOptions,
+    start: u32,
+    end: u32,
+) -> Option<(std::ops::Range<u32>, String)> {
     let parsed = leek_parser::parse_with_features(
         src,
         SourceId::new(1).unwrap(),
         Version::V4,
         leek_parser::ParseFeatures::default(),
     );
-    format_range(&parsed.green, Version::V4, &opts(), start..end)
+    format_range(&parsed.green, Version::V4, opts, start..end)
+}
+
+/// Apply the text-edit `format_range` describes, the way an LSP
+/// client would: splice `replacement` over `range` in `src`. The
+/// point of the level-based indent is that the result reads like the
+/// document format, so several tests below check exactly that.
+fn splice(src: &str, range: &std::ops::Range<u32>, replacement: &str) -> String {
+    let start = usize::try_from(range.start).unwrap();
+    let end = usize::try_from(range.end).unwrap();
+    format!("{}{replacement}{}", &src[..start], &src[end..])
+}
+
+/// The leading whitespace run of `line`.
+fn leading_ws(line: &str) -> &str {
+    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
 /// Locate the byte offsets of `needle` in `haystack`. Panics if not
@@ -49,23 +80,158 @@ fn formats_a_function_with_proper_inner_indent() {
     assert!(out.ends_with('}'));
 }
 
+// ---- the replacement is printed at the target's indent level (#200) ----
+//
+// The subtree used to be printed at level 0 and every continuation
+// line then padded out with `" ".repeat(byte column of the node)`.
+// That wrote spaces into a tab-indented file, shifted every line when
+// a multi-byte character sat ahead of the node, and used the node's
+// physical column even when the node started mid-line. Printing the
+// doc inside `indent(level, …)` hands all of it to the printer.
+
 #[test]
-fn re_indents_nested_block_to_match_source_column() {
-    // Block sits at column 4; reformatted output's continuation
-    // lines must also start at column 4 (or deeper for nested
-    // content).
+fn re_indents_nested_block_to_its_logical_level() {
+    // The `if` is one `Block` deep, so its own lines print at level
+    // 1 and its body at level 2 — four and eight spaces under the
+    // default options, which is where the document format puts them.
     let src = "function f() {\n    if (x) {\n        body  ;\n    }\n}\n";
+    let (s, e) = span_of(src, "if (x) {\n        body  ;\n    }");
+    let (range, out) = fmt_range(src, s, e).expect("found");
+
+    assert_eq!(out, "if (x) {\n        body;\n    }");
+    // Line one starts at column 0: the caller splices it in at the
+    // node's start offset, which is already indented.
+    assert_eq!(leading_ws(out.lines().next().unwrap()), "");
+    // Splicing the edit in reproduces the whole-document format.
+    assert_eq!(splice(src, &range, &out), fmt_all(src));
+}
+
+#[test]
+fn an_off_region_node_keeps_the_whitespace_its_range_starts_with() {
+    // The printer indents only right after a line break, so the
+    // replacement's first line never needs trimming back to column 0
+    // — and trimming it anyway would eat real content here. A node
+    // inside a `// fmt: off` region is emitted from its own source
+    // text, and the parser attaches the whitespace in front of a
+    // node's first token *inside* the node: this `TypeRef`'s range
+    // is `" integer"`, space included. Strip that space and the edit
+    // splices back as `publicinteger`.
+    let src = "// fmt: off\nclass A {\n    public integer x = 0;\n}\n";
+    let (s, e) = span_of(src, "integer");
+    let (range, out) = fmt_range(src, s, e).expect("found");
+
+    assert_eq!(
+        &src[usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap()],
+        " integer"
+    );
+    assert_eq!(out, " integer");
+    assert_eq!(splice(src, &range, &out), src);
+}
+
+#[test]
+fn tab_indent_style_never_mixes_a_space_into_the_indent() {
+    // The padding this replaced was always spaces, so a tab-indented
+    // file came back with tabs inside the subtree and spaces in front
+    // of them. Every leading whitespace run must now be tabs only.
+    let src = "function f() {\n\tswitch (x) {\n\t\tcase 1:\n\t\t\tif (y) {\n\t\t\t\tg( ) ;\n\t\t\t}\n\t}\n}\n";
+    let (s, e) = span_of(src, "if (y) {\n\t\t\t\tg( ) ;\n\t\t\t}");
+    let (range, out) = fmt_range_with(src, &tab_opts(), s, e).expect("found");
+
+    for line in out.lines() {
+        assert!(
+            !leading_ws(line).contains(' '),
+            "space in the indent of {line:?}: {out:?}"
+        );
+    }
+    assert_eq!(out, "if (y) {\n\t\t\t\tg();\n\t\t\t}");
+    let all = format_source(src, SourceId::new(1).unwrap(), Version::V4, &tab_opts());
+    assert_eq!(splice(src, &range, &out), all);
+}
+
+#[test]
+fn a_node_starting_mid_line_is_indented_by_level_not_by_its_column() {
+    // The block opens at column 11, but its contents belong at the
+    // level of the `if` that holds it — the byte-column padding put
+    // the closing brace under the `{` instead.
+    let src = "function f() {\n    if (c) { longcall(aaaaaaaaaaaa, bbbbbbbbbbbbb, ccccccccccccc, ddddddddddddd, eeeeeeeeeeee); }\n}\n";
+    let (s, e) = span_of(
+        src,
+        "{ longcall(aaaaaaaaaaaa, bbbbbbbbbbbbb, ccccccccccccc, ddddddddddddd, eeeeeeeeeeee); }",
+    );
+    let (_range, out) = fmt_range(src, s, e).expect("found");
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "{", "got: {out:?}");
+    assert!(lines[1].starts_with("        longcall("), "got: {out:?}");
+    assert_eq!(*lines.last().unwrap(), "    }", "got: {out:?}");
+}
+
+#[test]
+fn a_multi_byte_char_ahead_of_the_node_does_not_shift_the_indent() {
+    // `"eee"` is three bytes wider than it is columns, so the byte
+    // column of the `if` overshot its visual column by three — and
+    // the node's column was the wrong anchor to begin with.
+    let src =
+        "function f() {\n    g(\"\u{e9}\u{e9}\u{e9}\"); if (x) {\n        body  ;\n    }\n}\n";
     let (s, e) = span_of(src, "if (x) {\n        body  ;\n    }");
     let (_range, out) = fmt_range(src, s, e).expect("found");
 
-    // The `}` should land at column 4 (the original column of `if`).
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(*lines.last().unwrap(), "    }", "got: {out:?}");
-    // The body should land at column 8.
-    assert!(
-        lines.iter().any(|l| l.starts_with("        body")),
-        "body re-indented: {out:?}"
+    assert_eq!(out, "if (x) {\n        body;\n    }");
+}
+
+#[test]
+fn a_statement_in_a_switch_arm_sits_two_levels_below_the_switch() {
+    // `SwitchStmt` indents its arms and `SwitchCase` indents the
+    // statements after its colon (#497), so both count — a missed one
+    // is an off-by-one indent.
+    let src = "function f() {\n    switch (x) {\n        case 1:\n            g( 1 );\n        default:\n            h( ) ;\n    }\n}\n";
+
+    let (s, e) = span_of(src, "case 1:\n            g( 1 );");
+    let (_range, out) = fmt_range(src, s, e).expect("found");
+    // The arm's label prints at level 2 and its body at level 3 —
+    // exactly where the whole-document format puts them. (No splice
+    // cross-check here: a `SwitchCase`'s text range starts at the
+    // whitespace in front of `case`, so the edit would swallow the
+    // line break the arm sits on.)
+    assert_eq!(out, "case 1:\n            g(1);");
+    assert!(fmt_all(src).contains("\n        case 1:\n            g(1);"));
+
+    // A `default` arm has no label expression; every node child of it
+    // is a body statement.
+    let (s, e) = span_of(src, "h( ) ;");
+    let (_range, out) = fmt_range(src, s, e).expect("found");
+    assert_eq!(out, "h();");
+}
+
+#[test]
+fn the_switch_scrutinee_does_not_get_the_arm_indent() {
+    // The scrutinee rides in the `switch (…)` header, outside the
+    // `indent` that holds the arms: counting `SwitchStmt` for it
+    // would push its broken argument list a level too deep.
+    let scrutinee = "someverylongfunctionname(aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbb, cccccccccccccccccccc, dddddddddddddddddddd)";
+    let src = format!(
+        "function f() {{\n    switch ({scrutinee}) {{\n        case 1:\n            g();\n    }}\n}}\n"
     );
+    let (s, e) = span_of(&src, scrutinee);
+    let (range, out) = fmt_range(&src, s, e).expect("found");
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[1].starts_with("        aaaa"), "got: {out:?}");
+    assert_eq!(*lines.last().unwrap(), "    )", "got: {out:?}");
+    assert_eq!(splice(&src, &range, &out), fmt_all(&src));
+}
+
+#[test]
+fn a_class_member_is_indented_by_its_class_body() {
+    let src = "class A {\n    public add(integer n) -> integer {\nreturn n;\n}\n}\n";
+    let (s, e) = span_of(src, "public add(integer n) -> integer {\nreturn n;\n}");
+    let (range, out) = fmt_range(src, s, e).expect("found");
+
+    assert_eq!(
+        out,
+        "public add(integer n) -> integer {\n        return n;\n    }"
+    );
+    assert_eq!(splice(src, &range, &out), fmt_all(src));
 }
 
 #[test]

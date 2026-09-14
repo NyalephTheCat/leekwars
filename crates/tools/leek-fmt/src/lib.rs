@@ -426,11 +426,25 @@ pub fn format_source_checked(
 /// exists, or `None` if `range` doesn't match any node (e.g. it
 /// extends past EOF).
 ///
-/// The replacement is re-indented so its first line starts at column
-/// 0 (callers append it where the node's range begins), and every
-/// continuation line is prefixed with the source-detected leading
-/// indent of the node's start position. This way, an LSP client
-/// applying the returned text-edit gets correctly-indented output.
+/// The replacement is printed at the target's *logical* indent level
+/// ([`logical_indent_level`]): the subtree's doc is wrapped in that
+/// many [`doc::indent`] levels, so the printer raises every
+/// continuation line itself, with the configured `indent` width and
+/// [`IndentStyle`]. Line one carries no indent of its own — the
+/// caller splices the text in where the node's range begins, and that
+/// offset already sits at the node's indent — and needs no trimming
+/// to get there, because the printer emits indentation only straight
+/// after a line break. Trimming the front unconditionally would in
+/// fact corrupt the one case where a replacement legitimately
+/// *starts* with whitespace: a node inside a `// fmt: off` region is
+/// emitted from its own source text, and the parser attaches the
+/// trivia in front of a node's first token inside the node.
+///
+/// Letting the printer do it is what keeps a tab-indented file
+/// tab-indented: padding continuation lines out to the node's source
+/// *byte* column (as this used to) wrote spaces around the tabs the
+/// printer emits inside, and shifted every line whenever a multi-byte
+/// character sat ahead of the node on its line (#200).
 ///
 /// The returned `(start, end)` is the byte range of the chosen
 /// subtree — the same range the caller should replace with
@@ -467,6 +481,7 @@ pub fn format_range(
         opts_stack: Vec::new(),
         off_regions: collect_off_regions(&root),
     };
+    let level = logical_indent_level(&target);
     let raw = format::with_ctx_set(ctx, || {
         // Document order: a later `set` beats an earlier one, and
         // `push` / `pop` pairs nest the way the walkers nest them.
@@ -482,18 +497,87 @@ pub fn format_range(
         // `indent_style`, `max_line_length`) reach the printer, which
         // is otherwise handed the unmodified `opts`.
         let doc = format::wrap_with_active_opts(doc);
+        // Outside the options wrapper: the level is scaled by
+        // whatever `indent` / `indent_style` the replay landed on,
+        // the same ones the body below it is printed with.
+        let doc = doc::indent(isize::try_from(level).unwrap_or(0), doc);
         apply_line_ending(printer::print(&doc, version, opts), opts.line_ending)
     });
 
-    let base_col = leading_column(&source, target_start as usize);
-    let result = if base_col > 0 {
-        let pad = " ".repeat(base_col);
-        raw.replace('\n', &format!("\n{pad}"))
-    } else {
-        raw
-    };
+    Some((target_start..target_end, raw))
+}
 
-    Some((target_start..target_end, result))
+/// How many indent levels a whole-document format would put `node`'s
+/// own lines at.
+///
+/// Walks `node`'s ancestors up to the `SourceFile` root and counts
+/// the ones whose formatter wraps the subtree `node` sits in with
+/// `indent(1, …)`:
+///
+/// - `Block` and `ClassBody` indent everything between their braces
+///   (`format::blocks::format_block`,
+///   `format::stmts::format_class_body`);
+/// - `SwitchStmt` indents its arms — but not the scrutinee in its
+///   header — and `SwitchCase` indents the statements after its
+///   colon, not the label expression, so a statement inside an arm
+///   sits two levels below its `switch` (#497).
+///
+/// The *conditional* indents are deliberately not counted: a broken
+/// argument or parameter group indents its contents only when the
+/// printer picks the broken layout, and `control_braces = always`
+/// indents an unbraced control body only because it is synthesizing
+/// the braces around it. Neither shape is in the source text the
+/// caller splices this replacement back into, so counting them would
+/// push the range format a level past where the node actually sits.
+fn logical_indent_level(node: &SyntaxNode) -> usize {
+    let mut level = 0usize;
+    let mut child = node.clone();
+    while let Some(parent) = child.parent() {
+        let indents = match parent.kind() {
+            SyntaxKind::Block | SyntaxKind::ClassBody => true,
+            SyntaxKind::SwitchStmt => child.kind() == SyntaxKind::SwitchCase,
+            SyntaxKind::SwitchCase => is_switch_case_body(&parent, &child),
+            _ => false,
+        };
+        if indents {
+            level += 1;
+        }
+        child = parent;
+    }
+    level
+}
+
+/// Does `child` land in the indented *body* of its `SwitchCase`
+/// parent, rather than in the `case <expr>:` label that stays on the
+/// head line?
+///
+/// Mirrors the placement rule in `format::stmts::format_switch_case`:
+/// on a `case`, the first node before the colon is the label
+/// expression and every later node is a statement; a `default` arm
+/// has no label expression, so every node is a statement.
+fn is_switch_case_body(case: &SyntaxNode, child: &SyntaxNode) -> bool {
+    let mut is_case = false;
+    let mut seen_colon = false;
+    let mut label_expr_seen = false;
+    for el in case.children_with_tokens() {
+        match el {
+            leek_syntax::language::NodeOrToken::Token(t) => match t.kind() {
+                SyntaxKind::KwCase => is_case = true,
+                SyntaxKind::Colon if !seen_colon => seen_colon = true,
+                _ => {}
+            },
+            leek_syntax::language::NodeOrToken::Node(n) => {
+                let in_label = is_case && !seen_colon && !label_expr_seen;
+                if in_label {
+                    label_expr_seen = true;
+                }
+                if n == *child {
+                    return !in_label;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Find the smallest [`SyntaxNode`] under `root` whose text range
@@ -521,10 +605,4 @@ fn smallest_enclosing_node(root: &SyntaxNode, range: std::ops::Range<u32>) -> Op
         return None;
     }
     Some(current)
-}
-
-/// Column (0-based, byte-counted) of `offset` within its line.
-fn leading_column(source: &str, offset: usize) -> usize {
-    let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
-    offset - line_start
 }
