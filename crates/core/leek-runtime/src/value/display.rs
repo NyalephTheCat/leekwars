@@ -1,10 +1,11 @@
-//! Runtime values produced by the interpreter.
+//! Rendering a [`Value`] as LeekScript text.
 //!
-//! Mirrors the upstream Java runtime's tagged-value model: a single
-//! `Value` enum covers all primitive and composite kinds. Arrays and
-//! maps share interior mutability via `Rc<RefCell<…>>` so two
-//! references to the same array see each other's writes (matching
-//! Leekscript's reference-array semantics).
+//! Implements `Display` (the `string()` builtin and top-level result
+//! printing) plus the loose-equality helper that shares its coercion
+//! rules. Two thread-locals parameterize the output because `to_string`
+//! takes no arguments: `DISPLAY_VERSION` selects v1's French number
+//! formatting, and `DISPLAY_TOP_LEVEL_BARE` drops the quotes around a
+//! string that came from a class's user-defined `string()` method.
 
 // LeekScript `==` on reals is exact equality, and the formatting code also
 // tests exact bit patterns (subnormal `MIN_VALUE`, round-trip checks), so the
@@ -18,7 +19,7 @@ use super::types::{Function, Value};
 
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `DISPLAY_TOP_LEVEL_BARE` lets the interp opt the
+        // `DISPLAY_TOP_LEVEL_BARE` lets a backend opt the
         // immediate `to_string` out of the normal quote-wrapping
         // for strings — used when the value came from a class's
         // user-defined `string()` method.
@@ -623,7 +624,7 @@ fn format_with_thousands_separator(n: u64) -> String {
 // `value.to_string()` to drive v1's French number formatting.
 thread_local! {
     pub static DISPLAY_VERSION: std::cell::Cell<u8> = const { std::cell::Cell::new(4) };
-    /// One-shot flag set by the interpreter when the top-level
+    /// One-shot flag set by the backend when the top-level
     /// result came from a class's user-defined `string()` method.
     /// `Display::fmt` consumes the flag and outputs the value
     /// without the surrounding quotes that strings normally get

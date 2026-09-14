@@ -1,10 +1,15 @@
-//! Runtime values produced by the interpreter.
+//! Inherent methods on [`Value`] — coercion, equality, ordering.
 //!
-//! Mirrors the upstream Java runtime's tagged-value model: a single
-//! `Value` enum covers all primitive and composite kinds. Arrays and
-//! maps share interior mutability via `Rc<RefCell<…>>` so two
-//! references to the same array see each other's writes (matching
-//! Leekscript's reference-array semantics).
+//! The self-contained operations a backend needs on a single runtime
+//! value: [`Value::unbox`] peels the [`Value::Cell`] wrapper a captured
+//! local carries, `is_truthy` / `as_real` / `as_int` / `as_index` /
+//! `to_long` / `to_real` implement LeekScript's coercion rules, and
+//! `loose_eq` / `identity_eq` / `cmp_partial` back the `==` / `===` /
+//! relational operators.
+//!
+//! The *binary* operator semantics (`add`, `lt`, indexing, iteration)
+//! live in [`crate::eval`]; rendering lives in the sibling `display`
+//! module.
 
 use std::rc::Rc;
 

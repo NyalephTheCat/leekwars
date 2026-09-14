@@ -291,9 +291,18 @@ pub(crate) struct Lowerer {
     /// Stack of lexical scopes mapping names to their `DefId`. The
     /// innermost scope is at the back.
     pub(crate) scopes: Vec<Scope>,
-    /// Parallel marker — `true` for scopes that open a function
-    /// boundary (lambda / method / function body). Used to skip
-    /// builtin-style globals when looking up "local"-style names.
+    /// Parallel marker — `true` for the scopes that are *opaque* to
+    /// bare-name lookup: top-level function bodies, method bodies and
+    /// constructor bodies (everything pushed by
+    /// [`Self::push_function_scope`]).
+    ///
+    /// Lambdas are deliberately **not** opaque: `lower_lambda` uses the
+    /// plain [`Self::push_scope`], so [`Self::lookup_local`] walks
+    /// through into the enclosing locals and those names resolve as
+    /// captures. The opaque marker exists for the opposite case —
+    /// inside a method, a bare field name must reach the `this.field`
+    /// rewrite driven by [`Self::class_ctx`] rather than binding to an
+    /// enclosing scope's local of the same name.
     pub(crate) boundaries: Vec<bool>,
     /// Names of items registered in the file scope after the first
     /// pass. Keyed by name → kind so we know whether `foo` refers
@@ -472,10 +481,15 @@ impl Lowerer {
         id
     }
 
+    /// Push a transparent scope: blocks, loop headers, lambda bodies.
+    /// [`Self::lookup_local`] walks straight through it.
     fn push_scope(&mut self) {
         self.scopes.push(Scope::default());
         self.boundaries.push(false);
     }
+    /// Push an opaque scope: top-level function, method and constructor
+    /// bodies. [`Self::lookup_local`] stops here. Not for lambdas — see
+    /// [`Self::boundaries`].
     fn push_function_scope(&mut self) {
         self.scopes.push(Scope::default());
         self.boundaries.push(true);
@@ -583,9 +597,10 @@ impl Lowerer {
     }
 
     /// Look up a name through the scope stack (innermost first).
-    /// Crosses lambda boundaries (those have `boundaries[i] =
-    /// false`) so closures can capture outer locals, but stops
-    /// at method / top-level-function boundaries (`true`) — bare
+    /// Crosses lambda scopes (those have `boundaries[i] = false`,
+    /// pushed by `lower_lambda`) so closures can capture outer
+    /// locals, but stops at method / top-level-function boundaries
+    /// (`true`, pushed by [`Self::push_function_scope`]) — bare
     /// names inside a method body shouldn't reach across into
     /// the enclosing scope's locals, otherwise outer `var a` and
     /// `class A { a; m() { return a } }`-style field rewrites

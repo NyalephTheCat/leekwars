@@ -24,13 +24,16 @@
 //!
 //! Compound assignments (`+=`, `??=`, etc.) and `++` / `--` are
 //! desugared here into a read-modify-write sequence. This frees the
-//! interpreter and native backend from having to model them.
+//! backends from having to model them.
 //!
-//! ## Not yet lowered
+//! ## Unsupported markers
 //!
-//! Classes, lambdas with captures, and `super` dispatch are
-//! recognised but emit [`Rvalue::Unsupported`] markers. They have
-//! their own design pass coming.
+//! [`Rvalue::Unsupported`](crate::ir::Rvalue::Unsupported) is not a "not yet implemented" marker —
+//! classes, lambdas with captures and `super` dispatch all lower. It
+//! marks the shapes that are *errors*: an unbound local, `super`
+//! outside a method or inside a static, and a `this(...)` call. Each
+//! site also emits a diagnostic, and the program is still returned so
+//! the caller sees every error rather than only the first.
 
 use std::collections::HashMap;
 
@@ -49,7 +52,7 @@ mod util;
 ///
 /// The result also contains lowering [`Diagnostic`]s for shapes that
 /// couldn't be fully modeled. The program is still returned — unsupported
-/// sites are marked with [`Rvalue::Unsupported`] where applicable.
+/// sites are marked with [`Rvalue::Unsupported`](crate::ir::Rvalue::Unsupported) where applicable.
 pub fn lower_file(hir: &HirFile) -> (MirProgram, Vec<Diagnostic>) {
     let mut ctx = ProgramCtx::new(hir);
     ctx.lower();

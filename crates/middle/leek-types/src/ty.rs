@@ -4,7 +4,9 @@
 
 use leek_syntax::{SyntaxKind, SyntaxNode};
 
-/// Canonical Leekscript types — see `doc/type-system.md`.
+/// Canonical Leekscript types. The lattice they form — assignability,
+/// joins, and the canonical forms of unions and nullables — is written
+/// up in `docs/semantics.md` §5.
 #[cfg_attr(feature = "salsa", derive(salsa::Update))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -179,7 +181,7 @@ impl Type {
             (Type::Tuple(ms), Type::Array(el)) => ms.iter().all(|m| Type::assignable_to(m, el)),
             // Null is universally assignable in dynamic semantics.
             (Type::Null, _) | (_, Type::Null) => true,
-            // Numeric crosses are permitted (per type-system.md §5.1):
+            // Numeric crosses are permitted:
             // Integer ↔ Real, and either into/out of `big_integer`
             // (assignment to a `big_integer` slot coerces, truncating reals).
             (

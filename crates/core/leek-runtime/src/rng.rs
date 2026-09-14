@@ -2,8 +2,8 @@
 //!
 //! A seeded xorshift64 — reproducible across runs so the corpus's
 //! statistical tests are stable, while still giving real spread. Lives in
-//! `leek-runtime` (not a backend) so the interpreter and the native
-//! backend draw from the same generator.
+//! `leek-runtime` (not a backend) so every execution backend draws from
+//! the same generator.
 //
 // PRNG bit math reinterprets between signed/unsigned and builds floats from
 // raw bits; the casts here are deliberate, not lossy coercions.

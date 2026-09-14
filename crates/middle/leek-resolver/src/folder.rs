@@ -1,8 +1,8 @@
 //! File-namespace abstraction for `include("name")` resolution.
 //!
 //! Leekscript's `include` statement takes a string-literal path and
-//! resolves it relative to a "folder" — see
-//! [`doc/pipeline.md`](../../../doc/pipeline.md) §5.1.2. The folder
+//! resolves it relative to a "folder" — see `docs/semantics.md` §2 for
+//! the full include semantics. The folder
 //! mediates the lookup so the compiler can be embedded in different
 //! environments: local disk (the `leekc` / `miku` CLI), an in-memory
 //! workspace (the LSP server), the LeekWars asset bundle, or
@@ -43,11 +43,14 @@ pub struct LoadedFile {
 /// these into proper diagnostics with spans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
-    /// `name` couldn't be resolved to any file. Maps to
-    /// `AI_NOT_EXISTING` in the upstream's diagnostic table.
+    /// `name` couldn't be resolved to any file. Reported as
+    /// [`INCLUDE_NOT_FOUND`](leek_diagnostics::codes::INCLUDE_NOT_FOUND)
+    /// — *not* `AI_NOT_EXISTING`, which is reserved for `import`.
     NotFound,
     /// The file resolved but couldn't be read (permission denied,
     /// not utf-8, …). The string carries the underlying message.
+    /// Reported as
+    /// [`INCLUDE_UNREADABLE`](leek_diagnostics::codes::INCLUDE_UNREADABLE).
     Unreadable(String),
 }
 

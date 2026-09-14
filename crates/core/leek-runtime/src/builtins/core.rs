@@ -73,8 +73,9 @@ pub(crate) fn dispatch_unary_math(name: &str, args: &[Value]) -> Option<Value> {
             _ => return None,
         },
         // The pure scalar-math family delegates to the shared
-        // implementations in `crate::builtin`, so the interpreter
-        // and the native backend can never drift on these semantics.
+        // implementations in `crate::builtin`, which the native
+        // backend also calls directly, so the two can never drift
+        // on these semantics.
         "sqrt" => Value::Real(crate::leek_sqrt(a.as_real()?)),
         "cbrt" => Value::Real(crate::leek_cbrt(a.as_real()?)),
         "ceil" => Value::Int(crate::leek_ceil(a.as_real()?)),

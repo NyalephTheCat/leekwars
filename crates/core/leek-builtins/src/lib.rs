@@ -2,7 +2,8 @@
 //!
 //! Generated at build time:
 //! - [`JAVA_BUILTINS`] / [`lookup_java`] — static Java dispatch
-//! - [`op_cost`] / [`op_cost_u64`] — interpreter per-call costs (default 1)
+//! - [`op_cost`] / [`op_cost_u64`] — per-call op costs charged at run time
+//!   by `leek-charge` and the native backend (default 1)
 //! - [`op_cost_emit`] — Java emit per-call costs (default 0)
 //! - [`batch_multiplier`] — element-scaled costs for batch builtins
 //! - [`ALL_CATALOG_NAMES`] — every catalogued name (for contract tests)

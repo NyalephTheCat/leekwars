@@ -2,10 +2,10 @@
 //!
 //! These functions implement Leekscript's runtime behavior on [`Value`]s —
 //! binary/unary operators, indexing, iteration, equality, deep-clone — with
-//! no dependency on any IR or interpreter state. The interpreter *calls*
-//! them as it walks the tree; the native backend *links* them as C-ABI
-//! runtime functions. Keeping them here (rather than in a backend) is what
-//! lets both share one implementation.
+//! no dependency on any IR or backend state. The native backend *links* them
+//! as C-ABI runtime functions and the AOT runtime re-exports them; tooling
+//! calls them directly. Keeping them here (rather than in a backend) is what
+//! lets every caller share one implementation.
 //!
 //! The binary operator is exposed as one function per operator (`add`,
 //! `sub`, …) rather than a single `apply(op, …)` so that `leek-runtime`
@@ -21,8 +21,8 @@ use crate::{MapKey, Value};
 
 // ---- slicing (`a[start:end:step]`) ----
 
-/// `base[start:end:step]` for arrays, strings, and intervals. Shared by the
-/// interpreter and the native backend so the semantics match.
+/// `base[start:end:step]` for arrays, strings, and intervals. Shared by every
+/// execution backend so the semantics match.
 pub fn slice(base: &Value, start: Option<i64>, end: Option<i64>, step: Option<f64>) -> Value {
     let int_step = step.map(crate::real_to_int);
     match base {

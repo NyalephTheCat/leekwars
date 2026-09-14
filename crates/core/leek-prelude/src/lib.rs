@@ -13,9 +13,9 @@
 //!   loads `STDLIB_SRC` so library calls infer precise return types in
 //!   user code.
 //!
-//! All loading is gated behind [`enabled`] (the `LEEK_EXPERIMENTAL_PRELUDE`
-//! environment variable) so the default compile path and the corpus
-//! baseline are unchanged.
+//! All loading is gated behind [`FeatureFlags::prelude`](leek_span::FeatureFlags::prelude)
+//! (the `LEEK_EXPERIMENTAL_PRELUDE` environment variable) so the default
+//! compile path and the corpus baseline are unchanged.
 
 use leek_span::SourceId;
 
@@ -54,8 +54,10 @@ pub fn activate_library(src: &'static str) {
 }
 
 /// The combined source of all active library headers (and, when
-/// [`enabled`], the implicit [`PRELUDE_SRC`]), or `None` when nothing is
-/// active. Lowering parses this as a prelude and merges it ahead of the
+/// `prelude_enabled`, the implicit [`PRELUDE_SRC`]), or `None` when
+/// nothing is active. Callers pass
+/// [`FeatureFlags::prelude`](leek_span::FeatureFlags::prelude) for that
+/// argument. Lowering parses this as a prelude and merges it ahead of the
 /// user file.
 pub fn merged_header_src(prelude_enabled: bool) -> Option<String> {
     let libs = ACTIVE_LIBRARIES.lock().expect("library lock");

@@ -1,21 +1,21 @@
 //! Mid-level intermediate representation for Leekscript.
 //!
-//! MIR is the IR consumed by the execution backends — the bytecode
-//! VM interpreter and the native (Cranelift) codegen. The Java
-//! emitter reads HIR directly, so MIR is intentionally lower-level:
-//! a per-function control-flow graph of basic blocks, with explicit
-//! temporaries and explicit short-circuit lowering for `&&`, `||`,
-//! and `??`. See `doc/pipeline.md` §8.
+//! MIR is the IR consumed by the native (Cranelift) backend. The Java
+//! and LeekScript emitters read HIR directly, so MIR is intentionally
+//! lower-level: a per-function control-flow graph of basic blocks,
+//! with explicit temporaries and explicit short-circuit lowering for
+//! `&&`, `||`, and `??`.
 //!
 //! Two entry points:
 //! - [`ir`] defines the MIR data types ([`MirProgram`],
 //!   [`MirFunction`], [`BasicBlock`], etc.).
 //! - [`lower`] turns a [`leek_hir::HirFile`] into a [`MirProgram`].
 //!
-//! This is a first-slice implementation. Classes, lambdas, and
-//! intervals are recognised but lowered to a `Rvalue::Unsupported`
-//! marker rather than fully modelled — they have their own design
-//! pass coming.
+//! Classes, lambdas (with captures), intervals and `super` dispatch
+//! are fully lowered. `Rvalue::Unsupported` survives only as a marker
+//! for shapes that are *errors* rather than gaps — an unbound local,
+//! `super` outside a method or in a static, a `this(...)` call — each
+//! paired with a diagnostic.
 
 pub mod cfg;
 pub mod ir;

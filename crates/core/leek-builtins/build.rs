@@ -123,7 +123,7 @@ fn write_op_costs(builtins: &[Builtin], path: &Path) {
         }
     }
     let mut out = String::from(
-        "/// Per-call op cost for the interpreter. Default: 1.\n\
+        "/// Per-call op cost charged at run time. Default: 1.\n\
          pub fn op_cost(name: &str) -> u32 {\n    match name {\n",
     );
     for (name, cost) in &costs {

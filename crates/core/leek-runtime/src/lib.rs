@@ -1,6 +1,9 @@
 //! Runtime values and supporting data structures.
 //!
-//! Shared between the MIR interpreter and future native backends.
+//! Shared by every consumer that needs LeekScript's runtime semantics: the
+//! native (Cranelift) backend links these as C-ABI symbols from JIT-compiled
+//! and AOT-compiled code, `leek-aot-runtime` re-exports them into a standalone
+//! binary, and the test/bench tooling calls them directly.
 
 mod builtin;
 mod builtins;
