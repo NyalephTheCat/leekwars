@@ -1218,7 +1218,9 @@ dependencies = [
 name = "leek-hir"
 version = "0.0.1"
 dependencies = [
+ "leek-config",
  "leek-diagnostics",
+ "leek-environment",
  "leek-parser",
  "leek-pipeline",
  "leek-prelude",
