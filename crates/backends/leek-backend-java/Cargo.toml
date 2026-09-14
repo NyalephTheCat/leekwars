@@ -19,10 +19,10 @@ leek-builtins    = { workspace = true }
 leek-runtime     = { workspace = true }
 leek-environment = { workspace = true }
 leek-text        = { workspace = true }
+leek-diagnostics = { workspace = true }
 
 [dev-dependencies]
 leek-parser      = { workspace = true }
-leek-diagnostics = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
 similar          = "2"

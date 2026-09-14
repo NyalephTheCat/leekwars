@@ -2,6 +2,7 @@ use leek_hir::{
     BinaryOp, Callee, Def, Expr, ExprKind, IntervalExpr, Literal, NameRef, NewExpr, PostfixOp,
     SetItem, SliceExpr, UnaryOp,
 };
+use leek_span::Span;
 use leek_types::Type;
 use std::fmt::Write as _;
 
@@ -175,9 +176,11 @@ impl Emitter<'_> {
 
 impl Emitter<'_> {
     pub(crate) fn write_expr(&self, buf: &mut String, e: &Expr, parens_if_negative: bool) {
+        // Anchor for any diagnostic raised below that has no span of its own.
+        self.set_cur_span(e.span);
         match &e.kind {
             ExprKind::Literal(lit) => self.write_literal(buf, lit, parens_if_negative),
-            ExprKind::Name(n) => self.write_name(buf, n),
+            ExprKind::Name(n) => self.write_name(buf, n, e.span),
             ExprKind::Binary(op, l, r) => self.write_binary(buf, *op, l, r, &e.ty),
             ExprKind::Unary(op, x) => self.write_unary(buf, *op, x, parens_if_negative),
             ExprKind::Postfix(op, x) => self.write_postfix(buf, *op, x),
@@ -236,7 +239,7 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
-    pub(crate) fn write_name(&self, buf: &mut String, n: &NameRef) {
+    pub(crate) fn write_name(&self, buf: &mut String, n: &NameRef, span: Span) {
         match n {
             NameRef::Local(id) => {
                 // Inside a self-recursive lambda body, references
@@ -308,7 +311,7 @@ impl Emitter<'_> {
                     let prev: Vec<String> = tmp_shadow.iter().cloned().collect();
                     tmp_shadow.clear();
                     drop(tmp_shadow);
-                    self.write_name(buf, n);
+                    self.write_name(buf, n, span);
                     let mut tmp_shadow = self.shadowed_builtins.borrow_mut();
                     tmp_shadow.extend(prev);
                     drop(tmp_shadow);
@@ -355,6 +358,15 @@ impl Emitter<'_> {
                                 &self.fn_singleton(field, || builtin_fn_wrapper(other, v).unwrap()),
                             );
                         } else {
+                            // Terminal fallback: neither a constant nor a
+                            // builtin this backend has a wrapper for, so the
+                            // bare identifier goes out and javac rejects it
+                            // (or, worse, resolves it to something else).
+                            // Say so against the name the user wrote.
+                            self.unsupported(
+                                span,
+                                &format!("a first-class reference to `{other}`"),
+                            );
                             buf.push_str(other);
                         }
                     }

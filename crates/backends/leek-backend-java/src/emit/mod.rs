@@ -15,6 +15,7 @@
 //! to byte-parity is gated on the golden-output harness landing.
 
 use leek_charge::{ChargeOpts, add_charges};
+use leek_diagnostics::{Diagnostic, codes};
 use leek_hir::{
     BinaryOp, Callee, Def, Expr, ExprKind, HirFile, Literal, NameRef, PostfixOp, Stmt, UnaryOp,
 };
@@ -27,10 +28,33 @@ use crate::options::Options;
 use crate::writer::JavaWriter;
 
 /// Output of a single emission run.
+///
+/// `emit` stays infallible: a file the emitter has no shape for still
+/// produces *something*, because the `.lines` sidecar and the parity harness
+/// want a best-effort rendering to diff against. What used to be missing is
+/// the other half — [`diagnostics`](Self::diagnostics), the spanned
+/// complaints raised along the way. A front end renders them and exits
+/// non-zero when [`has_errors`](Self::has_errors); before, an unsupported
+/// construct reached the user as a javac error inside generated code with no
+/// Leek line attached at all (#152).
 pub struct EmittedJava {
     pub class_name: String,
     pub java: String,
     pub lines: String,
+    /// Everything the emitter could not render faithfully, each anchored at
+    /// the construct that caused it.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl EmittedJava {
+    /// True when some diagnostic is error-level, i.e. the emitted Java is
+    /// known not to be a faithful translation of the input.
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == leek_diagnostics::Severity::Error)
+    }
 }
 
 pub fn emit(hir: &HirFile, opts: &Options) -> EmittedJava {
@@ -48,11 +72,13 @@ pub fn emit(hir: &HirFile, opts: &Options) -> EmittedJava {
     let mut em = Emitter::new(opts, hir_ref);
     em.emit_file();
     let class_name = opts.class_name();
+    let diagnostics = em.diagnostics.take();
     let (java, lines) = em.writer.into_parts();
     EmittedJava {
         class_name,
         java,
         lines,
+        diagnostics,
     }
 }
 
@@ -164,6 +190,16 @@ pub(crate) struct Emitter<'a> {
     /// `emit_var_decl` drops its base cost for these. v1 keeps the +1 (it
     /// matches the Box ctor's runtime charge).
     synthetic_default_decls: std::collections::HashSet<leek_hir::DefId>,
+    /// Constructs this run could not render faithfully. `RefCell` because
+    /// every `write_*` method takes `&self` — the same reason
+    /// `switch_counter` and `lambda_depth` are `Cell`s. Drained into
+    /// [`EmittedJava`] by [`emit`].
+    diagnostics: std::cell::RefCell<Vec<Diagnostic>>,
+    /// Span of the construct currently being emitted, kept as the anchor for
+    /// a diagnostic raised somewhere that has no span of its own
+    /// ([`Emitter::def_name`]). Mirrors the native backend's `Tx::cur_span`
+    /// (#173).
+    cur_span: std::cell::Cell<Span>,
 }
 
 mod call;
@@ -221,7 +257,37 @@ impl<'a> Emitter<'a> {
             returns_box_fns,
             returns_box_vars,
             synthetic_default_decls: std::collections::HashSet::new(),
+            diagnostics: std::cell::RefCell::new(Vec::new()),
+            cur_span: std::cell::Cell::new(Span::synthetic()),
         }
+    }
+
+    /// Anchor subsequent diagnostics at `span`. Called as each statement and
+    /// each expression is entered, so a complaint raised deep in a helper
+    /// still points at source the user wrote.
+    pub(crate) fn set_cur_span(&self, span: Span) {
+        self.cur_span.set(span);
+    }
+
+    /// Record that the emitter has no faithful Java for `what`, at `span`.
+    ///
+    /// Every caller sits on a *terminal* fallback arm — after the builtin
+    /// table, the host environment catalog and the built-in-class
+    /// constructors have all missed — never on a `NameRef` tag. Whether a
+    /// name lowers to `NameRef::Builtin` or `NameRef::Unresolved` depends on
+    /// whether the library was registered before lowering ran, so keying on
+    /// the tag would fire on programs that emit perfectly good Java.
+    pub(crate) fn unsupported(&self, span: Span, what: &str) {
+        let span = if span.source == Span::SYNTHETIC_SOURCE {
+            self.cur_span.get()
+        } else {
+            span
+        };
+        self.diagnostics.borrow_mut().push(Diagnostic::error(
+            codes::JAVA_UNSUPPORTED,
+            span,
+            format!("the Java backend does not support {what}"),
+        ));
     }
 
     /// Identifier to pass for the AI reference at this emit point. Inside a
@@ -239,10 +305,27 @@ impl<'a> Emitter<'a> {
     }
 
     pub(crate) fn def_name(&self, id: leek_hir::DefId) -> &str {
-        self.hir
-            .defs
-            .get(id.0 as usize)
-            .map_or("__unresolved", leek_hir::Def::name)
+        if let Some(def) = self.hir.defs.get(id.0 as usize) {
+            return def.name();
+        }
+        // A `DefId` outside this file's own table is an internal-invariant
+        // breach, not a user error — but the placeholder used to be written
+        // straight into the Java with nothing said about it, so all the user
+        // got was `__unresolved(...)` and a javac error. Keep the
+        // placeholder (the caller needs a `&str`, and the file still has to
+        // render), and make the breach visible.
+        self.diagnostics.borrow_mut().push(
+            Diagnostic::error(
+                codes::JAVA_UNSUPPORTED,
+                self.cur_span.get(),
+                "the Java backend does not support this name".to_string(),
+            )
+            .with_note(format!(
+                "internal: DefId {} is out of range for this file",
+                id.0
+            )),
+        );
+        "__unresolved"
     }
 
     /// Declared arity of a user function. Used by [`user_fn_wrapper`]

@@ -1394,6 +1394,9 @@ fn actual_display(case: &TestCase, source: SourceId, backend: SuiteBackend) -> S
     match backend {
         SuiteBackend::JavaEmit => match java_emit(case, hir) {
             JavaEmitRun::Emitted { bytes } => format!("emit ok, {bytes} bytes (not compiled)"),
+            JavaEmitRun::Diagnosed { bytes, count } => {
+                format!("emit ok, {bytes} bytes, {count} backend diagnostics (not compiled)")
+            }
             JavaEmitRun::Panicked => "emitter panicked".into(),
         },
         SuiteBackend::Native => {
@@ -1408,11 +1411,21 @@ fn actual_display(case: &TestCase, source: SourceId, backend: SuiteBackend) -> S
     }
 }
 
-/// Outcome of one Java emission. There is no "emitted the wrong thing" arm:
-/// `emit_clean` is infallible by construction, so the only failure it can
-/// report is a panic.
+/// Outcome of one Java emission.
+///
+/// `emit_clean` is still infallible — it always produces a file — but it now
+/// also reports what it could not translate (#152), which is the
+/// [`Diagnosed`](Self::Diagnosed) arm.
 enum JavaEmitRun {
-    Emitted { bytes: usize },
+    Emitted {
+        bytes: usize,
+    },
+    /// The file was produced, and the emitter complained about `count`
+    /// constructs it has no faithful Java for.
+    Diagnosed {
+        bytes: usize,
+        count: usize,
+    },
     Panicked,
 }
 
@@ -1424,10 +1437,12 @@ enum JavaEmitRun {
 fn java_emit(case: &TestCase, hir: &leek_hir::HirFile) -> JavaEmitRun {
     let version = version_from_byte(case.version);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        leek_backend_java::emit_clean(hir, version, 1).java.len()
+        let out = leek_backend_java::emit_clean(hir, version, 1);
+        (out.java.len(), out.diagnostics.len())
     }));
     match result {
-        Ok(bytes) => JavaEmitRun::Emitted { bytes },
+        Ok((bytes, 0)) => JavaEmitRun::Emitted { bytes },
+        Ok((bytes, count)) => JavaEmitRun::Diagnosed { bytes, count },
         Err(payload) => {
             let msg = payload
                 .downcast_ref::<&str>()
@@ -1477,7 +1492,14 @@ fn run_java_emit(case: &TestCase, ctx: &CaseContext) -> CaseOutcome {
     };
 
     match java_emit(case, hir) {
-        JavaEmitRun::Emitted { .. } => CaseOutcome::Pass,
+        // A diagnosed emission still *passes* this backend. `java-emit`
+        // proves one thing — the emitter produced a file without panicking —
+        // and deliberately never compiles or runs the output, so it is not in
+        // a position to adjudicate "this Java would not have compiled". The
+        // count is recorded in the case detail so a triage pass can see it;
+        // promoting it to a non-passing outcome is a baseline refresh, which
+        // wants the upstream corpus checked out to be meaningful.
+        JavaEmitRun::Emitted { .. } | JavaEmitRun::Diagnosed { .. } => CaseOutcome::Pass,
         JavaEmitRun::Panicked => CaseOutcome::FailWrongValue,
     }
 }

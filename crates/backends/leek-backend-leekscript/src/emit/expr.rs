@@ -1,6 +1,7 @@
 //! Expression emission with precedence-driven re-parenthesization.
 
 use leek_hir::{Call, Callee, Expr, ExprKind, LambdaBody, Literal, NameRef, UnaryOp};
+use leek_span::Span;
 use leek_syntax::Version;
 use leek_types::Type;
 
@@ -24,15 +25,25 @@ impl Emitter<'_> {
         if paren {
             self.w.token("(");
         }
-        self.emit_kind(&e.kind);
+        self.emit_kind(&e.kind, e.span);
         if paren {
             self.w.token(")");
         }
     }
 
-    fn emit_kind(&mut self, kind: &ExprKind) {
+    fn emit_kind(&mut self, kind: &ExprKind, span: Span) {
         match kind {
             ExprKind::Literal(l) => {
+                if let Literal::String(v) = l
+                    && string_lit_is_approximate(v, self.opts.version)
+                {
+                    self.semantic_loss(
+                        span,
+                        "this string literal",
+                        "at v1 a value holding both `\"` and `'` has no single-literal \
+                         form; the emitted literal decodes to a different string",
+                    );
+                }
                 let s = literal_str(l, self.opts.version);
                 self.w.token(&s);
             }
@@ -113,6 +124,13 @@ impl Emitter<'_> {
                     }
                     self.w.token("]");
                 }
+            }
+            ExprKind::Set(items) if items.is_empty() => {
+                // `{}` re-parses as an empty *object*, not an empty set —
+                // the grammar resolves that ambiguity in the object's favour
+                // (docs/grammar.md §8.5). `<>` is the unambiguous spelling
+                // and is what `<>` in the source lowered from anyway.
+                self.w.token("<>");
             }
             ExprKind::Set(items) => {
                 self.w.token("{");
@@ -295,17 +313,23 @@ fn postfix_str(op: leek_hir::PostfixOp) -> &'static str {
 }
 
 /// Render a real literal so it always re-lexes as a real (with a decimal
-/// point or exponent). Non-finite values are emitted as equivalent
-/// arithmetic so the output stays valid source.
+/// point or exponent).
+///
+/// Non-finite values go out as the names the language already has for them:
+/// `∞` (U+221E, official syntax — it lowers straight back to
+/// `Literal::Real(INFINITY)`) and the `NaN` builtin constant. They used to be
+/// emitted as the arithmetic that produces them, `(1.0 / 0.0)` and
+/// `(0.0 / 0.0)`, which is simply a different program at v1: division by zero
+/// returns `null` there, so `return ∞;` round-tripped to `null` (#154).
 fn real_lit(r: f64) -> String {
     if r.is_nan() {
-        return "(0.0 / 0.0)".to_string();
+        return "NaN".to_string();
     }
     if r.is_infinite() {
         return if r > 0.0 {
-            "(1.0 / 0.0)".to_string()
+            "\u{221E}".to_string()
         } else {
-            "(-1.0 / 0.0)".to_string()
+            "-\u{221E}".to_string()
         };
     }
     // `{:?}` for f64 always includes a `.0` for integer-valued reals and
@@ -353,10 +377,72 @@ pub(crate) fn string_lit(s: &str, version: Version) -> String {
     out
 }
 
+/// True when `version` has no faithful single-literal spelling for `s`.
+///
+/// Only v1, and only for a value holding *both* quote characters: there the
+/// delimiter is the sole lever for embedding a quote (a backslash before the
+/// delimiter reads back as the two characters `\"`), so one of the two is
+/// necessarily wrong. [`string_lit`] emits the closest approximation and the
+/// caller reports the loss.
+pub(crate) fn string_lit_is_approximate(s: &str, version: Version) -> bool {
+    version == Version::V1 && s.contains('"') && s.contains('\'')
+}
+
+/// The annotation to write back for a *declared* type, or `None` when this
+/// backend has no faithful official spelling for it.
+///
+/// A whitelist, deliberately. HIR `Type`s cover shapes that official
+/// LeekScript cannot spell — `Tuple` is experimental, a multi-parameter
+/// `FunctionWithReturn` has no syntax in the type grammar at all, and a
+/// `ClassInstance` carrying bound generic arguments needs a `class Box<T>`
+/// declaration, which is feature-gated. Writing the nearest name for those
+/// (what [`type_str`] does, because an `as` cast must produce *something*)
+/// would silently change what the declaration means, which is the bug this
+/// exists to fix — so they get `None` and the caller raises a diagnostic.
+pub(crate) fn decl_type_str(ty: &Type) -> Option<String> {
+    Some(match ty {
+        Type::Any => "any".to_string(),
+        Type::Void => "void".to_string(),
+        Type::Boolean => "boolean".to_string(),
+        Type::Integer => "integer".to_string(),
+        Type::Real => "real".to_string(),
+        Type::BigInteger => "big_integer".to_string(),
+        Type::String => "string".to_string(),
+        Type::Object => "Object".to_string(),
+        Type::Interval => "Interval".to_string(),
+        Type::Function => "Function".to_string(),
+        // Generic *arguments* are official (`TypeArgs` carries no feature
+        // gate); only the `<T>` on a declaration is experimental. An `Any`
+        // element is what a bare `Array` parses to, so it round-trips either
+        // way — write the shorter form.
+        Type::Array(el) if **el == Type::Any => "Array".to_string(),
+        Type::Array(el) => format!("Array<{}>", decl_type_str(el)?),
+        Type::Set(el) if **el == Type::Any => "Set".to_string(),
+        Type::Set(el) => format!("Set<{}>", decl_type_str(el)?),
+        Type::Map(k, v) if **k == Type::Any && **v == Type::Any => "Map".to_string(),
+        Type::Map(k, v) => format!("Map<{}, {}>", decl_type_str(k)?, decl_type_str(v)?),
+        Type::ClassInstance(name, args) if args.is_empty() => name.clone(),
+        Type::Nullable(inner) => format!("{}?", decl_type_str(inner)?),
+        Type::Union(members) => {
+            let mut out = String::new();
+            for (i, m) in members.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(" | ");
+                }
+                out.push_str(&decl_type_str(m)?);
+            }
+            out
+        }
+        Type::Null | Type::Tuple(_) | Type::FunctionWithReturn { .. } | Type::ClassInstance(..) => {
+            return None;
+        }
+    })
+}
+
 /// Best-effort rendering of a type for `as` casts. Scalars are exact;
 /// containers erase their element types (always valid, and casts of
 /// containers are rare).
-fn type_str(ty: &Type) -> String {
+pub(crate) fn type_str(ty: &Type) -> String {
     match ty {
         Type::Any => "any".to_string(),
         Type::Null => "null".to_string(),

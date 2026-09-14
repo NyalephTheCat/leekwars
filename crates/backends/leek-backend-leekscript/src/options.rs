@@ -23,7 +23,9 @@ pub struct Options {
     /// Run the HIR→HIR optimization passes (constant folding, dead-code
     /// elimination) before emitting.
     pub optimize: bool,
-    /// Language version the output targets (drives a few literal quirks).
+    /// Language version the output targets. Drives the string-literal
+    /// delimiter and escapes (v1 decodes `\"` differently — #395), and gates
+    /// the type annotations written back onto declarations (v4 only — #154).
     pub version: Version,
     /// The `SourceId` of the *user* (entry) file. Only used for comment
     /// attribution: `source_text` holds the entry's text, so comments are

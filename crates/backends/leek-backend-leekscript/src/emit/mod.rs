@@ -2,12 +2,16 @@
 
 mod expr;
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
+use leek_diagnostics::{Diagnostic, codes};
 use leek_hir::{
     Block, Def, DefId, ForeachBind, Function, Global, HirFile, MethodDef, Param, Stmt, VarDecl,
 };
 use leek_span::Span;
+use leek_syntax::Version;
+use leek_types::Type;
 
 use crate::comments::Comments;
 use crate::options::Options;
@@ -18,6 +22,11 @@ use crate::writer::LsWriter;
 pub struct EmittedLeekScript {
     /// The generated official-LeekScript source.
     pub source: String,
+    /// Semantics the round-trip could not carry across, each anchored at the
+    /// declaration or literal that lost them (#154). Warnings, not errors:
+    /// `source` is still valid official LeekScript — it just means slightly
+    /// less than the input did.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Emit valid official (non-experimental) LeekScript from a checked HIR.
@@ -48,10 +57,13 @@ pub fn emit(hir: &HirFile, opts: &Options) -> EmittedLeekScript {
         names,
         comments,
         declared_globals: BTreeSet::new(),
+        diagnostics: RefCell::new(Vec::new()),
     };
     em.emit_file();
+    let diagnostics = em.diagnostics.take();
     EmittedLeekScript {
         source: em.w.into_string(),
+        diagnostics,
     }
 }
 
@@ -66,9 +78,74 @@ pub(crate) struct Emitter<'a> {
     /// them all onto a single `DefId`, so only the first site writes the
     /// `global` keyword — see [`Emitter::emit_vardecl`].
     declared_globals: BTreeSet<DefId>,
+    /// Semantics dropped on the way out, drained into [`EmittedLeekScript`]
+    /// by [`emit`]. `RefCell` so the expression emitter — which holds only
+    /// `&self` on some paths — can add to it.
+    diagnostics: RefCell<Vec<Diagnostic>>,
 }
 
 impl Emitter<'_> {
+    /// Record that `what` could not be carried through the round-trip, at
+    /// `span`.
+    ///
+    /// The emitted program stays valid; this is the difference between a
+    /// silent drop and one the user is told about, which is the whole point
+    /// of #154. Where a semantic *can* be preserved the emitter preserves it
+    /// and says nothing.
+    pub(crate) fn semantic_loss(&self, span: Span, what: &str, note: &str) {
+        self.diagnostics.borrow_mut().push(
+            Diagnostic::warning(
+                codes::LEEK_SCRIPT_SEMANTIC_LOSS,
+                span,
+                format!("the emitted LeekScript does not preserve {what}"),
+            )
+            .with_note(note.to_string()),
+        );
+    }
+
+    /// The type annotation to write for a declaration of `what`, reporting
+    /// whatever the round-trip drops.
+    ///
+    /// `None` means "write no annotation", which is what this backend did
+    /// unconditionally before #154 — a declared type is a *coercion*
+    /// upstream (`real r = 5` stores `5.0`), so erasing one silently changed
+    /// the program's result.
+    ///
+    /// Annotations are only written when targeting v4. This repo's parser
+    /// accepts `real x = 5` at every version — `looks_like_typed_var_decl`
+    /// carries no version gate — but the official v1–v3 servers predate the
+    /// type syntax, so emitting one there would be a guess about somebody
+    /// else's compiler. At v1–v3 the type is dropped and reported instead.
+    fn decl_annotation(&self, ty: Option<&Type>, span: Span, what: &str) -> Option<String> {
+        let ty = ty?;
+        if self.opts.version != Version::V4 {
+            self.semantic_loss(
+                span,
+                &format!("the declared type of {what}"),
+                &format!(
+                    "`{}` is written back only when targeting v4; at {:?} the declaration \
+                     is emitted untyped, so a value assigned to it is no longer coerced",
+                    expr::type_str(ty),
+                    self.opts.version
+                ),
+            );
+            return None;
+        }
+        let rendered = expr::decl_type_str(ty);
+        if rendered.is_none() {
+            self.semantic_loss(
+                span,
+                &format!("the declared type of {what}"),
+                &format!(
+                    "`{}` has no official (non-experimental) LeekScript spelling, so the \
+                     declaration is emitted untyped",
+                    expr::type_str(ty)
+                ),
+            );
+        }
+        rendered
+    }
+
     fn emit_file(&mut self) {
         // Globals whose `global x = …;` statement survives in the emitted
         // program: their `Def::Global` item would be a redeclaration.
@@ -119,6 +196,11 @@ impl Emitter<'_> {
         let name = self.fn_name(item, &f.name);
         self.w.token(&name);
         self.emit_params(&f.params);
+        self.emit_return_type(
+            f.return_type.as_ref(),
+            f.span,
+            &format!("`{name}`'s return"),
+        );
         self.w.space();
         if let Some(b) = &f.body {
             self.emit_block(b);
@@ -189,7 +271,11 @@ impl Emitter<'_> {
             }
         }
         // Class fields are bare names (optionally prefixed by the
-        // modifiers above) — never `var`.
+        // modifiers above, and by the declared type) — never `var`.
+        if let Some(ann) = self.decl_annotation(f.ty.as_ref(), f.span, &format!("`{}`", f.name)) {
+            self.w.token(&ann);
+            self.w.space();
+        }
         self.w.token(&f.name);
         if let Some(init) = &f.init {
             self.w.space();
@@ -223,6 +309,14 @@ impl Emitter<'_> {
             self.w.token(&m.name);
         }
         self.emit_params(&m.params);
+        // A constructor takes no return type in the grammar.
+        if !is_ctor {
+            self.emit_return_type(
+                m.return_type.as_ref(),
+                m.span,
+                &format!("`{}`'s return", m.name),
+            );
+        }
         self.w.space();
         if let Some(b) = &m.body {
             self.emit_block(b);
@@ -236,6 +330,10 @@ impl Emitter<'_> {
     fn emit_global(&mut self, g: &Global) {
         self.w.token("global");
         self.w.space();
+        if let Some(ann) = self.decl_annotation(g.ty.as_ref(), g.span, &format!("`{}`", g.name)) {
+            self.w.token(&ann);
+            self.w.space();
+        }
         self.w.token(&g.name);
         if let Some(init) = &g.init {
             self.w.space();
@@ -252,6 +350,13 @@ impl Emitter<'_> {
         for (i, p) in params.iter().enumerate() {
             if i > 0 {
                 self.w.token(",");
+                self.w.space();
+            }
+            // `Param : '@'? ( Type '@'? )? Ident` — the type goes before
+            // the by-ref marker (docs/grammar.md §5.2).
+            if let Some(ann) = self.decl_annotation(p.ty.as_ref(), p.span, &format!("`{}`", p.name))
+            {
+                self.w.token(&ann);
                 self.w.space();
             }
             if p.is_by_ref {
@@ -502,18 +607,38 @@ impl Emitter<'_> {
     }
 
     fn emit_vardecl(&mut self, v: &VarDecl) {
+        // Only a *declaration* site may carry the type: the later sites of a
+        // folded global are plain assignments, and prefixing one with a type
+        // would declare a shadowing local.
+        let mut declaring = true;
         if v.is_global {
             // One `global` keyword per global. HIR folds every declaration
             // site of a name onto one `DefId` and keeps them all as
             // statements; upstream hoists the declaration regardless of
             // position, so the sites after the first are assignments.
-            if self.declared_globals.insert(v.def) {
+            declaring = self.declared_globals.insert(v.def);
+            if declaring {
                 self.w.token("global");
                 self.w.space();
             }
+        }
+        // `Type Ident` replaces the `var` keyword — `real r = 5;`, not
+        // `var real r = 5;` (docs/grammar.md §5.1).
+        let annotation = if declaring {
+            self.decl_annotation(v.ty.as_ref(), v.span, &format!("`{}`", v.name))
         } else {
-            self.w.token("var");
-            self.w.space();
+            None
+        };
+        match &annotation {
+            Some(ann) => {
+                self.w.token(ann);
+                self.w.space();
+            }
+            None if !v.is_global => {
+                self.w.token("var");
+                self.w.space();
+            }
+            None => {}
         }
         self.w.token(&v.name);
         if let Some(init) = &v.init {
@@ -521,6 +646,16 @@ impl Emitter<'_> {
             self.w.token("=");
             self.w.space();
             self.emit_expr(init, 0);
+        }
+    }
+
+    /// Write `-> T` for a declared return type, reporting what is dropped.
+    fn emit_return_type(&mut self, ty: Option<&Type>, span: Span, what: &str) {
+        if let Some(ann) = self.decl_annotation(ty, span, what) {
+            self.w.space();
+            self.w.token("->");
+            self.w.space();
+            self.w.token(&ann);
         }
     }
 

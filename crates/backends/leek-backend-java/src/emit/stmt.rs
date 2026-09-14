@@ -9,6 +9,9 @@ use crate::mangle;
 
 impl Emitter<'_> {
     pub(crate) fn emit_stmt(&mut self, s: &Stmt) {
+        // Anchor for a diagnostic raised by a statement that holds no
+        // expression to set it (`var x;`); `write_expr` narrows it further.
+        self.set_cur_span(s.span());
         // Exact mode folds the per-statement op tick into the
         // value-producing expression via the `ops(value, n)`
         // overload (see `emit_var_decl` / `Stmt::Return`). The
@@ -774,6 +777,8 @@ impl Emitter<'_> {
             returns_box_fns: self.returns_box_fns.clone(),
             returns_box_vars: self.returns_box_vars.clone(),
             synthetic_default_decls: self.synthetic_default_decls.clone(),
+            diagnostics: std::cell::RefCell::new(Vec::new()),
+            cur_span: std::cell::Cell::new(self.cur_span.get()),
         };
         scratch.emit_stmts(&b.stmts);
         // Hand off any outlined-lambda helpers the scratch run
@@ -787,6 +792,12 @@ impl Emitter<'_> {
         self.fn_singletons
             .borrow_mut()
             .append(&mut *scratch.fn_singletons.borrow_mut());
+        // …and its complaints: a lambda body is emitted through this scratch
+        // run, so without the hand-off an unsupported construct inside one
+        // would be raised and then dropped on the floor.
+        self.diagnostics
+            .borrow_mut()
+            .append(&mut *scratch.diagnostics.borrow_mut());
         let (java, _) = scratch.writer.into_parts();
         java
     }

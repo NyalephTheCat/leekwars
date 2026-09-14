@@ -80,11 +80,26 @@ pub fn run(
     let version = version_from_byte(driver_run.run.input().version_byte);
 
     match backend {
-        BackendKind::Java => {
-            emit_java(&project, &driver_run.run, version, args, quiet, environment)
-        }
+        BackendKind::Java => emit_java(
+            &project,
+            &driver_run.run,
+            version,
+            args,
+            quiet,
+            environment,
+            color,
+            format,
+        ),
         BackendKind::Native => emit_native(&project, &driver_run.run, args, quiet),
-        BackendKind::LeekScript => emit_leekscript(&project, &driver_run.run, version, args, quiet),
+        BackendKind::LeekScript => emit_leekscript(
+            &project,
+            &driver_run.run,
+            version,
+            args,
+            quiet,
+            color,
+            format,
+        ),
         BackendKind::Jar => {
             bail!("jar backend not yet supported in this toolchain");
         }
@@ -92,6 +107,42 @@ pub fn run(
             bail!("wasm backend not yet supported in this toolchain");
         }
     }
+}
+
+/// Render a backend's own diagnostics through the project's reporter — the
+/// same codes, carets and `[lint]` levels a frontend diagnostic gets — and
+/// report whether any of them was error-level.
+///
+/// Both source-emitting backends produce output *and* complaints (unlike the
+/// native backend, which fails outright), so this takes a slice rather than
+/// an error. Falls back to a plain one-line form when the reporter can't be
+/// built from a broken `[lint]` table, exactly as `miku run` does for a
+/// native failure.
+fn report_backend_diagnostics(
+    project: &Project,
+    result: &leek_pipeline::Run<'_>,
+    diagnostics: &[leek_diagnostics::Diagnostic],
+    color: ColorWhen,
+    format: MessageFormat,
+) -> bool {
+    if diagnostics.is_empty() {
+        return false;
+    }
+    // The same source map the driver rendered the frontend diagnostics
+    // against, so a backend complaint raised inside an included file points
+    // at *that* file.
+    let entry_label = project.entry_path().display().to_string();
+    let entry_text = std::fs::read_to_string(project.entry_path()).unwrap_or_default();
+    let sources = leek_driver::run_sources(result, &entry_text, &entry_label);
+    if let Ok(reporter) = leek_driver::reporter_for(project, color.into(), format.into()) {
+        return reporter.emit(diagnostics, &sources);
+    }
+    for d in diagnostics {
+        eprintln!("{}: {}", d.severity, d.message);
+    }
+    diagnostics
+        .iter()
+        .any(|d| d.severity == leek_diagnostics::Severity::Error)
 }
 
 /// AOT-compile the project to a standalone native executable. The output path
@@ -152,6 +203,8 @@ fn emit_leekscript(
     version: leek_syntax::Version,
     args: &Build,
     quiet: bool,
+    color: ColorWhen,
+    format: MessageFormat,
 ) -> Result<ExitCode> {
     let hir = result
         .get::<HirArtifact>()
@@ -168,6 +221,12 @@ fn emit_leekscript(
         .with_user_source(input.source);
 
     let out = leek_backend_leekscript::emit(hir.0.as_ref(), &opts);
+    // A semantic this backend cannot carry across is a warning: the emitted
+    // program is valid, it just means slightly less than the input did. It
+    // still has to be *said* — dropping it silently is #154.
+    if report_backend_diagnostics(project, result, &out.diagnostics, color, format) {
+        return Ok(ExitCode::from(1));
+    }
 
     let settings = project
         .manifest
@@ -202,6 +261,8 @@ fn emit_java(
     args: &Build,
     quiet: bool,
     environment: Option<&std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
+    color: ColorWhen,
+    format: MessageFormat,
 ) -> Result<ExitCode> {
     let hir = result
         .get::<HirArtifact>()
@@ -221,6 +282,19 @@ fn emit_java(
     }
 
     let out = leek_backend_java::emit(hir.0.as_ref(), &opts);
+    // A construct the emitter has no shape for produces Java that javac
+    // rejects — or, worse, that compiles to something else. Say so against
+    // the Leek source and stop, instead of writing the file and reporting
+    // success (#152). The `.java` is deliberately not written: it is known
+    // not to be a translation of this program.
+    //
+    // Whether a diagnostic is fatal is the reporter's call, not
+    // `out.has_errors()`: a project that has decided it knows better can
+    // demote `E0610` through the manifest's `[lint]` table, and then the
+    // build proceeds as it did before.
+    if report_backend_diagnostics(project, result, &out.diagnostics, color, format) {
+        return Ok(ExitCode::from(1));
+    }
 
     let out_dir = pick_java_out_dir(project, args.out_dir.as_deref(), &settings);
     std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;

@@ -385,6 +385,26 @@ impl super::Emitter<'_> {
                     // A built-in class called as a constructor (`Array()`,
                     // `Map()`, `Set(1, 2)`, `Integer()`, …) — handled above.
                 } else {
+                    // Terminal fallback, after the builtin table, the host
+                    // environment catalog and the built-in-class constructors
+                    // have all missed. The bare `name(...)` that goes out here
+                    // is not a Java method on the generated class, so javac
+                    // rejects it — with a line inside generated code and no
+                    // way back to the Leek source. `callee_span` is the `f` in
+                    // `f(args)`, which is exactly what to point at.
+                    //
+                    // Not every arrival here is a defect: a *receiver*-shaped
+                    // catalog entry is emitted bare on purpose, because it is
+                    // an instance method on the AI base class. Only complain
+                    // when the environment does not know the name either.
+                    let known_to_host = self
+                        .opts
+                        .environment
+                        .as_ref()
+                        .is_some_and(|env| env.lookup(name).is_some());
+                    if !known_to_host {
+                        self.unsupported(c.callee_span, &format!("a call to `{name}`"));
+                    }
                     buf.push_str(name);
                     buf.push('(');
                     for (i, a) in c.args.iter().enumerate() {
@@ -566,7 +586,7 @@ impl super::Emitter<'_> {
                 // `execute(fn, args...)` like the `Callee::Expr` arm
                 // does for arbitrary expressions.
                 buf.push_str("execute(");
-                self.write_name(buf, name_ref);
+                self.write_name(buf, name_ref, c.callee_span);
                 // v1: when the callee is a known `var f = function(@a){…}`
                 // binding, pass the bare box (not `.get()`) for a ref-box arg at
                 // each written-`@` position so the lambda's `@a` aliases — and
