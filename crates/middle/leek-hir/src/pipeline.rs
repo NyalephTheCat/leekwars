@@ -110,6 +110,14 @@ impl RecipeArtifact for HirArtifact {
 /// path — existing pipelines without `ResolveIncludes` are
 /// unchanged.
 fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>) {
+    // Entry boundary for the compilation configuration (#98, #226). Which
+    // libraries and constant catalogs are active is still a process-global,
+    // so it is sampled once here, at the edge, and threaded down as plain
+    // values — the lowering below reads no global. A later slice of epic #346
+    // replaces these two reads with the configuration the driver hands in.
+    let libraries = leek_prelude::active_library_set();
+    let fold = leek_prelude::active_fold_set();
+
     // An include graph is assembled outside salsa from the workspace's
     // open-buffer/disk snapshot. Lower it directly so the graph is not lost
     // when the ordinary single-file salsa query is available.
@@ -124,7 +132,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         // pre-declared before every user file's, mirroring the
         // single-file prelude path. No `include` statement resolves
         // to the synthetic path, so it contributes no main block.
-        let prelude = prelude_tree(flags.prelude, version);
+        let prelude = prelude_tree(libraries, flags.prelude, version);
         let mut units: Vec<LowerUnit<'_>> = Vec::with_capacity(graph.includes.len() + 1);
         if let Some((prelude_ast, prelude_src)) = &prelude {
             units.push(LowerUnit {
@@ -149,7 +157,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
             version,
         };
         let (hir, diagnostics) = lower_files(entry, &units, Some(&graph.resolved), flags);
-        return (finish(hir, &fold_map(), opt), diagnostics);
+        return (finish(hir, &fold_map(fold), opt), diagnostics);
     }
 
     #[cfg(feature = "salsa")]
@@ -171,7 +179,11 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         .map(|a| a.0.clone())
         .expect("LowerHir::run guards on AstArtifact presence outside the salsa path");
     let flags = cx.flags();
-    let prelude = prelude_tree(flags.prelude, Version::from_byte(cx.version_byte()));
+    let prelude = prelude_tree(
+        libraries,
+        flags.prelude,
+        Version::from_byte(cx.version_byte()),
+    );
     let (hir, diagnostics) = lower_one(
         &ast,
         cx.source(),
@@ -179,7 +191,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         flags,
         prelude.as_ref().map(|(tree, source)| (tree, *source)),
     );
-    (finish(hir, &fold_map(), opt), diagnostics)
+    (finish(hir, &fold_map(fold), opt), diagnostics)
 }
 
 /// Tracked return type for [`lower_hir_query`]: the HIR (in an
@@ -203,6 +215,15 @@ pub fn lower_hir_query(
     use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
     use leek_syntax::SyntaxNode;
 
+    // Entry boundary for the compilation configuration (#98, #226): sampled
+    // here rather than inside `prelude_tree` / `fold_map`, which are now pure
+    // functions of these values. The read is still a process-global and so is
+    // invisible to salsa — a later slice of epic #346 replaces it with a
+    // tracked input on `file`, at which point this query re-runs when the
+    // configuration changes.
+    let libraries = leek_prelude::active_library_set();
+    let fold = leek_prelude::active_fold_set();
+
     let parse = leek_parser::pipeline::parse_query(db, file);
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return LowerHirResult {
@@ -212,7 +233,7 @@ pub fn lower_hir_query(
     };
     let flags = leek_span::FeatureFlags::from_bits(file.flags_bits(db));
     let version_byte = file.version_byte(db);
-    let prelude = prelude_tree(flags.prelude, Version::from_byte(version_byte));
+    let prelude = prelude_tree(libraries, flags.prelude, Version::from_byte(version_byte));
     let (hir, diagnostics) = lower_one(
         &ast,
         file.source(db),
@@ -221,7 +242,7 @@ pub fn lower_hir_query(
         prelude.as_ref().map(|(tree, source)| (tree, *source)),
     );
     LowerHirResult {
-        hir: finish(hir, &fold_map(), OptLevel::O0),
+        hir: finish(hir, &fold_map(fold), OptLevel::O0),
         diagnostics,
     }
 }

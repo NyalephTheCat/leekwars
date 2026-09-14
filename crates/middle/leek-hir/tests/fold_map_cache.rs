@@ -1,54 +1,45 @@
-//! `fold_map` parses each registered constant's value string once per
-//! [`leek_prelude::generation`], not once per lowered file (#191).
+//! `fold_map` parses each catalog's value strings once per [`FoldSet`], not
+//! once per lowered file (#191), and reads nothing but its argument to do it
+//! (#98, #226).
 //!
-//! The generation is process-global, so this lives in its own test binary
-//! (its own process) and is written as one `#[test]` that walks the states in
-//! order — two tests in one binary would race on the counter.
+//! That second property is why this test no longer registers anything:
+//! before, it had to drive `leek_prelude::activate_fold_constants` and live
+//! in its own process so two tests could not race on the generation counter.
+//! With the catalogs named by the argument there is no counter and no
+//! process-global left to disturb — the assertions below hold in any order,
+//! in any process.
 
 use std::sync::Arc;
 
+use leek_config::FoldSet;
 use leek_hir::ir::Literal;
 
 #[test]
-fn the_parsed_map_is_shared_until_the_generation_moves() {
-    // Same generation ⇒ literally the same allocation, not an equal copy.
-    let first = leek_hir::fold_map();
-    let second = leek_hir::fold_map();
+fn the_parsed_map_is_shared_per_fold_set() {
+    // Folding nothing is the default compile path: an empty map, so the fold
+    // pass is a no-op — and still one shared allocation, not a fresh one per
+    // lowered file.
+    let none = leek_hir::fold_map(FoldSet::NONE);
+    assert!(none.is_empty(), "FoldSet::NONE must fold nothing");
     assert!(
-        Arc::ptr_eq(&first, &second),
-        "a second call at the same generation must not re-parse the values"
+        Arc::ptr_eq(&none, &leek_hir::fold_map(FoldSet::NONE)),
+        "a second call for the same set must not rebuild the map"
     );
 
-    // Registering a genuinely new constant bumps the generation, which must
-    // invalidate the parsed map rather than serve the pre-registration one.
-    leek_prelude::activate_fold_constants([
-        ("R1_05_FOLD_INT", "37"),
-        ("R1_05_FOLD_REAL", "1.5"),
-        ("R1_05_FOLD_JUNK", "not a number"),
-    ]);
-    let third = leek_hir::fold_map();
+    // The leek-wars catalog applies the value rules the lowering pass used
+    // inline: `.`-bearing → real, else integer. `leek-environment`'s own
+    // tests pin these two values.
+    let leekwars = leek_hir::fold_map(FoldSet::LEEKWARS);
+    assert_eq!(leekwars.get("WEAPON_PISTOL"), Some(&Literal::Int(37)));
+    assert_eq!(leekwars.get("EROSION_DAMAGE"), Some(&Literal::Real(0.05)));
+
+    // Each set memoizes in its own slot, so the two never alias.
     assert!(
-        !Arc::ptr_eq(&second, &third),
-        "activate_fold_constants must invalidate the parsed map"
+        Arc::ptr_eq(&leekwars, &leek_hir::fold_map(FoldSet::LEEKWARS)),
+        "the leek-wars map must be memoized in its turn"
     );
-
-    // …and the rebuild applies the same value rules the lowering pass used:
-    // `.`-bearing → real, else integer, unparseable dropped.
-    assert_eq!(third.get("R1_05_FOLD_INT"), Some(&Literal::Int(37)));
-    assert_eq!(third.get("R1_05_FOLD_REAL"), Some(&Literal::Real(1.5)));
-    assert_eq!(third.get("R1_05_FOLD_JUNK"), None);
-
-    // The rebuilt map is then shared in its turn.
     assert!(
-        Arc::ptr_eq(&third, &leek_hir::fold_map()),
-        "the rebuilt map must be memoized at the new generation too"
-    );
-
-    // Re-registering an identical set changes nothing, so neither the
-    // generation nor the map moves.
-    leek_prelude::activate_fold_constants([("R1_05_FOLD_INT", "37")]);
-    assert!(
-        Arc::ptr_eq(&third, &leek_hir::fold_map()),
-        "an idempotent re-registration must not discard the parsed map"
+        !Arc::ptr_eq(&none, &leekwars),
+        "two different fold sets must not share one map"
     );
 }

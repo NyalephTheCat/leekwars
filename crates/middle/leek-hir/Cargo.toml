@@ -17,6 +17,8 @@ leek-types       = { workspace = true }
 leek-resolver    = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-prelude     = { workspace = true }
+leek-config      = { workspace = true }
+leek-environment = { workspace = true }
 rowan            = { workspace = true }
 num-bigint       = { workspace = true }
 salsa            = { version = "0.26", optional = true }

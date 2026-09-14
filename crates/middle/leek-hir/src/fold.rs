@@ -1,59 +1,70 @@
-//! The active fold constants, parsed into literals once per generation.
+//! The fold constants a compilation asks for, parsed into literals.
 //!
-//! [`leek_prelude`] keeps the registered constants as `name → value-string`
-//! pairs so that leaf crate stays free of any IR dependency; turning those
-//! strings into [`Literal`]s is this crate's job. It used to be done inside
-//! the lowering pass, which re-parsed every value string on every file
-//! lowered (#191). The parsed map is built at most once per
-//! [`leek_prelude::generation`] instead — the same key the merged library
-//! header is memoized on, and the one that moves when a driver registers a
-//! new constant or changes a value.
+//! [`leek_environment`] keeps the leek-wars fight constants as
+//! `name → value-string` pairs baked into the binary; turning those strings
+//! into [`Literal`]s is this crate's job. It used to be done inside the
+//! lowering pass, which re-parsed every value string on every file lowered
+//! (#191).
+//!
+//! Which catalogs to fold now arrives as a [`FoldSet`] argument instead of
+//! being read back out of `leek_prelude`'s process-global registrations
+//! (#98, #226). That makes the map a pure function of a one-bit input, which
+//! is what lets the salsa-tracked [`lower_hir_query`] be keyed on it — a
+//! tracked query cannot see a generation counter move, so it could never be
+//! keyed on the registry.
+//!
+//! [`lower_hir_query`]: crate::pipeline::lower_hir_query
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
+
+use leek_config::FoldSet;
 
 use crate::ir::Literal;
 
-/// The parsed map, tagged with the [`leek_prelude::generation`] it was built
-/// at. `None` until the first call.
-static FOLD_MAP: Mutex<Option<(u64, Arc<HashMap<String, Literal>>)>> = Mutex::new(None);
+/// Memoized [`fold_map`] answers, one slot per [`FoldSet`], indexed by
+/// [`FoldSet::bits`].
+///
+/// A plain array of [`OnceLock`]s rather than the generation-keyed
+/// [`Mutex`](std::sync::Mutex) this used to be: with the catalogs named by
+/// the argument there is nothing left to invalidate, so a slot's answer is a
+/// function of the slot's own index and stays correct once computed. Same
+/// table shape, and the same reasoning, as `leek_prelude`'s
+/// `MERGED_HEADER_FOR`.
+static FOLD_MAP: [OnceLock<Arc<HashMap<String, Literal>>>; 2] = [const { OnceLock::new() }; 2];
 
-/// The active fold constants as `name → literal`, shared and rebuilt only
-/// when [`leek_prelude::generation`] moves. Empty when constant folding
-/// isn't active, which is the default path.
+/// The table above has a slot for every set [`FoldSet`] can build. A second
+/// fold bit in `leek-config` would index past the end, so it has to widen
+/// this table in the same change.
+const _: () = assert!(
+    FoldSet::from_bits(u8::MAX).bits() < 2,
+    "leek-config gained a fold bit: widen FOLD_MAP accordingly"
+);
+
+/// The constants the catalogs in `fold` define, as `name → literal`, parsed
+/// at most once per set per process and shared by [`Arc`].
+///
+/// Empty — and still `Arc`-stable — for [`FoldSet::NONE`], the default
+/// compile path: an empty map makes
+/// [`fold_constants`](crate::transform::fold_constants) a no-op.
 ///
 /// A value string containing `.` parses as a real, anything else as an
 /// integer; a value that parses as neither is dropped — exactly what the
 /// lowering pass did with it inline.
-pub fn fold_map() -> Arc<HashMap<String, Literal>> {
-    let generation = leek_prelude::generation();
-    {
-        let cache = FOLD_MAP.lock().expect("fold map cache lock");
-        if let Some((built_at, map)) = &*cache
-            && *built_at == generation
-        {
-            return Arc::clone(map);
-        }
+pub fn fold_map(fold: FoldSet) -> Arc<HashMap<String, Literal>> {
+    let slot = usize::from(fold.bits());
+    Arc::clone(FOLD_MAP[slot].get_or_init(|| Arc::new(parse_constants(fold))))
+}
+
+/// Parse every catalog named in `fold` into one map.
+fn parse_constants(fold: FoldSet) -> HashMap<String, Literal> {
+    if !fold.contains(FoldSet::LEEKWARS) {
+        return HashMap::new();
     }
-    // The snapshot reports the generation it was taken at, and that is what
-    // the map must be tagged with: sampling the counter separately could pair
-    // an older snapshot with a newer generation and pin it there.
-    let (pairs, generation) = leek_prelude::fold_constants_cached();
-    let map: Arc<HashMap<String, Literal>> = Arc::new(
-        pairs
-            .iter()
-            .filter_map(|(name, value)| Some((name.clone(), parse_literal(value)?)))
-            .collect(),
-    );
-    // Two builders racing at the same generation still agree on one `Arc`,
-    // and a build that lost to a *newer* generation does not clobber it.
-    let mut cache = FOLD_MAP.lock().expect("fold map cache lock");
-    match &*cache {
-        Some((built_at, _)) if *built_at >= generation => {}
-        _ => *cache = Some((generation, map)),
-    }
-    let (_, map) = cache.as_ref().expect("just filled");
-    Arc::clone(map)
+    leek_environment::leekwars_constant_values()
+        .into_iter()
+        .filter_map(|(name, value)| Some((name.to_string(), parse_literal(value)?)))
+        .collect()
 }
 
 /// Parse one registered value string: a `.`-bearing value is a real, any

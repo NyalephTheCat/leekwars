@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use leek_config::LibrarySet;
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{self, AstNode, Stmt as AstStmt};
 use leek_pipeline::OptLevel;
@@ -135,22 +136,30 @@ pub fn lower_file_with_prelude_with_flags(
 /// statement resolves to it, so it never contributes a main block.
 pub const PRELUDE_UNIT_PATH: &str = "<prelude>";
 
-/// Parse the active library/prelude headers (the implicit prelude when
-/// enabled, plus any `--library` headers like leekwars) into a single
+/// Parse the configured library/prelude headers (the implicit prelude when
+/// `prelude_enabled`, plus every library named by `libs`) into a single
 /// signature AST to merge ahead of the user file. `None` when nothing is
 /// active.
 ///
-/// Neither cost here is paid per file: [`leek_prelude::merged_header`] joins
-/// the headers once per [`leek_prelude::generation`] and hands back the same
-/// `Arc`, and the parse of that text is memoized by
+/// Pure in its three arguments (#98, #226): the headers come from
+/// [`leek_prelude::merged_header_for`], which reads no process-global, so a
+/// salsa-tracked lowering may call this and still be re-run when the
+/// configuration it holds changes. The generation-keyed
+/// [`leek_prelude::merged_header`] this used to call could not offer that —
+/// its answer moved under a tracked query without the query system seeing it.
+///
+/// Neither cost here is paid per file: `merged_header_for` joins the headers
+/// once per `(libs, prelude_enabled)` pair and hands back the same `Arc`, and
+/// the parse of that text is memoized by
 /// [`leek_parser::parse_signature_header`] on the **program's** language
 /// version — `version` is the one the driver settled (override > pragma >
 /// default), never re-derived from the file's pragmas.
 pub fn prelude_tree(
+    libs: LibrarySet,
     prelude_enabled: bool,
     version: Version,
 ) -> Option<(ast::SourceFile, SourceId)> {
-    let (combined, _generation) = leek_prelude::merged_header(prelude_enabled)?;
+    let combined = leek_prelude::merged_header_for(libs, prelude_enabled)?;
     let green = leek_parser::parse_signature_header(&combined, version);
     let ast = ast::SourceFile::cast(SyntaxNode::new_root(green))?;
     Some((ast, leek_prelude::source_id()))
@@ -190,8 +199,8 @@ pub fn lower_one(
 /// consumers — the Java backend (reads `HirArtifact`) and MIR/native/interp
 /// (lower from the same `HirArtifact`) — see folded literals from one hook.
 /// `fold` comes from [`crate::fold::fold_map`], already parsed once per
-/// generation; an empty map makes the fold pass a no-op, so the default path
-/// and the corpus baseline are unchanged.
+/// [`FoldSet`](leek_config::FoldSet); an empty map makes the fold pass a
+/// no-op, so the default path and the corpus baseline are unchanged.
 ///
 /// Propagation and folding run to a fixpoint inside
 /// [`optimize_hir`](crate::transform::optimize_hir) so chained constants
