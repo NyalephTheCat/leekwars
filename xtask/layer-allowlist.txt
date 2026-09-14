@@ -23,7 +23,6 @@ leek-resolver -> leek-pipeline: stage defines its pipeline step/artifacts
 leek-types -> leek-pipeline: stage defines its pipeline step/artifacts
 leek-hir -> leek-pipeline: stage defines its pipeline step/artifacts
 leek-mir -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-charge -> leek-pipeline: stage defines its pipeline step/artifacts
 leek-complexity -> leek-pipeline: stage defines its pipeline step/artifacts
 
 # Dev-dependency, two layers up: tests/empirical.rs checks the complexity
