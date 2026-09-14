@@ -56,7 +56,7 @@ fn run_analyze(cx: &Context<'_>) -> Option<Arc<Vec<Complexity>>> {
     // file alone. Still dormant, but for a narrower reason than it used to be:
     // since #165 the LSP *does* ask for this target, from hover, code lens and
     // `leek.showComplexity` — only ever through `crate::pipeline::run` /
-    // `run_on_file`, which build a plain `leek_recipes::pipeline`. Nothing
+    // `run_on_file`, which build a plain `leek_session::pipeline`. Nothing
     // routes `Target::Complexity` through `pipeline_with_includes` yet.
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {

@@ -123,7 +123,7 @@ fn include_targets(
     includer: &Path,
     by_path: &HashMap<PathBuf, ScopeFile>,
 ) -> Vec<PathBuf> {
-    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_recipes::Target::Parsed)
+    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_session::Target::Parsed)
     else {
         return Vec::new();
     };

@@ -2,7 +2,7 @@
 
 use leek_lint::pipeline::LintFindings;
 use leek_pipeline::Input;
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 
 fn lint_with_allows(src: &str) -> Vec<leek_diagnostics::Diagnostic> {
@@ -14,7 +14,7 @@ fn lint_with_allows(src: &str) -> Vec<leek_diagnostics::Diagnostic> {
         flags: leek_pipeline::FeatureFlags::from_env(),
     };
     let pipeline =
-        leek_recipes::pipeline(Target::Linted, &RecipeParams::permissive()).expect("recipe");
+        leek_session::pipeline(Target::Linted, &RecipeParams::permissive()).expect("recipe");
     let run = pipeline.run(input);
     run.get::<LintFindings>()
         .map(|f| f.0.clone())

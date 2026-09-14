@@ -31,7 +31,7 @@ pub fn handle(
 ) -> Option<Vec<lsp::InlineValue>> {
     let doc = ws.doc(uri)?;
     let pm = doc.pos_map();
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
     let range_start = pm.to_offset(range.start)?;

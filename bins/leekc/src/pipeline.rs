@@ -4,10 +4,9 @@ use std::path::Path;
 
 use anyhow::Result;
 use leek_diagnostics::Code;
-use leek_driver::DriverConfig;
 use leek_fmt::FormatOptions;
 use leek_pipeline::{LintGroups, Pipeline};
-use leek_recipes::{self, Target};
+use leek_session::{self, DriverConfig, Target};
 use leek_span::SourceId;
 
 use crate::cli::Emit;
@@ -18,7 +17,7 @@ pub const ENTRY_SOURCE: u32 = 1;
 /// Pick the shortest pipeline that produces the artifact `emit` needs.
 ///
 /// The emits that resolve names go through
-/// [`leek_driver::standalone_pipeline`], the manifest-less half of the
+/// [`leek_session::standalone_pipeline`], the manifest-less half of the
 /// entry point `miku` plans every file with — so `leekc main.leek` and
 /// `miku check` agree on what `include("helper")` means. `input` is the
 /// entry file the include graph is walked from.
@@ -32,14 +31,14 @@ pub fn pipeline_for(
     lints: LintGroups,
     input: &Path,
 ) -> Pipeline {
-    let params = leek_recipes::driver_params().with_lints(lints);
+    let params = leek_session::driver_params().with_lints(lints);
     let with_includes = |target: Target| {
         let config = DriverConfig {
             target,
             params: params.clone(),
             ..DriverConfig::default()
         };
-        leek_driver::standalone_pipeline(input, SourceId::new(ENTRY_SOURCE).unwrap(), &config)
+        leek_session::standalone_pipeline(input, SourceId::new(ENTRY_SOURCE).unwrap(), &config)
             .expect("recipe")
     };
     match emit {
@@ -47,10 +46,10 @@ pub fn pipeline_for(
             with_includes(Target::Linted)
         }
         Emit::Tokens | Emit::FlatCst => {
-            leek_recipes::pipeline(Target::Tokens, &params).expect("recipe")
+            leek_session::pipeline(Target::Tokens, &params).expect("recipe")
         }
-        Emit::Cst => leek_recipes::pipeline(Target::Parsed, &params).expect("recipe"),
-        Emit::Fmt => leek_recipes::pipeline_formatted(fmt_opts, &params).expect("recipe"),
+        Emit::Cst => leek_session::pipeline(Target::Parsed, &params).expect("recipe"),
+        Emit::Fmt => leek_session::pipeline_formatted(fmt_opts, &params).expect("recipe"),
         Emit::Mir => with_includes(Target::Mir),
     }
 }
@@ -142,8 +141,8 @@ mod tests {
     fn the_name_resolving_emits_plan_the_same_front_end_as_the_driver() {
         // DRIVER-02: `leekc` and `miku` must not disagree about whether a
         // file's `include(...)` calls are resolved. Both plan through
-        // `leek_driver`, so the step sequence is identical.
-        let driver = leek_driver::standalone_pipeline(
+        // `leek_session`, so the step sequence is identical.
+        let driver = leek_session::standalone_pipeline(
             entry(),
             SourceId::new(ENTRY_SOURCE).unwrap(),
             &DriverConfig::default(),

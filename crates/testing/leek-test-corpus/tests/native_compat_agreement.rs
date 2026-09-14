@@ -29,7 +29,7 @@
 use leek_backend_native::{NativeOptions, check_native_compat, compile_program};
 use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::{FeatureFlags, Input};
-use leek_recipes::{RecipeParams, Target};
+use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_test_cases::TestCase;
 use leek_test_corpus::{embedded_manifest, run_on_large_stack};
@@ -50,7 +50,7 @@ struct Disagreement {
 
 fn hir_of(case: &TestCase, source: SourceId) -> Option<std::sync::Arc<leek_hir::HirFile>> {
     let pipeline =
-        leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
+        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
     let run = pipeline.run(Input {
         source,
         text: case.code.clone().into(),

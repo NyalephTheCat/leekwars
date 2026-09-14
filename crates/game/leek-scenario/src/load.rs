@@ -13,7 +13,7 @@ use leek_generator::{Entity, Fight};
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::{FeatureFlags, Input};
-use leek_recipes::Target;
+use leek_session::Target;
 use leek_span::SourceId;
 
 use crate::schema::{EntitySpec, Scenario};
@@ -262,7 +262,7 @@ pub fn compile_ai_source(
         flags: FeatureFlags::from_env(),
     };
 
-    let pipeline = leek_recipes::pipeline(Target::Hir, &leek_recipes::driver_params())
+    let pipeline = leek_session::pipeline(Target::Hir, &leek_session::driver_params())
         .map_err(|e| anyhow!("building pipeline: {e}"))?;
     let run = pipeline.run(input);
 

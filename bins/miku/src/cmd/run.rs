@@ -5,10 +5,9 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use leek_backends::resolve_run_backend;
-use leek_driver::{DriverConfig, run_entry};
 use leek_hir::pipeline::HirArtifact;
 use leek_project::Project;
-use leek_recipes::{OptLevel, RecipeParams, Target};
+use leek_session::{DriverConfig, OptLevel, RecipeParams, Target, run_entry};
 
 use crate::cli::{ColorWhen, MessageFormat, Run};
 
@@ -20,7 +19,7 @@ pub fn run(
     _quiet: bool,
 ) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
-    if leek_driver::report_manifest(&project, color.into(), format.into()) {
+    if leek_session::report_manifest(&project, color.into(), format.into()) {
         return Ok(ExitCode::from(1));
     }
 
@@ -41,7 +40,7 @@ pub fn run(
     // against, reused so a backend failure points at the same files.
     let entry_label = project.entry_path().display().to_string();
     let entry_text = std::fs::read_to_string(project.entry_path()).unwrap_or_default();
-    let sources = leek_driver::run_sources(&driver_run.run, &entry_text, &entry_label);
+    let sources = leek_session::run_sources(&driver_run.run, &entry_text, &entry_label);
 
     let Some(hir) = driver_run.run.get::<HirArtifact>() else {
         eprintln!("miku: lowering produced no HIR");

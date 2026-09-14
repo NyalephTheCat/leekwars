@@ -27,7 +27,7 @@ pub fn handle(
         return Ok(None);
     };
 
-    let Some(run) = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved) else {
+    let Some(run) = crate::pipeline::run(ws, uri, leek_session::Target::Resolved) else {
         return Ok(None);
     };
     let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {

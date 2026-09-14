@@ -71,7 +71,7 @@ fn run_tool(script: &str, extra_args: &[&str], quiet: bool) -> Result<ExitCode> 
 
 fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
     use leek_pipeline::{Input, TimingSink};
-    use leek_recipes::{RecipeParams, Target};
+    use leek_session::{RecipeParams, Target};
     use leek_span::SourceId;
 
     let path = cmd.path.unwrap_or_else(|| {
@@ -87,7 +87,7 @@ fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
         false,
     );
     let sink = TimingSink::new();
-    let pipeline = leek_recipes::pipeline_timed(Target::Hir, &RecipeParams::permissive(), &sink)
+    let pipeline = leek_session::pipeline_timed(Target::Hir, &RecipeParams::permissive(), &sink)
         .expect("recipe");
     let _run = pipeline.run(Input {
         source: SourceId::new(1).unwrap(),

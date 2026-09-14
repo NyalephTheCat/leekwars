@@ -24,7 +24,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     // superset (the complexity artifact requires HIR, which requires resolve
     // and type-check), and the report it carries is salsa-cached per file
     // revision instead of rebuilt on every hover. See #165.
-    let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Complexity)?;
+    let run = crate::pipeline::run(ws, uri, leek_session::Target::Complexity)?;
 
     let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>();
     let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
@@ -285,7 +285,7 @@ fn cross_file_sections(
     sym: &leek_resolver::Symbol,
 ) -> Vec<String> {
     let Some(run) =
-        crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Complexity)
+        crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Complexity)
     else {
         return Vec::new();
     };
