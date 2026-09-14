@@ -282,6 +282,10 @@ fn closer_missing(node: &SyntaxNode) -> bool {
     match node.kind() {
         // `cond ? then : else` — `format_ternary` prints the `:`.
         S::TernaryExpr => !sig.contains(&S::Colon),
+        // `switch (…) { … }` — `format_switch_stmt` prints the braces
+        // around the arm list rather than echoing the tokens, so a body
+        // the parser never saw opened or closed has to round-trip.
+        S::SwitchStmt => !sig.contains(&S::LBrace) || !sig.contains(&S::RBrace),
         // Intervals open with `[` (inclusive) or `]` (exclusive) and
         // close with `]` (inclusive) or `[` (exclusive), so both
         // brackets are valid closers here.
@@ -353,8 +357,8 @@ pub(crate) fn fmt_node(node: &SyntaxNode) -> Doc {
 }
 
 /// The dedicated formatter for `kind`, or `None` for kinds that are
-/// emitted verbatim (`switch`, slices, annotations, error recovery and
-/// anything not yet modelled).
+/// emitted verbatim (slices, error recovery and anything not yet
+/// modelled).
 fn formatter_for(kind: S) -> Option<NodeFormatter> {
     let format: NodeFormatter = match kind {
         S::Block => blocks::format_block,
@@ -398,9 +402,11 @@ fn formatter_for(kind: S) -> Option<NodeFormatter> {
         S::TernaryExpr => exprs::format_ternary,
         S::IntervalExpr => exprs::format_interval,
         S::Annotation => exprs::format_annotation,
-        // `switch` bodies and slices (`a[i:j]`) keep the user's
-        // spacing; `ErrorNode` recovery must round-trip.
-        S::SwitchStmt | S::SliceExpr | S::ErrorNode => return None,
+        S::SwitchStmt => stmts::format_switch_stmt,
+        S::SwitchCase => stmts::format_switch_case,
+        // Slices (`a[i:j]`) keep the user's spacing; `ErrorNode`
+        // recovery must round-trip.
+        S::SliceExpr | S::ErrorNode => return None,
         _ => return None,
     };
     Some(format)

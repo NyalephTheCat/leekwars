@@ -962,3 +962,288 @@ pub(super) fn format_foreach_stmt(node: &SyntaxNode) -> Doc {
     }
     concat(parts)
 }
+
+// ---- Switch ----
+
+/// `switch (expr) { case … }`.
+///
+/// Shaped exactly like [`format_block`]: the `{` follows
+/// [`block_lead`] (a space under K&R, a newline under Allman), the
+/// arms sit one indent level in, and the `}` comes back out to the
+/// `switch`'s own column — so a switch written at some other
+/// indentation is re-indented to where it now sits, like every other
+/// braced construct.
+///
+/// A comment sitting directly in the body never reaches here:
+/// [`fmt_node`] hands such a node to `format_verbatim` first, which is
+/// what keeps a `// fallthrough` between two arms from being dropped.
+///
+/// [`format_block`]: super::blocks::format_block
+/// [`fmt_node`]: super::fmt_node
+pub(super) fn format_switch_stmt(node: &SyntaxNode) -> Doc {
+    debug_assert_eq!(node.kind(), S::SwitchStmt);
+    let mut header: Vec<Doc> = Vec::new();
+    let mut body: Vec<Doc> = Vec::new();
+    let mut seen_lparen = false;
+    let mut seen_rparen = false;
+    let mut scrutinee_seen = false;
+    let mut in_body = false;
+    let mut newlines: usize = 0;
+
+    for el in node.children_with_tokens() {
+        match el {
+            NodeOrToken::Token(t) if t.kind() == S::Whitespace => {
+                newlines += count_newlines(t.text());
+            }
+            NodeOrToken::Token(t) if is_trivia(&t) => {}
+            NodeOrToken::Token(t) => match t.kind() {
+                S::KwSwitch => header.push(text("switch")),
+                S::LParen if !seen_lparen => {
+                    header.push(ctrl_paren_lead());
+                    header.push(text("("));
+                    seen_lparen = true;
+                }
+                S::RParen if seen_lparen && !seen_rparen => {
+                    header.push(text(")"));
+                    seen_rparen = true;
+                }
+                S::LBrace if !in_body => in_body = true,
+                // Everything after the body's `}` belongs to no arm;
+                // this formatter re-emits both braces itself.
+                S::RBrace if in_body => break,
+                _ if in_body => push_item(&mut body, &mut newlines, token_text(&t)),
+                _ => header.push(token_text(&t)),
+            },
+            NodeOrToken::Node(child) => {
+                if in_body {
+                    // `SwitchCase` arms, plus any statement the parser
+                    // found in the body before the first `case`.
+                    newlines += leading_newlines(&child);
+                    push_item(&mut body, &mut newlines, fmt_node(&child));
+                } else if seen_lparen && !seen_rparen && !scrutinee_seen {
+                    header.push(group(fmt_node(&peel_context_parens(&child))));
+                    scrutinee_seen = true;
+                } else {
+                    header.push(fmt_node(&child));
+                }
+            }
+        }
+    }
+
+    let head = concat([concat(header), block_lead()]);
+    if body.is_empty() {
+        return concat([head, text("{}")]);
+    }
+    concat([
+        head,
+        text("{"),
+        indent(1, concat([hardline(), concat(body)])),
+        hardline(),
+        text("}"),
+    ])
+}
+
+/// One arm of a switch: `case <expr>:` (or `default:`) on its own
+/// line, then the arm's statements one indent level in.
+///
+/// An arm owns every statement up to the next `case` / `default` / `}`,
+/// so the indent is this formatter's to place; the arm itself is placed
+/// by [`format_switch_stmt`], which keeps the blank lines the source
+/// had between arms.
+pub(super) fn format_switch_case(node: &SyntaxNode) -> Doc {
+    debug_assert_eq!(node.kind(), S::SwitchCase);
+    let mut label: Vec<Doc> = Vec::new();
+    let mut body: Vec<Doc> = Vec::new();
+    let mut is_case = false;
+    let mut label_expr_seen = false;
+    let mut seen_colon = false;
+    let mut newlines: usize = 0;
+
+    for el in node.children_with_tokens() {
+        match el {
+            NodeOrToken::Token(t) if t.kind() == S::Whitespace => {
+                newlines += count_newlines(t.text());
+            }
+            NodeOrToken::Token(t) if is_trivia(&t) => {}
+            NodeOrToken::Token(t) => match t.kind() {
+                S::KwCase => {
+                    label.push(text("case"));
+                    is_case = true;
+                }
+                S::KwDefault => label.push(text("default")),
+                S::Colon if !seen_colon => {
+                    label.push(text(":"));
+                    seen_colon = true;
+                }
+                _ if seen_colon => push_item(&mut body, &mut newlines, token_text(&t)),
+                _ => {
+                    label.push(space());
+                    label.push(token_text(&t));
+                }
+            },
+            NodeOrToken::Node(child) => {
+                if is_case && !seen_colon && !label_expr_seen {
+                    label.push(space());
+                    label.push(group(fmt_node(&child)));
+                    label_expr_seen = true;
+                } else {
+                    newlines += leading_newlines(&child);
+                    push_item(&mut body, &mut newlines, fmt_node(&child));
+                }
+            }
+        }
+    }
+
+    let head = concat(label);
+    if body.is_empty() {
+        // `case 3:` with nothing of its own — the next arm follows on
+        // the next line.
+        return head;
+    }
+    concat([head, indent(1, concat([hardline(), concat(body)]))])
+}
+
+/// Append one item to a switch body (an arm) or an arm body (a
+/// statement), separated from the previous one by what `newlines` —
+/// the newline count of the whitespace between them — calls for.
+/// `newlines` is consumed: the count restarts for the next gap.
+fn push_item(items: &mut Vec<Doc>, newlines: &mut usize, item: Doc) {
+    if !items.is_empty() {
+        items.push(item_separator(*newlines));
+    }
+    *newlines = 0;
+    items.push(item);
+}
+
+/// Newlines in the whitespace the parser attached *inside* `node`, in
+/// front of its first token.
+///
+/// A switch arm's leading trivia lands inside the arm: `switch_case`
+/// opens the `SwitchCase` node before consuming the `case` keyword
+/// whose bump flushes the pending trivia. So the blank line a user left
+/// between two arms is only visible from in there, and a walker that
+/// counted the whitespace between siblings alone would swallow it.
+fn leading_newlines(node: &SyntaxNode) -> usize {
+    node.children_with_tokens()
+        .map_while(|el| el.into_token().filter(|t| t.kind() == S::Whitespace))
+        .map(|t| count_newlines(t.text()))
+        .sum()
+}
+
+/// Blank line or hardline between two items, from the number of
+/// newlines the source had between them.
+///
+/// The rule the block walker's item sequence applies between
+/// statements, [`FormatOptions::max_blank_lines`] included: with no
+/// blank lines allowed, even a `\n\n+` run comes back as a single
+/// hardline.
+///
+/// [`FormatOptions::max_blank_lines`]: crate::FormatOptions::max_blank_lines
+fn item_separator(newlines: usize) -> Doc {
+    if newlines >= 2 && with_ctx(|cx| cx.opts.max_blank_lines) >= 1 {
+        crate::doc::blank_line()
+    } else {
+        hardline()
+    }
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use leek_span::SourceId;
+    use leek_syntax::Version;
+
+    use crate::{FormatOptions, format_source_checked};
+
+    /// Format with the equivalence net in circuit, so a lost comment
+    /// fails the test here rather than being asserted around.
+    fn fmt(src: &str) -> String {
+        format_source_checked(
+            src,
+            SourceId::new(1).expect("1 is a valid source id"),
+            Version::V4,
+            &FormatOptions::default(),
+        )
+        .expect("formatting a switch must keep every comment and token")
+    }
+
+    /// The common shape this slice must not break.
+    ///
+    /// The parser attaches an arm's leading trivia *inside* the arm
+    /// that follows it, so a `// fallthrough` note lands as a direct
+    /// child of the next `SwitchCase` — where `format_switch_case`,
+    /// which rebuilds its output from the label and the statements,
+    /// would drop it. It never gets the chance: [`fmt_node`]'s
+    /// unplaced-comment guard runs before dispatch and hands that arm
+    /// to `format_verbatim`. Coming out verbatim is a fine outcome;
+    /// coming out without the comment would be the worst one.
+    ///
+    /// [`fmt_node`]: super::super::fmt_node
+    #[test]
+    fn a_fallthrough_comment_between_two_arms_survives() {
+        let src = "switch (x) {\ncase 1:\na();\n// fallthrough\ncase 2:\nb();\nbreak;\n}\n";
+        let out = fmt(src);
+        assert!(out.contains("// fallthrough"), "{out}");
+        assert!(out.contains("case 2"), "{out}");
+        assert!(out.contains("b();"), "{out}");
+    }
+
+    /// The same guard one level up: a comment after the last arm's
+    /// statements is flushed into the `SwitchStmt` itself (the `}`'s
+    /// bump is what emits it), so the whole switch goes out verbatim
+    /// rather than the comment going nowhere.
+    #[test]
+    fn a_comment_before_the_closing_brace_survives() {
+        let src = "switch (x) {\ncase 1:\na();\n// done\n}\n";
+        let out = fmt(src);
+        assert!(out.contains("// done"), "{out}");
+        assert!(out.contains("a();"), "{out}");
+    }
+
+    /// A comment in the header — between the scrutinee and the `{` —
+    /// is a direct child of the `SwitchStmt` too.
+    #[test]
+    fn a_comment_in_the_header_survives() {
+        let src = "switch (x) /* why */ {\ncase 1:\na();\n}\n";
+        let out = fmt(src);
+        assert!(out.contains("/* why */"), "{out}");
+    }
+
+    /// Falling back to verbatim must not oscillate: the second pass
+    /// over the first pass's output is a no-op, comments and all.
+    #[test]
+    fn the_verbatim_fallback_is_idempotent() {
+        for src in [
+            "function f(x) {\nswitch (x) {\ncase 1:\na();\n// fallthrough\ncase 2:\nb();\n}\n}\n",
+            "function f(x) {\nswitch (x) {\ncase 1:\na();\n// done\n}\n}\n",
+        ] {
+            let once = fmt(src);
+            let twice = fmt(&once);
+            assert_eq!(once, twice, "not idempotent for {src:?}");
+        }
+    }
+
+    /// With no comment in the way the real formatter runs: the switch
+    /// is re-indented to the block it now sits in, arms one level in
+    /// and statements one level inside those, whatever column the
+    /// source had them at.
+    #[test]
+    fn a_switch_is_reindented_to_the_block_it_sits_in() {
+        let src = "function f(x) {\n      switch (x) {\n  case 1:\n        a();\nbreak;\n}\n}\n";
+        assert_eq!(
+            fmt(src),
+            "function f(x) {\n    switch (x) {\n        case 1:\n            a();\n            \
+             break;\n    }\n}\n",
+        );
+    }
+
+    /// A switch whose body the parser never saw closed keeps the
+    /// user's text: rebuilding the braces from constants would
+    /// manufacture a `}` nobody wrote (#415, #417).
+    #[test]
+    fn an_unclosed_switch_body_round_trips() {
+        let src = "switch (x) {\ncase 1:\na();\n";
+        let out = fmt(src);
+        assert!(!out.contains('}'), "a `}}` nobody wrote: {out}");
+        assert!(out.contains("case 1:"), "{out}");
+    }
+}
