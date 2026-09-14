@@ -473,7 +473,10 @@ shim! {
 }
 
 shim! {
-    /// Build a `foreach` iterator (`[key, value]` pairs) for an iterable.
+    /// Snapshot an iterable into `foreach`-iteration state — the flat element
+    /// list (plus a parallel key list for keyed sources) the synthesized loop
+    /// walks with [`leek_foreach_len`] / [`leek_iter_value`] /
+    /// [`leek_iter_key`].
     pub extern "C" fn leek_foreach_iter(iterable: *mut Value) -> *mut Value {
         handle(leek_runtime::make_foreach_iter(unsafe { val(iterable) }))
     }
@@ -483,9 +486,23 @@ shim! {
     /// Length of a foreach snapshot (a [`leek_foreach_iter`] result) — the
     /// synthesized loop bound. Uncharged: upstream's `hasNext()` is free.
     pub extern "C" fn leek_foreach_len(iter: *mut Value) -> i64 {
-        match unsafe { val(iter) } {
-            Value::Array(a) => a.borrow().len() as i64,
-            _ => 0,
-        }
+        leek_runtime::foreach_len(unsafe { val(iter) })
+    }
+}
+
+shim! {
+    /// Element `pos` of a foreach snapshot. Uncharged: upstream's `next()` /
+    /// `getValue()` are free.
+    pub extern "C" fn leek_iter_value(iter: *mut Value, pos: i64) -> *mut Value {
+        handle(leek_runtime::foreach_value_at(unsafe { val(iter) }, pos))
+    }
+}
+
+shim! {
+    /// Key at `pos` of a foreach snapshot: the stored key of a map / object /
+    /// instance, otherwise the position itself. Uncharged: upstream's
+    /// `getKey()` is free.
+    pub extern "C" fn leek_iter_key(iter: *mut Value, pos: i64) -> *mut Value {
+        handle(leek_runtime::foreach_key_at(unsafe { val(iter) }, pos))
     }
 }

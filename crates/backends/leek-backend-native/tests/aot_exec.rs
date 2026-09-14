@@ -28,6 +28,9 @@ const PROGRAMS: &[&str] = &[
     "return true\n",
     "var s = \"a\" + \"b\"\nreturn s\n",
     "var a = []\nfor (var i = 0; i < 3; i++) { push(a, i) }\nreturn a\n",
+    // A `foreach`: its snapshot shims (`leek_iter_value` / `leek_iter_key`)
+    // must be in `runtime_symbols`, or only the AOT link notices (#111).
+    "var s = 0\nfor (var k : var v in [1, 2, 3]) { s += k * v }\nreturn s\n",
 ];
 
 fn hir_v4(src: &str) -> HirFile {

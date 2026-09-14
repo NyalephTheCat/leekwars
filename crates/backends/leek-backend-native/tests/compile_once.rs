@@ -105,6 +105,30 @@ fn compile_time_constants_survive_later_runs() {
     );
 }
 
+/// The `foreach` snapshot and every element read out of it are per-run
+/// allocations, never constants baked into the reused module (#111): a loop
+/// must therefore yield the same thing on run 3 as on run 1.
+#[test]
+fn foreach_snapshots_are_rebuilt_per_run() {
+    assert_eq!(
+        run_n("var s = 0 for (var x in [1, 2, 3]) { s += x } return s", 3),
+        ["6"; 3]
+    );
+    assert_eq!(
+        run_n(
+            "var r = '' for (var k : var v in ['a': 1, 'b': 2]) { r = r + k + v } return r",
+            3
+        ),
+        ["\"a1b2\""; 3]
+    );
+    // Mutating the elements a run iterated must not leak into the next run's
+    // snapshot of the same literal.
+    assert_eq!(
+        run_n("var a = [[1]] for (var x in a) { push(x, 2) } return a", 3),
+        ["[[1, 2]]"; 3]
+    );
+}
+
 /// The reflection tables (`C.fields`, `C.methods`) are compile-time-known
 /// arrays. Handing out the constant itself let `C.fields.push(x)` mutate it —
 /// harmless while every run rebuilt the module, a leak across turns once the

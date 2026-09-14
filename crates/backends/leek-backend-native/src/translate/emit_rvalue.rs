@@ -32,6 +32,8 @@ impl Tx<'_, '_> {
             Rvalue::Slice(base, bounds) => self.slice(*base, bounds),
             Rvalue::MakeForeachIter(op) => self.foreach_iter(op),
             Rvalue::ForeachLen(base) => self.foreach_len(*base),
+            Rvalue::ForeachValueAt(base, pos) => self.foreach_elem("leek_iter_value", *base, pos),
+            Rvalue::ForeachKeyAt(base, pos) => self.foreach_elem("leek_iter_key", *base, pos),
             Rvalue::Synthetic(inner) => self.synthetic(inner),
             Rvalue::Map(pairs) => self.map_literal(pairs),
             Rvalue::Set(items) => self.set_literal(items),
@@ -443,9 +445,9 @@ impl Tx<'_, '_> {
         Ok((set, ValTy::Ref))
     }
 
-    /// Build a `foreach` iterator handle (`[key, value]` pairs) from an
-    /// iterable. The loop body then indexes it: `iter[i]` is a pair,
-    /// `iter[i][1]` the value — both lower through `index`.
+    /// Snapshot an iterable into a `foreach` iteration-state handle. The
+    /// loop body reads elements straight out of it (`foreach_elem`) — there
+    /// is no per-element pair to allocate or unpack (#111).
     pub(super) fn foreach_iter(&mut self, op: &Operand) -> Result<(Value, ValTy), NativeError> {
         let f = self.imports.rt("leek_foreach_iter")?;
         let (v, t) = self.operand(op)?;
@@ -462,6 +464,25 @@ impl Tx<'_, '_> {
         let h = self.coerce(v, t, ValTy::Ref)?;
         let inst = self.b.ins().call(f, &[h]);
         Ok((self.b.inst_results(inst)[0], ValTy::Int))
+    }
+
+    /// Read the value (`leek_iter_value`) or key (`leek_iter_key`) at `pos`
+    /// of a foreach snapshot. Uncharged — upstream's `next()` / `getKey()` /
+    /// `getValue()` are free — so, unlike an `Index`, this never goes through
+    /// `Synthetic`.
+    pub(super) fn foreach_elem(
+        &mut self,
+        sym: &str,
+        base: LocalId,
+        pos: &Operand,
+    ) -> Result<(Value, ValTy), NativeError> {
+        let f = self.imports.rt(sym)?;
+        let (v, t) = self.local_value(base)?;
+        let h = self.coerce(v, t, ValTy::Ref)?;
+        let (p, pt) = self.operand(pos)?;
+        let p = self.coerce(p, pt, ValTy::Int)?;
+        let inst = self.b.ins().call(f, &[h, p]);
+        Ok((self.b.inst_results(inst)[0], ValTy::Ref))
     }
 
     /// A compiler-synthesized rvalue: evaluates exactly like the inner

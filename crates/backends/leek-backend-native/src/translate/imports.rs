@@ -199,6 +199,8 @@ pub(super) fn declare_imports(
                     | Rvalue::Slice(..)
                     | Rvalue::MakeForeachIter(_)
                     | Rvalue::ForeachLen(_)
+                    | Rvalue::ForeachValueAt(..)
+                    | Rvalue::ForeachKeyAt(..)
                     | Rvalue::Synthetic(_)
                     | Rvalue::Map(_)
                     | Rvalue::Set(_)
@@ -494,6 +496,9 @@ pub(super) fn declare_imports(
             ("leek_value_binop_crl", &[i, types::F64, i, i], Some(i)),
             ("leek_foreach_iter", &[i], Some(i)),
             ("leek_foreach_len", &[i], Some(i)),
+            // Uncharged snapshot reads: element / key at a position.
+            ("leek_iter_value", &[i, i], Some(i)),
+            ("leek_iter_key", &[i, i], Some(i)),
             ("leek_class_of", &[i], Some(i)),
             ("leek_class_super", &[i], Some(i)),
             ("leek_construct_builtin", &[i, i, i], Some(i)),

@@ -131,84 +131,148 @@ fn slice_seq<T: Clone>(
 
 // ---- foreach iteration ----
 
-/// Snapshot `v` into an `Array<[key, value]>` for `foreach`. Arrays iterate
-/// by index, maps by entry, strings by byte position, intervals by unit
-/// step, sets by element (synthetic integer keys), objects/instances by
-/// field order. Non-iterables yield an empty array.
+/// Slot of a packed foreach snapshot holding the iterated values.
+const FOREACH_VALUES: usize = 0;
+/// Slot of a packed foreach snapshot holding the keys of a keyed source.
+const FOREACH_KEYS: usize = 1;
+
+/// Snapshot `v` into foreach-iteration state. Arrays iterate by index, maps
+/// by entry, strings by byte position, intervals by unit step, sets by
+/// element (synthetic integer keys), objects/instances by field order.
+/// Non-iterables yield an empty snapshot (0 iterations).
+///
+/// The state holds the iterated values *flat* — one `Value` per element, no
+/// per-element `[key, value]` pair — plus, for keyed sources (map / object /
+/// instance), a parallel array of keys built in the same traversal. A
+/// positional source (array / set / string / interval) stores no keys: its
+/// key is the position, produced on demand by [`foreach_key_at`].
+///
+/// Both halves are packed into one `Value` so the compiler can hold the
+/// iteration state in a single slot. The packing is private to this module;
+/// read it back with [`foreach_len`], [`foreach_value_at`] and
+/// [`foreach_key_at`].
 pub fn make_foreach_iter(v: &Value) -> Value {
-    let mut pairs: Vec<Value> = Vec::new();
-    let push_pair = |pairs: &mut Vec<Value>, k: Value, v: Value| {
-        pairs.push(Value::Array(Rc::new(RefCell::new(vec![k, v]))));
-    };
+    let mut values: Vec<Value> = Vec::new();
+    // Stays empty (and unpacked) for positional sources.
+    let mut keys: Vec<Value> = Vec::new();
+    let mut keyed = false;
     match v {
-        Value::Array(a) => {
-            for (i, el) in a.borrow().iter().enumerate() {
-                push_pair(&mut pairs, Value::Int(crate::len_as_int(i)), el.clone());
-            }
-        }
+        Value::Array(a) => values.extend(a.borrow().iter().cloned()),
         Value::Map(m) => {
-            for (k, val) in &m.borrow().entries {
-                push_pair(&mut pairs, k.clone(), val.clone());
+            keyed = true;
+            let m = m.borrow();
+            reserve(&mut values, &mut keys, m.len());
+            for (k, val) in &m.entries {
+                keys.push(k.clone());
+                values.push(val.clone());
             }
         }
-        Value::Set(s) => {
-            for (i, el) in s.borrow().iter().enumerate() {
-                push_pair(&mut pairs, Value::Int(crate::len_as_int(i)), el.clone());
-            }
-        }
+        Value::Set(s) => values.extend(s.borrow().iter().cloned()),
         Value::Object(o) => {
-            for (name, val) in o.borrow().iter() {
-                push_pair(
-                    &mut pairs,
-                    Value::String(Rc::new(name.clone())),
-                    val.clone(),
-                );
+            keyed = true;
+            let o = o.borrow();
+            reserve(&mut values, &mut keys, o.len());
+            for (name, val) in o.iter() {
+                keys.push(Value::String(Rc::new(name.clone())));
+                values.push(val.clone());
             }
         }
         Value::Instance(inst) => {
-            for (name, val) in &inst.borrow().fields {
-                push_pair(
-                    &mut pairs,
-                    Value::String(Rc::new(name.clone())),
-                    val.clone(),
-                );
+            keyed = true;
+            let inst = inst.borrow();
+            reserve(&mut values, &mut keys, inst.fields.len());
+            for (name, val) in &inst.fields {
+                keys.push(Value::String(Rc::new(name.clone())));
+                values.push(val.clone());
             }
         }
-        Value::String(s) => {
-            for (i, b) in s.as_bytes().iter().enumerate() {
-                push_pair(
-                    &mut pairs,
-                    Value::Int(crate::len_as_int(i)),
-                    Value::String(Rc::new((*b as char).to_string())),
-                );
-            }
-        }
+        Value::String(s) => values.extend(
+            s.as_bytes()
+                .iter()
+                .map(|b| Value::String(Rc::new((*b as char).to_string()))),
+        ),
         Value::Interval(iv) => {
-            let (Some(start), Some(end)) = (iv.start, iv.end) else {
-                return Value::Array(Rc::new(RefCell::new(pairs)));
-            };
-            let lo = if iv.start_inclusive {
-                start
-            } else {
-                start + 1.0
-            };
-            let hi = if iv.end_inclusive { end } else { end - 1.0 };
-            let mut x = lo;
-            let mut i = 0i64;
-            while x <= hi {
-                let v = if iv.integer_typed {
-                    Value::Int(crate::real_to_int(x))
+            if let (Some(start), Some(end)) = (iv.start, iv.end) {
+                let lo = if iv.start_inclusive {
+                    start
                 } else {
-                    Value::Real(x)
+                    start + 1.0
                 };
-                push_pair(&mut pairs, Value::Int(i), v);
-                x += 1.0;
-                i += 1;
+                let hi = if iv.end_inclusive { end } else { end - 1.0 };
+                let mut x = lo;
+                while x <= hi {
+                    values.push(if iv.integer_typed {
+                        Value::Int(crate::real_to_int(x))
+                    } else {
+                        Value::Real(x)
+                    });
+                    x += 1.0;
+                }
             }
         }
         _ => {}
     }
-    Value::Array(Rc::new(RefCell::new(pairs)))
+    let keys = if keyed {
+        Value::Array(Rc::new(RefCell::new(keys)))
+    } else {
+        Value::Null
+    };
+    Value::Array(Rc::new(RefCell::new(vec![
+        Value::Array(Rc::new(RefCell::new(values))),
+        keys,
+    ])))
+}
+
+/// Size both halves of a keyed snapshot up front, so building it costs one
+/// allocation each rather than a growth sequence.
+fn reserve(values: &mut Vec<Value>, keys: &mut Vec<Value>, n: usize) {
+    values.reserve_exact(n);
+    keys.reserve_exact(n);
+}
+
+/// Run `f` over slot `slot` of a packed foreach snapshot, or `None` when the
+/// slot is absent (`iter` is not a snapshot, or the source was positional and
+/// stored no keys).
+fn with_foreach_slot<R>(iter: &Value, slot: usize, f: impl FnOnce(&[Value]) -> R) -> Option<R> {
+    let Value::Array(outer) = iter else {
+        return None;
+    };
+    let outer = outer.borrow();
+    match outer.get(slot) {
+        Some(Value::Array(a)) => Some(f(&a.borrow())),
+        _ => None,
+    }
+}
+
+/// Element `pos` of a foreach snapshot's `slot`, `null` out of range — the
+/// same shape an index read of a too-short array produces.
+fn foreach_elem(iter: &Value, slot: usize, pos: i64) -> Option<Value> {
+    with_foreach_slot(iter, slot, |items| {
+        usize::try_from(pos)
+            .ok()
+            .and_then(|i| items.get(i))
+            .cloned()
+            .unwrap_or(Value::Null)
+    })
+}
+
+/// Number of iterations a [`make_foreach_iter`] snapshot yields.
+#[must_use]
+pub fn foreach_len(iter: &Value) -> i64 {
+    with_foreach_slot(iter, FOREACH_VALUES, |items| crate::len_as_int(items.len())).unwrap_or(0)
+}
+
+/// Value at position `pos` of a foreach snapshot.
+#[must_use]
+pub fn foreach_value_at(iter: &Value, pos: i64) -> Value {
+    foreach_elem(iter, FOREACH_VALUES, pos).unwrap_or(Value::Null)
+}
+
+/// Key at position `pos` of a foreach snapshot: the stored key of a keyed
+/// source (map / object / instance), otherwise the position itself.
+#[must_use]
+pub fn foreach_key_at(iter: &Value, pos: i64) -> Value {
+    foreach_elem(iter, FOREACH_KEYS, pos).unwrap_or(Value::Int(pos))
 }
 
 // ---- indexing & fields ----

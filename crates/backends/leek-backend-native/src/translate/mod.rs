@@ -435,6 +435,11 @@ fn param_value_only(f: &MirFunction, id: LocalId) -> bool {
                     }
                     Rvalue::MakeForeachIter(o) if op_is(o) => return false,
                     Rvalue::ForeachLen(l) if *l == id => return false,
+                    Rvalue::ForeachValueAt(l, o) | Rvalue::ForeachKeyAt(l, o)
+                        if *l == id || op_is(o) =>
+                    {
+                        return false;
+                    }
                     // Synthetic wraps foreach machinery (whose bases are
                     // always compiler temps, never params) — refuse
                     // conservatively on any mention.
@@ -1984,6 +1989,8 @@ fn rvalue_name(rv: &Rvalue) -> &'static str {
         Rvalue::Interval(_) => "interval",
         Rvalue::MakeForeachIter(_) => "foreach-iter",
         Rvalue::ForeachLen(_) => "foreach-len",
+        Rvalue::ForeachValueAt(..) => "foreach-value",
+        Rvalue::ForeachKeyAt(..) => "foreach-key",
         Rvalue::Synthetic(inner) => rvalue_name(inner),
         Rvalue::MakeLambda { .. } => "make-lambda",
         Rvalue::FunctionRef(_) => "function-ref",
@@ -2061,7 +2068,10 @@ fn rvalue_ty(rv: &Rvalue, tys: &HashMap<LocalId, ValTy>) -> Option<ValTy> {
         // regardless of the target kind (a numeric-typed destination unboxes
         // it on coercion).
         | Rvalue::Cast(..)
-        | Rvalue::MakeForeachIter(_) => Some(ValTy::Ref),
+        | Rvalue::MakeForeachIter(_)
+        // Snapshot reads box, like every other element read.
+        | Rvalue::ForeachValueAt(..)
+        | Rvalue::ForeachKeyAt(..) => Some(ValTy::Ref),
         // The synthesized foreach loop bound is a raw integer.
         Rvalue::ForeachLen(_) => Some(ValTy::Int),
         Rvalue::Synthetic(inner) => rvalue_ty(inner, tys),

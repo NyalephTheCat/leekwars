@@ -360,11 +360,12 @@ impl FnLowerer<'_> {
     }
 
     pub(crate) fn lower_foreach(&mut self, fe: &ForeachStmt) {
-        // Snapshot the iterable into an Array<[key, value]> and
-        // walk it with a normal index loop. This keeps the loop's
-        // shape uniform across array / map / set / interval /
-        // string / object sources; the interpreter materialises
-        // the snapshot at MakeForeachIter time.
+        // Snapshot the iterable and walk the snapshot with a normal
+        // index loop. This keeps the loop's shape uniform across
+        // array / map / set / interval / string / object sources;
+        // the runtime materialises the snapshot at MakeForeachIter
+        // time, and the loop reads elements out of it directly —
+        // no per-element pair to allocate or unpack (#111).
         let iter_val = self.lower_expr_to_operand(&fe.iter);
         let iter_local = self.fresh_temp(Type::Any, fe.span);
         self.push_stmt(Statement::Assign(
@@ -435,23 +436,18 @@ impl FnLowerer<'_> {
             else_block: exit,
         });
 
-        // body: pair = iter[pos]; key = pair[0]; value = pair[1];
-        // <user body>; goto step. The pair reads are synthesized
+        // body: key = iter.key(pos); value = iter.value(pos);
+        // <user body>; goto step. The snapshot reads are uncharged
         // (upstream's `next()` / `getKey()` / `getValue()` are free);
         // the explicit per-iteration tick below is the only charge.
         self.resume(body_bb);
-        let pair_local = self.fresh_temp(Type::Any, fe.span);
-        self.push_stmt(Statement::Assign(
-            Place::Local(pair_local),
-            Rvalue::Synthetic(Box::new(Rvalue::Index(
-                iter_local,
-                Operand::Local(pos_local),
-            ))),
-        ));
+        let pos = Operand::Local(pos_local);
         if let Some(k) = &fe.key {
-            self.store_foreach_binding(k, key_local, pair_local, 0);
+            let read = Rvalue::ForeachKeyAt(iter_local, pos.clone());
+            self.store_foreach_binding(k, key_local, read);
         }
-        self.store_foreach_binding(&fe.value, value_local, pair_local, 1);
+        let read = Rvalue::ForeachValueAt(iter_local, pos);
+        self.store_foreach_binding(&fe.value, value_local, read);
         // Per-iteration tick. Value form: 1 op, except v1's by-value
         // copy-on-set path which pays 2 (`@ref` skips the copy → 1).
         // Key:value form: v2+ charges nothing, v1 charges 1 per
@@ -513,29 +509,22 @@ impl FnLowerer<'_> {
         Some(id)
     }
 
-    /// Store slot `slot` (0 = key, 1 = value) of the current foreach pair into
-    /// a binding: its declared local, or — for a bare binding — the same
-    /// [`Place`] an assignment to that name writes (reused local or capture
-    /// cell, global, name-keyed global, class field). The pair read is
-    /// synthesized machinery (upstream's `getKey()` / `getValue()` are free).
+    /// Store a snapshot read (`read`, a [`Rvalue::ForeachKeyAt`] or
+    /// [`Rvalue::ForeachValueAt`]) into a binding: its declared local, or —
+    /// for a bare binding — the same [`Place`] an assignment to that name
+    /// writes (reused local or capture cell, global, name-keyed global, class
+    /// field).
     fn store_foreach_binding(
         &mut self,
         bind: &ForeachBind,
         declared: Option<LocalId>,
-        pair: LocalId,
-        slot: i64,
+        read: Rvalue,
     ) {
         let place = match declared {
             Some(id) => Place::Local(id),
             None => self.lower_place(&bind.target),
         };
-        self.push_stmt(Statement::Assign(
-            place,
-            Rvalue::Synthetic(Box::new(Rvalue::Index(
-                pair,
-                Operand::Const(Const::Int(slot)),
-            ))),
-        ));
+        self.push_stmt(Statement::Assign(place, read));
     }
 
     pub(crate) fn lower_switch(&mut self, sw: &SwitchStmt) {
