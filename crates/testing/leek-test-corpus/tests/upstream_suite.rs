@@ -92,6 +92,56 @@ fn every_backend_has_a_full_size_baseline_column() {
     }
 }
 
+/// The suite runs on a worker pool, so "the same code gives the same report"
+/// is a property, not a tautology: a case that leaked state into the next one
+/// would land differently depending on which worker picked it up, and the
+/// baseline diff would flicker instead of failing.
+///
+/// `leek-test-driver/tests/parallel_determinism.rs` pins this on a synthetic
+/// manifest in seconds; this pins it on the real 11005 cases, which costs a
+/// second full suite run. Hence `#[ignore]`: run it by hand or from the
+/// workflow_dispatch step in `corpus.yml`, not on every PR.
+///
+/// ```text
+/// cargo test -p leek-test-corpus --release -- --ignored run_to_run
+/// ```
+#[test]
+#[ignore = "runs the full suite twice; wired to the manual corpus workflow"]
+fn the_full_suite_is_run_to_run_identical() {
+    let first = run_upstream_suite();
+    let second = run_upstream_suite();
+
+    assert_eq!(
+        first.backends.keys().collect::<Vec<_>>(),
+        second.backends.keys().collect::<Vec<_>>(),
+    );
+    for (name, a) in &first.backends {
+        let b = &second.backends[name];
+        assert!(
+            a.summary.total > 5_000,
+            "[{name}] only {} cases ran — submodules missing?",
+            a.summary.total,
+        );
+        assert_eq!(a.summary, b.summary, "[{name}] summary is not reproducible");
+        let differing: Vec<_> = a
+            .outcomes
+            .iter()
+            .filter(|(id, outcome)| b.outcomes.get(*id) != Some(*outcome))
+            .take(10)
+            .collect();
+        assert!(
+            differing.is_empty(),
+            "[{name}] {} case(s) changed outcome between two identical runs, \
+             e.g. {differing:?}",
+            a.outcomes
+                .iter()
+                .filter(|(id, outcome)| b.outcomes.get(*id) != Some(*outcome))
+                .count(),
+        );
+        assert_eq!(a.outcomes.len(), b.outcomes.len(), "[{name}] case count");
+    }
+}
+
 #[test]
 fn no_regressions_against_baseline() {
     let multi = run_upstream_suite();

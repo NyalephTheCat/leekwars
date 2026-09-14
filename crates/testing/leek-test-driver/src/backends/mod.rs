@@ -1,8 +1,9 @@
 //! Run upstream cases on every linked / enabled backend.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use leek_backends::version_from_byte;
 use leek_diagnostics::Severity;
@@ -164,35 +165,273 @@ struct CaseContext {
     has_compile_error: bool,
 }
 
-fn build_context(case: &TestCase, source: SourceId) -> CaseContext {
-    let input = Input {
-        source,
-        text: case.code.clone().into(),
-        version_byte: case.version,
-        strict: case.strict,
-        flags: leek_pipeline::FeatureFlags::from_env(),
-    };
-    let pipeline =
-        leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
-    let run = pipeline.run(input);
-    let has_compile_error = run
-        .diagnostics()
-        .iter()
-        .any(|d| d.severity == Severity::Error);
-    let green = run
-        .get::<leek_parser::pipeline::GreenTreeArtifact>()
-        .map(|g| g.0.clone());
-    let hir = run.get::<HirArtifact>().map(|a| Arc::clone(&a.0));
-    CaseContext {
-        green,
-        hir,
-        has_compile_error,
+/// Stack for one corpus worker. A handful of upstream cases nest deeply
+/// enough to blow the stack a default thread gets, so every thread that
+/// compiles a case needs this. `leek_test_corpus::UPSTREAM_SUITE_STACK`
+/// re-exports this same constant, so the two cannot drift.
+pub const WORKER_STACK: usize = 64 * 1024 * 1024;
+
+/// Cases a worker claims per `fetch_add`. Per-case cost spans orders of
+/// magnitude (a parse-error case versus a JIT-compiled loop), so workers steal
+/// small batches instead of taking a contiguous slice up front — a static
+/// split leaves one worker holding all the heavy cases.
+const BATCH: usize = 16;
+
+/// Environment override for [`RunConfig::default`]'s worker count.
+///
+/// Deliberately *not* a `LEEK_EXPERIMENTAL_*` key: `FeatureFlags::from_env`
+/// reads only those eight names, so this cannot move a single case outcome —
+/// it only changes how many threads compute them. That is what makes it safe
+/// to set next to a baseline-diffing gate.
+pub const JOBS_ENV: &str = "LEEK_CORPUS_JOBS";
+
+/// Cap on the *default* worker count. Peak memory scales with the number of
+/// workers (each holds a live JIT module and its own bump arenas), and the
+/// suite is compute-bound, so more than this trades memory for little.
+const MAX_DEFAULT_JOBS: usize = 8;
+
+/// One slice of the manifest, for splitting a run across CI jobs.
+///
+/// The split is by index modulo `count`, not contiguous: cases from one
+/// upstream test file sit together and cost alike, so a contiguous split
+/// would hand one shard a much longer run than the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shard {
+    index: usize,
+    count: usize,
+}
+
+impl Shard {
+    /// The whole manifest — what every caller that is not sharding uses.
+    pub const ALL: Self = Self { index: 0, count: 1 };
+
+    /// Shard `index` of `count`. `None` unless `count >= 1 && index < count`,
+    /// so an out-of-range `--shard` cannot quietly run zero cases.
+    pub fn new(index: usize, count: usize) -> Option<Self> {
+        (count >= 1 && index < count).then_some(Self { index, count })
+    }
+
+    pub fn index(self) -> usize {
+        self.index
+    }
+
+    pub fn count(self) -> usize {
+        self.count
+    }
+
+    /// Whether this is the whole manifest rather than a slice of it.
+    pub fn is_all(self) -> bool {
+        self.count == 1
+    }
+
+    fn contains(self, case_index: usize) -> bool {
+        case_index % self.count == self.index
+    }
+
+    /// How many of `manifest`'s cases this shard owns. A sharded job can assert
+    /// its report against this exact number — not a tolerance — so a shard that
+    /// silently ran short is a red job rather than a thinner merged report.
+    pub fn expected_len(self, manifest: &Manifest) -> usize {
+        (0..manifest.cases.len())
+            .filter(|&i| self.contains(i))
+            .count()
     }
 }
 
-/// Run the full manifest on each detected backend (one pipeline build per case).
+/// How to run a manifest: across how many worker threads, and which slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunConfig {
+    /// Worker threads. `1` is not a special case — it takes the same code
+    /// path, so a serial measurement exercises the shipped runner.
+    pub jobs: usize,
+    pub shard: Shard,
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        Self {
+            jobs: default_jobs(),
+            shard: Shard::ALL,
+        }
+    }
+}
+
+impl RunConfig {
+    #[must_use]
+    pub fn with_jobs(mut self, jobs: usize) -> Self {
+        self.jobs = jobs.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_shard(mut self, shard: Shard) -> Self {
+        self.shard = shard;
+        self
+    }
+}
+
+/// [`JOBS_ENV`] when it parses to a positive number, else this machine's
+/// parallelism capped at [`MAX_DEFAULT_JOBS`].
+fn default_jobs() -> usize {
+    if let Some(raw) = std::env::var_os(JOBS_ENV)
+        && let Some(n) = raw.to_str().and_then(|s| s.trim().parse::<usize>().ok())
+        && n >= 1
+    {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(MAX_DEFAULT_JOBS)
+}
+
+/// What a worker needs to compile a case, built once per *worker* instead of
+/// once per case: the recipe pipeline (~10k rebuilds otherwise) and the
+/// feature flags (eight `env::var_os` lookups per case otherwise).
+///
+/// `Pipeline` holds `Box<dyn Step>` and is not `Send`, so each worker builds
+/// its own — which is also what keeps the hoist honest: no pipeline is ever
+/// shared between threads, and `Step::run` takes `&self`, so reusing one
+/// across cases is the same contract the pipeline already documents.
+struct CaseRunner {
+    pipeline: leek_pipeline::Pipeline,
+    flags: leek_pipeline::FeatureFlags,
+    source: SourceId,
+}
+
+impl CaseRunner {
+    fn new(source: SourceId) -> Self {
+        Self {
+            pipeline: leek_recipes::pipeline(Target::Hir, &RecipeParams::permissive())
+                .expect("recipe"),
+            flags: leek_pipeline::FeatureFlags::from_env(),
+            source,
+        }
+    }
+
+    fn context(&self, case: &TestCase) -> CaseContext {
+        let input = Input {
+            source: self.source,
+            text: case.code.clone().into(),
+            version_byte: case.version,
+            strict: case.strict,
+            flags: self.flags,
+        };
+        let run = self.pipeline.run(input);
+        let has_compile_error = run
+            .diagnostics()
+            .iter()
+            .any(|d| d.severity == Severity::Error);
+        let green = run
+            .get::<leek_parser::pipeline::GreenTreeArtifact>()
+            .map(|g| g.0.clone());
+        let hir = run.get::<HirArtifact>().map(|a| Arc::clone(&a.0));
+        CaseContext {
+            green,
+            hir,
+            has_compile_error,
+        }
+    }
+}
+
+fn build_context(case: &TestCase, source: SourceId) -> CaseContext {
+    CaseRunner::new(source).context(case)
+}
+
+/// Apply `f` to every case of `manifest` that `cfg.shard` owns, on `cfg.jobs`
+/// worker threads, and return the `Some` results **in manifest order**.
+///
+/// Ordering the merge by case index rather than by completion is what keeps
+/// every caller deterministic: the workers race, the result does not.
+fn map_cases<T, F>(manifest: &Manifest, cfg: RunConfig, f: F) -> Vec<(usize, T)>
+where
+    T: Send,
+    F: Fn(&TestCase, &CaseRunner) -> Option<T> + Sync,
+{
+    let indices: Vec<usize> = (0..manifest.cases.len())
+        .filter(|&i| cfg.shard.contains(i))
+        .collect();
+    let jobs = cfg.jobs.max(1).min(indices.len().max(1));
+    let cursor = AtomicUsize::new(0);
+    let (f, indices, cursor) = (&f, &indices, &cursor);
+
+    let mut parts: Vec<Vec<(usize, T)>> = Vec::with_capacity(jobs);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..jobs)
+            .map(|w| {
+                std::thread::Builder::new()
+                    .name(format!("corpus-{w}"))
+                    // Without this the deeply nested cases overflow the stack
+                    // and abort the *process*, turning passes into a crash
+                    // that names no failing case.
+                    .stack_size(WORKER_STACK)
+                    .spawn_scoped(scope, move || {
+                        let runner = CaseRunner::new(SourceId::new(1).unwrap());
+                        let mut out = Vec::new();
+                        loop {
+                            let start = cursor.fetch_add(BATCH, Ordering::Relaxed);
+                            if start >= indices.len() {
+                                break;
+                            }
+                            let end = (start + BATCH).min(indices.len());
+                            for &i in &indices[start..end] {
+                                if let Some(value) = f(&manifest.cases[i], &runner) {
+                                    out.push((i, value));
+                                }
+                            }
+                        }
+                        out
+                    })
+                    .expect("spawn corpus worker")
+            })
+            .collect();
+        for worker in workers {
+            match worker.join() {
+                Ok(part) => parts.push(part),
+                // Re-raise rather than swallow: a worker panic means a case
+                // escaped the harness's own `catch_unwind`, and a run that
+                // quietly lost those cases would diff green against the
+                // baseline.
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+    });
+
+    let mut out: Vec<(usize, T)> = parts.into_iter().flatten().collect();
+    out.sort_by_key(|(i, _)| *i);
+    out
+}
+
+/// Run the full manifest on each detected backend, across the default number
+/// of workers (see [`RunConfig`]).
 pub fn run_manifest(manifest: &Manifest, backends: &[SuiteBackend]) -> MultiReport {
-    let src = SourceId::new(1).unwrap();
+    run_manifest_with(manifest, backends, RunConfig::default())
+}
+
+/// Run `cfg`'s slice of the manifest on each backend, across `cfg.jobs`
+/// workers (one pipeline build per *worker*, not per case).
+///
+/// The result does not depend on `cfg.jobs`: cases are independent (every
+/// native run reinstalls its tables and reseeds the RNG from a fixed seed, and
+/// the runtime's state is thread-local), outcomes merge in manifest order, and
+/// the summary counters are commutative. `tests/parallel_determinism.rs` pins
+/// that equality rather than leaving it as a claim.
+pub fn run_manifest_with(
+    manifest: &Manifest,
+    backends: &[SuiteBackend],
+    cfg: RunConfig,
+) -> MultiReport {
+    // Ids key the outcome map, so a duplicate makes the merge order-dependent:
+    // whichever worker finished last would win and the baseline diff would
+    // flicker between runs. The serial loop hid this (last-wins by position),
+    // which is why uniqueness is asserted here rather than assumed.
+    let ids: BTreeSet<&str> = manifest.cases.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        manifest.cases.len(),
+        "the manifest has duplicate case id(s); outcomes are keyed by id, so the \
+         merged report would depend on worker scheduling",
+    );
+
     let mut multi = MultiReport {
         schema_version: MultiReport::SCHEMA_VERSION,
         backends: BTreeMap::new(),
@@ -203,22 +442,26 @@ pub fn run_manifest(manifest: &Manifest, backends: &[SuiteBackend]) -> MultiRepo
             .insert(backend.as_str().to_string(), crate::run::Report::default());
     }
 
-    for case in &manifest.cases {
-        if !case.enabled {
-            for &backend in backends {
-                let report = multi.backends.get_mut(backend.as_str()).expect("report");
-                let outcome = CaseOutcome::SkippedDisabled;
-                report.summary.record(outcome);
-                report.outcomes.insert(case.id.clone(), outcome);
-            }
-            continue;
-        }
-        let ctx = build_context(case, src);
-        for &backend in backends {
-            let outcome = run_case_with_ctx(case, src, backend, &ctx);
+    let results = map_cases(manifest, cfg, |case, runner| {
+        let outcomes: Vec<CaseOutcome> = if case.enabled {
+            let ctx = runner.context(case);
+            backends
+                .iter()
+                .map(|&backend| run_case_with_ctx(case, runner.source, backend, &ctx))
+                .collect()
+        } else {
+            vec![CaseOutcome::SkippedDisabled; backends.len()]
+        };
+        Some(outcomes)
+    });
+
+    for (i, outcomes) in results {
+        let case = &manifest.cases[i];
+        for (&backend, &outcome) in backends.iter().zip(&outcomes) {
             let report = multi.backends.get_mut(backend.as_str()).expect("report");
             report.summary.record(outcome);
-            report.outcomes.insert(case.id.clone(), outcome);
+            let previous = report.outcomes.insert(case.id.clone(), outcome);
+            debug_assert!(previous.is_none(), "case id {} recorded twice", case.id);
         }
     }
     multi
@@ -770,26 +1013,21 @@ pub struct NativeSkipRow {
 /// biggest buckets are the highest-value features to add next. Rows are
 /// returned sorted by descending count.
 pub fn native_skip_histogram(manifest: &Manifest) -> Vec<NativeSkipRow> {
-    let src = SourceId::new(1).unwrap();
-    let mut hist: BTreeMap<String, (u32, String)> = BTreeMap::new();
-    for case in &manifest.cases {
+    // Same worker pool as the suite; folding the per-case reasons back in
+    // manifest order keeps both the counts and the sample snippet (first case
+    // in the bucket) independent of which worker got there first.
+    let skips = map_cases(manifest, RunConfig::default(), |case, runner| {
         if !case.enabled || !matches!(case.expected, Expectation::Equals { .. }) {
-            continue;
+            return None;
         }
-        let ctx = build_context(case, src);
-        if ctx.has_compile_error {
-            continue;
-        }
-        let Some(hir) = ctx.hir.as_deref() else {
-            continue;
-        };
-        let opts =
-            leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
-        if let Err(e) = leek_backend_native::run(hir, &opts) {
-            let reason = normalize_native_skip(&e);
-            let entry = hist.entry(reason).or_insert((0, case.code.clone()));
-            entry.0 += 1;
-        }
+        let reason = native_skip_reason(case, runner)?;
+        Some((reason, case.code.clone()))
+    });
+
+    let mut hist: BTreeMap<String, (u32, String)> = BTreeMap::new();
+    for (_, (reason, code)) in skips {
+        let entry = hist.entry(reason).or_insert((0, code));
+        entry.0 += 1;
     }
     let mut rows: Vec<NativeSkipRow> = hist
         .into_iter()
@@ -816,37 +1054,40 @@ pub struct NativeSkipCase {
 /// contains `filter` (case-insensitive substring) — with full source, for
 /// hands-on triage of a histogram bucket.
 pub fn native_skips_matching(manifest: &Manifest, filter: &str) -> Vec<NativeSkipCase> {
-    let src = SourceId::new(1).unwrap();
     let needle = filter.to_lowercase();
-    let mut out = Vec::new();
-    for case in &manifest.cases {
+    let matches = map_cases(manifest, RunConfig::default(), |case, runner| {
         let Expectation::Equals { value } = &case.expected else {
-            continue;
+            return None;
         };
         if !case.enabled {
-            continue;
+            return None;
         }
-        let ctx = build_context(case, src);
-        if ctx.has_compile_error {
-            continue;
+        let reason = native_skip_reason(case, runner)?;
+        if !reason.to_lowercase().contains(&needle) {
+            return None;
         }
-        let Some(hir) = ctx.hir.as_deref() else {
-            continue;
-        };
-        let opts =
-            leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
-        if let Err(e) = leek_backend_native::run(hir, &opts) {
-            let reason = normalize_native_skip(&e);
-            if reason.to_lowercase().contains(&needle) {
-                out.push(NativeSkipCase {
-                    reason,
-                    expected: value.clone(),
-                    code: case.code.clone(),
-                });
-            }
-        }
+        Some(NativeSkipCase {
+            reason,
+            expected: value.clone(),
+            code: case.code.clone(),
+        })
+    });
+    matches.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Why native declined this case, or `None` if it compiled and ran (or never
+/// reached the backend). Shared by the two triage listings above so they
+/// cannot drift apart in what counts as "attempted".
+fn native_skip_reason(case: &TestCase, runner: &CaseRunner) -> Option<String> {
+    let ctx = runner.context(case);
+    if ctx.has_compile_error {
+        return None;
     }
-    out
+    let hir = ctx.hir.as_deref()?;
+    let opts = leek_backend_native::NativeOptions::release().with_lang(case.version, case.strict);
+    leek_backend_native::run(hir, &opts)
+        .err()
+        .map(|e| normalize_native_skip(&e))
 }
 
 /// Collapse a [`leek_backend_native::NativeError`] into a stable bucket

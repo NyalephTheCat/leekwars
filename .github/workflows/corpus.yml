@@ -69,14 +69,32 @@ jobs:
       # full-size column (`every_backend_has_a_full_size_baseline_column`), and
       # no case that used to pass and now doesn't. `--nocapture` so the
       # per-backend pass/fail/skip lines reach the log and the job summary.
-      # `--release` because the suite is >10 min even optimised; parallelising
-      # it is #149.
+      # `--release` because the suite is minutes long even optimised: ~11k
+      # cases on every linked backend, now spread over one worker thread per
+      # core (#149). LEEK_CORPUS_JOBS is deliberately *not* pinned here — the
+      # default is this runner's core count, capped at 8. If you ever do pin
+      # it, note it is not a `FeatureFlags` key (see the warning above the
+      # `env:` block): it changes how many threads compute the outcomes, never
+      # what they are.
       - name: corpus regression gate
         shell: bash
         run: |
           set -o pipefail
           cargo test -p leek-test-corpus --release --locked -- --nocapture 2>&1 \
             | tee corpus-report.txt
+
+      # The suite runs on a worker pool, so the gate's meaning rests on the
+      # report not depending on scheduling. `parallel_determinism.rs` pins that
+      # on a synthetic manifest on every PR; this pins it on the real 11005
+      # cases by running the whole suite twice and comparing. It doubles the
+      # job, so it is manual-only — run it after touching the runner, the JIT's
+      # per-run state, or anything else that could make a case remember the
+      # case before it.
+      - name: the full suite is run-to-run identical (manual only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          cargo test -p leek-test-corpus --release --locked --test upstream_suite \
+            -- --ignored --nocapture run_to_run
 
       # Only when the gate is red (or you asked by hand): re-run the suite and
       # write the baseline it *would* have. That is exactly what you need once

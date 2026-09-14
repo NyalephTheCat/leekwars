@@ -11,7 +11,10 @@ pub use fmt_ratchet::{
 
 pub use leek_test_driver::{
     CaseAudit, CaseChecks, CasePlan, CheckKind, Expectation, Manifest, MultiReport, SuiteBackend,
-    TestCase, audit::audit_case, backends, cases, checks, run,
+    TestCase,
+    audit::audit_case,
+    backends::{self, RunConfig, Shard},
+    cases, checks, run,
 };
 
 use std::path::{Path, PathBuf};
@@ -78,7 +81,9 @@ pub fn suite_backends() -> Vec<SuiteBackend> {
 }
 
 /// Worker stack for the full upstream suite (some cases recurse very deeply).
-pub const UPSTREAM_SUITE_STACK: usize = 64 * 1024 * 1024;
+/// Aliased, not copied, from the stack the driver gives each of its corpus
+/// workers — the two must not drift.
+pub use leek_test_driver::backends::WORKER_STACK as UPSTREAM_SUITE_STACK;
 
 /// Run `f` on a thread with [`UPSTREAM_SUITE_STACK`] — avoids main-thread stack overflow.
 pub fn run_on_large_stack<F, T>(name: &str, f: F) -> T
@@ -96,24 +101,39 @@ where
 }
 
 pub fn run_manifest_on_large_stack(manifest: &Manifest, backends: &[SuiteBackend]) -> MultiReport {
+    run_manifest_on_large_stack_with(manifest, backends, RunConfig::default())
+}
+
+/// As [`run_manifest_on_large_stack`], with an explicit worker count / shard.
+/// The outer big-stack thread is kept even though the pool spawns its own
+/// [`UPSTREAM_SUITE_STACK`] workers: it costs one thread and keeps every
+/// caller of `run_on_large_stack` on the same footing.
+pub fn run_manifest_on_large_stack_with(
+    manifest: &Manifest,
+    backends: &[SuiteBackend],
+    cfg: RunConfig,
+) -> MultiReport {
     let manifest = manifest.clone();
     let backends = backends.to_vec();
     run_on_large_stack("upstream-suite", move || {
-        backends::run_manifest(&manifest, &backends)
+        backends::run_manifest_with(&manifest, &backends, cfg)
     })
 }
 
 pub fn run_upstream_suite() -> MultiReport {
     run_on_large_stack("upstream-suite", || {
         let backends = suite_backends();
+        let cfg = RunConfig::default();
         eprintln!(
-            "upstream suite backends: {}",
+            "upstream suite backends: {} ({} worker(s); override with {}=N)",
             backends
                 .iter()
                 .map(|b| b.as_str())
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            cfg.jobs,
+            backends::JOBS_ENV,
         );
-        backends::run_manifest(embedded_manifest(), &backends)
+        backends::run_manifest_with(embedded_manifest(), &backends, cfg)
     })
 }

@@ -24,8 +24,8 @@ use leek_test_corpus::cases::Expectation;
 use leek_test_corpus::reference;
 use leek_test_corpus::run::Summary;
 use leek_test_corpus::{
-    Manifest, MultiReport, TestCase, baseline_path, embedded_manifest, run_manifest_on_large_stack,
-    run_on_large_stack, run_upstream_suite, suite_backends,
+    Manifest, MultiReport, RunConfig, Shard, TestCase, baseline_path, embedded_manifest,
+    run_manifest_on_large_stack_with, run_on_large_stack, run_upstream_suite, suite_backends,
 };
 
 const USAGE: &str = "\
@@ -38,6 +38,10 @@ COMMANDS:
     run      [--save-baseline]    Run the suite on every linked backend
              [--check-baseline]   Fail on regressions vs the saved baseline
              [--manifest=PATH]
+             [--jobs=N]           Worker threads (default: cores, capped at 8;
+                                  env LEEK_CORPUS_JOBS). Outcomes don't depend on it.
+             [--shard=i/n]        Run case indices ≡ i (mod n) only. A slice speaks
+                                  for itself, so it refuses --save/--check-baseline.
     failures [BACKEND] [CATEGORY] Categorized table of failing cases (expected vs actual)
              [--run]              Read the saved baseline by default; --run does a fresh run
     unknown                       Histogram of expectations we couldn't extract
@@ -100,6 +104,25 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let save = args.iter().any(|a| a == "--save-baseline");
     let check = args.iter().any(|a| a == "--check-baseline");
     let manifest_arg = args.iter().find_map(|a| a.strip_prefix("--manifest="));
+    let cfg = run_config(args)?;
+
+    // A shard runs a slice of the manifest, so its report is a slice too, and
+    // neither whole-suite verdict may be drawn from one:
+    //
+    // * `--save-baseline` would write a truncated baseline — which
+    //   `every_backend_has_a_full_size_baseline_column` only rejects later, as
+    //   a confusing red on some unrelated run;
+    // * `--check-baseline` would print "no regressions" having looked at 1/n
+    //   of the cases. Sharded CI needs a collect job that merges the shards'
+    //   reports and diffs the union; until there is one, refuse to pretend.
+    if !cfg.shard.is_all() && (save || check) {
+        bail!(
+            "--shard={}/{} runs a slice of the manifest; --save-baseline and \
+             --check-baseline speak for the whole suite, so run them on a full run",
+            cfg.shard.index(),
+            cfg.shard.count(),
+        );
+    }
 
     let multi = if let Some(path) = manifest_arg {
         let manifest = Manifest::load(std::path::Path::new(path))
@@ -107,9 +130,22 @@ fn cmd_run(args: &[String]) -> Result<()> {
         eprintln!("loaded {} cases from {}", manifest.cases.len(), path);
         let backends = suite_backends();
         eprintln!("upstream suite backends: {}", backend_list(&backends));
-        run_manifest_on_large_stack(&manifest, &backends)
-    } else {
+        run_manifest_on_large_stack_with(&manifest, &backends, cfg)
+    } else if cfg == RunConfig::default() {
         run_upstream_suite()
+    } else {
+        let manifest = embedded_manifest();
+        let backends = suite_backends();
+        eprintln!("upstream suite backends: {}", backend_list(&backends));
+        eprintln!(
+            "running {} of {} cases (shard {}/{}) on {} worker(s)",
+            cfg.shard.expected_len(manifest),
+            manifest.cases.len(),
+            cfg.shard.index(),
+            cfg.shard.count(),
+            cfg.jobs,
+        );
+        run_manifest_on_large_stack_with(manifest, &backends, cfg)
     };
 
     for (name, report) in &multi.backends {
@@ -160,6 +196,42 @@ fn cmd_run(args: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse `--jobs=N` and `--shard=i/n` into a [`RunConfig`].
+///
+/// Both are *how the run is executed*, never *what it computes*: the outcome
+/// of a case does not depend on which worker or which shard ran it (see
+/// `run_manifest_with`).
+fn run_config(args: &[String]) -> Result<RunConfig> {
+    let mut cfg = RunConfig::default();
+
+    if let Some(raw) = args.iter().find_map(|a| a.strip_prefix("--jobs=")) {
+        let jobs: usize = raw
+            .parse()
+            .with_context(|| format!("--jobs={raw} is not a number"))?;
+        if jobs == 0 {
+            bail!("--jobs must be at least 1");
+        }
+        cfg = cfg.with_jobs(jobs);
+    }
+
+    if let Some(raw) = args.iter().find_map(|a| a.strip_prefix("--shard=")) {
+        let (index, count) = raw
+            .split_once('/')
+            .with_context(|| format!("--shard={raw} must look like `i/n`"))?;
+        let index: usize = index
+            .parse()
+            .with_context(|| format!("--shard={raw}: `{index}` is not a number"))?;
+        let count: usize = count
+            .parse()
+            .with_context(|| format!("--shard={raw}: `{count}` is not a number"))?;
+        let shard = Shard::new(index, count)
+            .with_context(|| format!("--shard={raw} is out of range (need 0 <= i < n, n >= 1)"))?;
+        cfg = cfg.with_shard(shard);
+    }
+
+    Ok(cfg)
 }
 
 fn backend_list(backends: &[SuiteBackend]) -> String {
