@@ -370,6 +370,50 @@ version = "0.1.0"
 }
 
 #[test]
+fn check_native_compat_warns_without_failing_the_check() {
+    let dir = scratch_dir("check_native_compat");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "compatme"
+version = "0.1.0"
+"#,
+    );
+    // `2 ** b` with a non-constant exponent compiles for Java and not for
+    // native, which is exactly what this pass is for.
+    write(
+        &dir,
+        "src/main.leek",
+        "var b = 3\nvar out = 0\nout = 2 ** b\nreturn out\n",
+    );
+
+    // Off by default: this project names no backend, so it hears nothing.
+    let quiet = miku(&["check"], &dir);
+    assert_eq!(quiet.status, 0, "stderr: {}", quiet.stderr);
+    assert!(!quiet.stderr.contains("E0600"), "stderr: {}", quiet.stderr);
+
+    let out = miku(&["check", "--native-compat"], &dir);
+    // A warning, not an error: `miku check` is a CI gate, and a project that
+    // ships to Java must not fail it over the native subset.
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("E0600"), "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("warning"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("main.leek:3"),
+        "the warning points at the construct: {}",
+        out.stderr
+    );
+
+    // …and the opt-out silences it even when asked for both ways round.
+    let off = miku(&["check", "--no-native-compat"], &dir);
+    assert_eq!(off.status, 0, "stderr: {}", off.stderr);
+    assert!(!off.stderr.contains("E0600"), "stderr: {}", off.stderr);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn fmt_check_returns_nonzero_on_unformatted_input() {
     let dir = scratch_dir("fmt_check");
     write(

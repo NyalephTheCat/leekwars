@@ -60,7 +60,7 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
         ),
         Command::Run(args) => run::run(&args, manifest_path.as_deref(), color, format, quiet),
         Command::Fight(args) => fight::run(&args, manifest_path.as_deref(), quiet),
-        Command::Check => check::run(manifest_path.as_deref(), color, format, quiet),
+        Command::Check(args) => check::run(&args, manifest_path.as_deref(), color, format, quiet),
         Command::Test(args) => test::run(&args, manifest_path.as_deref(), color, format, quiet),
         Command::Fmt(args) => fmt::run(&args, manifest_path.as_deref(), quiet),
         Command::Lint(args) => lint::run(&args, manifest_path.as_deref(), color, format, quiet),
