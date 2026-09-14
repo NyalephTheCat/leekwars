@@ -436,3 +436,100 @@ pub(crate) fn preceded_by_dot(tok: &SyntaxToken) -> bool {
     }
     false
 }
+
+// ─── lexical scope of a declaration ─────────────────────────────────
+
+/// The syntax node kinds that open a new resolver scope. Mirrors the
+/// `push_scope` / `push_function_scope` sites in `leek-resolver`
+/// (`resolve_fn_body`, `resolve_class`, `resolve_class_method_body`,
+/// `resolve_class_constructor_body`, `resolve_block_body`,
+/// `resolve_for`, `resolve_foreach`, and the lambda arm of
+/// `resolve_expr`), so a declaration's lexical reach on the CST matches
+/// the one the resolver gives it.
+fn opens_a_scope(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::FnDecl
+            | SyntaxKind::ClassDecl
+            | SyntaxKind::ClassMethod
+            | SyntaxKind::ClassConstructor
+            | SyntaxKind::LambdaExpr
+            | SyntaxKind::Block
+            | SyntaxKind::ForStmt
+            | SyntaxKind::ForeachStmt
+    )
+}
+
+/// The node whose scope a declaration starting at `decl_offset` binds
+/// into: the innermost scope-opening ancestor, or `root` for a
+/// file-scope declaration.
+///
+/// A parameter's declaration sits in the header rather than the body,
+/// so the walk lands on the `FnDecl` / `ClassMethod` — which spans the
+/// body too, exactly the reach `push_function_scope` gives it.
+fn scope_node_of(root: &SyntaxNode, decl_offset: u32) -> SyntaxNode {
+    let mut cur = Some(smallest_node_at(root, decl_offset));
+    while let Some(n) = cur {
+        if opens_a_scope(n.kind()) {
+            return n;
+        }
+        cur = n.parent();
+    }
+    root.clone()
+}
+
+/// Whether `sym`'s binding is live at byte `cursor`.
+///
+/// Globals, functions and classes live in Leekscript's flat namespace
+/// and are visible everywhere. Everything else — locals, parameters,
+/// class fields — is visible only inside the node that opened its
+/// scope. Containment is the whole test on purpose: the resolver's
+/// `lookup_id` walks every enclosing scope outward without stopping at
+/// a function boundary, so a stricter rule (say, "declared before the
+/// cursor") would hide names that do resolve today.
+pub(crate) fn symbol_in_scope_at(root: &SyntaxNode, sym: &Symbol, cursor: u32) -> bool {
+    if is_workspace_global(sym.kind) || sym.kind == SymbolKind::Builtin {
+        return true;
+    }
+    let scope = scope_node_of(root, sym.def_span.start);
+    let range = scope.text_range();
+    let (lo, hi) = (u32::from(range.start()), u32::from(range.end()));
+    if lo > cursor {
+        return false;
+    }
+    // Half-open, except at file scope: completing on the blank line
+    // after the last statement puts the cursor exactly on the root's
+    // end offset, and a top-level binding is certainly live there.
+    if scope == *root {
+        cursor <= hi
+    } else {
+        cursor < hi
+    }
+}
+
+/// Whether the declaration covering `decl_offset` sits directly at file
+/// scope — not inside a function body, a class, a loop or a block.
+///
+/// Used to decide which of another file's symbols this file can see: an
+/// `include`d file contributes its top-level declarations to the shared
+/// flat namespace and nothing else.
+pub(crate) fn is_top_level_decl(root: &SyntaxNode, decl_offset: u32) -> bool {
+    let node = smallest_node_at(root, decl_offset);
+    let Some(decl) = std::iter::successors(Some(node), SyntaxNode::parent).find(|n| {
+        matches!(
+            n.kind(),
+            SyntaxKind::FnDecl
+                | SyntaxKind::ClassDecl
+                | SyntaxKind::ClassMethod
+                | SyntaxKind::ClassConstructor
+                | SyntaxKind::ClassField
+                | SyntaxKind::VarDeclStmt
+                | SyntaxKind::Param
+        )
+    }) else {
+        return false;
+    };
+    // The declaration node itself opens a scope for its *contents*; what
+    // decides file-scope-ness is everything above it.
+    std::iter::successors(decl.parent(), SyntaxNode::parent).all(|n| !opens_a_scope(n.kind()))
+}

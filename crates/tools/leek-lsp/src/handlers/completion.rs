@@ -5,23 +5,30 @@
 //! ## Sources
 //!
 //! 1. **User symbols** discovered by the resolver — every declared
-//!    function, class, global, local, param. Each item's `detail`
-//!    is the full one-line signature (function header, class
-//!    `extends` clause, typed `var`) when we can render one from
-//!    the CST; otherwise the inferred type's name.
-//! 2. **Builtin functions** from [`BUILTIN_FNS`] (with arity in
-//!    the detail string) plus every name in [`BUILTINS`] not
-//!    already covered by the arity table.
-//! 3. **Builtin constants** from [`BUILTIN_CONSTANTS`].
-//! 4. **Keywords** + a small **snippet** set.
+//!    function, class, global, local, param *whose binding is live
+//!    at the cursor* (see [`symbol_in_scope_at`]). Each item's
+//!    `detail` is the full one-line signature (function header,
+//!    class `extends` clause, typed `var`) when we can render one
+//!    from the CST; otherwise the inferred type's name.
+//! 2. **Top-level declarations from the rest of the program** — the
+//!    files this one shares a flat namespace with, via
+//!    [`program_scope`]. Each such item keeps the uri and offsets of
+//!    the file that *declares* it, so `completionItem/resolve` reads
+//!    the right doc-comment.
+//! 3. **Builtin functions** from [`BUILTIN_FNS`] (typed signature
+//!    from the embedded library headers when there is one) plus
+//!    every name in [`BUILTINS`] not already covered by the arity
+//!    table.
+//! 4. **Builtin constants** from [`BUILTIN_CONSTANTS`].
+//! 5. **Keywords** + a small **snippet** set.
 //!
 //! ## Member mode
 //!
 //! When the cursor is positioned right after a `.` token we switch
 //! to member completion:
 //!
-//! - `this.` — list the enclosing class's fields, methods, and
-//!   constructor.
+//! - `this.` — list the fields, methods and constructor of the class
+//!   the cursor is *inside*, plus everything it inherits.
 //! - `Integer.` / `Real.` / `String.` / `Array.` / `Map.` / `Set.`
 //!   — list every entry of [`FINAL_BUILTIN_FIELDS`] under that
 //!   prefix.
@@ -29,17 +36,42 @@
 //! Receiver-typed member completion (e.g. `myCat.` where `myCat`
 //! is `ClassInstance("Cat")`) would need to consult the type
 //! table; we resolve that path for declared classes via the
-//! resolver's symbol table here too.
+//! resolver's symbol table here too. A class named by any file in
+//! the program is found, and its `extends` chain is walked.
 
 use leek_resolver::SymbolKind;
 use leek_resolver::builtins::{BUILTIN_CONSTANTS, BUILTIN_FNS, BUILTINS, FINAL_BUILTIN_FIELDS};
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
-use super::member::{class_name_of_type, find_class_decl_by_name};
+use super::member::{class_name_of_type, class_parent_name_of, find_class_decl_by_name};
+use super::program_scope::{ScopeFile, program_scope};
+use crate::handlers::{enclosing_class_name, is_top_level_decl, symbol_in_scope_at};
 use crate::util::position::position_to_offset;
 use crate::workspace::Workspace;
 use leek_ide::signature::signature_for;
+
+/// Everything the item builders need about one completion request: the
+/// analysed home file, the cursor, and the program the file belongs to.
+///
+/// Bundled because both builders need all of it and threading seven
+/// parameters through each of them reads badly.
+struct Ctx<'a, 'db> {
+    ws: &'a Workspace,
+    /// The file the cursor is in — the *home* file of the program.
+    uri: &'a lsp::Url,
+    run: &'a leek_pipeline::Run<'db>,
+    /// CST of the home file.
+    root: &'a SyntaxNode,
+    /// Every file the home file shares a flat namespace with, home
+    /// file included.
+    scope: &'a [ScopeFile],
+    /// Cursor position, as a byte offset into the home file.
+    offset: u32,
+    /// Language version the home file is analysed under; gates the
+    /// builtins we offer.
+    version: leek_syntax::Version,
+}
 
 pub fn handle(
     ws: &Workspace,
@@ -53,18 +85,31 @@ pub fn handle(
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
     let root = SyntaxNode::new_root(green.clone());
 
+    // Computed once per request and shared by both modes: the scope
+    // walk re-parses the workspace to read include edges, and
+    // completion runs on every keystroke (leekwars#155 tracks making
+    // that cheaper).
+    let scope = program_scope(ws, uri);
+    let cx = Ctx {
+        ws,
+        uri,
+        run: &run,
+        root: &root,
+        scope: &scope,
+        offset,
+        version: doc.source_file_version(&ws.db),
+    };
+
     // Member mode: did the user just type `.`?
     if let Some((receiver, receiver_start)) = member_receiver(&doc.text, offset)
-        && let Some(items) = member_items(&run, &root, receiver, receiver_start)
+        && let Some(items) = member_items(&cx, receiver, receiver_start)
     {
         return Some(lsp::CompletionResponse::Array(items));
     }
     // Fall through to global suggestions if we can't resolve
     // the receiver — better than offering nothing.
 
-    Some(lsp::CompletionResponse::Array(global_items(
-        &run, &root, uri,
-    )))
+    Some(lsp::CompletionResponse::Array(global_items(&cx)))
 }
 
 // ─── completionItem/resolve ─────────────────────────────────────────
@@ -138,11 +183,19 @@ fn builtin_documentation(name: &str) -> Option<String> {
 }
 
 /// Pull the doc-comment that sits above a user symbol's declaration.
+///
+/// `data.uri` is the *declaring* file, which for a cross-file item is
+/// not the file the user is typing in and need not be open — hence the
+/// fall back to the indexed text.
 fn user_documentation(ws: &Workspace, data: &ResolveData) -> Option<String> {
     let uri = lsp::Url::parse(&data.uri).ok()?;
-    let doc = ws.doc(&uri)?;
     let start = data.def_start?;
-    let comment = leek_ide::doc::doc_comment_before(&doc.text, start)?;
+    let targets = ws.analysis_targets();
+    let text: &str = match ws.doc(&uri) {
+        Some(doc) => &doc.text,
+        None => targets.iter().find(|t| *t.uri == uri)?.text,
+    };
+    let comment = leek_ide::doc::doc_comment_before(text, start)?;
     let comment = comment.trim();
     (!comment.is_empty()).then(|| comment.to_string())
 }
@@ -194,8 +247,7 @@ fn is_ident_byte(b: u8) -> bool {
 }
 
 fn member_items(
-    run: &leek_pipeline::Run<'_>,
-    root: &SyntaxNode,
+    cx: &Ctx<'_, '_>,
     receiver: &str,
     receiver_start: u32,
 ) -> Option<Vec<lsp::CompletionItem>> {
@@ -217,35 +269,112 @@ fn member_items(
     //     `ClassInstance(N)` via the type table and list class N's
     //     members. Handles the common `var c = new Cat(); c.<here>`
     //     case that v0.2's completion missed.
-    if let Some(art) = run.get::<leek_types::pipeline::TypeCheckArtifact>()
+    let mut named_a_class = false;
+    if let Some(art) = cx.run.get::<leek_types::pipeline::TypeCheckArtifact>()
         && let Some(entry) = art.table.smallest_at(receiver_start)
         && let Some(class_name) = class_name_of_type(&entry.ty)
         && class_name != receiver
-        && let Some(cls_node) = find_class_decl_by_name(root, &class_name)
     {
-        push_class_members(&cls_node, &mut items);
+        named_a_class = push_class_chain(cx, &class_name, &mut items);
     }
 
-    // 2) `this.` — list members of the enclosing ClassDecl.
+    // 2) `this.` — members of the class the cursor is *inside*. Using
+    //    the cursor matters: a file with two classes used to complete
+    //    the last one's members from inside the first.
     if receiver == "this"
-        && let Some(cls) = enclosing_class(root)
+        && let Some(class_name) = enclosing_class_name(cx.root, cx.offset)
     {
-        push_class_members(&cls, &mut items);
+        named_a_class |= push_class_chain(cx, &class_name, &mut items);
     }
 
     // 3) Receiver names a user-declared class → list its members.
     // Use the CST directly: in salsa mode the type-check step does not
-    // leave a ResolveArtifact in the run context.
-    if let Some(cls_node) = find_class_decl_by_name(root, receiver) {
-        push_class_members(&cls_node, &mut items);
+    // leave a ResolveArtifact in the run context. Skipped once the
+    // receiver's type already named a class, so an ordinary variable
+    // doesn't cost a program-wide search for a class of its name on
+    // every keystroke after a `.`.
+    if !named_a_class {
+        push_class_chain(cx, receiver, &mut items);
     }
 
     if items.is_empty() { None } else { Some(items) }
 }
 
+/// Push `class_name`'s members, then each ancestor's, following
+/// `extends` across the whole program. Returns whether `class_name`
+/// itself named a declared class.
+///
+/// Members already in `items` are skipped, so an override hides the
+/// inherited copy and a class reached by two routes is listed once.
+fn push_class_chain(
+    cx: &Ctx<'_, '_>,
+    class_name: &str,
+    items: &mut Vec<lsp::CompletionItem>,
+) -> bool {
+    let mut current = class_name.to_string();
+    // False for `class_name` itself, true for every ancestor above it —
+    // and so also "the head of the chain was found".
+    let mut inherited = false;
+    // Same cap `member::find_member_in_chain` uses, so a cyclic
+    // `extends` terminates instead of hanging the editor.
+    for _ in 0..64 {
+        let Some(cls) = find_class_decl_in_program(cx, &current) else {
+            break;
+        };
+        push_class_members(&cls, inherited.then_some(current.as_str()), items);
+        inherited = true;
+        match class_parent_name_of(&cls) {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    inherited
+}
+
+/// Find `class <name>` in the home file, or failing that in any other
+/// file of the program — `#400` expands includes in the HIR lowerer,
+/// not the CST, so an included class is simply absent from this file's
+/// green tree and has to be looked up in its own.
+fn find_class_decl_in_program(cx: &Ctx<'_, '_>, name: &str) -> Option<SyntaxNode> {
+    if let Some(cls) = find_class_decl_by_name(cx.root, name) {
+        return Some(cls);
+    }
+    for file in cx.scope {
+        if file.uri == *cx.uri {
+            continue;
+        }
+        let Some(root) = file_root(cx.ws, file) else {
+            continue;
+        };
+        if let Some(cls) = find_class_decl_by_name(&root, name) {
+            return Some(cls);
+        }
+    }
+    None
+}
+
+/// Parse one program-scope file and hand back an *owned* root, so the
+/// node outlives the `Run` that produced its green tree.
+fn file_root(ws: &Workspace, file: &ScopeFile) -> Option<SyntaxNode> {
+    let run = crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Parsed)?;
+    let green = run.get::<leek_parser::pipeline::GreenTreeArtifact>()?;
+    Some(SyntaxNode::new_root(green.0.clone()))
+}
+
 /// Extract every `ClassField` / `ClassMethod` / `ClassConstructor`
 /// under `cls_node`'s `ClassBody` and append as completion items.
-fn push_class_members(cls_node: &SyntaxNode, items: &mut Vec<lsp::CompletionItem>) {
+///
+/// `inherited_from` names the subclass's ancestor when `cls_node` was
+/// reached by walking `extends`; it is shown in the item's `detail`
+/// (rather than `labelDetails`, which needs a client capability the
+/// server does not yet record). A `(label, kind)` pair already present
+/// is left alone, which is what makes an override win over the member
+/// it overrides.
+fn push_class_members(
+    cls_node: &SyntaxNode,
+    inherited_from: Option<&str>,
+    items: &mut Vec<lsp::CompletionItem>,
+) {
     let Some(body) = cls_node
         .children()
         .find(|c| c.kind() == SyntaxKind::ClassBody)
@@ -255,30 +384,32 @@ fn push_class_members(cls_node: &SyntaxNode, items: &mut Vec<lsp::CompletionItem
     for member in body.children() {
         match member.kind() {
             SyntaxKind::ClassField | SyntaxKind::ClassMethod | SyntaxKind::ClassConstructor => {
-                if let Some(label) = member_label(&member) {
-                    items.push(lsp::CompletionItem {
-                        label,
-                        kind: Some(member_kind(member.kind())),
-                        detail: signature_for(&member),
-                        ..Default::default()
-                    });
+                let Some(label) = member_label(&member) else {
+                    continue;
+                };
+                let kind = member_kind(member.kind());
+                if items
+                    .iter()
+                    .any(|it| it.label == label && it.kind == Some(kind))
+                {
+                    continue;
                 }
+                let detail = match (signature_for(&member), inherited_from) {
+                    (Some(sig), Some(base)) => Some(format!("{sig} — from {base}")),
+                    (Some(sig), None) => Some(sig),
+                    (None, Some(base)) => Some(format!("from {base}")),
+                    (None, None) => None,
+                };
+                items.push(lsp::CompletionItem {
+                    label,
+                    kind: Some(kind),
+                    detail,
+                    ..Default::default()
+                });
             }
             _ => {}
         }
     }
-}
-
-fn enclosing_class(root: &SyntaxNode) -> Option<SyntaxNode> {
-    // The first ClassDecl whose range encloses … hmm, we don't have
-    // the cursor here. Caller is in member mode AFTER `this.`, which
-    // is only valid inside a class. Pick the smallest ClassDecl that
-    // covers the cursor position — but we don't have it. Simplest:
-    // return the LAST ClassDecl we see (matches the common case of
-    // one class per file). Refine later if needed.
-    root.descendants()
-        .filter(|n| n.kind() == SyntaxKind::ClassDecl)
-        .last()
 }
 
 fn member_label(member: &SyntaxNode) -> Option<String> {
@@ -303,19 +434,20 @@ fn member_kind(k: SyntaxKind) -> lsp::CompletionItemKind {
 
 // ─── global completion ──────────────────────────────────────────────
 
-fn global_items(
-    run: &leek_pipeline::Run<'_>,
-    root: &SyntaxNode,
-    uri: &lsp::Url,
-) -> Vec<lsp::CompletionItem> {
+fn global_items(cx: &Ctx<'_, '_>) -> Vec<lsp::CompletionItem> {
     let mut items: Vec<lsp::CompletionItem> = Vec::new();
 
-    // 1. User symbols with their rendered signatures. The doc-comment
-    //    above the declaration is deferred to `resolve`; we only stash
-    //    a `data` pointer to its declaration here.
-    if let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() {
+    // 1. User symbols with their rendered signatures, restricted to the
+    //    ones whose binding is live at the cursor — offering another
+    //    function's local is worse than offering nothing. The
+    //    doc-comment above the declaration is deferred to `resolve`; we
+    //    only stash a `data` pointer to its declaration here.
+    if let Some(art) = cx.run.get::<leek_resolver::pipeline::ResolveArtifact>() {
         for sym in &art.table.symbols {
-            let detail = decl_signature_for_symbol(root, sym)
+            if !symbol_in_scope_at(cx.root, sym, cx.offset) {
+                continue;
+            }
+            let detail = decl_signature_for_symbol(cx.root, sym)
                 .unwrap_or_else(|| symbol_kind_label(sym.kind).into());
             items.push(lsp::CompletionItem {
                 label: sym.name.clone(),
@@ -325,20 +457,45 @@ fn global_items(
                 // `function`/`class`/`var` keyword), which is what
                 // `doc_comment_before` needs in `resolve` — the symbol
                 // span sits mid-line and would find no comment above.
-                data: resolve_data(uri, &sym.name, "user", decl_start_for_symbol(root, sym)),
+                data: resolve_data(
+                    cx.uri,
+                    &sym.name,
+                    "user",
+                    decl_start_for_symbol(cx.root, sym),
+                ),
                 ..Default::default()
             });
         }
     }
 
-    // 2. Builtin functions — arity-tracked entries get a detail
-    //    string with their signature; everything in BUILTINS not
-    //    already covered is added as a plain function entry. We
-    //    track names already emitted so the user symbols above
-    //    don't get a duplicate item from the builtin pass.
+    // We track the names already emitted so later passes never add a
+    // duplicate item. Seeding it from this file's own symbols also
+    // means a local shadow wins over a same-named cross-file symbol.
     let mut seen: std::collections::HashSet<String> =
         items.iter().map(|it| it.label.clone()).collect();
+
+    // 2. Top-level declarations from the other files of this program.
+    //    Leekscript's namespace is flat per program, so an `include`d
+    //    file's functions, classes and top-level variables are usable
+    //    here by their bare names.
+    for file in cx.scope {
+        if file.uri == *cx.uri {
+            continue;
+        }
+        push_cross_file_items(cx.ws, file, &mut seen, &mut items);
+    }
+
+    // 3. Builtin functions — arity-tracked entries get a detail
+    //    string with their signature; everything in BUILTINS not
+    //    already covered is added as a plain function entry.
     for b in BUILTIN_FNS {
+        // A builtin the file's language version predates cannot be
+        // called at all (`FUNCTION_NOT_AVAILABLE`). Claim the name so
+        // the untyped `BUILTINS` pass below doesn't re-offer it.
+        if b.min_version > cx.version as u8 {
+            seen.insert(b.name.to_string());
+            continue;
+        }
         if !seen.insert(b.name.to_string()) {
             continue;
         }
@@ -347,7 +504,7 @@ fn global_items(
             label: b.name.into(),
             kind: Some(lsp::CompletionItemKind::FUNCTION),
             detail: Some(detail),
-            data: resolve_data(uri, b.name, "builtin", None),
+            data: resolve_data(cx.uri, b.name, "builtin", None),
             ..Default::default()
         });
     }
@@ -358,13 +515,13 @@ fn global_items(
         items.push(lsp::CompletionItem {
             label: (*name).into(),
             kind: Some(lsp::CompletionItemKind::FUNCTION),
-            detail: Some("builtin".into()),
-            data: resolve_data(uri, name, "builtin", None),
+            detail: Some(library_detail(name).unwrap_or_else(|| "builtin".into())),
+            data: resolve_data(cx.uri, name, "builtin", None),
             ..Default::default()
         });
     }
 
-    // 3. Builtin constants.
+    // 4. Builtin constants.
     for name in BUILTIN_CONSTANTS {
         if !seen.insert((*name).to_string()) {
             continue;
@@ -377,7 +534,7 @@ fn global_items(
         });
     }
 
-    // 4. Host-environment library functions + constants (registered from a
+    // 5. Host-environment library functions + constants (registered from a
     //    loaded library like `leekwars`, e.g. `getCell`, `CELL_EMPTY`).
     for (name, lo, hi, _v) in leek_resolver::builtins::dynamic_builtin_functions() {
         if !seen.insert(name.clone()) {
@@ -388,7 +545,7 @@ fn global_items(
         } else {
             format!("library {name}({lo}-{hi} args)")
         };
-        let data = resolve_data(uri, &name, "builtin", None);
+        let data = resolve_data(cx.uri, &name, "builtin", None);
         items.push(lsp::CompletionItem {
             label: name,
             kind: Some(lsp::CompletionItemKind::FUNCTION),
@@ -409,20 +566,23 @@ fn global_items(
         });
     }
 
-    // 4. Keywords.
+    // 6. Keywords, and 7. snippets. The snippets are labelled after the
+    //    keyword they expand, so each pair shares a label; the
+    //    `sort_text` suffix keeps the bare keyword above its snippet
+    //    without disturbing the alphabetical order of everything else.
     for kw in KEYWORDS {
         items.push(lsp::CompletionItem {
             label: (*kw).into(),
             kind: Some(lsp::CompletionItemKind::KEYWORD),
+            sort_text: Some(format!("{kw}0")),
             ..Default::default()
         });
     }
-
-    // 5. Snippets.
     for (label, body) in SNIPPETS {
         items.push(lsp::CompletionItem {
             label: (*label).into(),
             kind: Some(lsp::CompletionItemKind::SNIPPET),
+            sort_text: Some(format!("{label}1")),
             insert_text: Some((*body).into()),
             insert_text_format: Some(lsp::InsertTextFormat::SNIPPET),
             ..Default::default()
@@ -430,6 +590,64 @@ fn global_items(
     }
 
     items
+}
+
+/// Append the top-level declarations of one *other* file of the program.
+///
+/// Every item keeps `file`'s uri and `file`'s byte offsets, never the
+/// home file's: `resolve` re-opens the declaring document to read the
+/// doc-comment, and offsets from a merged table would silently land on
+/// an unrelated declaration in the home buffer.
+fn push_cross_file_items(
+    ws: &Workspace,
+    file: &ScopeFile,
+    seen: &mut std::collections::HashSet<String>,
+    items: &mut Vec<lsp::CompletionItem>,
+) {
+    let Some(run) =
+        crate::pipeline::run_on_file(ws, file.source_file, leek_recipes::Target::Resolved)
+    else {
+        return;
+    };
+    let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
+        return;
+    };
+    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
+        return;
+    };
+    let root = SyntaxNode::new_root(green.0.clone());
+
+    for sym in &art.table.symbols {
+        // A top-level `var` is a `Local` to the resolver but still
+        // lands in the shared file scope, so it crosses an include
+        // just like a `global` does. Params and fields never do.
+        if !matches!(
+            sym.kind,
+            SymbolKind::Function | SymbolKind::Class | SymbolKind::Global | SymbolKind::Local
+        ) {
+            continue;
+        }
+        if !is_top_level_decl(&root, sym.def_span.start) {
+            continue;
+        }
+        if !seen.insert(sym.name.clone()) {
+            continue;
+        }
+        let detail = decl_signature_for_symbol(&root, sym)
+            .unwrap_or_else(|| symbol_kind_label(sym.kind).into());
+        items.push(lsp::CompletionItem {
+            label: sym.name.clone(),
+            kind: Some(symbol_kind_to_lsp(sym.kind)),
+            detail: Some(detail),
+            data: resolve_data(
+                &file.uri,
+                &sym.name,
+                "user",
+                decl_start_for_symbol(&root, sym),
+            ),
+            ..Default::default()
+        });
+    }
 }
 
 /// Build the `data` payload `resolve` reads back. Cheap to serialize;
@@ -507,7 +725,26 @@ fn enclosing_decl(n: &SyntaxNode) -> Option<SyntaxNode> {
     None
 }
 
+/// One-line `detail` for a library name, from the embedded signature
+/// headers — the same source `builtin_documentation` reads. The first
+/// overload's signature, with a count of the rest. `None` for a name the
+/// headers don't cover. (Unifying the two builtin metadata sources
+/// outright is leekwars#162.)
+fn library_detail(name: &str) -> Option<String> {
+    let sigs = leek_ide::library_sigs::library_signatures(name)?;
+    let first = sigs.first()?;
+    Some(match sigs.len() {
+        1 => first.signature.clone(),
+        n => format!("{} (+{} overloads)", first.signature, n - 1),
+    })
+}
+
+/// One-line `detail` for an arity-tracked builtin: the typed signature
+/// when the library headers have one, else the arity table.
 fn format_builtin_detail(b: &leek_resolver::builtins::BuiltinFn) -> String {
+    if let Some(detail) = library_detail(b.name) {
+        return detail;
+    }
     if b.min_args == b.max_args {
         let args = (0..b.min_args)
             .map(|i| format!("arg{}", i + 1))
@@ -589,14 +826,17 @@ const KEYWORDS: &[&str] = &[
     "void",
 ];
 
+/// Snippet bodies, labelled after the keyword each one expands. The
+/// duplicate label a keyword item already carries is deliberate — see
+/// the `sort_text` note in [`global_items`].
 const SNIPPETS: &[(&str, &str)] = &[
-    ("ifsnip", "if ($1) {\n\t$0\n}"),
+    ("if", "if ($1) {\n\t$0\n}"),
     ("ifelse", "if ($1) {\n\t$2\n} else {\n\t$0\n}"),
-    ("forsnip", "for (var $1 = 0; $1 < $2; $1++) {\n\t$0\n}"),
+    ("for", "for (var $1 = 0; $1 < $2; $1++) {\n\t$0\n}"),
     ("foreach", "for (var $1 in $2) {\n\t$0\n}"),
-    ("whilesnip", "while ($1) {\n\t$0\n}"),
-    ("funsnip", "function $1($2) {\n\t$0\n}"),
-    ("classsnip", "class $1 {\n\t$0\n}"),
+    ("while", "while ($1) {\n\t$0\n}"),
+    ("function", "function $1($2) {\n\t$0\n}"),
+    ("class", "class $1 {\n\t$0\n}"),
 ];
 
 #[cfg(test)]
