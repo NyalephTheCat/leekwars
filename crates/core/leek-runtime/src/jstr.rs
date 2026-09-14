@@ -140,6 +140,30 @@ pub fn index_of16(hay: &str, needle: &str, from: usize) -> Option<usize> {
     Some(len16(&hay[..found]))
 }
 
+/// Java [`String.trim()`] — the string with every leading and trailing
+/// character `<= U+0020` removed.
+///
+/// Not Rust's [`str::trim`], which strips every character carrying the
+/// Unicode `White_Space` property. Java's definition is the older, narrower
+/// one: "all leading and trailing space removed, where space is defined as
+/// any character whose codepoint is less than or equal to `'U+0020'`". A
+/// no-break space (`U+00A0`), an ideographic space (`U+3000`) and the rest
+/// of the Unicode whitespace block are *not* space to `String.trim()`, so
+/// `java_trim("\u{00A0}x\u{00A0}")` is unchanged where `str::trim` would
+/// hand back `"x"`.
+///
+/// Java scans UTF-16 code units and this scans `char`s; the two agree,
+/// because every code unit `<= 0x20` is an ASCII character, which can be
+/// neither half of a surrogate pair nor part of a multi-byte sequence — so
+/// both scans stop at the same boundary.
+///
+/// [`String.trim()`]: https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/String.html#trim()
+#[inline]
+#[must_use]
+pub fn java_trim(s: &str) -> &str {
+    s.trim_matches(|c: char| c <= '\u{0020}')
+}
+
 /// Byte offset of the first character whose UTF-16 position is `>= units`.
 /// (`units` may land inside a surrogate pair; rounding up to the next
 /// character is what a byte-wise search needs, and matches Java, since no

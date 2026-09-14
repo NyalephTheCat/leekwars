@@ -100,14 +100,39 @@ pub(crate) fn dispatch_unary_math(name: &str, args: &[Value]) -> Option<Value> {
             Some(_) => Value::Int(0),
             None => return None,
         },
-        // `number(v)` returns int when v has no decimal, real
-        // otherwise. Matches `ValueClass.number`.
+        // `number(v)` mirrors `ValueClass.number`, which is exactly:
+        //
+        // ```java
+        // if (value instanceof Number) return (Number) value;
+        // if (value instanceof String) {
+        //     var s = (String) value;
+        //     try {
+        //         if (s.contains(".")) return Double.parseDouble(s);
+        //         else return Long.parseLong(s);
+        //     } catch (Exception e) {}
+        // }
+        // return 0l;
+        // ```
+        //
+        // Three consequences the earlier arm missed:
+        //
+        // - A `Boolean` is neither a `Number` nor a `String`, so it falls all
+        //   the way to `return 0l`: `number(true)` is `0`, not `1`.
+        // - `BigIntegerValue extends Number` (`runner/values/BigIntegerValue.java`),
+        //   so a big integer is returned unchanged rather than zeroed.
+        // - Every failure exits through that same `return 0l` — a **`long`**.
+        //   So a string with a dot that does not parse answers integer `0`,
+        //   not `0.0`: `number("1.5x")` is `0`.
+        //
+        // `number("1e5")` is `0` for the same shape of reason: the string
+        // holds no `.`, so upstream takes the `Long.parseLong` branch, which
+        // rejects the exponent. `Double.parseDouble` is reachable only for a
+        // string that contains a dot, so no dotless exponent form ever parses.
         "number" => match a {
-            Value::Int(_) | Value::Real(_) => a.clone(),
-            Value::Bool(b) => Value::Int(i64::from(*b)),
+            Value::Int(_) | Value::Real(_) | Value::BigInt(_) => a.clone(),
             Value::String(s) => {
                 if s.contains('.') {
-                    Value::Real(s.parse::<f64>().unwrap_or(0.0))
+                    s.parse::<f64>().map_or(Value::Int(0), Value::Real)
                 } else {
                     Value::Int(s.parse::<i64>().unwrap_or(0))
                 }
