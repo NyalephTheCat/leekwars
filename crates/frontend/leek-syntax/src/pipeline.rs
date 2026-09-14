@@ -1,18 +1,17 @@
-//! Pipeline integration: pragma preprocessing as a [`Step`], plus
-//! a helper to convert the pipeline's `version_byte` into a [`Version`].
+//! Pipeline integration: pragma preprocessing as a [`Step`].
+//!
+//! [`version_from_byte`], which decodes the pipeline's `version_byte`
+//! into a [`Version`](crate::version::Version), lives in
+//! [`crate::version`] and is re-exported here for the passes that still
+//! reach for it through this module.
 
 use leek_diagnostics::Diagnostic;
 use leek_pipeline::{Artifact, Context};
 use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 
 use crate::pragma::{Pragmas, parse_pragmas};
-use crate::version::Version;
 
-/// Decode a `Context::version_byte()` into the typed [`Version`]
-/// enum. Values out of range collapse to [`Version::LATEST`].
-pub fn version_from_byte(b: u8) -> Version {
-    Version::from_byte(b)
-}
+pub use crate::version::version_from_byte;
 
 /// Output of [`Pragma`].
 #[derive(Debug, Clone)]

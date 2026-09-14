@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use leek_backends::version_from_byte;
 use leek_diagnostics::Severity;
 use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
@@ -12,6 +11,7 @@ use leek_manifest::{BackendKind, BackendTable};
 use leek_pipeline::Input;
 use leek_recipes::{RecipeParams, Target};
 use leek_span::SourceId;
+use leek_syntax::version::version_from_byte;
 use serde::{Deserialize, Serialize};
 
 use crate::cases::{Expectation, Manifest, TestCase};

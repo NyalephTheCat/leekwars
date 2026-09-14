@@ -12,7 +12,7 @@ use leek_span::Span;
 use leek_span::paths::canonical_or_normalized;
 use leek_syntax::Version;
 use leek_syntax::pipeline::PragmasArtifact;
-use leek_syntax::pipeline::version_from_byte;
+use leek_syntax::version::version_from_byte;
 
 use crate::folder::Folder;
 use crate::include_graph::{ResolvedFile, build_include_graph};

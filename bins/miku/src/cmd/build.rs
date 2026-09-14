@@ -4,14 +4,13 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use leek_backends::{
-    java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_backend, version_from_byte,
-};
+use leek_backends::{java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_backend};
 use leek_driver::{DriverConfig, run_entry, run_entry_timed};
 use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
 use leek_project::Project;
 use leek_recipes::{RecipeParams, Target};
+use leek_syntax::version::version_from_byte;
 
 use crate::cli::{Build, ColorWhen, MessageFormat};
 

@@ -498,7 +498,7 @@ impl Workspace {
     /// Scan one file's `class IDENT` declarations (version-aware:
     /// `class` only lexes as a keyword from v2 on).
     fn scan_classes(text: &str, source: leek_span::SourceId, version_byte: u8) -> Vec<String> {
-        let version = leek_syntax::pipeline::version_from_byte(version_byte);
+        let version = leek_syntax::version::version_from_byte(version_byte);
         let lexed = leek_lexer::lex(text, source, version);
         leek_parser::scan_class_names(text, &lexed.tokens)
     }

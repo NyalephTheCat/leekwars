@@ -10,8 +10,8 @@ use leek_span::pragma::LanguageSettings;
 use leek_syntax::Version;
 
 use crate::cli::Fmt;
-use leek_backends::version_from_byte;
 use leek_project::{Project, walk_leek_files};
+use leek_syntax::version::version_from_byte;
 
 pub fn run(args: &Fmt, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     // Outside a project, stdin / explicit paths still work with the
