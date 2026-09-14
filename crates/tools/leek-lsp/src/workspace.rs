@@ -1082,6 +1082,11 @@ mod tests {
         fs::rename(&old_path, &new_path).expect("rename entry");
         ws.rename_file(&path_to_uri(&old_path), &path_to_uri(&new_path));
 
+        // `indexed` is keyed by the canonical path (#181), so look the entry
+        // up the same way. On macOS the temp root is reached through a symlink
+        // (`/var` -> `/private/var`), so the raw join and the canonical
+        // spelling differ and only the canonical one is a key.
+        let new_path = new_path.canonicalize().expect("canonical renamed entry");
         let stored = ws
             .indexed
             .get(&new_path)
