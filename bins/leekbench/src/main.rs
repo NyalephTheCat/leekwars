@@ -43,14 +43,14 @@ fn run_single(cli: &Cli, input: &Path) {
     let mut summaries: Vec<(String, Result<BenchSummary>)> = Vec::new();
 
     let mut nat = RustNative::new();
-    summaries.push((nat.name_str(), bench(&mut nat, input, &opts)));
+    summaries.push((name_of(&nat), bench(&mut nat, input, &opts)));
     if !cli.no_rust_java {
         let mut rj = RustJavaEmit::auto();
-        summaries.push((rj.name_str(), bench(&mut rj, input, &opts)));
+        summaries.push((name_of(&rj), bench(&mut rj, input, &opts)));
     }
     if !cli.no_upstream {
         let mut up = UpstreamJava::auto();
-        summaries.push((up.name_str(), bench(&mut up, input, &opts)));
+        summaries.push((name_of(&up), bench(&mut up, input, &opts)));
     }
 
     let baseline = summaries
@@ -738,23 +738,11 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-trait NameStr {
-    fn name_str(&self) -> String;
-}
-impl NameStr for RustNative {
-    fn name_str(&self) -> String {
-        leek_bench::Backend::name(self).to_string()
-    }
-}
-impl NameStr for RustJavaEmit {
-    fn name_str(&self) -> String {
-        leek_bench::Backend::name(self).to_string()
-    }
-}
-impl NameStr for UpstreamJava {
-    fn name_str(&self) -> String {
-        leek_bench::Backend::name(self).to_string()
-    }
+/// The backend's display name, owned: a summary row outlives the
+/// backend it came from, so the `&'static str` is copied out rather
+/// than borrowed.
+fn name_of<B: leek_bench::Backend>(b: &B) -> String {
+    b.name().to_string()
 }
 
 #[cfg(test)]
