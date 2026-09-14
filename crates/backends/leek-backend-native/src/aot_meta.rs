@@ -9,10 +9,13 @@
 //! generated C harness passes in.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_int;
 
 use serde::{Deserialize, Serialize};
 
 use leek_mir::ir::{MirProgram, Rvalue, Statement};
+
+use crate::NativeError;
 
 /// All dispatch tables, with maps flattened to `Vec<(K, V)>` so non-string map
 /// keys round-trip cleanly through JSON.
@@ -127,8 +130,14 @@ impl AotMeta {
     }
 
     /// Serialize to a JSON blob for embedding in the executable.
-    pub fn to_blob(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_default()
+    ///
+    /// Fallible on purpose: an empty `Vec` used to be indistinguishable from a
+    /// serialization failure, so a broken blob got embedded and the produced
+    /// executable silently ran with empty dispatch tables.
+    pub fn to_blob(&self) -> Result<Vec<u8>, NativeError> {
+        serde_json::to_vec(self).map_err(|e| {
+            NativeError::compile(format!("serializing the AOT dispatch-table metadata: {e}"))
+        })
     }
 
     /// Reinstall every dispatch table into the runtime thread-locals, then
@@ -172,8 +181,20 @@ pub struct LeekLambdaEntry {
     pub arity: u64,
 }
 
+/// `leek_aot_install` succeeded.
+pub const LEEK_AOT_INSTALL_OK: c_int = 0;
+/// The metadata blob could not be parsed — a compiler/executable format break.
+pub const LEEK_AOT_INSTALL_BAD_BLOB: c_int = 1;
+/// A null pointer was passed with a non-zero length.
+pub const LEEK_AOT_INSTALL_BAD_ARGS: c_int = 2;
+
 /// Reinstall the AOT dispatch tables at process startup. Called by the generated
-/// C harness before `leek_main`.
+/// C harness before `leek_main`; the harness aborts on a non-zero return.
+///
+/// Returns [`LEEK_AOT_INSTALL_OK`], [`LEEK_AOT_INSTALL_BAD_BLOB`] or
+/// [`LEEK_AOT_INSTALL_BAD_ARGS`]. It used to return nothing and parse with
+/// `unwrap_or_default()`, so a format break installed EMPTY dispatch tables and
+/// the program ran on into whatever that produced.
 ///
 /// # Safety
 /// `blob`/`blob_len` must describe the JSON metadata emitted for this program,
@@ -185,29 +206,44 @@ pub unsafe extern "C" fn leek_aot_install(
     blob_len: usize,
     entries: *const LeekLambdaEntry,
     n_entries: usize,
-) {
+) -> c_int {
+    // Neither array is ever legitimately null — the generated C passes two
+    // file-scope statics — and `from_raw_parts` requires non-null even for a
+    // zero length, so reject both outright.
+    if blob.is_null() || entries.is_null() {
+        return LEEK_AOT_INSTALL_BAD_ARGS;
+    }
     // SAFETY: caller's contract — `blob`/`blob_len` is the metadata blob the
-    // AOT emitter wrote into the program object, readable for the process.
+    // AOT emitter wrote into the program object, readable for the process;
+    // null was rejected above.
     let bytes = unsafe { std::slice::from_raw_parts(blob, blob_len) };
-    let meta: AotMeta = serde_json::from_slice(bytes).unwrap_or_default();
+    let Ok(meta) = serde_json::from_slice::<AotMeta>(bytes) else {
+        return LEEK_AOT_INSTALL_BAD_BLOB;
+    };
     let mut addrs: HashMap<usize, (*const u8, usize)> = HashMap::new();
     // SAFETY: caller's contract — `entries`/`n_entries` is the emitted
-    // `leek_uniform_*` address array, a static in the same object.
+    // `leek_uniform_*` address array, a static in the same object; null was
+    // rejected above.
     let entry_slice = unsafe { std::slice::from_raw_parts(entries, n_entries) };
     for e in entry_slice {
         addrs.insert(e.idx as usize, (e.func, e.arity as usize));
     }
     meta.install(addrs);
+    LEEK_AOT_INSTALL_OK
 }
 
 #[cfg(test)]
 mod tests {
     //! The blob format is the only channel between the compiler process and the
-    //! produced executable, and [`leek_aot_install`] parses it with
-    //! `unwrap_or_default()` — a format break would silently install EMPTY
-    //! dispatch tables rather than fail. So round-trip every table here.
+    //! produced executable. [`leek_aot_install`] used to parse it with
+    //! `unwrap_or_default()`, so a format break silently installed EMPTY
+    //! dispatch tables; it now reports the break and the generated C harness
+    //! exits on it. Round-trip every table here, and pin that failure code.
 
-    use super::AotMeta;
+    use super::{
+        AotMeta, LEEK_AOT_INSTALL_BAD_ARGS, LEEK_AOT_INSTALL_BAD_BLOB, LEEK_AOT_INSTALL_OK,
+        LeekLambdaEntry, leek_aot_install,
+    };
 
     fn populated() -> AotMeta {
         AotMeta {
@@ -227,7 +263,8 @@ mod tests {
     #[test]
     fn every_dispatch_table_round_trips_through_the_blob() {
         let meta = populated();
-        let back: AotMeta = serde_json::from_slice(&meta.to_blob()).expect("parse blob");
+        let blob = meta.to_blob().expect("serialize blob");
+        let back: AotMeta = serde_json::from_slice(&blob).expect("parse blob");
         assert_eq!(back.method_resolve, meta.method_resolve);
         assert_eq!(back.static_init, meta.static_init);
         assert_eq!(back.user_fn_idx, meta.user_fn_idx);
@@ -244,10 +281,44 @@ mod tests {
     fn the_empty_metadata_of_the_aot_able_subset_round_trips() {
         // Today's AOT subset (scalars, strings, numeric arrays, direct calls)
         // always emits empty tables — the shape the generated C harness embeds.
-        let blob = AotMeta::default().to_blob();
+        let blob = AotMeta::default().to_blob().expect("serialize blob");
         assert!(!blob.is_empty(), "an empty table set must still serialize");
         let back: AotMeta = serde_json::from_slice(&blob).expect("parse blob");
         assert!(back.lambda_entries().is_empty());
         assert!(back.method_resolve.is_empty());
+    }
+
+    /// The sentinel-only array the generated C harness always passes.
+    const NO_LAMBDAS: &[LeekLambdaEntry] = &[LeekLambdaEntry {
+        idx: 0,
+        func: std::ptr::null(),
+        arity: 0,
+    }];
+
+    #[test]
+    fn a_blob_that_does_not_parse_is_reported_not_defaulted() {
+        let bad = b"{ not json";
+        // SAFETY: both pointers are live slices, described by their lengths.
+        let rc = unsafe { leek_aot_install(bad.as_ptr(), bad.len(), NO_LAMBDAS.as_ptr(), 0) };
+        assert_eq!(
+            rc, LEEK_AOT_INSTALL_BAD_BLOB,
+            "a corrupt blob must be reported, not silently defaulted to empty tables"
+        );
+    }
+
+    #[test]
+    fn a_well_formed_blob_installs() {
+        let blob = populated().to_blob().expect("serialize blob");
+        // SAFETY: both pointers are live slices, described by their lengths.
+        let rc = unsafe { leek_aot_install(blob.as_ptr(), blob.len(), NO_LAMBDAS.as_ptr(), 0) };
+        assert_eq!(rc, LEEK_AOT_INSTALL_OK);
+    }
+
+    #[test]
+    fn a_null_pointer_is_reported_rather_than_dereferenced() {
+        // SAFETY: passing null is exactly what is under test; the function
+        // must reject it before constructing any slice.
+        let rc = unsafe { leek_aot_install(std::ptr::null(), 0, NO_LAMBDAS.as_ptr(), 0) };
+        assert_eq!(rc, LEEK_AOT_INSTALL_BAD_ARGS);
     }
 }

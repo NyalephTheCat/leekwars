@@ -52,6 +52,40 @@ pub enum MainRet {
 /// (Linux/glibc). `cc` links libc itself.
 const SYS_LIBS: &[&str] = &["-lpthread", "-ldl", "-lm", "-lrt", "-lgcc_s", "-lutil"];
 
+/// Whether this host can produce an AOT executable at all.
+///
+/// The link hardcodes `-no-pie` (the cranelift object uses absolute
+/// relocations) and the glibc-only `-lrt` / `-lgcc_s` / `-lutil`, none of which
+/// exist on macOS. `tests/aot_exec.rs` has always declared the path
+/// Linux-only; this makes the *code* say so too, so a macOS user gets one
+/// sentence pointing at the JIT instead of raw linker noise.
+const AOT_EXE_SUPPORTED: bool = cfg!(target_os = "linux");
+
+/// Overrides the directory searched for `libleek_aot_runtime.a`. Set it and the
+/// archive must be there — a miss is an error, never a silent fallback.
+const RUNTIME_DIR_ENV: &str = "LEEK_AOT_RUNTIME_DIR";
+
+/// Set to keep the per-compile scratch directory (the generated C and the
+/// program object) instead of deleting it — the only way to inspect what the
+/// harness generator produced.
+const KEEP_TEMP_ENV: &str = "LEEK_AOT_KEEP_TEMP";
+
+/// The static runtime archive's file name.
+const ARCHIVE: &str = "libleek_aot_runtime.a";
+
+// `AOT_ABI_TAG` + the `leek_aot_abi_<tag>` anchor function this build's
+// generated C harness calls. See `build.rs`.
+include!(concat!(env!("OUT_DIR"), "/abi.rs"));
+
+/// The ABI anchor symbol for this build. The generated C harness calls it, so a
+/// static runtime archive built from a different revision — which exports a
+/// different tag — fails the link instead of corrupting shim arguments at run
+/// time. Public so a test can check the archive really exports it.
+#[must_use]
+pub fn abi_symbol_name() -> String {
+    format!("leek_aot_abi_{AOT_ABI_TAG}")
+}
+
 // ---- runtime entry points the static-runtime glue calls ----
 
 /// Per-run runtime initialization before `leek_main`, mirroring the JIT path.
@@ -190,6 +224,14 @@ pub fn compile_to_executable(
     out: &Path,
     quiet: bool,
 ) -> Result<(), NativeError> {
+    if !AOT_EXE_SUPPORTED {
+        return Err(NativeError::unsupported(
+            "AOT executables (`miku build`, `leekc --emit exe`) are supported on Linux only \
+             — the link needs `-no-pie` and the glibc-only `-lrt`/`-lgcc_s`/`-lutil`; \
+             run the program on the JIT instead — `miku run`",
+        ));
+    }
+
     // Reject constructs that would bake a compiler-process heap pointer (strings,
     // lambdas, classes, …) into the standalone binary — they segfault at runtime.
     // See [`aot_unsupported_reason`]. (The dispatch-table metadata below is in
@@ -205,24 +247,15 @@ pub fn compile_to_executable(
 
     let ret = main_ret(hir, opts)?;
 
-    // Scratch dir for the object + generated C. Unique per *compile*, not just
-    // per process: it is wiped on entry and exit, so a process that compiles two
-    // programs (a test binary, `miku` building several AIs) would otherwise have
-    // one compile delete the other's `program.o` mid-link.
-    static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "leek-aot-{}-{}",
-        std::process::id(),
-        SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    mkdirs(&tmp)?;
+    // Scratch dir for the object + generated C, removed when `tmp` drops — so a
+    // failed link (or an error emitting the object) leaves nothing behind.
+    let tmp = Scratch::new()?;
 
     // Emit the program object (with externally linkable `leek_uniform_{idx}`
     // symbols) and the dispatch-table metadata the harness reinstalls at startup.
     let obj = tmp.join("program.o");
     let meta = crate::compile_object_with_meta(hir, opts, &obj)?;
-    let blob = meta.to_blob();
+    let blob = meta.to_blob()?;
 
     // Generate the C entry point and link everything with cc.
     let main_c = tmp.join("leek_entry.c");
@@ -252,19 +285,109 @@ pub fn compile_to_executable(
         } else {
             Stdio::inherit()
         })
-        .stderr(Stdio::inherit());
-    let status = cmd.status().map_err(|e| {
+        // Captured, not inherited, so the ABI-anchor miss can be recognized in
+        // it; it is echoed verbatim below, so the user still sees `cc`'s own
+        // diagnosis either way.
+        .stderr(Stdio::piped());
+    let output = cmd.output().map_err(|e| {
         NativeError::compile(format!("running `{cc}` (a C compiler on PATH?): {e}"))
     })?;
-    if !status.success() {
-        return Err(NativeError::compile("cc link of the AOT executable failed"));
+    // Echoed whether or not the link succeeded, so `cc`'s warnings on the
+    // generated C reach the user exactly as they did when stderr was inherited.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprint!("{stderr}");
+    if !output.status.success() {
+        return Err(link_failure(&stderr, &lib_dir));
     }
 
-    let _ = std::fs::remove_dir_all(&tmp);
     if !quiet {
         eprintln!("leek: wrote executable to {}", out.display());
     }
     Ok(())
+}
+
+/// Turn a failed `cc` link into a `NativeError`, recognizing the one failure
+/// mode the ABI anchor exists to produce: the archive was built from a
+/// different revision, so it exports a different `leek_aot_abi_<tag>` and the
+/// harness's call to ours is unresolved.
+fn link_failure(stderr: &str, lib_dir: &Path) -> NativeError {
+    if stderr.contains(&abi_symbol_name()) {
+        return NativeError::compile(format!(
+            "the AOT static runtime archive in {} was built from a different revision of \
+             this compiler (it does not export the ABI anchor `{}`); rebuild it with \
+             `cargo build -p leek-aot-runtime` (add `--release` for the release profile)",
+            lib_dir.display(),
+            abi_symbol_name()
+        ));
+    }
+    NativeError::compile("cc link of the AOT executable failed")
+}
+
+// ---- per-compile scratch directory ----
+
+/// A scratch directory owned by one `compile_to_executable` call, deleted when
+/// it drops.
+///
+/// Created *exclusively* (`create_dir`, retrying the next sequence number on
+/// `AlreadyExists`) rather than `remove_dir_all` + `create_dir_all`: the path
+/// lives in a world-writable `temp_dir()` and is predictable, so wiping
+/// whatever is already there would let a local user hand us a symlink, and
+/// would also let two compiles in one process (parallel tests, an LSP) delete
+/// each other's `program.o` mid-link.
+struct Scratch {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Scratch {
+    fn new() -> Result<Self, NativeError> {
+        Self::new_in(
+            &std::env::temp_dir(),
+            std::env::var_os(KEEP_TEMP_ENV).is_some(),
+        )
+    }
+
+    fn new_in(base: &Path, keep: bool) -> Result<Self, NativeError> {
+        static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let pid = std::process::id();
+        let fail = |why: String| {
+            NativeError::compile(format!(
+                "creating an AOT scratch directory under {}: {why}",
+                base.display()
+            ))
+        };
+        for _ in 0..1024 {
+            let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+            let path = base.join(format!("leek-aot-{pid}-{seq}"));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path, keep }),
+                // Taken already (another process's pid reuse, or a plant):
+                // step over it rather than wiping whatever is there.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // Anything else (no such base, no permission) will fail
+                // identically for every other name, so stop.
+                Err(e) => return Err(fail(e.to_string())),
+            }
+        }
+        Err(fail("every candidate name was already taken".to_string()))
+    }
+
+    fn join(&self, name: &str) -> PathBuf {
+        self.path.join(name)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if self.keep {
+            eprintln!(
+                "leek: {KEEP_TEMP_ENV} is set — keeping the AOT scratch directory at {}",
+                self.path.display()
+            );
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 // ---- C entry point ----
@@ -307,6 +430,7 @@ fn main_c_source(
     let n_lambdas = lambda_entries.len();
     let max_call_depth = opts.max_call_depth;
     let max_stack_bytes = opts.max_stack_bytes as u64;
+    let abi = abi_symbol_name();
 
     format!(
         r#"/* Generated by the Leekscript AOT backend. Runs the linked program. */
@@ -318,10 +442,17 @@ extern void leek_aot_setup(int strict, unsigned long long op_limit, unsigned int
 extern char *leek_aot_error(void);
 extern void {printer}({c_ty} value, int version);
 
+/* ABI guard. This symbol's name carries a hash of the shim signatures this
+   program object was compiled against; only a static runtime archive built
+   from the same revision exports it. Calling it (rather than merely taking
+   its address, which -O2 may drop) makes a mismatched archive an undefined
+   reference at link time instead of corrupted shim arguments at run time. */
+extern void {abi}(void);
+
 /* Reinstall the dispatch tables (lambdas / methods / classes) at startup. */
 struct leek_lambda_entry {{ unsigned long long idx; const void *func; unsigned long long arity; }};
-extern void leek_aot_install(const unsigned char *blob, unsigned long blob_len,
-                             const struct leek_lambda_entry *entries, unsigned long n);
+extern int leek_aot_install(const unsigned char *blob, unsigned long blob_len,
+                            const struct leek_lambda_entry *entries, unsigned long n);
 
 static const unsigned char LEEK_META[] = {{{meta_bytes}
 }};
@@ -331,7 +462,12 @@ static const struct leek_lambda_entry LEEK_LAMBDAS[] = {{{table}
 }};
 
 int main(void) {{
-    leek_aot_install(LEEK_META, sizeof(LEEK_META), LEEK_LAMBDAS, {n_lambdas}UL);
+    {abi}();
+    if (leek_aot_install(LEEK_META, sizeof(LEEK_META), LEEK_LAMBDAS, {n_lambdas}UL) != 0) {{
+        fprintf(stderr, "error: the dispatch-table metadata embedded in this executable "
+                        "could not be parsed\n");
+        return 1;
+    }}
     leek_aot_setup({strict}, {op_limit}, {max_call_depth}U, {max_stack_bytes}ULL);
     {c_ty} value = leek_main();
     char *err = leek_aot_error();
@@ -345,6 +481,7 @@ int main(void) {{
 "#,
         c_ty = c_ty,
         printer = printer,
+        abi = abi,
         meta_bytes = meta_bytes,
         externs = externs,
         table = table,
@@ -366,20 +503,117 @@ fn op_limit_literal(limit: u64) -> String {
 
 // ---- static runtime archive ----
 
-/// Directory containing `libleek_aot_runtime.a`. Prefers an already-built
-/// release archive, then debug; builds it once with `cargo` if neither exists.
-fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
-    let root = workspace_root()?;
-    let target =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
-    let archive = "libleek_aot_runtime.a";
-    for profile in ["release", "debug"] {
-        let dir = target.join(profile);
-        if dir.join(archive).is_file() {
-            return Ok(dir);
+/// Pick the directory holding `libleek_aot_runtime.a`, or `None` if no built
+/// archive exists anywhere we know to look.
+///
+/// Pure — every path it consults is a parameter — so the policy is unit
+/// testable without touching the environment. In search order:
+///
+/// 1. `$LEEK_AOT_RUNTIME_DIR`, if set. An explicit override that does *not*
+///    hold the archive is an **error**, never a silent fall-through to some
+///    other archive: the whole point of setting it is to control which one.
+/// 2. Next to the running executable, then `../lib` and `../lib/leek`. This is
+///    what makes an *installed* or relocated `miku`/`leekc` work, and it also
+///    covers the common dev layout, where `target/{profile}/miku` sits beside
+///    the archive.
+/// 3. `$CARGO_TARGET_DIR` (or `<workspace>/target`), `release` and `debug`,
+///    taking the **newest by mtime**. Preferring `release` unconditionally, as
+///    this used to, silently linked a stale release archive for anyone
+///    iterating in debug.
+fn resolve_runtime_dir(
+    override_dir: Option<&Path>,
+    exe_dir: Option<&Path>,
+    target_dir: Option<&Path>,
+) -> Result<Option<PathBuf>, NativeError> {
+    if let Some(dir) = override_dir {
+        if dir.join(ARCHIVE).is_file() {
+            return Ok(Some(dir.to_path_buf()));
+        }
+        return Err(NativeError::compile(format!(
+            "{RUNTIME_DIR_ENV} is set to {}, but {ARCHIVE} is not there",
+            dir.display()
+        )));
+    }
+
+    if let Some(exe_dir) = exe_dir {
+        for rel in ["", "../lib", "../lib/leek"] {
+            let dir = if rel.is_empty() {
+                exe_dir.to_path_buf()
+            } else {
+                exe_dir.join(rel)
+            };
+            if dir.join(ARCHIVE).is_file() {
+                return Ok(Some(dir));
+            }
         }
     }
-    // Not built yet — build it once (release).
+
+    if let Some(target_dir) = target_dir {
+        let newest = ["release", "debug"]
+            .into_iter()
+            .map(|p| target_dir.join(p))
+            .filter_map(|dir| {
+                let mtime = std::fs::metadata(dir.join(ARCHIVE))
+                    .and_then(|m| m.modified())
+                    .ok()?;
+                Some((mtime, dir))
+            })
+            .max_by_key(|(mtime, _)| *mtime)
+            .map(|(_, dir)| dir);
+        if newest.is_some() {
+            return Ok(newest);
+        }
+    }
+
+    Ok(None)
+}
+
+/// The already-built static runtime archive's directory, if there is one.
+///
+/// The lookup [`compile_to_executable`] does, minus the on-demand `cargo
+/// build` — so a test can find the archive (or skip) without risking a nested
+/// cargo under `cargo test`, which deadlocks on the target-directory lock.
+#[must_use]
+pub fn prebuilt_runtime_dir() -> Option<PathBuf> {
+    prebuilt_runtime_dir_checked().ok().flatten()
+}
+
+/// [`prebuilt_runtime_dir`], keeping the one hard failure it swallows: an
+/// explicitly-set `$LEEK_AOT_RUNTIME_DIR` that does not hold the archive.
+fn prebuilt_runtime_dir_checked() -> Result<Option<PathBuf>, NativeError> {
+    let exe = std::env::current_exe().ok();
+    resolve_runtime_dir(
+        std::env::var_os(RUNTIME_DIR_ENV)
+            .map(PathBuf::from)
+            .as_deref(),
+        exe.as_deref().and_then(Path::parent),
+        target_dir().as_deref(),
+    )
+}
+
+/// `$CARGO_TARGET_DIR`, else `<workspace>/target` when a source tree is there.
+fn target_dir() -> Option<PathBuf> {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .or_else(|| workspace_root().map(|r| r.join("target")))
+}
+
+/// Directory containing `libleek_aot_runtime.a`, building it once with `cargo`
+/// if no built archive can be found and a source tree is available.
+fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
+    if let Some(dir) = prebuilt_runtime_dir_checked()? {
+        return Ok(dir);
+    }
+
+    // Not built yet — build it once (release), which needs the workspace
+    // sources. A relocated install has none, so say what to do instead of
+    // running `cargo` in a directory that isn't there.
+    let Some(root) = workspace_root() else {
+        return Err(NativeError::compile(format!(
+            "no {ARCHIVE} found next to this executable, and no workspace source tree to \
+             build one from; point {RUNTIME_DIR_ENV} at a directory holding it"
+        )));
+    };
     if !quiet {
         eprintln!("leek: building the AOT static runtime (one-time; cargo)…");
     }
@@ -405,28 +639,30 @@ fn locate_static_runtime(quiet: bool) -> Result<PathBuf, NativeError> {
             "building the AOT static runtime failed",
         ));
     }
-    let dir = target.join("release");
-    if dir.join(archive).is_file() {
+    let dir = target_dir()
+        .unwrap_or_else(|| root.join("target"))
+        .join("release");
+    if dir.join(ARCHIVE).is_file() {
         Ok(dir)
     } else {
         Err(NativeError::compile(format!(
             "static runtime archive not found at {}",
-            dir.join(archive).display()
+            dir.join(ARCHIVE).display()
         )))
     }
 }
 
 // ---- small fs/path helpers ----
 
-fn workspace_root() -> Result<PathBuf, NativeError> {
+/// The workspace root as it was at *compile* time, if that tree still exists.
+///
+/// `CARGO_MANIFEST_DIR` is baked in, so for an installed or relocated binary
+/// this is simply absent. It returns `Option` rather than `Result` for exactly
+/// that reason: a missing source tree must skip a candidate, not abort the
+/// whole lookup before the other candidates are tried.
+fn workspace_root() -> Option<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR")); // crates/backends/leek-backend-native
-    std::fs::canonicalize(here.join("../../.."))
-        .map_err(|e| NativeError::compile(format!("locating workspace root: {e}")))
-}
-
-fn mkdirs(p: &Path) -> Result<(), NativeError> {
-    std::fs::create_dir_all(p)
-        .map_err(|e| NativeError::compile(format!("creating {}: {e}", p.display())))
+    std::fs::canonicalize(here.join("../../..")).ok()
 }
 
 fn write_file(p: &Path, contents: &str) -> Result<(), NativeError> {
@@ -436,7 +672,11 @@ fn write_file(p: &Path, contents: &str) -> Result<(), NativeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::aot_unsupported_reason;
+    use super::{
+        ARCHIVE, KEEP_TEMP_ENV, MainRet, RUNTIME_DIR_ENV, Scratch, abi_symbol_name,
+        aot_unsupported_reason, link_failure, main_c_source, resolve_runtime_dir,
+    };
+    use crate::NativeOptions;
     use leek_hir::lower_file_versioned;
     use leek_parser::{ast::AstNode, ast::SourceFile, parse};
     use leek_span::SourceId;
@@ -480,5 +720,224 @@ mod tests {
             reason("class P { integer x\nconstructor(v) { this.x = v } }\nreturn new P(7).x\n"),
             Some("classes")
         );
+    }
+
+    // ---- archive resolution ----
+
+    /// A disposable directory tree. Built on [`Scratch`] (so these tests also
+    /// exercise its exclusive create) and never on `env::set_var`, which is
+    /// unsafe in edition 2024 and racy across test threads — which is why
+    /// [`resolve_runtime_dir`] takes every path as a parameter.
+    fn scratch() -> Scratch {
+        Scratch::new_in(&std::env::temp_dir(), /*keep=*/ false).expect("scratch dir")
+    }
+
+    fn with_archive(base: &std::path::Path, rel: &str) -> std::path::PathBuf {
+        let dir = base.join(rel);
+        std::fs::create_dir_all(&dir).expect("create candidate dir");
+        std::fs::write(dir.join(ARCHIVE), b"not really an archive").expect("write archive");
+        dir
+    }
+
+    #[test]
+    fn an_explicit_override_wins_over_every_other_candidate() {
+        let tmp = scratch();
+        let over = with_archive(&tmp.path, "override");
+        let exe = with_archive(&tmp.path, "bin");
+        let target = tmp.path.join("target");
+        with_archive(&target, "release");
+        let got = resolve_runtime_dir(Some(&over), Some(&exe), Some(&target)).expect("resolve");
+        assert_eq!(got.as_deref(), Some(over.as_path()));
+    }
+
+    #[test]
+    fn an_override_without_the_archive_errors_instead_of_falling_through() {
+        let tmp = scratch();
+        let over = tmp.path.join("empty");
+        std::fs::create_dir_all(&over).expect("create the empty override dir");
+        // A perfectly good archive sits in the next candidate; the override
+        // must still lose, loudly — picking a different one silently is the
+        // bug this whole ordering exists to prevent.
+        let target = tmp.path.join("target");
+        with_archive(&target, "release");
+        let err = resolve_runtime_dir(Some(&over), None, Some(&target))
+            .expect_err("an override that does not hold the archive must error");
+        assert!(
+            err.reason().contains(RUNTIME_DIR_ENV)
+                && err.reason().contains(&*over.to_string_lossy()),
+            "the error must name the variable and the directory: {err}"
+        );
+    }
+
+    #[test]
+    fn the_executables_own_directory_beats_the_target_dir() {
+        let tmp = scratch();
+        let exe = with_archive(&tmp.path, "bin");
+        let target = tmp.path.join("target");
+        with_archive(&target, "release");
+        let got = resolve_runtime_dir(None, Some(&exe), Some(&target)).expect("resolve");
+        assert_eq!(got.as_deref(), Some(exe.as_path()));
+    }
+
+    #[test]
+    fn an_installed_layout_finds_the_archive_under_lib() {
+        let tmp = scratch();
+        let root = tmp.path.join("usr");
+        let exe = root.join("bin");
+        std::fs::create_dir_all(&exe).expect("create bin");
+        let lib = with_archive(&root, "lib/leek");
+        let got = resolve_runtime_dir(None, Some(&exe), None).expect("resolve");
+        assert_eq!(
+            got.map(|d| std::fs::canonicalize(d).expect("canonicalize")),
+            Some(std::fs::canonicalize(lib).expect("canonicalize"))
+        );
+    }
+
+    #[test]
+    fn the_newest_archive_wins_not_release_unconditionally() {
+        let tmp = scratch();
+        let target = tmp.path.join("target");
+        let release = with_archive(&target, "release");
+        // Same second resolution on some filesystems, so make `debug` visibly
+        // newer rather than relying on write order.
+        let debug = with_archive(&target, "debug");
+        let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(debug.join(ARCHIVE))
+            .expect("open debug archive")
+            .set_modified(newer)
+            .expect("set mtime");
+        let got = resolve_runtime_dir(None, None, Some(&target)).expect("resolve");
+        assert_eq!(
+            got.as_deref(),
+            Some(debug.as_path()),
+            "a fresher debug archive must beat a stale release one"
+        );
+        assert!(
+            release.join(ARCHIVE).is_file(),
+            "the release archive is still there"
+        );
+    }
+
+    #[test]
+    fn no_candidate_anywhere_is_not_an_error() {
+        let tmp = scratch();
+        let empty = tmp.path.join("nothing");
+        std::fs::create_dir_all(&empty).expect("create dir");
+        // `Ok(None)` rather than `Err`: the caller's next move is to build the
+        // archive, which it can only decide once every candidate has been tried.
+        assert_eq!(
+            resolve_runtime_dir(None, Some(&empty), Some(&empty)).expect("resolve"),
+            None
+        );
+    }
+
+    // ---- scratch directory ----
+
+    #[test]
+    fn the_scratch_directory_is_removed_when_it_drops() {
+        let base = scratch();
+        let path = {
+            let s = Scratch::new_in(&base.path, /*keep=*/ false).expect("scratch");
+            std::fs::write(s.join("program.o"), b"x").expect("write a file into it");
+            s.path.clone()
+        };
+        assert!(
+            !path.exists(),
+            "a failed link must not leak {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn the_scratch_directory_survives_when_asked_to_be_kept() {
+        let base = scratch();
+        let path = {
+            let s = Scratch::new_in(&base.path, /*keep=*/ true).expect("scratch");
+            s.path.clone()
+        };
+        assert!(
+            path.exists(),
+            "{KEEP_TEMP_ENV} must keep the generated C around"
+        );
+        std::fs::remove_dir_all(&path).expect("clean up");
+    }
+
+    #[test]
+    fn two_scratch_directories_in_one_process_do_not_collide() {
+        let base = scratch();
+        let a = Scratch::new_in(&base.path, false).expect("first");
+        let b = Scratch::new_in(&base.path, false).expect("second");
+        assert_ne!(a.path, b.path);
+        assert!(a.path.is_dir() && b.path.is_dir());
+    }
+
+    #[test]
+    fn an_existing_directory_is_stepped_over_not_wiped() {
+        let base = scratch();
+        // Pre-plant the name the next sequence number would produce, holding a
+        // file we must not lose: exclusive create is what stops a predictable
+        // path under a world-writable /tmp being a hand-in.
+        let planted = Scratch::new_in(&base.path, /*keep=*/ true).expect("planted");
+        let planted_path = planted.path.clone();
+        std::fs::write(planted_path.join("witness"), b"mine").expect("write witness");
+        drop(planted);
+        let s = Scratch::new_in(&base.path, false).expect("scratch");
+        assert_ne!(s.path, planted_path);
+        assert!(
+            planted_path.join("witness").is_file(),
+            "the pre-existing directory's contents must survive"
+        );
+        std::fs::remove_dir_all(&planted_path).expect("clean up");
+    }
+
+    // ---- the ABI anchor ----
+
+    #[test]
+    fn the_generated_c_calls_this_builds_abi_anchor() {
+        // The Rust half (`build.rs` defines `leek_aot_abi_<tag>`) and the C
+        // half (the harness calls it) have to agree on the name, and nothing
+        // else would notice if they drifted apart: the check would simply stop
+        // checking, silently.
+        let c = main_c_source(MainRet::Int, &NativeOptions::release(), b"{}", &[]);
+        let sym = abi_symbol_name();
+        assert!(
+            c.contains(&format!("extern void {sym}(void);")),
+            "the harness must declare {sym}:\n{c}"
+        );
+        assert!(
+            c.contains(&format!("    {sym}();")),
+            "the harness must *call* {sym} — taking its address lets -O2 drop it:\n{c}"
+        );
+    }
+
+    #[test]
+    fn the_generated_c_aborts_when_the_metadata_does_not_install() {
+        let c = main_c_source(MainRet::Int, &NativeOptions::release(), b"{}", &[]);
+        assert!(
+            c.contains("if (leek_aot_install("),
+            "the harness must check leek_aot_install's return:\n{c}"
+        );
+    }
+
+    #[test]
+    fn a_missing_abi_anchor_is_reported_as_a_stale_archive() {
+        let dir = std::path::Path::new("/some/target/release");
+        let ld = format!(
+            "/usr/bin/ld: /tmp/leek-aot-1-0/leek_entry.c:32: undefined reference to `{}'\n\
+             collect2: error: ld returned 1 exit status\n",
+            abi_symbol_name()
+        );
+        let err = link_failure(&ld, dir);
+        assert!(
+            err.reason().contains("different revision")
+                && err.reason().contains("cargo build -p leek-aot-runtime"),
+            "a stale archive must say so, and say how to fix it: {err}"
+        );
+        // Any other link failure keeps the generic message — `cc`'s own output
+        // is echoed, and guessing would be worse than saying nothing.
+        let other = link_failure("undefined reference to `some_other_symbol'", dir);
+        assert_eq!(other.reason(), "cc link of the AOT executable failed");
     }
 }
