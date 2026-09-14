@@ -145,6 +145,55 @@ pub fn report_manifest(project: &Project, color: ColorWhen, format: MessageForma
     }
 }
 
+/// One line naming the experimental features a run compiles with, or `None`
+/// when every feature is off.
+///
+/// A feature switched on only by a `LEEK_EXPERIMENTAL_*` variable is marked
+/// `(env)`: the environment is the half of the pair that leaves no trace in
+/// the repository, and leekwars#206 is exactly that the same project can
+/// compile differently in CI and locally with nothing to point at. Naming the
+/// features is the fix; marking which of them the manifest does *not* account
+/// for is what makes the line actionable.
+#[must_use]
+pub fn feature_flags_summary(
+    manifest: leek_span::FeatureFlags,
+    env: leek_span::FeatureFlags,
+) -> Option<String> {
+    let active = manifest.union(env);
+    let listed: Vec<String> = leek_span::FeatureFlags::FIELDS
+        .iter()
+        .filter(|field| active.get(field))
+        .map(|field| {
+            if manifest.get(field) {
+                field.name.to_string()
+            } else {
+                format!("{} (env)", field.name)
+            }
+        })
+        .collect();
+    if listed.is_empty() {
+        return None;
+    }
+    Some(format!("experimental features: {}", listed.join(", ")))
+}
+
+/// Print [`feature_flags_summary`] to stderr under `--verbose`.
+///
+/// Called once per invocation, beside the manifest warnings, rather than once
+/// per compiled file: the flags are settled for the whole run.
+pub fn report_feature_flags(
+    manifest: leek_span::FeatureFlags,
+    env: leek_span::FeatureFlags,
+    verbose: bool,
+) {
+    if !verbose {
+        return;
+    }
+    if let Some(line) = feature_flags_summary(manifest, env) {
+        eprintln!("{line}");
+    }
+}
+
 /// The manifest's text under [`Span::MANIFEST_SOURCE`](leek_span::Span::MANIFEST_SOURCE).
 ///
 /// Named explicitly rather than left to the reporter's entry-file fallback:
@@ -309,7 +358,10 @@ pub fn run_file(
     let label = path.display().to_string();
     Ok(run_with_reporter(
         &pipeline,
-        Input::from(src),
+        // The project's flags, not `Input::from`'s per-conversion
+        // `FeatureFlags::from_env`: `[experimental]` is part of the project
+        // and has to reach the pipeline (leekwars#206).
+        Input::from_source_with_flags(src, project.feature_flags()),
         &text,
         &label,
         &reporter,
@@ -606,6 +658,43 @@ mod tests {
             report_manifest(&denied, ColorWhen::Never, MessageFormat::Human),
             "`deny` must promote the manifest warning to an error"
         );
+    }
+
+    #[test]
+    fn a_project_compiles_with_its_experimental_table() {
+        let opted_in = project("[experimental]\nenums = true\ntypes = true\n");
+        let flags = opted_in.feature_flags();
+        assert!(flags.enums && flags.types);
+        assert!(!flags.interfaces);
+        // The default project asks for nothing, and this test process sets no
+        // `LEEK_EXPERIMENTAL_*` variable.
+        assert_eq!(project("").feature_flags(), leek_span::FeatureFlags::none());
+    }
+
+    #[test]
+    fn the_feature_summary_names_the_features_and_marks_the_env_only_ones() {
+        let manifest = leek_span::FeatureFlags {
+            enums: true,
+            ..leek_span::FeatureFlags::none()
+        };
+        let env = leek_span::FeatureFlags {
+            types: true,
+            ..leek_span::FeatureFlags::none()
+        };
+        assert_eq!(
+            feature_flags_summary(manifest, env).as_deref(),
+            Some("experimental features: types (env), enums"),
+        );
+        // A feature the manifest already asks for is not an env surprise,
+        // even when the variable is set as well.
+        assert_eq!(
+            feature_flags_summary(manifest, manifest).as_deref(),
+            Some("experimental features: enums"),
+        );
+        // Nothing to say about a project that opts into nothing — no line at
+        // all, rather than an empty list.
+        let none = leek_span::FeatureFlags::none();
+        assert_eq!(feature_flags_summary(none, none), None);
     }
 
     #[test]

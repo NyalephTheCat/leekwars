@@ -59,6 +59,13 @@ pub enum ManifestErrorKind {
     NotFound { start: PathBuf },
     /// A top-level key outside the known set — the typo guard.
     UnknownTopLevelKey { key: String },
+    /// An `[experimental]` key naming no feature this toolchain has.
+    ///
+    /// The one unknown *key inside a table* that is an error rather than a
+    /// warning: the keys there switch language features on, so a misspelling
+    /// that only warned would compile the project with the feature off (see
+    /// `parse_experimental`).
+    UnknownFeature { key: String },
     /// A required table is absent (`[project]`).
     MissingTable { name: &'static str },
     /// A required key inside a table that is present (`project.name`).
@@ -102,7 +109,8 @@ impl ManifestErrorKind {
             | ManifestErrorKind::Io { .. }
             | ManifestErrorKind::Cwd { .. }
             | ManifestErrorKind::NotFound { .. } => codes::MANIFEST_PARSE_ERROR,
-            ManifestErrorKind::UnknownTopLevelKey { .. } => codes::MANIFEST_UNKNOWN_KEY,
+            ManifestErrorKind::UnknownTopLevelKey { .. }
+            | ManifestErrorKind::UnknownFeature { .. } => codes::MANIFEST_UNKNOWN_KEY,
             ManifestErrorKind::MissingTable { .. } | ManifestErrorKind::MissingKey { .. } => {
                 codes::MANIFEST_MISSING_ENTRY
             }
@@ -130,6 +138,14 @@ impl ManifestErrorKind {
             ManifestErrorKind::UnknownTopLevelKey { key } => format!(
                 "unknown top-level key `{key}` (expected one of: {})",
                 KNOWN_TOP_LEVEL.join(", ")
+            ),
+            ManifestErrorKind::UnknownFeature { key } => format!(
+                "`experimental.{key}` names no feature (expected one of: {})",
+                leek_span::FeatureFlags::FIELDS
+                    .iter()
+                    .map(|f| f.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             ManifestErrorKind::MissingTable { name } => {
                 format!("missing required table `[{name}]`")

@@ -2171,6 +2171,122 @@ fn library_flag_dispatches_host_functions_through_their_class() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn manifest_libraries_load_without_the_flag_and_compose_with_it() {
+    let dir = scratch_dir("manifest-libraries");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname = \"lib\"\nversion = \"0.1.0\"\nlibraries = [\"leekwars\"]\n",
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn getCell();\n");
+
+    // No `--library` anywhere: the manifest is the whole declaration.
+    let declared = miku(&["build", "--backend", "java"], &dir);
+    assert_eq!(declared.status, 0, "stderr: {}", declared.stderr);
+    let emitted = std::fs::read_to_string(dir.join("build/java/AI_0.java")).expect("read emitted");
+    assert!(emitted.contains("EntityClass.getCell"), "{emitted}");
+
+    // Naming the same library on the command line as well is a no-op, not a
+    // second registration of the same catalog.
+    let both = miku(
+        &["--library", "leekwars", "build", "--backend", "java"],
+        &dir,
+    );
+    assert_eq!(both.status, 0, "stderr: {}", both.stderr);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn manifest_fold_constants_substitutes_the_library_constants() {
+    let dir = scratch_dir("fold-constants");
+    let base = "[project]\nname = \"fold\"\nversion = \"0.1.0\"\nlibraries = [\"leekwars\"]\n";
+    write(&dir, "Miku.toml", base);
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4\nreturn WEAPON_PISTOL;\n",
+    );
+    let emitted = dir.join("build/java/AI_0.java");
+
+    // Without folding the name survives into codegen, and the Java backend
+    // has no first-class reference for it — which is the whole reason a
+    // project wants the key.
+    let unfolded = miku(&["build", "--backend", "java", "--color", "never"], &dir);
+    assert_ne!(unfolded.status, 0, "stderr: {}", unfolded.stderr);
+    assert!(
+        unfolded.stderr.contains("WEAPON_PISTOL"),
+        "stderr: {}",
+        unfolded.stderr
+    );
+
+    write(&dir, "Miku.toml", &format!("{base}fold_constants = true\n"));
+    let folded = miku(&["build", "--backend", "java"], &dir);
+    assert_eq!(folded.status, 0, "stderr: {}", folded.stderr);
+    let after = std::fs::read_to_string(&emitted).expect("read emitted");
+    assert!(
+        after.contains("37") && !after.contains("WEAPON_PISTOL"),
+        "the constant should have been folded to its value:\n{after}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_experimental_table_switches_the_feature_on_and_verbose_says_so() {
+    let dir = scratch_dir("experimental");
+    let base = "[project]\nname = \"exp\"\nversion = \"0.1.0\"\n";
+    write(&dir, "Miku.toml", base);
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4\nenum Color { RED, GREEN = 10 }\nreturn Color.GREEN;\n",
+    );
+
+    // `[experimental]` absent: the feature is off and the enum does not
+    // compile. (Before #206 the table was parsed and thrown away, so the only
+    // way to switch this on was an environment variable.)
+    let off = miku(&["check", "--color", "never"], &dir);
+    assert_eq!(off.status, 1, "stderr: {}", off.stderr);
+
+    write(
+        &dir,
+        "Miku.toml",
+        &format!("{base}[experimental]\nenums = true\n"),
+    );
+    let on = miku(&["check", "--color", "never", "--verbose"], &dir);
+    assert_eq!(on.status, 0, "stderr: {}", on.stderr);
+    assert!(
+        on.stderr.contains("experimental features: enums"),
+        "`--verbose` must name the active features: {}",
+        on.stderr
+    );
+    // …and only under `--verbose`.
+    let quiet = miku(&["check", "--color", "never"], &dir);
+    assert!(
+        !quiet.stderr.contains("experimental features"),
+        "stderr: {}",
+        quiet.stderr
+    );
+
+    // A misspelled feature is an error, not a silent no-op.
+    write(
+        &dir,
+        "Miku.toml",
+        &format!("{base}[experimental]\nenum = true\n"),
+    );
+    let typo = miku(&["check", "--color", "never"], &dir);
+    assert_ne!(typo.status, 0, "stderr: {}", typo.stderr);
+    assert!(
+        typo.stderr.contains("experimental.enum") && typo.stderr.contains("enums"),
+        "stderr: {}",
+        typo.stderr
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ---- dev ----
 
 #[test]

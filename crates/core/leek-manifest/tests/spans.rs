@@ -49,6 +49,12 @@ fn a_deferred_table_points_at_the_table_name() {
 }
 
 #[test]
+fn an_unknown_experimental_feature_points_at_the_key() {
+    let src = format!("{HEAD}\n[experimental]\ngeneric = true\n");
+    assert_eq!(error_text(&src), "generic");
+}
+
+#[test]
 fn a_wrongly_typed_path_points_at_the_value() {
     let src = format!("{HEAD}\n[paths]\nbuild = 3\n");
     assert_eq!(error_text(&src), "3");
