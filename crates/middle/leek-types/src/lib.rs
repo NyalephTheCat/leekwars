@@ -42,7 +42,7 @@
 
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::SourceFile;
-use leek_span::SourceId;
+use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::Version;
 
 mod builtins;
@@ -130,23 +130,60 @@ pub struct Options {
     pub experimental_enums: bool,
 }
 
+impl Options {
+    /// Build the checker options from the settings that actually vary
+    /// per compilation: the experimental [`FeatureFlags`], the
+    /// `// @strict` pragma, and whether the library signature headers
+    /// should be seeded.
+    ///
+    /// This is the single place the flag bitmask is unpacked into
+    /// checker options, so a caller holding the three settings never has
+    /// to know which `experimental_*` field each flag feeds.
+    #[must_use]
+    pub fn from_settings(flags: FeatureFlags, strict: bool, seed_library: bool) -> Self {
+        Self {
+            strict,
+            experimental_generics: flags.generics,
+            seed_library,
+            experimental_prelude: flags.prelude,
+            experimental_types: flags.types,
+            experimental_interfaces: flags.interfaces,
+            experimental_enums: flags.enums,
+        }
+    }
+}
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Process-global toggle for [`Options::seed_library`] used by the
-/// pipeline. Set once by a tool (the LSP) at startup; never flipped
-/// mid-run, so salsa memoization stays correct. Defaults off so the
-/// driver / corpus path is unaffected.
+/// Process-global default for [`Options::seed_library`], set once by a
+/// tool (the LSP) at startup. Defaults off so the driver / corpus path
+/// is unaffected.
+///
+/// It is now read **only at an entry boundary**, where a run's settings
+/// are assembled: `type_options` on the direct pipeline path, and the
+/// LSP's salsa-input construction on the memoized one. No salsa-tracked
+/// query reads it any more — the tracked path takes the value off the
+/// [`SourceFile`](leek_pipeline::salsa::SourceFile) input — so flipping
+/// it can no longer leave a memo computed under the old setting alive.
+/// Removing the global entirely (threading the setting through the
+/// pipeline options) is R2's job — see issue #98.
 static SEED_LIBRARY: AtomicBool = AtomicBool::new(false);
 
 /// Enable (or disable) library-signature seeding for all subsequent
 /// pipeline type-check runs in this process. The LSP calls this once at
 /// workspace startup.
+///
+/// Only the default a run's settings are built from, never consulted
+/// inside a tracked query. R2 (#98) owns its removal.
 pub fn set_seed_library(on: bool) {
     SEED_LIBRARY.store(on, Ordering::Relaxed);
 }
 
-/// Whether the pipeline should seed library signatures (see
+/// Whether the pipeline should seed library signatures by default (see
 /// [`set_seed_library`]).
+///
+/// Read only where a run's settings are assembled, never inside a
+/// tracked query. R2 (#98) owns its removal.
 pub fn seed_library_enabled() -> bool {
     SEED_LIBRARY.load(Ordering::Relaxed)
 }

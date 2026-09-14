@@ -106,8 +106,10 @@ impl Default for Workspace {
         // The LSP wants builtin + leek-wars calls to infer their declared
         // return types (so hover, binary expressions, and member access
         // resolve real types instead of `any`). Seed the typed `.leek`
-        // signature headers process-wide — idempotent, set before any
-        // tracked query runs, and off for the corpus/driver baseline.
+        // signature headers — off for the corpus/driver baseline. Set
+        // here, before any salsa input exists, because each input copies
+        // the current value into its own `seed_library` field: the
+        // tracked queries read the input, never this global.
         leek_types::set_seed_library(true);
         Self {
             db: LeekDb::default(),
@@ -181,6 +183,7 @@ impl Workspace {
             text,
             lang.version,
             lang.strict,
+            leek_types::seed_library_enabled(),
             leek_pipeline::FeatureFlags::from_env().to_bits(),
             self.class_union.clone(),
         );
@@ -367,12 +370,14 @@ impl Workspace {
         let source = leek_span::SourceId::new(source_id).expect("non-zero SourceId");
         let classes = Self::scan_classes(&loaded.text, source, loaded.version_byte);
         self.class_names.insert(uri.clone(), classes);
+        let seed_library = leek_types::seed_library_enabled();
         let source_file = SourceFile::new(
             &self.db,
             source_id,
             loaded.text.clone(),
             loaded.version_byte,
             loaded.strict,
+            seed_library,
             flags_bits,
             self.class_union.clone(),
         );
@@ -383,6 +388,7 @@ impl Workspace {
             loaded.text,
             loaded.version_byte,
             loaded.strict,
+            seed_library,
             flags_bits,
             self.class_union.clone(),
         );
