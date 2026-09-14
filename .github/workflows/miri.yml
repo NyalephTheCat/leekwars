@@ -44,5 +44,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: miri
-      - name: cargo +nightly miri test -p leek-backend-native --lib runtime::
-        run: cargo +nightly miri test -p leek-backend-native --lib runtime::
+      - name: "cargo +nightly miri test -p leek-backend-native --lib runtime::"
+        run: "cargo +nightly miri test -p leek-backend-native --lib runtime::"
