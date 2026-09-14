@@ -21,8 +21,8 @@ pub use lower::{
 pub use transform::fold_constants;
 pub use visit::{
     Flow, HirVisitor, HirVisitorMut, OnExpr, OnStmt, Visit, VisitMut, Visitable, VisitableMut,
-    walk_expr_children, walk_expr_children_mut, walk_stmt_child_exprs, walk_stmt_child_exprs_mut,
-    walk_stmt_child_stmts, walk_stmt_child_stmts_mut,
+    walk_expr_children, walk_expr_children_mut, walk_lambda_stmts_in_expr, walk_stmt_child_exprs,
+    walk_stmt_child_exprs_mut, walk_stmt_child_stmts, walk_stmt_child_stmts_mut, walk_stmts_deep,
 };
 
 /// Re-export the type model so HIR consumers don't need to take a
