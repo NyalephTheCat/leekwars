@@ -1337,30 +1337,6 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
         params.iter().map(|p| p.is_by_ref).collect()
     }
 
-    // Deep statement walker: visits every statement in `s`'s subtree
-    // INCLUDING statements inside lambda bodies (the stock HIR visitor
-    // treats `ExprKind::Lambda` as a leaf, but by-ref propagation has to
-    // see recursive `aux(copy, …)` calls *inside* the lambda that defines
-    // `aux` — that's where the `@`-aliased locals are declared).
-    fn walk_stmts_deep(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
-        f(s);
-        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| walk_stmts_deep(c, f));
-        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| lambda_stmts_in_expr(e, f));
-    }
-    fn lambda_stmts_in_expr(e: &Expr, f: &mut dyn FnMut(&Stmt)) {
-        if let ExprKind::Lambda(l) = &e.kind {
-            match &l.body {
-                leek_hir::LambdaBody::Block(b) => {
-                    for s in &b.stmts {
-                        walk_stmts_deep(s, f);
-                    }
-                }
-                leek_hir::LambdaBody::Expr(inner) => lambda_stmts_in_expr(inner, f),
-            }
-        }
-        leek_hir::visit::walk_expr_children(e, &mut |c| lambda_stmts_in_expr(c, f));
-    }
-
     // `var f = function(@a){…}` bindings → the lambda's `@` positions, so a
     // `f(b)` call resolves. Also the assign form (`var aux; aux =
     // function(@a){…}` — the usual v1 recursion idiom). Store the owned
@@ -1418,9 +1394,12 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
             _ => {}
         }
     }
+    // `walk_stmts_deep`, not the shallow pair: by-ref propagation has to see
+    // recursive `aux(copy, …)` calls *inside* the lambda that defines `aux` —
+    // that's where the `@`-aliased locals are declared.
     for stmts in &roots {
         for s in *stmts {
-            walk_stmts_deep(s, &mut |s| collect_var_lambdas(s, &mut var_lambda_pos));
+            leek_hir::walk_stmts_deep(s, &mut |s| collect_var_lambdas(s, &mut var_lambda_pos));
         }
     }
 
@@ -1509,7 +1488,7 @@ pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
     }
     for stmts in &roots {
         for s in *stmts {
-            walk_stmts_deep(s, &mut |s| collect_foreach_binds(s, &mut foreach_binds));
+            leek_hir::walk_stmts_deep(s, &mut |s| collect_foreach_binds(s, &mut foreach_binds));
             walk_call_stmts(s, hir, &var_lambda_pos, &mut out, &mark);
         }
     }
@@ -1589,27 +1568,6 @@ pub(crate) fn v1_box_returners(
         }
     }
 
-    // Deep walkers (cross lambda boundaries) for *finding* the candidates —
-    // `var aux = function(){…}` bindings can live inside other lambdas.
-    fn walk_stmts_deep(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
-        f(s);
-        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| walk_stmts_deep(c, f));
-        leek_hir::visit::walk_stmt_child_exprs(s, &mut |e| lambda_stmts_in_expr(e, f));
-    }
-    fn lambda_stmts_in_expr(e: &Expr, f: &mut dyn FnMut(&Stmt)) {
-        if let ExprKind::Lambda(l) = &e.kind {
-            match &l.body {
-                leek_hir::LambdaBody::Block(b) => {
-                    for s in &b.stmts {
-                        walk_stmts_deep(s, f);
-                    }
-                }
-                leek_hir::LambdaBody::Expr(inner) => lambda_stmts_in_expr(inner, f),
-            }
-        }
-        leek_hir::visit::walk_expr_children(e, &mut |c| lambda_stmts_in_expr(c, f));
-    }
-
     let mut fn_ev: HashMap<u32, Ev> = HashMap::new();
     let mut var_ev: HashMap<u32, Ev> = HashMap::new();
 
@@ -1640,9 +1598,11 @@ pub(crate) fn v1_box_returners(
         }
         _ => {}
     };
+    // Deep walk (crosses lambda boundaries) for *finding* the candidates —
+    // `var aux = function(){…}` bindings can live inside other lambdas.
     for stmts in &roots {
         for s in *stmts {
-            walk_stmts_deep(s, &mut collect_var_lambda);
+            leek_hir::walk_stmts_deep(s, &mut collect_var_lambda);
         }
     }
 

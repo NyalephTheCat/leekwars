@@ -11,10 +11,9 @@ use crate::ir::{
     Statement, Terminator,
 };
 
-use super::util::{
-    captured_by_nested_lambda_body, captured_by_nested_lambda_stmts, lower_visibility,
-    placeholder_function,
-};
+use leek_hir::{captured_by_nested_lambda_body, captured_by_nested_lambda_stmts};
+
+use super::util::{lower_visibility, placeholder_function};
 use super::{FnLowerer, MethodCtx, PendingLambda, ProgramCtx};
 
 impl<'a> ProgramCtx<'a> {

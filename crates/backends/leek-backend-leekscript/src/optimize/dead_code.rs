@@ -59,7 +59,17 @@ fn run_stmt(s: &mut Stmt) {
                 run_stmts(&mut arm.body);
             }
         }
-        _ => {}
+        // Listed rather than caught by `_` so a new `Stmt` variant that
+        // holds statements is a compile error here instead of silently
+        // keeping its dead code.
+        Stmt::Expr(_)
+        | Stmt::VarDecl(_)
+        | Stmt::Return(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Include(_)
+        | Stmt::Import(_)
+        | Stmt::Charge(_) => {}
     }
 }
 

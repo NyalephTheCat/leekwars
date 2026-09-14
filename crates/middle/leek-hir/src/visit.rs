@@ -1,7 +1,7 @@
 //! Structural traversal of the HIR, bound to the generic
 //! [`leek_visit::tree`] framework.
 //!
-//! Two layers live here:
+//! Three layers live here:
 //!
 //! 1. **Shallow child enumerators** (`walk_expr_children`,
 //!    `walk_stmt_child_exprs`, `walk_stmt_child_stmts`, and their `_mut`
@@ -14,8 +14,14 @@
 //!    in these primitives: a lambda body has its own scope, so consumers
 //!    that descend into it must opt in explicitly.
 //!
-//! 2. **Framework wiring**: the [`Hir`] node types are bound to
-//!    `leek_visit::tree` via [`Visitable`] / [`VisitableMut`] impls and
+//! 2. **Lambda-crossing deep walkers** ([`walk_stmts_deep`],
+//!    [`walk_lambda_stmts_in_expr`]). Same structure, opposite lambda
+//!    rule: they report a lambda body's statements as part of the
+//!    enclosing sequence. Only for analyses that hunt for bindings at
+//!    any lambda depth; pick between the two layers deliberately.
+//!
+//! 3. **Framework wiring**: the [`Block`] / [`Stmt`] / [`Expr`] node types
+//!    are bound to `leek_visit::tree` via [`Visitable`] / [`VisitableMut`] impls and
 //!    the [`HirVisitor`] / [`HirVisitorMut`] umbrella traits, so a
 //!    visitor reacts to only the node kinds it cares about and controls
 //!    descent with [`Flow`]. Unlike the shallow primitives, the
@@ -190,6 +196,58 @@ pub fn walk_stmt_child_stmts(s: &Stmt, f: &mut impl FnMut(&Stmt)) {
         | Stmt::Import(_)
         | Stmt::Charge(_) => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lambda-crossing deep walkers
+//
+// The shallow primitives above stop at a lambda: `walk_expr_children` reports
+// no children for [`ExprKind::Lambda`] and `walk_stmt_child_stmts` never
+// reaches a lambda body, because a lambda has its own scope and most
+// consumers must not confuse it with the enclosing one. A handful of analyses
+// need the opposite contract — they look for *bindings* (`var aux =
+// function…`, `@`-aliased locals) that can be declared at any lambda depth.
+// Those two crates each hand-rolled the same pair of walkers; the pair lives
+// here now.
+//
+// Pick deliberately: a consumer that wants scope-respecting descent and
+// reaches for a `_deep` walker gets a lambda body's statements attributed to
+// the enclosing scope, and one that wants the whole subtree and reaches for
+// the shallow pair silently skips every lambda body. Getting that choice
+// wrong is how the drift these primitives exist to prevent happened in the
+// first place.
+// ---------------------------------------------------------------------------
+
+/// Invoke `f` on `s` and on **every** statement in its subtree, including
+/// statements inside lambda bodies.
+///
+/// Unlike [`walk_stmt_child_stmts`], which is shallow and treats
+/// [`ExprKind::Lambda`] as a leaf, this crosses lambda boundaries: the
+/// callback sees a lambda body's statements as if they were part of the
+/// enclosing sequence, with no scope bookkeeping. Use it only for analyses
+/// that genuinely want that — finding every `var x = function…` binding in a
+/// file, say — and use the shallow pair everywhere else.
+pub fn walk_stmts_deep(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+    f(s);
+    walk_stmt_child_stmts(s, &mut |c| walk_stmts_deep(c, f));
+    walk_stmt_child_exprs(s, &mut |e| walk_lambda_stmts_in_expr(e, f));
+}
+
+/// Invoke `f` on every statement of every lambda body reachable from `e`, at
+/// any nesting depth. The counterpart of [`walk_stmts_deep`] for the
+/// expression side; `e` itself is never reported (it is an expression).
+pub fn walk_lambda_stmts_in_expr(e: &Expr, f: &mut dyn FnMut(&Stmt)) {
+    if let ExprKind::Lambda(l) = &e.kind {
+        match &l.body {
+            LambdaBody::Block(b) => {
+                for s in &b.stmts {
+                    walk_stmts_deep(s, f);
+                }
+            }
+            LambdaBody::Expr(inner) => walk_lambda_stmts_in_expr(inner, f),
+        }
+    }
+    walk_expr_children(e, &mut |c| walk_lambda_stmts_in_expr(c, f));
 }
 
 // ---------------------------------------------------------------------------

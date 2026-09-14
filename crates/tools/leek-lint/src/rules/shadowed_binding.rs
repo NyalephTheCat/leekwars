@@ -115,7 +115,16 @@ fn walk_stmt(s: &Stmt, scopes: &mut Vec<HashSet<String>>, out: &mut Vec<Diagnost
                 scopes.pop();
             }
         }
-        _ => {}
+        // Listed rather than caught by `_` so a new `Stmt` variant that
+        // opens a scope is a compile error here instead of silently
+        // escaping the shadowing check.
+        Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Include(_)
+        | Stmt::Import(_)
+        | Stmt::Charge(_) => {}
     }
 }
 
