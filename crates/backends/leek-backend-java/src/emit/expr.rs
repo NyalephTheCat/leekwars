@@ -1849,3 +1849,60 @@ impl Emitter<'_> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{Options, emit};
+    use leek_parser::{ast::AstNode, parse};
+    use leek_span::SourceId;
+    use leek_syntax::{SyntaxNode, Version};
+
+    /// Parse → HIR → Java, mirroring the helper in `tests/smoke.rs`.
+    fn java_for(src: &str, opts: &Options) -> String {
+        let source = SourceId::new(1).unwrap();
+        let parsed = parse(src, source, opts.version);
+        let root = SyntaxNode::new_root(parsed.green);
+        let sf = leek_parser::ast::SourceFile::cast(root).expect("parse");
+        let (hir, _diags) = leek_hir::lower_file(&sf, source);
+        emit(&hir, opts).java
+    }
+
+    /// Corpus row `1 - equals 9 1 return 5 ^ 12;` in
+    /// `tests/fixtures/ops/snapshot.tsv`: binary `^` is bitwise XOR at
+    /// *every* version, v1 included, so the emitted Java is the
+    /// bitwise-xor operator on longs and never a power call.
+    #[test]
+    fn v1_binary_caret_is_xor() {
+        let java = java_for(
+            "// @version:1\nreturn 5 ^ 12;\n",
+            &Options::exact(Version::V1, 1),
+        );
+        // `write_bit` renders the Java bitwise-xor operator over both
+        // operands widened to `long`.
+        assert!(
+            java.contains("5l") && java.contains(" ^ ") && java.contains("12l"),
+            "v1 `5 ^ 12` should emit a bitwise xor: {java}"
+        );
+        assert!(!java.contains("pow("), "v1 binary `^` is not power: {java}");
+    }
+
+    /// Corpus row `1 - equals 25 41 var a = 5 a ^= 2 return a;` in
+    /// `tests/fixtures/ops/snapshot.tsv`: the compound `^=` *is*
+    /// version-dispatched, POWER-assign at v1, so `a ^= 2` emits a `pow`
+    /// call rather than a bitwise xor.
+    #[test]
+    fn v1_caret_assign_is_power() {
+        let java = java_for(
+            "// @version:1\nvar a = 5 a ^= 2 return a;\n",
+            &Options::exact(Version::V1, 1),
+        );
+        assert!(
+            java.contains("pow("),
+            "v1 `a ^= 2` should emit a power assign: {java}"
+        );
+        assert!(
+            !java.contains(" ^ "),
+            "v1 `^=` is power-assign, not xor-assign: {java}"
+        );
+    }
+}
