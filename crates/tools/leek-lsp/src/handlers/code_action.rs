@@ -45,7 +45,6 @@ use leek_span::{SourceId, Span};
 use tower_lsp::lsp_types as lsp;
 
 use crate::diagnostics::{SOURCE, file_diagnostics, to_lsp};
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -55,8 +54,8 @@ pub fn handle(
     context: &lsp::CodeActionContext,
 ) -> Option<Vec<lsp::CodeActionOrCommand>> {
     let doc = ws.doc(uri)?;
-    let req_start = position_to_offset(doc.pos_map(), range.start)?;
-    let req_end = position_to_offset(doc.pos_map(), range.end)?;
+    let req_start = doc.pos_map().to_offset(range.start)?;
+    let req_end = doc.pos_map().to_offset(range.end)?;
 
     // The diagnostics the client is showing for this document — exactly
     // the set push and pull publish, so a fix is never offered for a
@@ -183,7 +182,7 @@ fn validate_edits(
     Some(
         set.iter()
             .map(|e| lsp::TextEdit {
-                range: span_to_range(pm, Span::new(source_id, e.start, e.end)),
+                range: pm.span_range(Span::new(source_id, e.start, e.end)),
                 new_text: e.replacement.clone(),
             })
             .collect(),

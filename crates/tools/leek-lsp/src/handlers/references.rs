@@ -4,7 +4,6 @@
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -14,7 +13,7 @@ pub fn handle(
     include_declaration: bool,
 ) -> Option<Vec<lsp::Location>> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
@@ -81,6 +80,6 @@ pub fn handle(
 fn loc(uri: &lsp::Url, pm: crate::util::position::PosMap<'_>, span: Span) -> lsp::Location {
     lsp::Location {
         uri: uri.clone(),
-        range: span_to_range(pm, span),
+        range: pm.span_range(span),
     }
 }

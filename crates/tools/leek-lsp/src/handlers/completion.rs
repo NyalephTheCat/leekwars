@@ -47,7 +47,6 @@ use tower_lsp::lsp_types as lsp;
 use super::member::{class_name_of_type, class_parent_name_of, find_class_decl_by_name};
 use super::program_scope::{ScopeFile, program_scope};
 use crate::handlers::{enclosing_class_name, is_top_level_decl, symbol_in_scope_at};
-use crate::util::position::position_to_offset;
 use crate::workspace::Workspace;
 use leek_ide::signature::signature_for;
 
@@ -79,7 +78,7 @@ pub fn handle(
     pos: lsp::Position,
 ) -> Option<lsp::CompletionResponse> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::TypeChecked)?;
     let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;

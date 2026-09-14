@@ -16,7 +16,7 @@ use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
 use super::member;
-use crate::util::position::{PosMap, position_to_offset, span_to_range};
+use crate::util::position::PosMap;
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -25,7 +25,7 @@ pub fn handle(
     pos: lsp::Position,
 ) -> Option<lsp::GotoDefinitionResponse> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     // TypeChecked (not just Resolved): a member access needs the type
     // table to resolve its receiver's class.
@@ -36,7 +36,7 @@ pub fn handle(
     //    itself. Try the references list first, then fall back to a
     //    symbol whose `def_span` covers the cursor.
     if let Some(sym) = crate::handlers::resolve_symbol(table, offset) {
-        let range = span_to_range(doc.pos_map(), sym.def_span);
+        let range = doc.pos_map().span_range(sym.def_span);
         return Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
             uri: uri.clone(),
             range,
@@ -52,7 +52,7 @@ pub fn handle(
         let span = Span::new(doc.source_file_source_id(&ws.db), start, end);
         return Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
             uri: uri.clone(),
-            range: span_to_range(doc.pos_map(), span),
+            range: doc.pos_map().span_range(span),
         }));
     }
 
@@ -63,7 +63,7 @@ pub fn handle(
 
     let text = file.source_file.text(&ws.db);
     let line_table = leek_span::LineTable::new(text);
-    let range = span_to_range(PosMap::new(&line_table, text), sym.def_span);
+    let range = PosMap::new(&line_table, text).span_range(sym.def_span);
     Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
         uri: file.uri,
         range,

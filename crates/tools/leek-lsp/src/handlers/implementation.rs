@@ -23,7 +23,7 @@ use leek_resolver::SymbolKind;
 use leek_span::{LineTable, Span};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{PosMap, position_to_offset, span_to_range};
+use crate::util::position::PosMap;
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -32,7 +32,7 @@ pub fn handle(
     pos: lsp::Position,
 ) -> Option<lsp::request::GotoImplementationResponse> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
     let run = crate::pipeline::run(ws, uri, leek_recipes::Target::Hir)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
     let hir = run.get::<HirArtifact>()?;
@@ -200,7 +200,7 @@ fn subclasses_of(classes: &[ProgClass], name: &str) -> Vec<String> {
 fn loc(uri: &lsp::Url, pm: PosMap<'_>, span: Span) -> lsp::Location {
     lsp::Location {
         uri: uri.clone(),
-        range: span_to_range(pm, span),
+        range: pm.span_range(span),
     }
 }
 

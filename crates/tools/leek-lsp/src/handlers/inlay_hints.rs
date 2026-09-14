@@ -7,7 +7,6 @@ use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::offset_to_position;
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<lsp::InlayHint>> {
@@ -61,7 +60,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
         }
         let type_name = format_type(&inferred);
         out.push(lsp::InlayHint {
-            position: offset_to_position(doc.pos_map(), sym.def_span.end),
+            position: doc.pos_map().to_position(sym.def_span.end),
             label: lsp::InlayHintLabel::String(format!(": {type_name}")),
             kind: Some(lsp::InlayHintKind::TYPE),
             text_edits: None,

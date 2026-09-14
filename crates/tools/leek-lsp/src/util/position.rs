@@ -88,25 +88,6 @@ impl<'a> PosMap<'a> {
     }
 }
 
-/// Convert an LSP zero-based `Position` to a byte offset. Returns `None` if the
-/// position's line is out of range. UTF-16-aware (see [`PosMap`]).
-#[must_use]
-pub fn position_to_offset(pm: PosMap, position: lsp::Position) -> Option<u32> {
-    pm.to_offset(position)
-}
-
-/// Convert a byte offset to an LSP `Position` (UTF-16 column).
-#[must_use]
-pub fn offset_to_position(pm: PosMap, offset: u32) -> lsp::Position {
-    pm.to_position(offset)
-}
-
-/// Convert a [`Span`] to an LSP `Range` against the given map.
-#[must_use]
-pub fn span_to_range(pm: PosMap, span: Span) -> lsp::Range {
-    pm.span_range(span)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

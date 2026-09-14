@@ -9,7 +9,7 @@
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::{PosMap, offset_to_position};
+use crate::util::position::PosMap;
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<lsp::DocumentSymbolResponse> {
@@ -80,8 +80,8 @@ fn build_symbol(
             (
                 t.text().to_string(),
                 lsp::Range {
-                    start: offset_to_position(pm, u32::from(r.start())),
-                    end: offset_to_position(pm, u32::from(r.end())),
+                    start: pm.to_position(u32::from(r.start())),
+                    end: pm.to_position(u32::from(r.end())),
                 },
             )
         },
@@ -108,8 +108,8 @@ fn build_symbol(
 fn node_range(node: &SyntaxNode, pm: PosMap<'_>) -> lsp::Range {
     let r = node.text_range();
     lsp::Range {
-        start: offset_to_position(pm, u32::from(r.start())),
-        end: offset_to_position(pm, u32::from(r.end())),
+        start: pm.to_position(u32::from(r.start())),
+        end: pm.to_position(u32::from(r.end())),
     }
 }
 

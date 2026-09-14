@@ -17,7 +17,6 @@ use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
 use crate::handlers::refusal::Refusable;
-use crate::util::position::{offset_to_position, position_to_offset, span_to_range};
 use crate::workspace::Workspace;
 
 pub fn handle(
@@ -28,7 +27,7 @@ pub fn handle(
     let Some(doc) = ws.doc(uri) else {
         return Ok(None);
     };
-    let Some(offset) = position_to_offset(doc.pos_map(), pos) else {
+    let Some(offset) = doc.pos_map().to_offset(pos) else {
         return Ok(None);
     };
 
@@ -71,10 +70,9 @@ pub fn handle(
                 return Err(member_refusal(target));
             }
         }
-        return Ok(Some(lsp::PrepareRenameResponse::Range(span_to_range(
-            doc.pos_map(),
-            span,
-        ))));
+        return Ok(Some(lsp::PrepareRenameResponse::Range(
+            doc.pos_map().span_range(span),
+        )));
     }
 
     // 2. Cursor on a declaration: report the def_span.
@@ -89,10 +87,9 @@ pub fn handle(
         if crate::handlers::symbol_is_class_member(&root, sym) {
             return Err(member_refusal(sym));
         }
-        return Ok(Some(lsp::PrepareRenameResponse::Range(span_to_range(
-            doc.pos_map(),
-            sym.def_span,
-        ))));
+        return Ok(Some(lsp::PrepareRenameResponse::Range(
+            doc.pos_map().span_range(sym.def_span),
+        )));
     }
 
     // 3. Cross-file use site: the cursor is on a use of a top-level
@@ -103,7 +100,7 @@ pub fn handle(
         return Ok(None);
     };
     Ok(Some(lsp::PrepareRenameResponse::Range(lsp::Range {
-        start: offset_to_position(doc.pos_map(), target.use_start),
-        end: offset_to_position(doc.pos_map(), target.use_end),
+        start: doc.pos_map().to_position(target.use_start),
+        end: doc.pos_map().to_position(target.use_end),
     })))
 }

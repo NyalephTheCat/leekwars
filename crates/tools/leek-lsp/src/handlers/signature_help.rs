@@ -23,13 +23,12 @@ use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use tower_lsp::lsp_types as lsp;
 
 use super::member;
-use crate::util::position::position_to_offset;
 use crate::workspace::Workspace;
 use leek_ide::signature::signature_for;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp::SignatureHelp> {
     let doc = ws.doc(uri)?;
-    let offset = position_to_offset(doc.pos_map(), pos)?;
+    let offset = doc.pos_map().to_offset(pos)?;
 
     // TypeChecked (not just Resolved): a method callee needs the type
     // table to resolve its receiver's class.

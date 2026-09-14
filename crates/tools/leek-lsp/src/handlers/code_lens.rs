@@ -23,7 +23,6 @@ use leek_resolver::{Symbol, SymbolKind};
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::span_to_range;
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::CodeLens>> {
@@ -40,7 +39,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::CodeLens>> {
         if sym.kind != SymbolKind::Function {
             continue;
         }
-        let range = span_to_range(doc.pos_map(), sym.def_span);
+        let range = doc.pos_map().span_range(sym.def_span);
         // No command and no title yet — `resolve` re-finds the symbol by
         // the offset stashed in `data`.
         out.push(lsp::CodeLens {
@@ -124,7 +123,7 @@ pub fn resolve(ws: &Workspace, lens: lsp::CodeLens) -> Option<lsp::CodeLens> {
                 );
                 lsp::Location {
                     uri: uri.clone(),
-                    range: span_to_range(doc.pos_map(), span),
+                    range: doc.pos_map().span_range(span),
                 }
             })
             .collect()

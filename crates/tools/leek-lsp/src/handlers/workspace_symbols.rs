@@ -12,7 +12,6 @@ use leek_resolver::SymbolKind;
 use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
-use crate::util::position::span_to_range;
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, query: &str) -> Option<Vec<lsp::SymbolInformation>> {
@@ -47,7 +46,7 @@ pub fn handle(ws: &Workspace, query: &str) -> Option<Vec<lsp::SymbolInformation>
                 deprecated: None,
                 location: lsp::Location {
                     uri: target.uri.clone(),
-                    range: span_to_range(target.pos_map(), sym.def_span),
+                    range: target.pos_map().span_range(sym.def_span),
                 },
                 container_name,
             });
