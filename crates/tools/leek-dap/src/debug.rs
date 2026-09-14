@@ -13,13 +13,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, RwLock};
+use std::sync::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use leek_backend_native::DebugValue;
 use leek_span::LineTable;
 
 use crate::breakpoints::Trigger;
 use crate::expr;
+use crate::lock;
 
 /// One file the debuggee was compiled from, keyed by the `SourceId` its spans
 /// carry. A program built through the project include graph is spliced from
@@ -180,6 +181,10 @@ pub(crate) struct NativeDebugSession {
     step: Mutex<Step>,
     wait: Mutex<Wait>,
     cv: Condvar,
+    /// Set the first time one of the locks above is taken poisoned — a
+    /// thread panicked while holding it, so what is under it is whatever the
+    /// panic left behind. See [`Self::poisoned`].
+    poisoned: AtomicBool,
     /// Sends the DAP `stopped` event. Called on the debuggee thread.
     on_stop: Box<dyn Fn(StopInfo) + Send + Sync>,
     /// Sends a DAP `output` event: a logpoint's message, or the complaint of
@@ -210,9 +215,40 @@ impl NativeDebugSession {
                 detached: false,
             }),
             cv: Condvar::new(),
+            poisoned: AtomicBool::new(false),
             on_stop,
             on_output,
         }
+    }
+
+    /// Take one of this session's own locks, recovering from poisoning and
+    /// remembering that it happened (#176 — see [`crate::lock`] for why both
+    /// halves are needed).
+    fn locked<'a, T>(&self, mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+        lock::unpoisoned_seen(mutex.lock(), &self.poisoned)
+    }
+
+    /// [`Self::locked`] for the read half of an `RwLock`.
+    fn read_locked<'a, T>(&self, rw: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+        lock::unpoisoned_seen(rw.read(), &self.poisoned)
+    }
+
+    /// [`Self::locked`] for the write half of an `RwLock`.
+    fn write_locked<'a, T>(&self, rw: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+        lock::unpoisoned_seen(rw.write(), &self.poisoned)
+    }
+
+    /// Whether a panic has left one of this session's locks poisoned.
+    ///
+    /// Recovering the guard keeps the adapter alive, but the state recovered
+    /// with it is whatever the panicking thread left: a shadow frame pushed
+    /// with no line yet, a snapshot from the stop before this one, a hit
+    /// count half-incremented. The request loop asks after every request and
+    /// ends the session rather than go on answering `stackTrace`, `variables`
+    /// and `evaluate` out of it (#176) — and [`Self::stop`] announces no
+    /// further stops in the meantime.
+    pub(crate) fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::SeqCst)
     }
 
     /// Replace the whole breakpoint set, keyed by raw `SourceId` then line.
@@ -230,11 +266,8 @@ impl NativeDebugSession {
             .values()
             .flat_map(|lines| lines.values().map(|trigger| trigger.id))
             .collect();
-        self.hits
-            .lock()
-            .expect("hit count lock poisoned")
-            .retain(|id, _| live.contains(id));
-        *self.breakpoints.write().expect("breakpoint lock poisoned") = by_source;
+        self.locked(&self.hits).retain(|id, _| live.contains(id));
+        *self.write_locked(&self.breakpoints) = by_source;
     }
 
     /// The breakpoint on this line, if the client set one.
@@ -243,9 +276,7 @@ impl NativeDebugSession {
     /// to park the debuggee, and a lock held across that park would block the
     /// very `setBreakpoints` that could free it.
     fn breakpoint_at(&self, source: u32, line: u32) -> Option<Trigger> {
-        self.breakpoints
-            .read()
-            .expect("breakpoint lock poisoned")
+        self.read_locked(&self.breakpoints)
             .get(&source)?
             .get(&line)
             .cloned()
@@ -283,7 +314,7 @@ impl NativeDebugSession {
 
         if let Some(hit) = &trigger.hit {
             let count = {
-                let mut hits = self.hits.lock().expect("hit count lock poisoned");
+                let mut hits = self.locked(&self.hits);
                 let count = hits.entry(trigger.id).or_insert(0);
                 *count += 1;
                 *count
@@ -312,7 +343,7 @@ impl NativeDebugSession {
     /// The previous site is recorded whether or not this is an arrival: the
     /// test means nothing unless *every* safepoint updates it.
     fn arrived(&self, now: Site) -> bool {
-        let mut prev = self.prev.lock().expect("prev site lock poisoned");
+        let mut prev = self.locked(&self.prev);
         let arrived = prev.is_none_or(|p| {
             p.depth != now.depth
                 || p.source != now.source
@@ -325,10 +356,7 @@ impl NativeDebugSession {
 
     /// Frames captured at the most recent stop, top-first.
     pub(crate) fn frames(&self) -> Vec<FrameSnapshot> {
-        self.snapshot
-            .lock()
-            .expect("snapshot lock poisoned")
-            .clone()
+        self.locked(&self.snapshot).clone()
     }
 
     /// Tear the session down: release a parked debuggee and let every later
@@ -340,7 +368,7 @@ impl NativeDebugSession {
     /// standalone binary, which exits; fatal for an embedder, and for a test
     /// binary that runs one session after another.
     pub(crate) fn detach(&self) {
-        let mut wait = self.wait.lock().expect("debug wait lock poisoned");
+        let mut wait = self.locked(&self.wait);
         wait.detached = true;
         wait.stopped = false;
         self.cv.notify_all();
@@ -348,7 +376,7 @@ impl NativeDebugSession {
 
     /// Release a parked debuggee so it continues running.
     pub(crate) fn resume(&self) {
-        *self.step.lock().expect("step lock poisoned") = Step::None;
+        *self.locked(&self.step) = Step::None;
         self.wake();
     }
 
@@ -360,27 +388,27 @@ impl NativeDebugSession {
     /// Step into: stop at the very next statement (including a callee).
     pub(crate) fn step_into(&self) {
         let (line, depth) = self.top();
-        *self.step.lock().expect("step lock poisoned") = Step::Into { line, depth };
+        *self.locked(&self.step) = Step::Into { line, depth };
         self.wake();
     }
 
     /// Step over: stop at the next statement in this frame or a caller.
     pub(crate) fn step_over(&self) {
         let (line, depth) = self.top();
-        *self.step.lock().expect("step lock poisoned") = Step::Over { line, depth };
+        *self.locked(&self.step) = Step::Over { line, depth };
         self.wake();
     }
 
     /// Step out: stop once this frame has returned.
     pub(crate) fn step_out(&self) {
         let (_, depth) = self.top();
-        *self.step.lock().expect("step lock poisoned") = Step::Out { depth };
+        *self.locked(&self.step) = Step::Out { depth };
         self.wake();
     }
 
     /// Current (line, depth) of the top frame.
     fn top(&self) -> (u32, usize) {
-        let stack = self.stack.lock().expect("stack lock poisoned");
+        let stack = self.locked(&self.stack);
         (stack.last().map_or(0, |f| f.line), stack.len())
     }
 
@@ -389,7 +417,7 @@ impl NativeDebugSession {
     /// no stop in flight is a no-op, so a stray `continue` cannot swallow a
     /// later breakpoint.
     fn wake(&self) {
-        let mut wait = self.wait.lock().expect("debug wait lock poisoned");
+        let mut wait = self.locked(&self.wait);
         wait.stopped = false;
         self.cv.notify_all();
     }
@@ -397,9 +425,19 @@ impl NativeDebugSession {
     /// Capture every live frame's name/line/locals (debuggee thread, frames
     /// alive), publish the snapshot, then park until resumed.
     fn stop(&self, line: u32, reason: StopReason, hit_breakpoint_ids: Vec<i64>) {
+        // A panic has already cost this session part of its state and the
+        // request loop is about to end it (see [`Self::poisoned`]). Announce
+        // nothing and park nobody: a thread parked here would be waiting for
+        // a `continue` from a client that has been told the session is over,
+        // and the frames it stopped to show would come off a stack whose top
+        // may never have been finished.
+        if self.poisoned() {
+            return;
+        }
+
         // Clone the frame pointers out under the lock, then render outside it.
         let frames: Vec<(usize, usize, u32, u32)> = {
-            let stack = self.stack.lock().expect("stack lock poisoned");
+            let stack = self.locked(&self.stack);
             stack
                 .iter()
                 .rev()
@@ -422,17 +460,20 @@ impl NativeDebugSession {
                     .collect(),
             })
             .collect();
-        *self.snapshot.lock().expect("snapshot lock poisoned") = snapshot;
+        *self.locked(&self.snapshot) = snapshot;
 
         // Claim the stop before announcing it. The client may answer the
         // `stopped` event with `continue` (or a step) before this thread
         // reaches the condvar; that `wake` clears the flag we just set, so the
         // loop below sees the resume instead of losing it.
         {
-            let mut wait = self.wait.lock().expect("debug wait lock poisoned");
+            let mut wait = self.locked(&self.wait);
             // A detached session has no client left to answer the stop, and
-            // whoever detached is waiting for this thread to finish.
-            if wait.detached {
+            // whoever detached is waiting for this thread to finish. A lock
+            // found poisoned since the check at the top of this function is
+            // the same story: the request loop is ending the session, so do
+            // not announce one more stop into it.
+            if wait.detached || self.poisoned() {
                 return;
             }
             wait.stopped = true;
@@ -444,9 +485,9 @@ impl NativeDebugSession {
             hit_breakpoint_ids,
         });
 
-        let mut wait = self.wait.lock().expect("debug wait lock poisoned");
+        let mut wait = self.locked(&self.wait);
         while wait.stopped {
-            wait = self.cv.wait(wait).expect("debug wait lock poisoned");
+            wait = lock::unpoisoned_seen(self.cv.wait(wait), &self.poisoned);
         }
     }
 }
@@ -464,7 +505,7 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
 
         // Update the top frame and read the current depth.
         let depth = {
-            let mut stack = self.stack.lock().expect("stack lock poisoned");
+            let mut stack = self.locked(&self.stack);
             if let Some(top) = stack.last_mut() {
                 top.line = line;
                 top.values = frame_values;
@@ -511,7 +552,7 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
     }
 
     fn enter_frame(&self, frame_desc: usize) {
-        self.stack.lock().expect("stack lock poisoned").push(Frame {
+        self.locked(&self.stack).push(Frame {
             desc: frame_desc,
             values: 0,
             line: 0,
@@ -521,18 +562,18 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
 
     fn leave_frame(&self) {
         let len = {
-            let mut stack = self.stack.lock().expect("stack lock poisoned");
+            let mut stack = self.locked(&self.stack);
             stack.pop();
             stack.len()
         };
         // A pending step-out completes when the target frame returns; arm a
         // forced stop at the next safepoint in the caller. (Copy the step out
         // first — `Step` is `Copy` — to avoid re-locking while borrowed.)
-        let step = *self.step.lock().expect("step lock poisoned");
+        let step = *self.locked(&self.step);
         if let Step::Out { depth } = step
             && len < depth
         {
-            *self.step.lock().expect("step lock poisoned") = Step::Into {
+            *self.locked(&self.step) = Step::Into {
                 line: 0,
                 depth: len,
             };
@@ -543,7 +584,7 @@ impl leek_backend_native::DebugHook for NativeDebugSession {
 impl NativeDebugSession {
     /// Whether the in-progress step is satisfied at this (line, depth).
     fn step_reached(&self, line: u32, depth: usize) -> bool {
-        let mut step = self.step.lock().expect("step lock poisoned");
+        let mut step = self.locked(&self.step);
         let reached = match *step {
             Step::None => false,
             Step::Into { line: l, depth: d } => depth != d || line != l,
@@ -570,7 +611,7 @@ mod tests {
 
     use leek_span::LineTable;
 
-    use super::{DebugSource, NativeDebugSession, StopInfo};
+    use super::{DebugSource, Frame, FrameSnapshot, Mutex, NativeDebugSession, StopInfo};
     use crate::breakpoints::{BreakpointSpec, BreakpointStore, ProgramMap, Trigger};
 
     const SOURCE: &str = "var a = 1;\nvar b = 2;\n";
@@ -1062,5 +1103,82 @@ mod tests {
             done.recv_timeout(RELEASED).is_ok(),
             "debuggee stayed parked after resume"
         );
+    }
+
+    /// Panic on another thread while holding `mutex`, exactly as a panicking
+    /// handler (or a panicking debuggee hook) leaves a lock behind.
+    fn poison<T: Send + 'static>(
+        session: &Arc<NativeDebugSession>,
+        mutex: fn(&NativeDebugSession) -> &Mutex<T>,
+        write: impl FnOnce(&mut T) + Send + 'static,
+    ) {
+        let held = Arc::clone(session);
+        let outcome = std::thread::spawn(move || {
+            let mut guard = mutex(&held).lock().expect("a fresh mutex is not poisoned");
+            write(&mut guard);
+            panic!("deliberate panic: poisoning a debug-session lock");
+        })
+        .join();
+        assert!(outcome.is_err(), "the thread was supposed to panic");
+    }
+
+    #[test]
+    fn a_poisoned_snapshot_lock_is_recovered_rather_than_panicking() {
+        let session = session_with(|_: &NativeDebugSession| {});
+        poison(
+            &session,
+            |s| &s.snapshot,
+            |snapshot| {
+                snapshot.push(FrameSnapshot {
+                    name: "half a stop".to_string(),
+                    line: 1,
+                    path: None,
+                    vars: Vec::new(),
+                });
+            },
+        );
+
+        // The call the adapter makes to answer `stackTrace`: it used to
+        // `expect` here and take the whole adapter down with it.
+        assert_eq!(session.frames().len(), 1, "the recovered snapshot was lost");
+        assert!(
+            session.poisoned(),
+            "taking a poisoned lock was not recorded, so the session would run on"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_session_stops_announcing_stops() {
+        let (announced, stopped) = mpsc::channel();
+        let session = session_with(move |_: &NativeDebugSession| {
+            let _ = announced.send(());
+        });
+        // A panic while the shadow stack was being pushed: the top frame is
+        // there but its line was never filled in.
+        poison(
+            &session,
+            |s| &s.stack,
+            |stack| {
+                stack.push(Frame {
+                    desc: 0,
+                    values: 0,
+                    line: 0,
+                    source: ENTRY,
+                });
+            },
+        );
+
+        // This session stops on entry, so an untouched one would park here
+        // until a client resumed it.
+        let done = spawn_safepoint(&session);
+        assert!(
+            done.recv_timeout(RELEASED).is_ok(),
+            "a poisoned session parked the debuggee instead of running on"
+        );
+        assert!(
+            stopped.try_recv().is_err(),
+            "a poisoned session announced a stop it cannot describe"
+        );
+        assert!(session.poisoned(), "the poisoned lock went unrecorded");
     }
 }

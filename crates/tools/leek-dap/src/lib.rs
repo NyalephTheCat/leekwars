@@ -65,6 +65,7 @@ mod debug;
 mod event;
 mod expr;
 mod handlers;
+mod lock;
 mod server;
 mod session;
 mod target;

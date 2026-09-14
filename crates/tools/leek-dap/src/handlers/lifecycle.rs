@@ -285,6 +285,29 @@ fn emit_terminated<R: Read, W: Write>(
     Ok(())
 }
 
+/// Tell the client the adapter's own state can no longer be trusted, and end
+/// the debug session the way every other ending ends it.
+///
+/// A panic under one of the debug controller's locks leaves whatever it was
+/// midway through writing behind (see [`crate::debug::NativeDebugSession::poisoned`]).
+/// The adapter recovers the lock rather than panicking a second time, but it
+/// must not go on serving stack frames and variables read out of that state:
+/// a wrong answer at a breakpoint is worse than a session that stops and says
+/// why. The `output`/`exited`/`terminated` triple is the one [`emit_terminated`]
+/// already sends, so the client tears the session down exactly as it does for
+/// a compile error.
+pub(super) fn end_poisoned_session<R: Read, W: Write>(
+    server: &mut Server<R, W>,
+) -> anyhow::Result<()> {
+    emit_terminated(
+        server,
+        &RunOutcome::failed(
+            "leek-dap: a panic left this debug session's state incomplete (a lock was \
+             poisoned). Ending the session rather than reporting out of it.\n",
+        ),
+    )
+}
+
 /// `disconnect` / `terminate`: acknowledge and stop the request loop.
 pub(crate) fn shutdown<R: Read, W: Write>(
     server: &mut Server<R, W>,
