@@ -90,7 +90,7 @@ impl BackendTable {
     ///
     /// If exactly one backend has `default = true`, that wins. Otherwise
     /// falls back to the first enabled backend in the order
-    /// java → jar → native → wasm.
+    /// java → jar → native → wasm → leekscript.
     pub fn default_kind(&self) -> Option<BackendKind> {
         let entries: [(BackendKind, &Option<BackendSettings>); 5] = [
             (BackendKind::Java, &self.java),

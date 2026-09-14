@@ -50,6 +50,11 @@ impl RecipeArtifact for ComplexityArtifact {
 }
 
 fn run_analyze(cx: &Context<'_>) -> Option<Arc<Vec<Complexity>>> {
+    // NOTE(#428): unlike `LowerHir` / `TypeCheck`, this branch does not
+    // check for an include-aware run, so a memoized `Target::Complexity` pipeline
+    // built by `pipeline_with_includes` would measure complexity from the entry
+    // file alone. Dormant: the only `run_memoized` caller is the LSP, which
+    // never asks for this target.
     #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         return Some(complexity_query(db, file).0);

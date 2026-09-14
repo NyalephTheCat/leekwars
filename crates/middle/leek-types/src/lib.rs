@@ -44,8 +44,12 @@ pub use leek_diagnostics::codes;
 /// executed (vs cached). Used by the memoization smoke test.
 #[cfg(all(test, feature = "salsa"))]
 pub(crate) mod salsa_probe {
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     pub(crate) static TYPECHECK_QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    /// The counter is process-global and cargo runs `#[test]`s on a
+    /// thread pool, so every test that reads a delta takes this first.
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
 }
 
 // ---- Public entry points ----

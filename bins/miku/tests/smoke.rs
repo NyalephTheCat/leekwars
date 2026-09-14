@@ -824,6 +824,78 @@ return 0;
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `[backend.<kind>].out_dir` is documented as "where each backend writes
+/// its artifacts", and the leekscript emitter used to parse it and then
+/// ignore it — only the java emitter consulted the manifest.
+#[test]
+fn backend_out_dir_from_the_manifest_is_honored() {
+    let dir = scratch_dir("backend-out-dir");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "emitme"
+version = "0.1.0"
+
+[backend.leekscript]
+enable  = true
+default = true
+out_dir = "dist"
+"#,
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 1 + 2;\n");
+
+    let out = miku(&["build"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        dir.join("dist/main.leek").is_file(),
+        "[backend.leekscript].out_dir should place the emitted source; \
+         stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !dir.join("build/leekscript").exists(),
+        "the default <build>/leekscript must not also be written"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A relative `--out-dir` is relative to the project, not to the shell's
+/// working directory — otherwise the same command means two different
+/// things depending on where in the project it was typed.
+#[test]
+fn relative_out_dir_resolves_against_the_project_root_from_a_subdirectory() {
+    let dir = scratch_dir("out-dir-subdir");
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "emitme"
+version = "0.1.0"
+
+[backend.leekscript]
+enable  = true
+default = true
+"#,
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 1 + 2;\n");
+
+    let out = miku(&["build", "--out-dir", "gen"], &dir.join("src"));
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        dir.join("gen/main.leek").is_file(),
+        "--out-dir gen should land at <root>/gen; stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !dir.join("src/gen").exists(),
+        "--out-dir must not resolve against the cwd"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `miku clean` deletes the build root wholesale, so a `paths.build`
 /// that escapes the project is a manifest error, not a surprise `rm`.
 #[test]

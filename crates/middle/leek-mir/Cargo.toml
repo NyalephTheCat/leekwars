@@ -26,6 +26,13 @@ salsa = [
 ]
 
 [dev-dependencies]
+# Self dev-dependency: turns this crate's own `salsa` feature on whenever
+# it is built as a test target. Without it nothing in the workspace ever
+# requests `leek-mir/salsa`, so `lower_mir_query` and the memoization
+# tests below never compile — `cargo test --workspace` and
+# `clippy --all-targets` both skipped them silently. Must be `path`, not
+# `workspace`; cargo rejects a workspace self-reference.
+leek-mir    = { path = ".", features = ["salsa"] }
 # Cascade memoization test pulls salsa-enabled frontend stages and
 # uses the input setter.
 leek-syntax = { workspace = true, features = ["salsa"] }
