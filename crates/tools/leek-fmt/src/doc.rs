@@ -14,6 +14,18 @@ use crate::FormatOptions;
 pub enum Doc {
     Nil,
     Text(Cow<'static, str>),
+    /// Source text reproduced exactly, newlines included — a
+    /// `// fmt: off` region, an error node, any construct the
+    /// formatter declines to lay out.
+    ///
+    /// The distinction from [`Doc::Text`] is the printer's column:
+    /// text that carries its own `\n` leaves the cursor at the width
+    /// of whatever follows the *last* one, so the printer tracks the
+    /// column from there rather than adding the whole run's width.
+    /// Adding the whole width is what made every group after a
+    /// multi-line raw node break for a line that was never that long
+    /// (#198).
+    Verbatim(String),
     /// `" "` in flat mode, newline+indent in broken mode.
     Line,
     /// `""` in flat mode, newline+indent in broken mode.
@@ -54,6 +66,12 @@ pub fn nil() -> Doc {
 
 pub fn text(s: impl Into<Cow<'static, str>>) -> Doc {
     Doc::Text(s.into())
+}
+
+/// Source text the printer reproduces byte for byte. Use this rather
+/// than [`text`] for anything that can carry an embedded newline.
+pub fn verbatim(s: impl Into<String>) -> Doc {
+    Doc::Verbatim(s.into())
 }
 
 pub fn line() -> Doc {
