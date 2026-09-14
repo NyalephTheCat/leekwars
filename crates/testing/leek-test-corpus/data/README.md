@@ -8,9 +8,10 @@ compile time, so there is no manual extract step and no copy to keep in sync.
 (`run --save-baseline`). A case the file does not mention was passing, so a
 refresh is a few kilobytes of real signal instead of a full ~11k-case pass map.
 
-`fmt-known-failures-corpus.tsv`, `fmt-known-failures-ai.tsv` — the
-formatter's known-bad list, one sorted row per failing id (#197). See
-[Formatter ratchet](#formatter-ratchet) below.
+There is no `fmt-known-failures-*.tsv` here any more: the formatter's
+known-bad lists (#197) have been worked off to nothing and both suites gate
+on a plain assertion instead. See [Formatter ratchet](#formatter-ratchet)
+below.
 
 `reference.tsv` — the official-LeekScript reference dataset (value + ops +
 generated Java per case), refreshed with
@@ -79,47 +80,52 @@ with real code, and several of those are the formatter changing what a program
 means (`not true` printed as `nottrue`, `(x -> e)(a)` printed as
 `(x) -> e(a)` — the latter fixed in #416).
 
-`fmt-known-failures-corpus.tsv` and `fmt-known-failures-ai.tsv` hold those
-failures, one `id<TAB>kind<TAB>detail` row each, and the test gates on the
-**diff**: an id that breaks and is not listed fails the build, a listed id
-that now passes is reported so the file shrinks, and a reworded detail is
-information. An empty or missing file is an error, not a pass — see
-`src/fmt_ratchet.rs` for why.
+`fmt-known-failures-corpus.tsv` and `fmt-known-failures-ai.tsv` held those
+failures, one `id<TAB>kind<TAB>detail` row each, and each suite gated on the
+**diff** against its own file: an id that broke and was not listed failed the
+build, a listed id that passed again was reported so the file shrank, and a
+reworded detail was information. An empty or missing file is an error, not a
+pass — see `src/fmt_ratchet.rs` for why.
 
-Three of those classes are now fixed and their rows are gone: the printer
-inserts a separator wherever two adjacent tokens would otherwise re-lex as one
-(#412), `format_binary` emits every operator token so `not in` keeps its `in`
-(#413), and `format_class_body` emits a stray modifier instead of dropping it
-(#414). That took the files to **141 corpus rows and 6 AI rows**.
+Three rounds of fixes worked both files off completely:
 
-Two more are fixed on top of that, both cases of a construct formatter
-re-deriving its delimiters instead of printing the ones the parser consumed:
-`format_lambda` keeps the parentheses that wrap a whole `(x -> e)` lambda
-rather than peeling them off its callee (#416), and the bracketed-list
-printers fall back to verbatim output instead of synthesizing a closer the
-node never had, so the mis-parsed `|x|` no longer grows a `>` (#418). That
-takes the files to **23 corpus rows and 3 AI rows**.
-
-**Every row is an open bug.** Fixing one means deleting its row; nothing here
-is accepted behaviour, and nothing here is a reason to weaken the check that
-found it. The remaining rows group into four defect classes:
-
-| Row detail looks like | Defect | Issue |
+| Fixed | Corpus rows | AI rows |
 |---|---|---|
-| `` `:` becomes `]` ``, `` `..` becomes `]` `` | `a[i:j]` / `[a..b]` shredded into separate statements | #415 |
-| `` `<end of file>` becomes … ``, `` `"` becomes `"\n` `` | tokens invented past the end of the file | #417 |
-| `would drop 1 comment(s): /*…` | unterminated block comment grows a line per pass | #419 |
-| `not-idempotent … @pure  @unused` | annotations gain a space per pass | #420 |
+| — (first run) | 289 | 16 |
+| a separator wherever two adjacent tokens would re-lex as one (#412), `format_binary` emitting every operator token so `not in` keeps its `in` (#413), `format_class_body` emitting a stray modifier instead of dropping it (#414) | 141 | 6 |
+| `format_lambda` keeping the parentheses that wrap a whole `(x -> e)` lambda rather than peeling them off its callee (#416), and the bracketed-list printers falling back to verbatim output instead of synthesizing a closer the node never had (#418) | 23 | 3 |
+| no formatter printing a delimiter its node does not have (#415, #417), nothing written into a token that runs to end of file (#417, #419), and annotations reaching a fixed point (#420) | 0 | 0 |
 
-Regenerate both files after fixing something (needs the upstream submodule):
+**So both files are deleted and neither suite has a ratchet any more.** A
+ratchet holding nothing gates on nothing, so each suite is back to the plain
+assertion its own error message prescribes: every one of the 11005 corpus
+cases and 101 upstream `.leek` files must format safely and idempotently, and
+a failure is a formatter regression to fix — never a row to add back.
 
-```bash
-LEEK_FMT_WRITE_KNOWN_FAILURES=1 cargo test -p leek-test-corpus --test fmt_roundtrip
-```
+No row was ever accepted behaviour, and none was ever closed by editing its
+detail: each one came off because the bug behind it was fixed, with the one
+exception called out below. The machinery is still here — `src/fmt_ratchet.rs` and its tests
+in `tests/fmt_ratchet.rs` — for the next defect class too large to fix in the
+change that finds it; wiring a suite back to it means restoring the `gate`
+call and the `LEEK_FMT_WRITE_KNOWN_FAILURES` write path in
+`tests/fmt_roundtrip.rs` (see this file's history for the shape).
 
-Regenerating is for *shrinking* the files. If the gate reports an id as newly
-broken, that is a formatter regression to fix — writing it into the file is
-how a real corruption gets baked in.
+The signatures are recorded so a returning row is recognised for what it is:
+`` `KwNot` becomes `nottrue` `` and friends (#412), `` `KwIn` becomes … ``
+(#413), `` `KwStatic` becomes `Kw…` `` (#414), `` `:` becomes `]` `` /
+`` `..` becomes `]` `` (#415), `enter CallExpr becomes enter LambdaExpr`
+(#416), `` `<end of file>` becomes … `` and `` `"` becomes `"\n` `` (#417),
+`` `KwVar` becomes `>` `` (#418), `would drop 1 comment(s): /*…` (#419),
+`not-idempotent … @pure  @unused` (#420).
+
+**One row disappeared as a side effect rather than a fix, and that coverage
+is gone.** `euler/pe025.leek` (#418) lost its row because the missing-closer
+rule made the formatter round-trip `while |n1.string()| < 1000 {` instead of
+rewriting it — the safety net accepts the file now, but the file is still
+mis-parsed (there is no `|x|` length-operator production in the grammar, so
+the `|` lands in an `ErrorNode` and `< 1000 {…}` becomes a set literal) and it
+is still laid out wrongly. Adding that production is a separate parser
+feature, and no row watches it any more.
 
 ## CI
 

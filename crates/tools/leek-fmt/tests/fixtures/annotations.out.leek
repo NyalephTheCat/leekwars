@@ -1,0 +1,7 @@
+@pure @unused function helper() {
+    return 1;
+}
+@deprecated('use helper') function old() {
+    return helper();
+}
+@unused @deprecated var x = 5;

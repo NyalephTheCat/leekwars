@@ -28,7 +28,7 @@ mod interval;
 mod lambda;
 
 use atom::atom_or_prefix;
-use interval::has_matching_rbracket;
+use interval::{has_matching_rbracket, looks_like_interval_open};
 use lambda::looks_like_ternary_after_type;
 
 /// Parse an expression at the lowest precedence (allows assignments).
@@ -129,7 +129,17 @@ fn expr_bp_inner(p: &mut Parser, min_bp: u8) {
         // Guard: only consume as subscript if there's a matching `]`
         // at the same depth. Otherwise this `[` is the close of an
         // outer interval expression (`[a..b[` etc.).
-        if kind == S::LBracket && CALL_BP >= min_bp && has_matching_rbracket(p) {
+        // Second guard: a `[` whose contents hold a top-level `..` is
+        // an interval literal (`[2..10]`), never a subscript — there is
+        // no subscript syntax containing `..`. Without this, a
+        // statement-initial interval after an expression-shaped line
+        // (`}` / `]`) is swallowed as a subscript, `expr_bp` stops dead
+        // at the `..`, and the `]` is left stranded (#415).
+        if kind == S::LBracket
+            && CALL_BP >= min_bp
+            && has_matching_rbracket(p)
+            && !looks_like_interval_open(p)
+        {
             postfix_bracket(p, cp);
             continue;
         }
@@ -279,14 +289,12 @@ fn postfix_bracket(p: &mut Parser, cp: rowan::Checkpoint) {
         is_slice = true;
     }
     if is_slice && p.version() < leek_syntax::Version::V4 {
-        // Slice syntax `a[i:j]` is v4-only; in v1-v3 the parser
-        // expects `]` directly after the first index.
-        p.start_node_at(cp, S::IndexExpr);
-        p.bump(); // '['
-        expr_bp(p, 0);
-        p.expect(S::RBracket);
-        p.finish_node();
-        return;
+        // Slice syntax `a[i:j]` is v4-only. Report that as its own
+        // diagnostic, but still build the `SliceExpr` the source
+        // describes: falling back to the `IndexExpr` production made
+        // `expect(RBracket)` fail at the `:` and left the rest of the
+        // slice stranded as top-level statements (#415).
+        p.error("slice syntax `a[i:j]` requires language version 4");
     }
     if is_slice {
         p.start_node_at(cp, S::SliceExpr);

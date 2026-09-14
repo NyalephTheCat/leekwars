@@ -1234,3 +1234,47 @@ fn error_recovery_keeps_parsing() {
         "lost the second decl: {names:?}"
     );
 }
+
+// ---- #415: slices and intervals must not be shredded ----
+
+#[test]
+fn slice_below_v4_is_still_a_slice_node() {
+    // `a[i:j]` is v4-only, but the recovery must describe what the
+    // source says. Bailing into the index production stopped the parse
+    // at the `:` and left `3]` stranded at the top level; the formatter
+    // then closed the subscript with a `]` the source never had (#415).
+    for version in [Version::V1, Version::V2, Version::V3] {
+        let result = parse("return a[1:3];", src(), version);
+        let node = SyntaxNode::new_root(result.green);
+        assert_eq!(node.text().to_string(), "return a[1:3];");
+        assert!(
+            dump(&node).contains("SliceExpr"),
+            "no SliceExpr at {version:?}: {}",
+            dump(&node)
+        );
+        assert!(
+            !result.diagnostics.is_empty(),
+            "the version error must still be reported at {version:?}"
+        );
+    }
+}
+
+#[test]
+fn statement_initial_interval_is_not_a_subscript() {
+    // A `[` holding a top-level `..` opens an interval literal, never a
+    // subscript — so it must not be glued onto the preceding expression.
+    let (node, _) = parse_str("var x = [1]\n[2..10000].filter(i -> i)\n");
+    let shape = dump(&node);
+    assert!(shape.contains("IntervalExpr"), "no IntervalExpr: {shape}");
+    assert_eq!(
+        node.text().to_string(),
+        "var x = [1]\n[2..10000].filter(i -> i)\n"
+    );
+}
+
+#[test]
+fn a_plain_subscript_is_unaffected_by_the_interval_guard() {
+    assert_round_trip("return t[0][1];");
+    let (node, _) = parse_str("return t[0][1];");
+    assert!(dump(&node).contains("IndexExpr"), "{}", dump(&node));
+}
