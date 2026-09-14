@@ -887,6 +887,32 @@ fn execute_command_unknown_returns_none() {
 }
 
 #[test]
+fn advertised_commands_are_exactly_the_server_side_ones() {
+    // A command id belongs to exactly one side. Everything we advertise
+    // here is auto-registered as a client proxy by
+    // vscode-languageclient's ExecuteCommandFeature, so an id the VS Code
+    // extension already registers itself would collide — and VS Code
+    // throws on a duplicate registration at activation, killing the whole
+    // extension: language client, debug adapter, code lenses, the lot.
+    //
+    // These ids are the extension's and must never appear below:
+    //   leek.showReferences   leek.restartServer   leek.runFight
+    //   leek.runFightMatrix   leek.runTests        leek.debugFightHere
+    //   leek.showAnalysis
+    //
+    // `leek.showAnalysis` is the palette entry that *invokes*
+    // `leek.analyze` over `workspace/executeCommand`; the two are
+    // deliberately different ids for this reason.
+    assert_eq!(
+        execute_command::COMMANDS,
+        ["leek.showComplexity", "leek.analyze"],
+        "adding a client-side command id here bricks the VS Code \
+         extension at activation — see the module doc of \
+         handlers/execute_command.rs",
+    );
+}
+
+#[test]
 fn pull_diagnostics_reports_parse_errors() {
     // Use a body that produces a real diagnostic.
     let text = "function f( { return 1 }\n";
