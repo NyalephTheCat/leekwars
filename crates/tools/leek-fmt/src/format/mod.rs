@@ -191,12 +191,125 @@ pub(crate) fn is_fmt_skipped(node: &SyntaxNode) -> bool {
     false
 }
 
+/// True if a `BlockComment` token is closed by its own `*/`.
+///
+/// An unterminated `/*` runs to end of file, so the lexer hands the
+/// formatter a comment token that holds the rest of the source —
+/// including the file's own trailing newlines.
+pub(crate) fn block_comment_is_closed(text: &str) -> bool {
+    text.len() >= 4 && text.ends_with("*/")
+}
+
+/// True if a `StringLiteral` token is closed by its own quote.
+///
+/// Mirrors the lexer's scan: backslash escapes the next byte, and the
+/// first unescaped copy of the opening quote ends the token. A literal
+/// that hits end of file instead keeps everything to EOF.
+pub(crate) fn string_literal_is_closed(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    let Some(quote) = bytes.next() else {
+        return false;
+    };
+    let mut escaped = false;
+    for b in bytes {
+        if escaped {
+            escaped = false;
+        } else if b == b'\\' {
+            escaped = true;
+        } else if b == quote {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if the file's very last token runs to end of file unclosed —
+/// an unterminated string literal or block comment.
+///
+/// Such a token owns every byte to EOF, so appending the document's
+/// trailing newline would append it *inside* the token: the next pass
+/// lexes a longer token and appends again, a line per pass (#417,
+/// #419). A file that ends this way is left exactly as written.
+pub(crate) fn ends_in_unclosed_token(root: &SyntaxNode) -> bool {
+    root.last_token().is_some_and(|t| match t.kind() {
+        S::BlockComment => !block_comment_is_closed(t.text()),
+        S::StringLiteral => !string_literal_is_closed(t.text()),
+        _ => false,
+    })
+}
+
 /// Top-level entry: format the `SourceFile` root.
+///
+/// The file's final newline is *not* added here. An unterminated
+/// token (a `/*` or a string literal running to EOF) swallows the
+/// source's own trailing newline into its text, so a `hardline()`
+/// appended to the `Doc` would grow that token by a line on every
+/// pass. [`crate::format`] appends the terminator to the printed
+/// text instead, and only when one is not already there.
 pub fn format_source_file(root: &SyntaxNode) -> Doc {
     debug_assert_eq!(root.kind(), S::SourceFile);
-    let body = blocks::format_top_level(root);
-    // Ensure exactly one trailing newline.
-    concat([body, hardline()])
+    blocks::format_top_level(root)
+}
+
+/// True if `node` is a delimited construct whose formatter would
+/// rebuild its closing delimiter from a constant, but whose tree does
+/// not actually contain that closer.
+///
+/// Every bracketed formatter (`format_index`, `bracketed_list_with`,
+/// `format_kv_brackets`, `format_ternary`, the `text("()")` / `text("{}")`
+/// fallbacks) prints its delimiters from string literals rather than
+/// from the node's own tokens. That is correct for well-formed input,
+/// but on a parse error the closer is simply absent from the tree —
+/// `p.expect` records a diagnostic and consumes nothing — so printing
+/// one manufactures a token past the end of what the user wrote
+/// (#415, #417). Emitting the node verbatim is the conservative
+/// answer: malformed input round-trips unchanged rather than being
+/// silently rewritten into different, accepted code.
+///
+/// The test is deliberately node-local and as small as possible: it
+/// fires on the innermost delimited node, so one unclosed bracket
+/// freezes that expression's layout and not the whole statement.
+///
+/// `ParamList` is excluded on purpose — its parentheses are tokens of
+/// the enclosing function or lambda, not of the list itself.
+fn closer_missing(node: &SyntaxNode) -> bool {
+    let sig: Vec<S> = node
+        .children_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+        .filter(|t| !is_trivia(t))
+        .map(|t| t.kind())
+        .collect();
+    match node.kind() {
+        // `cond ? then : else` — `format_ternary` prints the `:`.
+        S::TernaryExpr => !sig.contains(&S::Colon),
+        // Intervals open with `[` (inclusive) or `]` (exclusive) and
+        // close with `]` (inclusive) or `[` (exclusive), so both
+        // brackets are valid closers here.
+        S::IntervalExpr => !matches!(sig.last(), Some(S::RBracket | S::LBracket)) || sig.len() < 2,
+        // Ordinary paired delimiters. The closer is decided by the
+        // opener — a `SetExpr`/`MapExpr` may be written `<…>` or
+        // `{…}`/`[…]` — exactly as `pick_brackets` decides what to print.
+        S::ArrayExpr
+        | S::MapExpr
+        | S::SetExpr
+        | S::ObjectExpr
+        | S::IndexExpr
+        | S::ParenExpr
+        | S::ArgList
+        | S::Block => {
+            let close = match sig.first() {
+                Some(S::LBracket) => S::RBracket,
+                Some(S::LBrace) => S::RBrace,
+                Some(S::Lt) => S::Gt,
+                Some(S::LParen) => S::RParen,
+                // No opening delimiter of a shape we know: the node is
+                // not one we would rebuild brackets for.
+                _ => return false,
+            };
+            sig.len() < 2 || sig.last() != Some(&close)
+        }
+        _ => false,
+    }
 }
 
 /// A per-construct formatter.
@@ -217,6 +330,12 @@ pub(crate) fn fmt_node(node: &SyntaxNode) -> Doc {
     // trivia is `// fmt-skip` does either.
     if in_off_region(node) || is_fmt_skipped(node) {
         return format_raw(node);
+    }
+    // Never print a delimiter the node does not have: when error
+    // recovery left the closer out of the tree, emitting one invents a
+    // token the user never wrote. Round-trip the node instead.
+    if closer_missing(node) {
+        return format_raw_trim_ws(node);
     }
     // Kinds without a dedicated formatter pass through verbatim, which
     // guarantees idempotence for anything not modelled explicitly.
@@ -278,9 +397,10 @@ fn formatter_for(kind: S) -> Option<NodeFormatter> {
         S::CastExpr => exprs::format_cast,
         S::TernaryExpr => exprs::format_ternary,
         S::IntervalExpr => exprs::format_interval,
-        // `switch` bodies, slices (`a[i:j]`) and annotations keep the
-        // user's spacing; `ErrorNode` recovery must round-trip.
-        S::SwitchStmt | S::SliceExpr | S::Annotation | S::ErrorNode => return None,
+        S::Annotation => exprs::format_annotation,
+        // `switch` bodies and slices (`a[i:j]`) keep the user's
+        // spacing; `ErrorNode` recovery must round-trip.
+        S::SwitchStmt | S::SliceExpr | S::ErrorNode => return None,
         _ => return None,
     };
     Some(format)
@@ -352,6 +472,38 @@ pub(crate) fn format_verbatim(node: &SyntaxNode) -> Doc {
 /// idempotence on broken input.
 pub(crate) fn format_raw(node: &SyntaxNode) -> Doc {
     text(node.text().to_string())
+}
+
+/// [`format_raw`] minus the node's edge *whitespace tokens*.
+///
+/// `start_node` does not flush pending trivia, so the whitespace in
+/// front of a node's first token — and, when recovery ends the node
+/// early, the whitespace after its last one — is attached *inside* it.
+/// The surrounding walkers supply their own separators, so re-emitting
+/// that whitespace adds a space (or a line) on every formatting pass
+/// and the formatter never converges.
+///
+/// The trim is structural, not textual: it drops whole `Whitespace`
+/// tokens at the edges and nothing else. Trimming the *text* would
+/// eat characters from inside a token — an unterminated string or
+/// block comment runs to EOF and owns the newlines at the end of the
+/// file — and dropping edge comments would lose them outright.
+pub(crate) fn format_raw_trim_ws(node: &SyntaxNode) -> Doc {
+    let tokens: Vec<SyntaxToken> = node
+        .descendants_with_tokens()
+        .filter_map(leek_syntax::language::NodeOrToken::into_token)
+        .collect();
+    let is_ws = |t: &&SyntaxToken| t.kind() != S::Whitespace;
+    let (Some(first), Some(last)) = (tokens.iter().find(is_ws), tokens.iter().rev().find(is_ws))
+    else {
+        // Nothing but whitespace — the parent's separator is all the
+        // output this node is entitled to.
+        return text(String::new());
+    };
+    let base = node.text_range().start();
+    let lo = usize::from(first.text_range().start() - base);
+    let hi = usize::from(last.text_range().end() - base);
+    text(node.text().to_string()[lo..hi].to_string())
 }
 
 // ---- Token / element helpers shared by sub-modules ----
@@ -604,6 +756,14 @@ pub(crate) fn comment_doc(t: &SyntaxToken) -> Doc {
         return crate::doc::nil();
     }
     let raw = t.text();
+    // An unterminated `/*` runs to end of file, so its text carries the
+    // file's own trailing newline(s). Re-laying it out turns that final
+    // empty line into a ` *` continuation, which the next pass reads
+    // back as real comment content and pads again — a line per pass
+    // (#419). Malformed input round-trips instead.
+    if t.kind() == S::BlockComment && !block_comment_is_closed(raw) {
+        return text(raw.to_string());
+    }
     if !raw.contains('\n') {
         if with_ctx(|cx| cx.opts.pad_line_comments) {
             return text(pad_line_comment(raw));

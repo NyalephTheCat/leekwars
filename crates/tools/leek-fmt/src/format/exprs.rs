@@ -25,6 +25,28 @@ pub(super) fn format_atom(node: &SyntaxNode) -> Doc {
     concat(parts)
 }
 
+/// `@name` or `@name(args)` — a declaration annotation.
+///
+/// Emits only the significant tokens and the argument list, never the
+/// node's own trivia. The parser opens an `Annotation` node before
+/// flushing pending trivia, so every annotation after the first owns
+/// the whitespace that separates it from its predecessor
+/// (`@pure @unused` gives the second one the text `" @unused"`). The
+/// parent walker supplies the separator, so re-emitting that leading
+/// space added one space per formatting pass and the formatter never
+/// reached a fixed point (#420).
+pub(super) fn format_annotation(node: &SyntaxNode) -> Doc {
+    let mut parts: Vec<Doc> = Vec::new();
+    for el in node.children_with_tokens() {
+        match el {
+            NodeOrToken::Token(t) if is_trivia(&t) => {}
+            NodeOrToken::Token(t) => parts.push(token_text(&t)),
+            NodeOrToken::Node(child) => parts.push(fmt_node(&child)),
+        }
+    }
+    concat(parts)
+}
+
 /// `lhs OP rhs` — binary expression. Adds spaces around the operator
 /// and groups so long expressions can break before the operator.
 pub(super) fn format_binary(node: &SyntaxNode) -> Doc {

@@ -50,7 +50,20 @@ pub fn format(green: &GreenNode, version: Version, opts: &FormatOptions) -> Stri
         off_regions: collect_off_regions(&root),
     };
     let doc = format::with_ctx_set(ctx, || format::format_source_file(&root));
-    apply_line_ending(printer::print(&doc, version, opts), opts.line_ending)
+    let mut out = printer::print(&doc, version, opts);
+    // Terminate the file — but never write *into* the last token. An
+    // unterminated `/*` comment or string literal runs to end of file
+    // and owns every byte to EOF, so a newline appended after it lands
+    // inside it: the next pass lexes a longer token and appends again,
+    // a line per formatting pass (#417, #419). Note this is
+    // append-if-absent, never trim-then-append — trimming would delete
+    // characters from inside such a token, the same bug mirrored.
+    if !out.ends_with('\n') && !format::ends_in_unclosed_token(&root) {
+        out.push('\n');
+    }
+    // Expand to CRLF *after* the terminator is in place, so the last
+    // line gets the configured ending like every other one.
+    apply_line_ending(out, opts.line_ending)
 }
 
 /// Normalize the output's line terminators per [`LineEnding`].
