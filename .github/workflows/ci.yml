@@ -142,8 +142,9 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
-      - name: install + compile
+      - name: install + typecheck + compile
         working-directory: editors/vscode
         run: |
           npm ci
+          npm run typecheck
           npm run compile

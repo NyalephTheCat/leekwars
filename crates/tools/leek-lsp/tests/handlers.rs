@@ -598,19 +598,29 @@ fn type_hierarchy_walks_extends_chain() {
     assert!(subs.iter().any(|c| c.name == "Cat"), "subs: {subs:?}");
 }
 
+/// The unresolved "N references" lens carries no command — only the
+/// `data` blob `codeLens/resolve` needs.
+fn reference_lens(lenses: &[lsp::CodeLens]) -> lsp::CodeLens {
+    lenses
+        .iter()
+        .find(|l| l.command.is_none() && l.data.is_some())
+        .cloned()
+        .expect("an unresolved reference lens")
+}
+
 #[test]
 fn code_lens_emits_reference_count_and_cost() {
     let text = "function foo() { return 1 }\nfoo()\nfoo()\n";
     let ws = open(text);
     let lenses = code_lens::handle(&ws, &url()).expect("lenses");
-    // Expect a "N references" lens and a complexity-derived lens. `foo`
-    // is constant-cost, so the latter shows the operation count rather
-    // than `Complexity: O(1)`.
-    let has_ref_lens = lenses.iter().any(|l| {
-        l.command
-            .as_ref()
-            .is_some_and(|c| c.title.contains("references"))
-    });
+    // Expect an unresolved "N references" lens and a complexity-derived
+    // lens. `foo` is constant-cost, so the latter shows the operation
+    // count rather than `Complexity: O(1)`.
+    let resolved = code_lens::resolve(&ws, reference_lens(&lenses)).expect("resolved lens");
+    let has_ref_lens = resolved
+        .command
+        .as_ref()
+        .is_some_and(|c| c.title == "2 references");
     let cost = lenses
         .iter()
         .find_map(|l| {
@@ -619,7 +629,7 @@ fn code_lens_emits_reference_count_and_cost() {
                 .filter(|c| c.command == "leek.showComplexity")
         })
         .expect("a complexity-derived lens");
-    assert!(has_ref_lens, "no reference lens: {lenses:?}");
+    assert!(has_ref_lens, "unexpected reference lens: {resolved:?}");
     assert!(
         cost.title.contains("Cost:") && cost.title.contains("operations"),
         "constant fn should show ops cost, got: {}",
@@ -956,21 +966,88 @@ fn code_lens_now_carries_clickable_command() {
     let text = "function foo() { return 1 }\nfoo()\nfoo()\n";
     let ws = open(text);
     let lenses = code_lens::handle(&ws, &url()).expect("lenses");
-    // Both the "X references" and "Complexity: O(...)" lenses
-    // should now have a non-empty `command.command`.
-    let mut saw_show_refs = false;
-    let mut saw_show_complexity = false;
-    for lens in &lenses {
-        let Some(cmd) = &lens.command else { continue };
-        if cmd.command == "leek.showReferences" {
-            saw_show_refs = true;
-        }
-        if cmd.command == "leek.showComplexity" {
-            saw_show_complexity = true;
-        }
-    }
-    assert!(saw_show_refs, "lenses: {lenses:?}");
+    // The complexity lens is clickable as emitted; the reference lens
+    // becomes clickable once resolved.
+    let saw_show_complexity = lenses.iter().any(|l| {
+        l.command
+            .as_ref()
+            .is_some_and(|c| c.command == "leek.showComplexity")
+    });
+    let resolved = code_lens::resolve(&ws, reference_lens(&lenses)).expect("resolved lens");
+    assert_eq!(
+        resolved.command.as_ref().map(|c| c.command.as_str()),
+        Some("leek.showReferences"),
+    );
     assert!(saw_show_complexity, "lenses: {lenses:?}");
+}
+
+#[test]
+fn code_lens_reference_count_is_resolved_lazily() {
+    let text = "function foo() { return 1 }\nfoo()\nfoo()\n";
+    let ws = open(text);
+    let lenses = code_lens::handle(&ws, &url()).expect("lenses");
+    let unresolved = reference_lens(&lenses);
+    // Nothing to click until `codeLens/resolve` runs — the count costs a
+    // program-wide occurrence search.
+    assert!(unresolved.command.is_none());
+
+    let resolved = code_lens::resolve(&ws, unresolved).expect("resolved lens");
+    let cmd = resolved.command.expect("a command after resolve");
+    assert_eq!(cmd.command, "leek.showReferences");
+    assert_eq!(cmd.title, "2 references");
+    // `editor.action.showReferences` takes (Uri, Position, Location[]);
+    // the locations are the whole point of resolving server-side.
+    let args = cmd.arguments.expect("arguments");
+    assert_eq!(args.len(), 3);
+    let locations: Vec<lsp::Location> =
+        serde_json::from_value(args[2].clone()).expect("a Location[] third argument");
+    assert_eq!(locations.len(), 2, "locations: {locations:?}");
+    assert!(locations.iter().all(|l| l.uri == url()));
+}
+
+#[test]
+fn code_lens_complexity_matches_the_method_not_a_same_named_function() {
+    // Two `tick`s: a constant-cost free function and a method that
+    // loops. Matching complexity records by name hands the method the
+    // free function's record.
+    let text = "function tick() { return 1 }\n                class Ticker { tick(arr) { var t = 0\n for (var x in arr) { t = t + x }\n return t } }\n";
+    let ws = open(text);
+    let lenses = code_lens::handle(&ws, &url()).expect("lenses");
+    let titles: Vec<String> = lenses
+        .iter()
+        .filter_map(|l| l.command.as_ref())
+        .filter(|c| c.command == "leek.showComplexity")
+        .map(|c| c.title.clone())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.starts_with("Cost:")),
+        "the free function is constant-cost: {titles:?}"
+    );
+    assert!(
+        titles.iter().any(|t| t.starts_with("Complexity:")),
+        "the looping method is not constant-cost: {titles:?}"
+    );
+}
+
+#[test]
+fn code_lens_counts_references_across_included_files() {
+    let mut ws = Workspace::default();
+    let library = test_file("code-lens-project/lib/util.leek");
+    let main = test_file("code-lens-project/src/entry.leek");
+    ws.open(
+        library.clone(),
+        "function shared() { return 1 }\n".to_string(),
+    );
+    ws.open(
+        main,
+        "include(\"../lib/util.leek\")\nreturn shared()\n".to_string(),
+    );
+
+    let lenses = code_lens::handle(&ws, &library).expect("lenses");
+    let resolved = code_lens::resolve(&ws, reference_lens(&lenses)).expect("resolved lens");
+    let cmd = resolved.command.expect("a command after resolve");
+    // The declaring file has no call of its own; the includer does.
+    assert_eq!(cmd.title, "1 reference", "lenses: {lenses:?}");
 }
 
 // ─── slice 5: linked editing, semantic range/delta, resolve, file ops ──
@@ -3427,6 +3504,27 @@ fn references_on_a_method_do_not_reach_a_same_named_function() {
     assert!(
         locs.iter().all(|l| l.range.start.line != 1),
         "the top-level `update` on line 1 is a different symbol: {locs:#?}"
+    );
+}
+
+/// The code lens must keep the same refusal `references` does: a
+/// method's count is file-local, never a program-wide fan-out that
+/// reports a same-named free function's call sites (leekwars#46).
+#[test]
+fn code_lens_references_on_a_method_stay_file_local() {
+    let ws = open(SHARED_NAME_SRC);
+    let lenses = code_lens::handle(&ws, &url()).expect("lenses");
+    // Line 0 is `class A { update() … }`, line 1 the free `update`.
+    let method_lens = lenses
+        .iter()
+        .find(|l| l.command.is_none() && l.range.start.line == 0)
+        .cloned()
+        .expect("a lens on the method");
+    let resolved = code_lens::resolve(&ws, method_lens).expect("resolved lens");
+    let cmd = resolved.command.expect("a command after resolve");
+    assert_eq!(
+        cmd.title, "0 references",
+        "the free function's call on line 2 is a different symbol"
     );
 }
 

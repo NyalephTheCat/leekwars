@@ -1,5 +1,5 @@
 //! Per-server workspace: holds the salsa DB, open-document registry,
-//! and optional project-wide file index.
+//! and one project index per workspace root.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -55,8 +55,11 @@ impl AnalysisTarget<'_> {
 pub struct Workspace {
     pub db: LeekDb,
     pub docs: HashMap<Url, DocHandle>,
-    /// Project-wide index when a `Miku.toml` was discovered.
-    pub project: Option<ProjectIndex>,
+    /// One index per workspace root we were asked to analyze. A file's
+    /// language defaults come from the root that owns it (see
+    /// [`Workspace::owning_root`]), so several roots — or a nested
+    /// project inside an outer one — each keep their own manifest.
+    roots: Vec<ProjectIndex>,
     /// On-disk `.leek` files from the project index (not open).
     pub indexed: HashMap<PathBuf, IndexedFile>,
     /// Monotonic counter for [`leek_span::SourceId`] allocation.
@@ -103,7 +106,7 @@ impl Default for Workspace {
         Self {
             db: LeekDb::default(),
             docs: HashMap::new(),
-            project: None,
+            roots: Vec::new(),
             indexed: HashMap::new(),
             next_source_id: 1,
             pending_project_roots: Vec::new(),
@@ -132,7 +135,7 @@ impl Workspace {
                 .get(&path)
                 .map(|indexed| (indexed.source_file, indexed.project_file))
         {
-            let lang = self.settle(&text);
+            let lang = self.settle(Some(&path), &text);
             self.apply_language(source_file, Some(project_file), lang);
             let source = source_file.source(&self.db);
             let classes = Self::scan_classes(&text, source, lang.version);
@@ -160,7 +163,7 @@ impl Workspace {
         let source_id = self.alloc_source_id();
         let line_table = LineTable::new(&text);
         let arc_text: Arc<str> = Arc::from(text.as_str());
-        let lang = self.settle(&text);
+        let lang = self.settle(uri_to_path(&uri).as_deref(), &text);
         let classes = Self::scan_classes(
             &text,
             leek_span::SourceId::new(source_id).expect("non-zero SourceId"),
@@ -207,7 +210,7 @@ impl Workspace {
         doc.text = Arc::from(new_text.as_str());
         // The edit may have added, removed or changed `@version`/`@strict`:
         // re-settle so every tracked pass sees the buffer's current settings.
-        let lang = self.settle(&new_text);
+        let lang = self.settle(uri_to_path(uri).as_deref(), &new_text);
         let project_file = uri_to_path(uri)
             .and_then(|path| self.indexed.get(&path))
             .map(|indexed| indexed.project_file);
@@ -287,45 +290,103 @@ impl Workspace {
             if self.docs.contains_key(&uri) {
                 continue;
             }
-            let arc_text: Arc<str> = Arc::from(loaded.text.as_str());
-            let flags_bits = leek_pipeline::FeatureFlags::from_env().to_bits();
-            let classes = Self::scan_classes(&loaded.text, loaded.source, loaded.version_byte);
-            self.class_names.insert(uri.clone(), classes);
-            let source_file = SourceFile::new(
-                &self.db,
-                loaded.source.get(),
-                loaded.text.clone(),
-                loaded.version_byte,
-                loaded.strict,
-                flags_bits,
-                self.class_union.clone(),
-            );
-            let project_file = ProjectFile::new(
-                &self.db,
-                loaded.path.display().to_string(),
-                loaded.source.get(),
-                loaded.text,
-                loaded.version_byte,
-                loaded.strict,
-                flags_bits,
-                self.class_union.clone(),
-            );
-            self.indexed.insert(
-                loaded.path.clone(),
-                IndexedFile {
-                    uri,
-                    path: loaded.path,
-                    source_file,
-                    project_file,
-                    line_table: loaded.line_table,
-                    text: arc_text,
-                },
-            );
+            self.register_indexed(uri, loaded);
         }
-        self.project = Some(index);
+        // Prefix matching in `owning_root` compares against a file's
+        // canonical path, so the bases have to be canonical too — a
+        // workspace folder arrives as whatever the client sent.
+        index.root = ProjectIndex::canonicalize(&index.root);
+        index.src_root = ProjectIndex::canonicalize(&index.src_root);
+        match self.roots.iter().position(|root| root.root == index.root) {
+            Some(at) => self.roots[at] = index,
+            None => self.roots.push(index),
+        }
         // One union rebuild after the whole tree is registered — this
         // pushes every file's classes into every input.
         self.rebuild_class_union();
+    }
+
+    /// Fold a file that just appeared on disk into the root that owns
+    /// it. Only that one file is loaded: re-indexing its parent
+    /// directory would build a second, subdirectory-rooted
+    /// [`ProjectIndex`] whose `language`/`strict` defaults are the
+    /// manifestless fallbacks, and every later edit anywhere under it
+    /// would settle against those instead of the real manifest.
+    ///
+    /// No-op for a file outside every indexed root, one we already
+    /// index, or one the editor has open (its buffer is authoritative
+    /// and already carries salsa inputs).
+    pub fn register_new_file(&mut self, uri: &Url) {
+        let Some(path) = uri_to_path(uri) else {
+            return;
+        };
+        let path = ProjectIndex::canonicalize(&path);
+        if self.indexed.contains_key(&path) || self.docs.contains_key(uri) {
+            return;
+        }
+        let Some(at) = self.owning_root(&path) else {
+            return;
+        };
+        let Ok(loaded) = self.roots[at].load_file(&path) else {
+            return;
+        };
+        if self.indexed.contains_key(&loaded.path) {
+            return;
+        }
+        let uri = path_to_uri(&loaded.path);
+        self.register_indexed(uri, loaded);
+        self.rebuild_class_union();
+    }
+
+    /// Register one loaded project file as a salsa-tracked input.
+    ///
+    /// The [`leek_span::SourceId`] comes from the workspace counter, not
+    /// from the owning [`ProjectIndex`] — each index numbers its own
+    /// files from 1, so two roots (or a root and an open buffer) would
+    /// otherwise hand the same id to different files, and
+    /// [`crate::pipeline::run_on_file_with_includes`] maps a source back
+    /// to a URI by exactly that id. The index's own numbering is never
+    /// read from here, so letting the two diverge costs nothing.
+    ///
+    /// Leaves the class union alone: callers registering a whole tree
+    /// rebuild it once at the end.
+    fn register_indexed(&mut self, uri: Url, loaded: leek_pipeline::LoadedProjectFile) {
+        let arc_text: Arc<str> = Arc::from(loaded.text.as_str());
+        let flags_bits = leek_pipeline::FeatureFlags::from_env().to_bits();
+        let source_id = self.alloc_source_id();
+        let source = leek_span::SourceId::new(source_id).expect("non-zero SourceId");
+        let classes = Self::scan_classes(&loaded.text, source, loaded.version_byte);
+        self.class_names.insert(uri.clone(), classes);
+        let source_file = SourceFile::new(
+            &self.db,
+            source_id,
+            loaded.text.clone(),
+            loaded.version_byte,
+            loaded.strict,
+            flags_bits,
+            self.class_union.clone(),
+        );
+        let project_file = ProjectFile::new(
+            &self.db,
+            loaded.path.display().to_string(),
+            source_id,
+            loaded.text,
+            loaded.version_byte,
+            loaded.strict,
+            flags_bits,
+            self.class_union.clone(),
+        );
+        self.indexed.insert(
+            loaded.path.clone(),
+            IndexedFile {
+                uri,
+                path: loaded.path,
+                source_file,
+                project_file,
+                line_table: loaded.line_table,
+                text: arc_text,
+            },
+        );
     }
 
     /// Every file available for project-wide analysis: open docs plus
@@ -358,14 +419,37 @@ impl Workspace {
     }
 
     /// Settle one buffer's language settings from its text: the file's
-    /// `@version` pragma, else the project's `[project].language` default
-    /// (latest outside a project); strict on `@strict` or the project
-    /// default.
-    fn settle(&self, text: &str) -> LanguageSettings {
-        self.project.as_ref().map_or_else(
+    /// `@version` pragma, else the `[project].language` default of the
+    /// root that owns `path` (latest outside every root); strict on
+    /// `@strict` or that root's default.
+    fn settle(&self, path: Option<&Path>, text: &str) -> LanguageSettings {
+        path.and_then(|path| self.owning_root(path)).map_or_else(
             || LanguageSettings::resolve(text, None, LATEST_VERSION, false),
-            |index| index.language_settings(text),
+            |root| self.roots[root].language_settings(text),
         )
+    }
+
+    /// Index of the project root that owns `path`: the one whose source
+    /// tree — or, failing that, whose project directory — is the longest
+    /// path prefix of it. `None` for a file outside every indexed root,
+    /// including an untitled buffer.
+    ///
+    /// Longest prefix rather than first match, so a nested project
+    /// inside an outer workspace folder wins for its own files.
+    fn owning_root(&self, path: &Path) -> Option<usize> {
+        self.roots
+            .iter()
+            .enumerate()
+            .filter_map(|(at, index)| {
+                let depth = [&index.src_root, &index.root]
+                    .into_iter()
+                    .filter(|base| path.starts_with(base))
+                    .map(|base| base.components().count())
+                    .max()?;
+                Some((depth, at))
+            })
+            .max_by_key(|&(depth, _)| depth)
+            .map(|(_, at)| at)
     }
 
     /// Push settled language settings into a file's salsa inputs, writing
@@ -499,6 +583,13 @@ impl Workspace {
         {
             indexed.uri = new.clone();
             indexed.path.clone_from(&new_path);
+            // The salsa input is keyed by canonical path; leaving the old
+            // one would point every path-keyed query at a file that is no
+            // longer there.
+            indexed
+                .project_file
+                .set_canonical_path(&mut self.db)
+                .to(new_path.display().to_string());
             self.indexed.insert(new_path, indexed);
         }
     }
@@ -533,7 +624,7 @@ impl Workspace {
         indexed.text = Arc::from(text.as_str());
         let source_file = indexed.source_file;
         let project_file = indexed.project_file;
-        let lang = self.settle(&text);
+        let lang = self.settle(Some(&path), &text);
         self.apply_language(source_file, Some(project_file), lang);
         let source = source_file.source(&self.db);
         let classes = Self::scan_classes(&text, source, lang.version);
@@ -543,14 +634,38 @@ impl Workspace {
         true
     }
 
-    /// Drop all state for a deleted file.
-    pub fn remove_file(&mut self, uri: &Url) {
-        self.docs.remove(uri);
-        self.semantic_tokens_cache.remove(uri);
+    /// React to a file disappearing from disk: drop the project's copy
+    /// of it, but keep an open buffer alive.
+    ///
+    /// The editor keeps the tab (and its unsaved text) open when a
+    /// checkout or an external tool deletes the file underneath it, and
+    /// every later `didChange` bails out at `doc(&uri)` once the handle
+    /// is gone — the tab would stay dead until reopened. This is the
+    /// mirror of the invariant `close` keeps from the other side:
+    /// neither event may evict the state the other one owns.
+    pub fn remove_from_disk(&mut self, uri: &Url) {
         if let Some(path) = uri_to_path(uri) {
             self.indexed.remove(&path);
         }
-        self.refresh_classes(uri, None);
+        let open = self
+            .docs
+            .get(uri)
+            .map(|doc| (Arc::clone(&doc.text), doc.source_file));
+        // Still open: the buffer is now the file's only text, so its
+        // classes stay in the union — rescanned from the buffer, since
+        // the indexed entry that held the disk copy is gone. Not open:
+        // the file contributes nothing any more.
+        if let Some((text, source_file)) = open {
+            let classes = Self::scan_classes(
+                &text,
+                source_file.source(&self.db),
+                source_file.version_byte(&self.db),
+            );
+            self.refresh_classes(uri, Some(classes));
+        } else {
+            self.semantic_tokens_cache.remove(uri);
+            self.refresh_classes(uri, None);
+        }
     }
 }
 
@@ -734,5 +849,221 @@ mod tests {
         assert!(baseline.is_none());
         assert_eq!(union, vec!["OnDisk".to_string()]);
         assert_eq!(targets, 1);
+    }
+
+    /// Mirror of `closing_an_indexed_file_restores_its_disk_classes`
+    /// from the other side: the disk copy goes, the live buffer stays.
+    #[test]
+    fn disk_delete_keeps_an_open_buffer_editable() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        let main = root.join("main.leek");
+        fs::write(&main, "class OnDisk {}\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = main.canonicalize().expect("canonical entry");
+        let uri = path_to_uri(&path);
+        ws.open(uri.clone(), "class InBuffer {}\n".into());
+
+        fs::remove_file(&main).expect("delete entry");
+        ws.remove_from_disk(&uri);
+        // The tab is still live, so a later edit must still land.
+        ws.update(&uri, "// @version:2\nclass Edited {}\n".into());
+
+        let union = ws.class_union.clone();
+        let still_open = ws.doc(&uri).is_some();
+        let indexed = ws.indexed.len();
+        let version = ws.doc(&uri).map(|doc| doc.source_file.version_byte(&ws.db));
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert!(still_open, "the open buffer must survive a disk delete");
+        assert_eq!(indexed, 0, "the project's copy is gone");
+        assert_eq!(union, vec!["Edited".to_string()]);
+        assert_eq!(version, Some(2), "the edit re-settled the buffer");
+    }
+
+    #[test]
+    fn disk_delete_of_a_closed_file_drops_it() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        let main = root.join("main.leek");
+        fs::write(&main, "class OnDisk {}\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = main.canonicalize().expect("canonical entry");
+        let uri = path_to_uri(&path);
+        assert_eq!(ws.class_union, vec!["OnDisk".to_string()]);
+
+        fs::remove_file(&main).expect("delete entry");
+        ws.remove_from_disk(&uri);
+
+        let union = ws.class_union.clone();
+        let indexed = ws.indexed.len();
+        let targets = ws.analysis_targets().len();
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert_eq!(indexed, 0);
+        assert_eq!(targets, 0);
+        assert!(
+            union.is_empty(),
+            "a file that is gone contributes no classes"
+        );
+    }
+
+    fn write_manifest(root: &Path, name: &str, language: u8) {
+        let text = format!(
+            "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\nlanguage = {language}\n\n[paths]\nsrc = \".\"\n"
+        );
+        fs::write(root.join("Miku.toml"), text).expect("write manifest");
+    }
+
+    /// Every salsa `SourceId` currently reachable for analysis.
+    fn source_ids(ws: &Workspace) -> Vec<u32> {
+        ws.analysis_targets()
+            .iter()
+            .map(|target| target.source_file.source(&ws.db).get())
+            .collect()
+    }
+
+    fn assert_unique(ids: &[u32]) {
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            before,
+            "duplicate SourceIds break the source → URI lookup in `pipeline`: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn a_created_file_joins_the_owning_root() {
+        let root = temp_root();
+        let library = root.join("library");
+        fs::create_dir_all(&library).expect("create project");
+        write_manifest(&root, "owning-root", 2);
+        fs::write(root.join("main.leek"), "return 1\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+
+        let created = library.join("helper.leek");
+        fs::write(&created, "function helper() { return 1 }\n").expect("write new file");
+        let path = created.canonicalize().expect("canonical new file");
+        ws.register_new_file(&path_to_uri(&path));
+
+        let version = ws
+            .indexed
+            .get(&path)
+            .map(|file| file.source_file.version_byte(&ws.db));
+        let ids = source_ids(&ws);
+        fs::remove_dir_all(&root).expect("remove project");
+
+        // The owning manifest's `language = 2` applies — not the
+        // manifestless fallback a subdirectory-rooted index would give.
+        assert_eq!(version, Some(2));
+        assert_unique(&ids);
+    }
+
+    #[test]
+    fn a_created_file_in_a_subdirectory_gets_a_fresh_source_id() {
+        let root = temp_root();
+        let library = root.join("library");
+        fs::create_dir_all(&library).expect("create project");
+        fs::write(root.join("main.leek"), "return 1\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+
+        let created = library.join("helper.leek");
+        fs::write(&created, "function helper() { return 1 }\n").expect("write new file");
+        let path = created.canonicalize().expect("canonical new file");
+        ws.register_new_file(&path_to_uri(&path));
+
+        let indexed = ws.indexed.len();
+        let ids = source_ids(&ws);
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert_eq!(indexed, 2);
+        assert_unique(&ids);
+    }
+
+    #[test]
+    fn source_ids_are_unique_across_indexed_and_open_files() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        fs::write(root.join("main.leek"), "return 1\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        ws.open(
+            Url::parse("untitled:scratch.leek").expect("uri"),
+            "return 2\n".into(),
+        );
+
+        let ids = source_ids(&ws);
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert_eq!(ids.len(), 2);
+        assert_unique(&ids);
+    }
+
+    #[test]
+    fn two_roots_each_keep_their_own_language_defaults() {
+        let first = temp_root();
+        let second = first.with_extension("second");
+        fs::create_dir_all(&first).expect("create first project");
+        fs::create_dir_all(&second).expect("create second project");
+        write_manifest(&first, "first", 2);
+        write_manifest(&second, "second", 3);
+        fs::write(first.join("main.leek"), "return 1\n").expect("write first entry");
+        fs::write(second.join("main.leek"), "return 2\n").expect("write second entry");
+
+        let mut ws = Workspace::default();
+        ws.queue_project_root(first.clone());
+        ws.queue_project_root(second.clone());
+        ws.index_pending_projects();
+
+        let first_uri = path_to_uri(&first.join("main.leek").canonicalize().expect("canonical"));
+        let second_uri = path_to_uri(&second.join("main.leek").canonicalize().expect("canonical"));
+        // No pragmas, so each buffer settles purely on its owning
+        // manifest's default.
+        ws.open(first_uri.clone(), "return 1\n".into());
+        ws.open(second_uri.clone(), "return 2\n".into());
+        let first_lang = lang_of(&ws, &first_uri);
+        let second_lang = lang_of(&ws, &second_uri);
+        let ids = source_ids(&ws);
+        fs::remove_dir_all(&first).expect("remove first project");
+        fs::remove_dir_all(&second).expect("remove second project");
+
+        assert_eq!(first_lang, (2, false));
+        assert_eq!(second_lang, (3, false));
+        assert_unique(&ids);
+    }
+
+    #[test]
+    fn rename_updates_the_project_file_path() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        let old = root.join("main.leek");
+        fs::write(&old, "return 1\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let old_path = old.canonicalize().expect("canonical entry");
+        let new_path = root.join("renamed.leek");
+        fs::rename(&old_path, &new_path).expect("rename entry");
+        ws.rename_file(&path_to_uri(&old_path), &path_to_uri(&new_path));
+
+        let stored = ws
+            .indexed
+            .get(&new_path)
+            .map(|file| file.project_file.canonical_path(&ws.db).clone());
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert_eq!(stored, Some(new_path.display().to_string()));
     }
 }
