@@ -842,7 +842,6 @@ pub(super) fn rvalue_mentions(r: &Rvalue, l: LocalId) -> bool {
         | Rvalue::BuiltinRef(_)
         | Rvalue::This
         | Rvalue::ClassSelf
-        | Rvalue::Super
         | Rvalue::ClassRef(..)
         | Rvalue::Unsupported(_) => false,
     }

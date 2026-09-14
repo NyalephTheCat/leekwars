@@ -326,7 +326,6 @@ impl<'t> Parser<'t> {
     }
 
     /// Source text of the current non-trivia token (empty at EOF).
-    #[allow(dead_code)] // exposed for future grammar productions
     pub(crate) fn current_text(&self) -> &'t str {
         self.nth_text(0)
     }
@@ -389,10 +388,9 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// Emit a token tagged with a *remap* kind (useful when, e.g.,
-    /// the lexer produces `KwAnd` but we want it to appear as `AmpAmp`
-    /// in the tree — not used in this slice but here for future use).
-    #[allow(dead_code)]
+    /// Emit a token tagged with a *remap* kind — used when splitting a
+    /// `>>`/`>>>` token so each half appears as its own `Gt` while closing
+    /// nested generic argument lists.
     pub(crate) fn bump_remap(&mut self, kind: SyntaxKind) {
         self.flush_trivia();
         if let Some(t) = self.tokens.get(self.pos) {

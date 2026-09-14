@@ -140,10 +140,10 @@ enum CounterStep {
     PlusOne,
     /// `i += k`.
     PlusK(u32),
-    /// `i *= k` (k >= 2) — log iteration count. Step factor is
-    /// kept for symmetry but big-O doesn't care.
-    #[allow(dead_code)]
-    MulK(u32),
+    /// `i *= k` (k >= 2) — log iteration count. The factor itself is
+    /// dropped: big-O doesn't care, and [`apply_step`] turns any such
+    /// step into [`LoopBound::LogSize`].
+    MulK,
     /// Step on a different variable / shape we don't model.
     Unrecognised,
 }
@@ -442,7 +442,7 @@ fn step_shape(step: Option<&Expr>, counter_id: leek_hir::DefId) -> Option<Counte
             }
             literal_uint(rhs)
                 .filter(|k| *k >= 2)
-                .map(|k| CounterStep::MulK(u32::try_from(k).unwrap_or(u32::MAX)))
+                .map(|_| CounterStep::MulK)
         }
         _ => Some(CounterStep::Unrecognised),
     }
@@ -479,8 +479,8 @@ fn apply_step(bound: LoopBound, step: CounterStep) -> LoopBound {
         (b, CounterStep::PlusOne) => b,
         (LoopBound::Size(v), CounterStep::PlusK(k)) => LoopBound::SizeOverStep { var: v, step: k },
         (LoopBound::Const(c), CounterStep::PlusK(k)) => LoopBound::Const(c / u64::from(k)),
-        (LoopBound::Size(v), CounterStep::MulK(_)) => LoopBound::LogSize(v),
-        (LoopBound::Const(c), CounterStep::MulK(_)) => {
+        (LoopBound::Size(v), CounterStep::MulK) => LoopBound::LogSize(v),
+        (LoopBound::Const(c), CounterStep::MulK) => {
             // log_k(c) — but k is filtered to ≥2 elsewhere, so
             // log2 is a safe upper bound.
             LoopBound::Const(64 - u64::from(c.leading_zeros()))

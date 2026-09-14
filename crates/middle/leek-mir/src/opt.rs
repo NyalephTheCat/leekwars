@@ -8,7 +8,7 @@
 //! 1. **Constant-branch simplification** — a [`Terminator::Branch`] on a
 //!    constant boolean (or a [`Terminator::Switch`] on a constant that exactly
 //!    matches an arm) becomes an unconditional [`Terminator::Goto`]. This drops
-//!    the branch operation the interpreter would charge for, and exposes the
+//!    the branch operation upstream would charge for, and exposes the
 //!    not-taken successor as dead code. It composes with HIR constant folding:
 //!    `if (DEBUG)` where `DEBUG` folded to a literal becomes straight-line flow.
 //!
@@ -46,7 +46,7 @@ fn simplify_const_terminators(f: &mut MirFunction) -> usize {
     for block in &mut f.blocks {
         let new_term = match &block.terminator {
             // `if (true)` / `if (false)` — only a *boolean* constant is folded;
-            // other constants would need the interpreter's truthiness coercion,
+            // other constants would need upstream's truthiness coercion,
             // which we deliberately don't replicate here.
             Terminator::Branch {
                 cond: Operand::Const(Const::Bool(b)),
@@ -55,7 +55,7 @@ fn simplify_const_terminators(f: &mut MirFunction) -> usize {
             } => Some(Terminator::Goto(if *b { *then_block } else { *else_block })),
             // Both arms go to the same block — the condition is irrelevant (and
             // its operand is side-effect-free, already in a temp), so drop the
-            // branch. Saves the runtime branch op the interpreter charges.
+            // branch. Saves the runtime branch op upstream charges.
             Terminator::Branch {
                 then_block,
                 else_block,

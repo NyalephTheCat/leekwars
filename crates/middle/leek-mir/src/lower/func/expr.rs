@@ -221,7 +221,7 @@ impl FnLowerer<'_> {
         for cap in &captures {
             if let Some(id) = self.local_map.get(cap).copied() {
                 // Mark the outer-scope local as shared so the
-                // interpreter wraps it in a `Value::Cell` at
+                // backend wraps it in a `Value::Cell` at
                 // frame init. Closures then share the cell with
                 // the outer scope and mutations propagate.
                 self.locals[id.0 as usize].is_shared = true;
@@ -607,7 +607,7 @@ impl FnLowerer<'_> {
                 // `^=` is the only compound op whose desugar
                 // semantics differ from the standalone operator
                 // (v1 means POW-assign, v2+ means XOR-assign).
-                // Lower to the dedicated MIR op so the interp
+                // Lower to the dedicated MIR op so the backend
                 // can dispatch on version at runtime.
                 let mop = if matches!(base_op, HBinOp::BitXor) {
                     BinOp::CompoundXor
@@ -796,7 +796,7 @@ impl FnLowerer<'_> {
             // Assignments to a builtin / function / class name
             // (`abs = 2`), or to a name nothing declares (`zzz = 5`),
             // shadow the stdlib binding with a name-keyed global.
-            // The interpreter's name-keyed global store does the
+            // The runtime's name-keyed global store does the
             // right thing on read too — `BuiltinRef` / `FunctionRef`
             // / `ClassRef` check it first before falling back to the
             // canonical stdlib value.
@@ -1121,7 +1121,7 @@ impl FnLowerer<'_> {
         // Builtins that may morph their first arg's container
         // (`removeElement`, `assocReverse`, `assocSort`, … on a
         // v1-v3 `LegacyArray` — an array gets promoted to a sparse
-        // map). The interp signals promotion through a thread-local
+        // map). The runtime signals promotion through a thread-local
         // side-channel; the post-call statement here applies it to
         // the caller's slot when needed. Without this, mutations
         // like `assocReverse(a)` lose the promoted-map shape.

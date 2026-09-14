@@ -137,11 +137,10 @@ impl Tx<'_, '_> {
             Rvalue::Cast(kind, x) => {
                 let (v, t) = self.operand(x)?;
                 let boxed = self.coerce(v, t, ValTy::Ref)?;
+                // Codes 0-3 named conversions that lowering never emitted;
+                // `User` keeps code 4 so an AOT object built before they were
+                // dropped still decodes against a newer runtime archive.
                 let code: i64 = match kind {
-                    leek_mir::ir::CastKind::IntToReal => 0,
-                    leek_mir::ir::CastKind::RealToInt => 1,
-                    leek_mir::ir::CastKind::ToBool => 2,
-                    leek_mir::ir::CastKind::ToString => 3,
                     leek_mir::ir::CastKind::User => 4,
                 };
                 let f = self.imports.rt("leek_apply_cast")?;
