@@ -9,6 +9,11 @@
 //! ship an extended write-up under `explain/<ID>.md` (printed by
 //! `miku explain <CODE>`).
 
+// Printing is an API decision in a library, not a convenience: a crate that
+// writes to the terminal behind its caller's back is unusable from a language
+// server or a test harness. Every print below is either the tool's *output*
+// or a justified exception, and says which.
+#![warn(clippy::print_stdout, clippy::print_stderr)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 use leek_span::{LineTable, Span};

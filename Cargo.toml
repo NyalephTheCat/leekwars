@@ -127,6 +127,12 @@ comfy-table = "7"
 # Debug Adapter Protocol types + server scaffolding for `leek-dap`.
 dap         = "0.4.1-alpha1"
 
+# Structured logging. `tracing` is the facade the language server emits
+# through; `tracing-subscriber` is the stderr sink + `LEEK_LSP_LOG` filter,
+# installed by the binaries (never by a library — see `leek_lsp::log`).
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Native backend (Cranelift). The cranelift-* crates are released in
 # lockstep, so keep these versions identical.
 cranelift        = "0.123"

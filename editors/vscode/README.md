@@ -61,9 +61,23 @@ Server** command (it restarts the server in place — no window reload).
 | `leek.trace.server` | `off` | LSP trace level (`off`/`messages`/`verbose`). |
 | `leek.libraries` | `[]` | Host function libraries: a built-in name (`"leekwars"` for the fight builtins) or a path to a library-definition file. Restart the server after changing. |
 
-Server logs appear in the **Leekscript** output channel; by default only
-lifecycle events are logged. Set `LEEK_LSP_LOG=trace` in the server's
-environment for per-handler logs (including the per-edit diagnostics lines).
+Server logs appear in the **Leekscript** output channel. Warnings and errors
+— a refused "Format Document", a project that failed to index, a handler that
+panicked — are sent to the channel by the server itself, so a bug report can
+quote them; everything quieter goes to the server's stderr, which the client
+also captures.
+
+By default only lifecycle events are logged. Set `LEEK_LSP_LOG` in the
+server's environment for more: a bare level (`trace`, `debug`, `info`,
+`warn`, `error`) applies to the server, and anything else is read as a
+`tracing` filter directive list (`leek_lsp=debug,salsa=off`). `trace` turns
+on the per-handler logs, including the per-edit diagnostics lines. An
+unparseable value falls back to the default rather than failing to start.
+
+There is no VS Code setting for this yet — see
+[#309](https://github.com/NyalephTheCat/leekwars/issues/309), which should
+contribute a `leek.server.logLevel` property and forward it as `LEEK_LSP_LOG`
+in the server's `env`.
 
 ## Debugging `.leek` programs
 

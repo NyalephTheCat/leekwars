@@ -28,6 +28,8 @@ tokio            = { version = "1", features = ["macros", "rt-multi-thread", "io
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 salsa            = "0.26"
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "test-util"] }

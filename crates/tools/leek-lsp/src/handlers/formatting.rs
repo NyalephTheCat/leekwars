@@ -29,7 +29,10 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::TextEdit>> {
         return Some(Vec::new());
     }
     if let Err(err) = leek_fmt::check_equivalence(original, &formatted, doc_version(ws, doc)) {
-        eprintln!("leek-lsp: refusing to format {uri}: {err}");
+        // "Format Document" appearing to do nothing is the failure the user
+        // actually experiences. `notify` raises the first such refusal as a
+        // `window/showMessage`; the rest land in the output channel.
+        tracing::warn!(notify = true, %uri, %err, "refusing to format");
         return Some(Vec::new());
     }
 
@@ -68,7 +71,7 @@ pub(crate) fn edit_is_safe(
     match leek_fmt::check_edit_equivalence(&doc.text, range, replacement, doc_version(ws, doc)) {
         Ok(()) => true,
         Err(err) => {
-            eprintln!("leek-lsp: refusing to format {uri}: {err}");
+            tracing::warn!(notify = true, %uri, %err, "refusing to format");
             false
         }
     }

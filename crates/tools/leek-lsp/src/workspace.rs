@@ -269,9 +269,13 @@ impl Workspace {
             match ProjectIndex::discover(start) {
                 Ok(index) => index,
                 Err(error) => {
-                    eprintln!(
-                        "leek-lsp: failed to index project at {}: {error}",
-                        start.display()
+                    // The whole project stays unindexed, so cross-file
+                    // resolution and diagnostics quietly go missing. The user
+                    // needs to see this one.
+                    tracing::warn!(
+                        root = %start.display(),
+                        %error,
+                        "failed to index project"
                     );
                     return;
                 }

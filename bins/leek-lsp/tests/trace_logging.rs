@@ -5,6 +5,13 @@
 //! editor's output channel filled with one line per edit. These drive the
 //! real binary over stdio and assert the lines only appear when
 //! `LEEK_LSP_LOG` asks for them.
+//!
+//! The gate is now a `tracing` `EnvFilter` (`leek_lsp::log`) rather than an
+//! `if trace_enabled()` around each `eprintln!`, so the records carry a
+//! level prefix and `key=value` fields — the assertions below are on the
+//! event names, which is what the filter actually selects on. A value the
+//! filter cannot parse must degrade to the default, not take the server
+//! down before it can say why.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -231,6 +238,30 @@ fn hot_path_traces_appear_with_leek_lsp_log_trace() {
         assert!(
             stderr.contains(noisy),
             "`{noisy}` missing under LEEK_LSP_LOG=trace; got:\n{stderr}"
+        );
+    }
+    // The records are structured now: the URI rides along as a field rather
+    // than being interpolated into a sentence.
+    assert!(
+        stderr.contains("uri=file://"),
+        "expected the structured `uri` field; got:\n{stderr}"
+    );
+}
+
+/// A filter directive the server cannot parse must not stop it starting —
+/// it is a typo in a launch config, not a reason to lose the editor's
+/// language support. The server falls back to the default filter.
+#[test]
+fn an_unparseable_leek_lsp_log_falls_back_to_the_default_filter() {
+    let stderr = open_close_shutdown(Some("=<>="), "junk-filter.leek");
+    assert!(
+        stderr.contains("initialized, ready"),
+        "the server must still start and log its lifecycle; got:\n{stderr}"
+    );
+    for noisy in ["didOpen", "didClose", "publishDiagnostics"] {
+        assert!(
+            !stderr.contains(noisy),
+            "`{noisy}` logged under a junk filter, so the fallback was not the default; got:\n{stderr}"
         );
     }
 }

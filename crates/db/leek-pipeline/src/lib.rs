@@ -31,6 +31,12 @@
 //! and `miku watch` avoid re-parsing unchanged files. See
 //! [`Pipeline::run_memoized`].
 
+// Printing is an API decision in a library, not a convenience: a crate that
+// writes to the terminal behind its caller's back is unusable from a language
+// server or a test harness. Every print below is either the tool's *output*
+// or a justified exception, and says which.
+#![warn(clippy::print_stdout, clippy::print_stderr)]
+
 mod adapters;
 mod combinators;
 mod context;

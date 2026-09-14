@@ -41,9 +41,10 @@ pub fn file_diagnostics(
     // Recipe planning can fail; degrade to "no diagnostics" rather than crash.
     let Some(run) = crate::pipeline::run_on_file_with_includes(ws, source_file, Target::Linted)
     else {
-        if crate::trace_enabled() {
-            eprintln!("leek-lsp: recipe planning failed for {uri}; no diagnostics");
-        }
+        // Warn, not trace: a file that silently produces zero diagnostics is
+        // indistinguishable from a clean one, so the user has no way to tell
+        // that analysis never ran.
+        tracing::warn!(%uri, "recipe planning failed; no diagnostics for this file");
         return Vec::new();
     };
     run.diagnostics()
@@ -146,11 +147,11 @@ pub fn to_lsp(
                 })
             })
             .collect();
-        if related.len() != diag.labels.len() && crate::trace_enabled() {
-            eprintln!(
-                "leek-lsp: dropped {} label(s) of {} with no known source file",
-                diag.labels.len() - related.len(),
-                diag.code.id()
+        if related.len() != diag.labels.len() {
+            tracing::debug!(
+                dropped = diag.labels.len() - related.len(),
+                code = diag.code.id(),
+                "dropped label(s) with no known source file"
             );
         }
         (!related.is_empty()).then_some(related)

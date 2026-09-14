@@ -108,6 +108,10 @@ impl<S: Step> Step for Timed<S> {
             duration: elapsed,
         };
         match &self.out {
+            // `Out::Print` exists precisely to print: it is what
+            // `--timings` asks for, and it has no other sink to write to.
+            // `Out::Sink` is the variant for a caller that wants the data.
+            #[allow(clippy::print_stderr)]
             Out::Print => eprintln!("[step] {:>14}: {:?}", entry.step, entry.duration),
             Out::Sink(s) => s.push(entry),
         }

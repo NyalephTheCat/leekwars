@@ -11,6 +11,11 @@
 //! Cranelift IR / disassembly (for inspecting generated code), or
 //! write a relocatable object file.
 
+// Printing is an API decision in a library, not a convenience: a crate that
+// writes to the terminal behind its caller's back is unusable from a language
+// server or a test harness. Every print below is either the tool's *output*
+// or a justified exception, and says which.
+#![warn(clippy::print_stdout, clippy::print_stderr)]
 // This crate inherits the workspace lint table (see Cargo.toml). Its Cranelift
 // JIT path transmutes and calls finalized function pointers, which the
 // workspace's `unsafe_code = "deny"` would otherwise block, so re-allow it
