@@ -142,20 +142,21 @@ pub fn build_include_graph(
         folder: &dyn Folder,
         source_for: &mut dyn FnMut(&Path) -> SourceId,
         entry_version: Version,
+        site: Option<Span>,
     ) {
         if done.contains(&current) {
             return;
         }
         if visiting.contains(&current) {
-            // Cycle: report against the includer site. We can't
-            // recover a precise span here (the include call is on
-            // the previous frame); attach a zero-span diagnostic
-            // anchored on the file's source id.
+            // Cycle: report at the `include("…")` call that closed it,
+            // which the caller passed down as `site`. Only the top-level
+            // entry has no site; fall back to a zero span anchored on the
+            // file's own source id there.
             let file = files.get(&current).cloned();
             if let Some(file) = file {
                 diagnostics.push(diag!(
                     codes::CIRCULAR_INCLUDE,
-                    Span::new(file.source, 0, 0),
+                    site.unwrap_or_else(|| Span::new(file.source, 0, 0)),
                     "circular include involving `{}`",
                     current.display(),
                 ));
@@ -213,6 +214,7 @@ pub fn build_include_graph(
                         folder,
                         source_for,
                         entry_version,
+                        Some(inc.span),
                     );
                 }
                 Err(e) => {
@@ -246,6 +248,7 @@ pub fn build_include_graph(
         folder,
         &mut source_for,
         entry_version,
+        None,
     );
 
     // Project `order` (canonical paths) onto `ResolvedFile` so
@@ -430,6 +433,33 @@ mod tests {
         assert!(
             codes.contains(&leek_diagnostics::codes::CIRCULAR_INCLUDE.0.to_string()),
             "expected circular-include diagnostic, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn circular_include_points_at_the_include_site() {
+        // The diagnostic used to be anchored at offset 0..0 of the file
+        // the cycle led back to, which points an editor at the wrong file
+        // and the wrong line. It belongs on the `include("…")` that closed
+        // the cycle — `/b.leek`'s, here.
+        let b_text = "include(\"a\")";
+        let result = build(
+            "/a.leek",
+            &[("/a.leek", "include(\"b\")"), ("/b.leek", b_text)],
+        );
+        let d = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == leek_diagnostics::codes::CIRCULAR_INCLUDE)
+            .expect("circular-include diagnostic");
+        // `build` hands out source ids in discovery order: a = 1, b = 2.
+        assert_eq!(d.span.source, SourceId::new(2).unwrap(), "wrong file");
+        let start = u32::try_from(b_text.find("\"a\"").unwrap()).unwrap();
+        assert_eq!(
+            (d.span.start, d.span.end),
+            (start, start + 3),
+            "expected the include site's string literal, got {:?}",
+            d.span
         );
     }
 
