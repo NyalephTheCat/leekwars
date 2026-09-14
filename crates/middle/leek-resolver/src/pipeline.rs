@@ -66,7 +66,7 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
     // resolver needs to walk all of those ASTs in one shared scope.
     if let Some(graph) = cx.get::<IncludeGraphArtifact>()
         && !graph.includes.is_empty()
-        && let Some(entry) = cx.get::<AstArtifact>().and_then(|a| a.0.as_ref())
+        && let Some(entry) = cx.get::<AstArtifact>().map(|a| &a.0)
     {
         let mut files: Vec<FileUnit<'_>> = graph
             .includes
@@ -94,7 +94,7 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
             table: art.table,
         };
     }
-    let Some(ast) = cx.get::<AstArtifact>().and_then(|a| a.0.clone()) else {
+    let Some(ast) = cx.get::<AstArtifact>().map(|a| a.0.clone()) else {
         return ResolveResult::default();
     };
     resolve_collecting(
@@ -258,36 +258,44 @@ impl Step for ResolveIncludes {
                 continue;
             }
             let parsed = parse_file_with_classes(&text, source, version, &known_classes);
-            if let Some(sites) = graph.include_sites.get(&path) {
-                if parsed.ast.is_none() {
-                    for site in sites {
-                        cx.emit(leek_diagnostics::diag!(
-                            leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
-                            site.span,
-                            "included file `{}` failed to parse",
-                            path.display(),
-                        ));
+            // The parse always yields a tree — error recovery builds
+            // `ErrorNode`s inside the `SourceFile` root rather than failing
+            // the root cast — so a broken include is only visible in the
+            // diagnostics. Report the chain at the `include(...)` site too,
+            // otherwise the entry file's author sees errors pointing only
+            // into a file they may not have open. Errors only: a lint in an
+            // included file must not mark the include site.
+            if parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == leek_diagnostics::Severity::Error)
+            {
+                match graph.include_sites.get(&path) {
+                    Some(sites) => {
+                        for site in sites {
+                            cx.emit(leek_diagnostics::diag!(
+                                leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
+                                site.span,
+                                "included file `{}` failed to parse",
+                                path.display(),
+                            ));
+                        }
                     }
+                    None => cx.emit(leek_diagnostics::diag!(
+                        leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
+                        Span::new(source, 0, 0),
+                        "included file `{}` failed to parse",
+                        path.display(),
+                    )),
                 }
-            } else if parsed.ast.is_none() {
-                cx.emit(leek_diagnostics::diag!(
-                    leek_diagnostics::codes::INCLUDE_PARSE_FAILED,
-                    Span::new(source, 0, 0),
-                    "included file `{}` failed to parse",
-                    path.display(),
-                ));
             }
-            let Some(ast) = parsed.ast else {
-                cx.emit_all(parsed.diagnostics);
-                continue;
-            };
             cx.emit_all(parsed.diagnostics);
             includes.push(ParsedIncludedFile {
                 source,
                 path,
                 text,
                 version,
-                ast,
+                ast: parsed.ast,
             });
         }
 

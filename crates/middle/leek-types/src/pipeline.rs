@@ -68,7 +68,7 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
     // entering the single-file salsa query.
     if let Some(graph) = cx.get::<leek_resolver::pipeline::IncludeGraphArtifact>()
         && !graph.includes.is_empty()
-        && let Some(entry) = cx.get::<AstArtifact>().and_then(|a| a.0.as_ref())
+        && let Some(entry) = cx.get::<AstArtifact>().map(|a| &a.0)
     {
         let mut files: Vec<leek_resolver::FileUnit<'_>> = graph
             .includes
@@ -97,7 +97,7 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
             signatures: art.signatures,
         };
     }
-    let Some(ast) = cx.get::<AstArtifact>().and_then(|a| a.0.clone()) else {
+    let Some(ast) = cx.get::<AstArtifact>().map(|a| a.0.clone()) else {
         return TypeCheckResult::default();
     };
     check_collecting(

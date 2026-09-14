@@ -1278,3 +1278,36 @@ fn a_plain_subscript_is_unaffected_by_the_interval_guard() {
     let (node, _) = parse_str("return t[0][1];");
     assert!(dump(&node).contains("IndexExpr"), "{}", dump(&node));
 }
+
+/// The root cast in `leek_parser::pipeline` is an `.expect`: every parse,
+/// however broken the input, must still open a `SourceFile` root. Recovery
+/// puts `ErrorNode`s *inside* that root, it never returns early past
+/// `finish_node`. Anything that breaks this turns what used to be a silent
+/// `None` into a panic in the pipeline, so pin the invariant here.
+#[test]
+fn every_parse_roots_at_source_file() {
+    for text in [
+        "",
+        "   \n\t\n",
+        "}}}",
+        "function f( {",
+        "var x = \"unterminated",
+        "/* unterminated block comment",
+        "@#$%^&",
+        "class {",
+        "if (",
+        "case 1:",
+        "\u{0}\u{1}\u{2}",
+    ] {
+        let (node, _) = parse_str(text);
+        assert_eq!(
+            node.kind(),
+            leek_syntax::SyntaxKind::SourceFile,
+            "input {text:?} did not root at SourceFile"
+        );
+        assert!(
+            SourceFile::cast(node).is_some(),
+            "input {text:?} did not cast to SourceFile"
+        );
+    }
+}

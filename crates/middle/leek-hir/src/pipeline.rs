@@ -150,7 +150,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
     // when the ordinary single-file salsa query is available.
     if let Some(graph) = cx.get::<IncludeGraphArtifact>()
         && !graph.includes.is_empty()
-        && let Some(ast) = cx.get::<AstArtifact>().and_then(|a| a.0.clone())
+        && let Some(ast) = cx.get::<AstArtifact>().map(|a| a.0.clone())
     {
         let version = Version::from_byte(cx.version_byte());
         let flags = cx.flags();
@@ -203,7 +203,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
     }
     let ast = cx
         .get::<AstArtifact>()
-        .and_then(|a| a.0.clone())
+        .map(|a| a.0.clone())
         .expect("LowerHir::run guards on AstArtifact presence outside the salsa path");
     let (hir, diagnostics) = lower_single(&ast, cx.source(), cx.version_byte(), cx.flags());
     (finish_hir(hir, opt), diagnostics)

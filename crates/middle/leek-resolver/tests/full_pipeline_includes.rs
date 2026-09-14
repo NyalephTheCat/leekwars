@@ -68,10 +68,14 @@ fn run_to_typecheck(entry_path: &str, files: &[(&str, &str)]) -> Run {
         strict: true,
         flags: leek_pipeline::FeatureFlags::none(),
     };
+    // The walker seeds the entry first, so the counter starts at the
+    // entry's own id — exactly what `leek_driver::includes_step` does.
+    // Seeding it past the entry would hand the entry a second `SourceId`
+    // and make any span-source assertion here meaningless.
     let includes = ResolveIncludes::with_counter(
         Arc::new(folder),
         PathBuf::from(entry_path),
-        /* start = */ 2,
+        /* start = */ 1,
     );
     let params = RecipeParams::permissive();
     let pipeline =
@@ -187,5 +191,49 @@ fn a_terminator_in_an_included_file_reaches_the_entrys_trailing_statement() {
         diags[0].span.source,
         SourceId::new(1).unwrap(),
         "the dead statement is the entry's"
+    );
+}
+
+#[test]
+fn a_broken_include_is_reported_at_the_include_site() {
+    // #290: the parse of an included file always yields a `SourceFile`
+    // root (recovery builds `ErrorNode`s inside it), so the old
+    // `ast.is_none()` test could never fire and E0274 had no emitter.
+    // The trigger is now "the included file's own parse produced an
+    // error", and the label lands on the entry's `include(...)`.
+    const ENTRY: &str = "include(\"a\")\nvar x = 1\n";
+    let run = run_to_typecheck(
+        "/main.leek",
+        &[("/main.leek", ENTRY), ("/a.leek", "function f( {\n")],
+    );
+    let diags = run.with_code(codes::INCLUDE_PARSE_FAILED);
+    assert_eq!(diags.len(), 1, "{:?}", run.diagnostics);
+    assert_eq!(
+        diags[0].span.source,
+        SourceId::new(1).unwrap(),
+        "the label is at the include site in the entry, not inside /a.leek"
+    );
+    let site = &ENTRY[diags[0].span.start as usize..diags[0].span.end as usize];
+    assert_eq!(
+        site, "\"a\"",
+        "the span is the include argument in the entry"
+    );
+}
+
+#[test]
+fn a_well_formed_include_reports_no_parse_failure() {
+    // Errors only — a file that parses cleanly must not mark its include
+    // site, even when a later pass complains about it.
+    let run = run_to_typecheck(
+        "/main.leek",
+        &[
+            ("/main.leek", "include(\"a\")\n"),
+            ("/a.leek", "var d = 1\nvar d = 2\n"),
+        ],
+    );
+    assert!(
+        run.with_code(codes::INCLUDE_PARSE_FAILED).is_empty(),
+        "{:?}",
+        run.diagnostics
     );
 }

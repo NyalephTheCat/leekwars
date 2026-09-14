@@ -23,11 +23,14 @@ impl GreenTreeArtifact {
     }
 }
 
-/// AST view (`SourceFile`) cast from the green tree. `None` if the
-/// parser failed to produce a `SourceFile` at the root (catastrophic
-/// parse error).
+/// AST view (`SourceFile`) cast from the green tree.
+///
+/// Always present once the [`Parse`] step has run: `grammar::source_file`
+/// opens a `SourceFile` node before any production and closes it on every
+/// path, so the root cast cannot fail. Recovery from a syntax error builds
+/// an `ErrorNode` *inside* that root.
 #[derive(Debug, Clone)]
-pub struct AstArtifact(pub Option<SourceFile>);
+pub struct AstArtifact(pub SourceFile);
 impl Artifact for AstArtifact {}
 
 /// Class names declared anywhere in the program — the include
@@ -46,11 +49,11 @@ impl Artifact for KnownClassesArtifact {}
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
     pub green: GreenNode,
-    pub ast: Option<SourceFile>,
+    pub ast: SourceFile,
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Parse `text` at `version`, returning a green tree, optional AST,
+/// Parse `text` at `version`, returning a green tree, its AST view,
 /// and diagnostics. Used by include resolution and the project index
 /// so every file goes through the same parse path.
 pub fn parse_file(text: &str, source: leek_span::SourceId, version: Version) -> ParsedFile {
@@ -76,7 +79,8 @@ pub fn parse_file_with_classes(
     );
     let mut diagnostics = lexed.diagnostics;
     diagnostics.append(&mut result.diagnostics);
-    let ast = SourceFile::cast(SyntaxNode::new_root(result.green.clone()));
+    let ast = SourceFile::cast(SyntaxNode::new_root(result.green.clone()))
+        .expect("grammar::source_file always opens a SourceFile root");
     ParsedFile {
         green: result.green,
         ast,
@@ -99,7 +103,8 @@ impl Step for Parse {
     fn run(&self, cx: &mut Context) -> Result<(), StepError> {
         let (green, diagnostics) = run_parse(cx);
         cx.emit_all(diagnostics.iter().cloned());
-        let ast = SourceFile::cast(SyntaxNode::new_root(green.clone()));
+        let ast = SourceFile::cast(SyntaxNode::new_root(green.clone()))
+            .expect("grammar::source_file always opens a SourceFile root");
         cx.insert(GreenTreeArtifact(green));
         cx.insert(AstArtifact(ast));
         Ok(())
