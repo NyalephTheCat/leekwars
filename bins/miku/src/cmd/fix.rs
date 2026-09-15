@@ -45,7 +45,10 @@ pub fn run(
         params: RecipeParams::default(),
         color: color.into(),
         format: format.into(),
-        timing: None,
+        // `scope` and `timing` stay at their defaults: every `miku`
+        // subcommand compiles the whole program, and only `build --verbose`
+        // wants timings.
+        ..DriverConfig::default()
     };
     // One session for the whole run: the reporter is built once, and every
     // file compiles through the same driver entry point `miku check` uses.

@@ -60,7 +60,8 @@ pub use leek_complexity::pipeline::{ComplexityReport, complexity_query};
 /// they are appended by `leek_lint::diagnostics_with_lints`, in the
 /// tool, because db may not depend on tools.
 pub use crate::diagnostics::{
-    Stage, diagnostics_without_lints, for_source, program_diagnostics, program_diagnostics_upto,
+    Stage, diagnostics_without_lints, file_diagnostics_upto, for_source, program_diagnostics,
+    program_diagnostics_upto,
 };
 /// The include closure: one file's include sites, one include name
 /// resolved against the workspace, the whole graph an entry file

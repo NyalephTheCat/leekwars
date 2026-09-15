@@ -15,6 +15,30 @@ use leek_project::Project;
 /// dependency just to name its type.
 pub use leek_resolver::interner::{PathInterner, SourceInterner};
 
+/// How much of the program a compilation answers about.
+///
+/// Every `miku` subcommand is [`Program`](Scope::Program): it compiles a
+/// file *and* what that file includes. `leekc` is too, except for the four
+/// emits that are textual views of one file — `tokens`, `flat-cst`, `cst`
+/// and `fmt`. Those describe the bytes in front of them, so they leave
+/// `include(...)` unresolved, and the formatter has to: it must stay
+/// byte-faithful to the file it was handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// The entry and its whole include closure. Parses under the
+    /// program's class set, and reports what every file in the closure
+    /// found.
+    #[default]
+    Program,
+    /// The entry's own bytes. Parses under the empty class set, and
+    /// reports only what the entry itself found.
+    ///
+    /// Valid up to [`Target::Parsed`]: the passes past it are
+    /// whole-program by construction, so a file-scoped compilation has no
+    /// HIR, MIR or complexity to hand out.
+    File,
+}
+
 /// Configuration for one driver invocation.
 #[derive(Debug, Clone)]
 pub struct DriverConfig {
@@ -22,6 +46,9 @@ pub struct DriverConfig {
     pub params: RecipeParams,
     pub color: ColorWhen,
     pub format: MessageFormat,
+    /// Whether the entry's includes are part of the compilation.
+    /// [`Scope::Program`] for everything but `leekc`'s textual emits.
+    pub scope: Scope,
     /// When set, every step of the pipelines planned from this config
     /// records its duration into the sink (`miku build --verbose`).
     ///
@@ -38,6 +65,7 @@ impl Default for DriverConfig {
             params: RecipeParams::default(),
             color: ColorWhen::Auto,
             format: MessageFormat::Human,
+            scope: Scope::Program,
             timing: None,
         }
     }
@@ -481,10 +509,12 @@ mod tests {
             params: RecipeParams::default().with_opt(crate::recipes::OptLevel::O1),
             color: ColorWhen::Never,
             format: MessageFormat::Json,
+            scope: Scope::File,
             timing: None,
         };
         let merged = merge_manifest_lints(&project, &cli);
         assert_eq!(merged.target, Target::Mir);
+        assert_eq!(merged.scope, Scope::File);
         assert_eq!(merged.params.opt, crate::recipes::OptLevel::O1);
         assert!(matches!(merged.format, MessageFormat::Json));
         assert!(merged.params.lints.pedantic);

@@ -78,14 +78,53 @@ use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 /// labels and suggestions included, on each one.
 #[salsa::tracked]
 pub fn diagnostics_without_lints(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagnostic>> {
+    let mut out = file_diagnostics_upto(db, file, Stage::Hir).as_ref().clone();
+    out.extend(leek_mir::pipeline::lower_mir_query(db, file).diagnostics);
+    Arc::new(out)
+}
+
+/// [`diagnostics_without_lints`], stopped after `stage`.
+///
+/// The single-file counterpart of [`program_diagnostics_upto`], for a
+/// driver whose target reaches only part of the front end: `leekc --emit
+/// cst` plans `pragma, lex, parse` and nothing more, so reporting what a
+/// resolve or a type-check found would be reporting a pass it never ran.
+///
+/// Parses under the empty [`ProgramClasses`] set, which is what makes this
+/// the *file* answer rather than the program one: `include(…)` is left
+/// unresolved, so a class an included file declares is not in scope. That
+/// is deliberate for the textual views — they describe the bytes in front
+/// of them — and wrong for everything else, which wants
+/// [`program_diagnostics_upto`].
+///
+/// [`Stage::Tokens`] stops before the parse, so at that stage the two
+/// queries answer identically: neither reads an include, because resolving
+/// one means lexing it.
+#[salsa::tracked]
+pub fn file_diagnostics_upto(db: &dyn Db, file: SourceFile, stage: Stage) -> Arc<Vec<Diagnostic>> {
     let mut out = Vec::new();
     out.extend(leek_syntax::pipeline::pragma_query(db, file).diagnostics);
     out.extend(leek_lexer::pipeline::lex_query(db, file).diagnostics);
+    if stage == Stage::Tokens {
+        return Arc::new(out);
+    }
+
     out.extend(leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db)).diagnostics);
+    if stage == Stage::Parsed {
+        return Arc::new(out);
+    }
+
     out.extend(leek_resolver::pipeline::resolve_query(db, file).diagnostics);
+    if stage == Stage::Resolved {
+        return Arc::new(out);
+    }
+
     out.extend(leek_types::pipeline::typecheck_query(db, file).diagnostics);
+    if stage == Stage::TypeChecked {
+        return Arc::new(out);
+    }
+
     out.extend(leek_hir::pipeline::lower_hir_query(db, file).diagnostics);
-    out.extend(leek_mir::pipeline::lower_mir_query(db, file).diagnostics);
     Arc::new(out)
 }
 

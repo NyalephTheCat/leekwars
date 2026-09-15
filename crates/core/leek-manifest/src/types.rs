@@ -17,6 +17,42 @@ pub struct Manifest {
     pub experimental: ExperimentalTable,
 }
 
+impl Manifest {
+    /// The manifest a file compiled outside any project gets.
+    ///
+    /// `leekc` takes a path and no `Miku.toml`, but everything downstream
+    /// of it — the session, its database, the reporter — is written over a
+    /// [`Manifest`]. So rather than a second manifest-less path through all
+    /// of that, a standalone file belongs to a one-file project: `entry` is
+    /// the file, `[paths].src` is the directory holding it, and every other
+    /// table is at its default.
+    ///
+    /// `[project].language` is [`LATEST_VERSION`](leek_span::pragma::LATEST_VERSION)
+    /// rather than the parser's `4`, because it is the *fallback* for a file
+    /// with no `@version` pragma and a driver with no manifest has nothing
+    /// older to be compatible with. The two happen to be equal today; naming
+    /// the constant is what keeps them so.
+    #[must_use]
+    pub fn standalone(entry: PathBuf) -> Self {
+        let mut project = ProjectTable::defaults_with("standalone".into(), "0.0.0".into());
+        project.language = leek_span::pragma::LATEST_VERSION;
+        project.entry = entry;
+        Self {
+            project,
+            paths: PathsTable {
+                src: PathBuf::from("."),
+                ..PathsTable::default()
+            },
+            backend: BackendTable::default(),
+            lint: LintTable::default(),
+            format: FormatOptions::default(),
+            test: TestTable::default(),
+            fight: FightTable::default(),
+            experimental: ExperimentalTable::none(),
+        }
+    }
+}
+
 /// `[experimental]` — the opt-in language features this project compiles
 /// with. One key per flag, each a boolean defaulting to `false`.
 ///

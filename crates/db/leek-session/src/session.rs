@@ -213,6 +213,7 @@ impl<'p> Session<'p> {
         let merged = crate::driver::merge_manifest_lints(self.project, &self.config);
         RunShape {
             stage,
+            scope: merged.scope,
             lints: (merged.target == Target::Linted).then_some(merged.params.lints),
             stop_at: merged.params.stop_on_diagnostics,
             opt: merged.params.opt,
@@ -404,6 +405,7 @@ pub struct Compilation<'a> {
     timing: Option<leek_pipeline::TimingSink>,
     /// Query answers behind the reference-returning accessors. Each holds
     /// an `Arc`, so the cache is a pointer rather than a copy of the tree.
+    tokens_cache: OnceLock<Option<Arc<Vec<leek_syntax::Token>>>>,
     hir_cache: OnceLock<Option<Arc<HirFile>>>,
     mir_cache: OnceLock<Option<Arc<MirProgram>>>,
     complexity_cache: OnceLock<Option<Arc<Vec<Complexity>>>>,
@@ -418,6 +420,8 @@ pub struct Compilation<'a> {
 #[derive(Debug, Clone, Copy)]
 struct RunShape {
     stage: leek_db::queries::Stage,
+    /// Whether the entry's includes are part of the compilation.
+    scope: crate::Scope,
     /// The lint groups the run planned with, when the target plans the
     /// lint step at all. `None` when it does not.
     lints: Option<leek_lint::LintGroups>,
@@ -460,6 +464,7 @@ impl<'a> Compilation<'a> {
             files: None,
             shape: None,
             timing: None,
+            tokens_cache: OnceLock::new(),
             hir_cache: OnceLock::new(),
             mir_cache: OnceLock::new(),
             complexity_cache: OnceLock::new(),
@@ -497,6 +502,7 @@ impl<'a> Compilation<'a> {
             files: Some(files),
             shape: Some(shape),
             timing,
+            tokens_cache: OnceLock::new(),
             hir_cache: OnceLock::new(),
             mir_cache: OnceLock::new(),
             complexity_cache: OnceLock::new(),
@@ -529,6 +535,13 @@ impl<'a> Compilation<'a> {
                 return run_sources(run, &self.text, &self.label);
             }
             let mut sources = Sources::single(self.input.source, &self.label, &*self.text);
+            // A file-scoped compilation resolves no include, so nothing it
+            // reports can point into one — and building the graph to find
+            // that out would read the very files this scope exists to
+            // leave alone.
+            if self.scope() == crate::Scope::File {
+                return sources;
+            }
             let graph = self.with_program(|db, files, file, version| {
                 leek_db::queries::include_graph(db, files, file, version)
             });
@@ -585,9 +598,63 @@ impl<'a> Compilation<'a> {
                 .map(|g| g.0.clone());
         }
         self.with_program(|db, files, file, version| {
-            let classes = leek_db::queries::program_classes(db, files, file, version);
+            let classes = self.classes(db, files, file, version);
             leek_db::queries::parse_query(db, file, classes).green
         })
+    }
+
+    /// The entry's tokens.
+    ///
+    /// Lexing is per file, so this is the one accessor a
+    /// [`Scope::File`](crate::Scope::File) compilation answers exactly as
+    /// a program-scoped one does.
+    #[must_use]
+    pub fn tokens(&self) -> Option<&[leek_syntax::Token]> {
+        if let Some(run) = &self.run {
+            return run
+                .get::<leek_lexer::pipeline::TokensArtifact>()
+                .map(|t| t.0.tokens.as_slice());
+        }
+        self.tokens_cache
+            .get_or_init(|| {
+                timed(self.timing.as_ref(), "tokens", || {
+                    self.with_program(|db, _, file, _| {
+                        Arc::new(leek_db::queries::lex_query(db, file).tokens)
+                    })
+                })
+            })
+            .as_deref()
+            .map(Vec::as_slice)
+    }
+
+    /// The entry, formatted under `options`.
+    ///
+    /// Unverified, exactly as the pipeline's `Fmt` step left it: whether
+    /// the formatted text still parses to the same program is the
+    /// caller's check to make (`leek_fmt::check_equivalence`), because
+    /// only the caller knows whether it is about to print the result or
+    /// write it over the original.
+    ///
+    /// The options are an argument rather than part of the session
+    /// because they are interned into the query key: two callers that
+    /// assemble the same settings share one memo, and a caller that
+    /// changes them does not invalidate anything else about the file.
+    #[must_use]
+    pub fn formatted(&self, options: &leek_fmt::FormatOptions) -> Option<Arc<String>> {
+        if let Some(run) = &self.run {
+            return run
+                .get::<leek_fmt::pipeline::FormattedArtifact>()
+                .map(|f| Arc::clone(&f.0));
+        }
+        let (db, file) = self.db?;
+        let db: &dyn leek_db::Db = db;
+        let config = leek_fmt::pipeline::FormatConfig::new(db, options.clone());
+        Some(
+            timed(self.timing.as_ref(), "fmt", || {
+                leek_fmt::pipeline::format_query(db, file, config)
+            })
+            .text,
+        )
     }
 
     /// The lowered HIR, when the target reached it.
@@ -604,7 +671,7 @@ impl<'a> Compilation<'a> {
         self.hir_cache
             .get_or_init(|| {
                 timed(self.timing.as_ref(), "hir", || {
-                    self.with_program(|db, files, file, version| {
+                    self.whole_program(|db, files, file, version| {
                         leek_db::queries::lower_program(db, files, file, version, self.opt()).hir
                     })
                 })
@@ -621,7 +688,7 @@ impl<'a> Compilation<'a> {
         self.mir_cache
             .get_or_init(|| {
                 timed(self.timing.as_ref(), "mir", || {
-                    self.with_program(|db, files, file, version| {
+                    self.whole_program(|db, files, file, version| {
                         leek_db::queries::lower_program_mir(db, files, file, version, self.opt())
                             .program
                     })
@@ -639,7 +706,7 @@ impl<'a> Compilation<'a> {
         self.complexity_cache
             .get_or_init(|| {
                 timed(self.timing.as_ref(), "complexity", || {
-                    self.with_program(|db, files, file, version| {
+                    self.whole_program(|db, files, file, version| {
                         leek_db::queries::program_complexity(db, files, file, version).0
                     })
                 })
@@ -653,7 +720,59 @@ impl<'a> Compilation<'a> {
         self.shape.map_or(leek_pipeline::OptLevel::O0, |s| s.opt)
     }
 
+    /// Whether this compilation's includes are part of it.
+    fn scope(&self) -> crate::Scope {
+        self.shape.map_or(crate::Scope::Program, |s| s.scope)
+    }
+
+    /// [`with_program`](Self::with_program), but `None` under
+    /// [`Scope::File`](crate::Scope::File).
+    ///
+    /// HIR, MIR and complexity are whole-program answers: they are built
+    /// over the merged tree of the include closure, and there is no
+    /// file-scoped query that means the same thing at the
+    /// [`OptLevel`](leek_pipeline::OptLevel) the program ones are keyed
+    /// on. A file-scoped compilation never plans those passes, so `None`
+    /// is the honest answer rather than a program-wide one it did not
+    /// ask for.
+    fn whole_program<T>(
+        &self,
+        f: impl FnOnce(
+            &leek_db::LeekDb,
+            leek_db::WorkspaceFiles,
+            leek_db::SourceFile,
+            leek_syntax::Version,
+        ) -> T,
+    ) -> Option<T> {
+        match self.scope() {
+            crate::Scope::Program => self.with_program(f),
+            crate::Scope::File => None,
+        }
+    }
+
+    /// The class set this compilation's entry parses under: the
+    /// program's, or the empty one when the includes are not part of it.
+    fn classes<'db>(
+        &self,
+        db: &'db leek_db::LeekDb,
+        files: leek_db::WorkspaceFiles,
+        file: leek_db::SourceFile,
+        version: leek_syntax::Version,
+    ) -> leek_db::ProgramClasses<'db> {
+        match self.scope() {
+            crate::Scope::Program => leek_db::queries::program_classes(db, files, file, version),
+            crate::Scope::File => leek_db::ProgramClasses::none(db),
+        }
+    }
+
     /// Run `f` against this compilation's program key, when it has one.
+    ///
+    /// Available under either [`Scope`](crate::Scope) — `files` is the
+    /// session's file set either way. What a file-scoped compilation must
+    /// not do is *use* it to reach past the entry, which is why the
+    /// accessors above take their class set from
+    /// [`classes`](Self::classes) and the whole-program ones below refuse
+    /// outright.
     fn with_program<T>(
         &self,
         f: impl FnOnce(
@@ -756,19 +875,20 @@ impl<'a> Compilation<'a> {
         // run never plans `Parse`, so there is nothing to abort and no
         // parse diagnostics to report — checking anyway would hand a
         // tokens-only run the parser's findings.
+        let upto = |stage| match shape.scope {
+            crate::Scope::Program => {
+                queries::program_diagnostics_upto(db, files, file, version, stage)
+            }
+            crate::Scope::File => queries::file_diagnostics_upto(db, file, stage),
+        };
+
         if let Some(min) = shape.stop_at
             && shape.stage >= queries::Stage::Parsed
         {
-            let classes = queries::program_classes(db, files, file, version);
+            let classes = self.classes(db, files, file, version);
             let parsed = queries::parse_query(db, file, classes);
             if parsed.diagnostics.iter().any(|d| d.severity <= min) {
-                return Some(queries::program_diagnostics_upto(
-                    db,
-                    files,
-                    file,
-                    version,
-                    queries::Stage::Parsed,
-                ));
+                return Some(upto(queries::Stage::Parsed));
             }
         }
 
@@ -776,7 +896,7 @@ impl<'a> Compilation<'a> {
             Some(groups) => leek_lint::pipeline::program_diagnostics_with_lints(
                 db, files, file, version, groups,
             ),
-            None => queries::program_diagnostics_upto(db, files, file, version, shape.stage),
+            None => upto(shape.stage),
         })
     }
 }

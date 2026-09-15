@@ -4,46 +4,19 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use leek_diagnostics::{ColorWhen, LintLevels, Reporter};
+use leek_diagnostics::ColorWhen;
 use leek_fmt::FormatOptions;
-use leek_fmt::pipeline::FormattedArtifact;
-use leek_lexer::pipeline::TokensArtifact;
-use leek_parser::pipeline::GreenTreeArtifact;
-use leek_project::Input;
-use leek_session::Compilation;
+use leek_project::Project;
+use leek_session::{Compilation, DriverConfig, Session};
 use leek_span::SourceId;
-use leek_span::pragma::LanguageSettings;
 use leek_syntax::{SyntaxNode, Version, build_flat_tree};
 
 use crate::cli::{Cli, Emit};
-use crate::pipeline::{pipeline_for, resolve_code};
+use crate::pipeline::{ENTRY_SOURCE, resolve_code, shape_for};
 use crate::print::{print_cst, print_hir, print_mir, print_tokens};
 
 pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-    let text = std::fs::read_to_string(&cli.input)
-        .with_context(|| format!("reading {}", cli.input.display()))?;
-
-    let source = SourceId::new(crate::pipeline::ENTRY_SOURCE).unwrap();
-
-    // Settle the language settings once, here at the input boundary:
-    // `--version-pragma` > the file's `@version` pragma > v4, and
-    // `@strict`. Every pass (lexer through HIR) and every backend reads
-    // them back from the `Input`; nothing re-derives them from pragmas.
-    let lang = LanguageSettings::resolve(
-        &text,
-        cli.version_pragma.map(u8::from),
-        leek_span::pragma::LATEST_VERSION,
-        false,
-    );
-    let version = Version::from_byte(lang.version);
-    let input = Input {
-        source,
-        text: text.clone().into(),
-        version_byte: lang.version,
-        strict: lang.strict,
-        flags: leek_span::FeatureFlags::from_env(),
-    };
 
     // Load formatter options for `--emit fmt`. The `--fmt-config`
     // flag points at a `Miku.toml`-style file; absent, defaults.
@@ -56,10 +29,18 @@ pub fn run() -> Result<ExitCode> {
         Some(path) => leek_manifest::load_from(path).map(|load| load.manifest.format)?,
     };
 
+    // Validate the severity flags before anything else, so an unknown code
+    // is a usage error (exit 2) with the catalog hint rather than the
+    // session's "[lint] in Miku.toml" — there is no Miku.toml here.
+    for code in cli.deny.iter().chain(&cli.warn).chain(&cli.allow) {
+        resolve_code(code)?;
+    }
+
     // Load + register any host-environment libraries (`--library leekwars`,
-    // `--library path/to.lib`) BEFORE the pipeline runs, so their functions
-    // are recognized by the resolver (no "undefined function"). The composed
-    // catalog is reused for backend emit below.
+    // `--library path/to.lib`) BEFORE the session opens, so their functions
+    // are recognized by the resolver (no "undefined function") and nothing
+    // is memoized without them. The composed catalog is reused for backend
+    // emit below.
     let environment: Option<std::sync::Arc<dyn leek_environment::EnvironmentCatalog>> =
         if cli.libraries.is_empty() {
             None
@@ -71,78 +52,78 @@ pub fn run() -> Result<ExitCode> {
 
     // Opt-in: register the library's constant values for folding so HIR
     // lowering replaces e.g. `WEAPON_PISTOL` with `37` for every backend
-    // (Java, MIR, native) from the one pipeline hook. Through the shared
-    // helper, which `miku`'s `[project] fold_constants` and the
-    // official-parity fight runners already use — this used to repeat its
-    // body inline, so `leekc --fold-constants` could fold a different set
-    // from every other driver (#132).
+    // (Java, MIR, native) from the one hook. Through the shared helper,
+    // which `miku`'s `[project] fold_constants` and the official-parity
+    // fight runners already use — this used to repeat its body inline, so
+    // `leekc --fold-constants` could fold a different set from every other
+    // driver (#132).
     if cli.fold_constants {
         leek_session::activate_leekwars_constant_folding();
     }
 
-    // Build a pipeline tailored to the requested emit. Each Emit
-    // picks the shortest chain that produces the needed artifact;
-    // result reuse comes for free within a single run.
-    let pipeline = pipeline_for(
-        cli.emit,
-        fmt_opts,
-        leek_pipeline::LintGroups {
-            pedantic: cli.pedantic,
-            nursery: cli.nursery,
+    // `leekc` is handed a file, not a project. It compiles through the same
+    // `Session` every `miku` subcommand does — one query database, one
+    // reporter, one `Compilation` — over the synthetic one-file project
+    // that file belongs to. The flags that a project would spell in
+    // `Miku.toml` are written into it here, so there is one configuration
+    // path rather than a manifest-ful and a manifest-less copy of each.
+    let mut project = Project::standalone(&cli.input);
+    project.manifest.lint.deny.clone_from(&cli.deny);
+    project.manifest.lint.warn.clone_from(&cli.warn);
+    project.manifest.lint.allow.clone_from(&cli.allow);
+    project.manifest.format = fmt_opts.clone();
+    // `--version-pragma` outranks the file's own `@version`, which is what
+    // makes it an override rather than the index's default.
+    project.index_mut().version_override = cli.version_pragma.map(u8::from);
+
+    let (target, scope) = shape_for(cli.emit);
+    let session = Session::new(
+        &project,
+        DriverConfig {
+            target,
+            scope,
+            params: leek_session::driver_params().with_lints(leek_pipeline::LintGroups {
+                pedantic: cli.pedantic,
+                nursery: cli.nursery,
+            }),
+            color: if cli.no_color {
+                ColorWhen::Never
+            } else {
+                ColorWhen::Auto
+            },
+            format: cli.message_format.into(),
+            timing: None,
         },
-        &cli.input,
     )?;
 
-    // Validate the severity flags before building the reporter, so an
-    // unknown code is a usage error (exit 2) with the catalog hint rather
-    // than a bare "unknown diagnostic code".
-    for code in cli.deny.iter().chain(&cli.warn).chain(&cli.allow) {
-        resolve_code(code)?;
-    }
-    // Diagnostics render through the same `Reporter` + `leek_session`
-    // machinery as every `miku` subcommand, so one raised inside an included
-    // file is shown against *that* file's text and path, not the entry's.
-    let reporter = Reporter::new(
-        if cli.no_color {
-            ColorWhen::Never
-        } else {
-            ColorWhen::Auto
-        },
-        cli.message_format.into(),
-        LintLevels {
-            deny: &cli.deny,
-            warn: &cli.warn,
-            allow: &cli.allow,
-        },
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-    // The run, its source map and the reporter as one value — the same one
-    // `miku` holds, so a backend diagnostic here renders exactly as it does
-    // there.
-    let compiled = Compilation::adopt(
-        pipeline.run(input),
-        cli.input.display().to_string(),
-        &reporter,
-    );
+    // The compiled file, its source map and the reporter as one value — the
+    // same one `miku` holds, so a backend diagnostic here renders exactly as
+    // it does there, and one raised inside an included file is shown against
+    // *that* file's text and path rather than the entry's.
+    let compiled: Compilation<'_> =
+        session.compile_file(&cli.input, SourceId::new(ENTRY_SOURCE).unwrap())?;
+    let text = compiled.text().to_string();
+    let source = compiled.input().source;
+    let version = Version::from_byte(compiled.input().version_byte);
     let had_error = compiled.report();
 
     match cli.emit {
         Emit::Check => {}
         Emit::Tokens => {
-            if let Some(tokens) = compiled.get::<TokensArtifact>() {
-                print_tokens(&text, &tokens.0.tokens);
+            if let Some(tokens) = compiled.tokens() {
+                print_tokens(&text, tokens);
             }
         }
         Emit::FlatCst => {
-            if let Some(tokens) = compiled.get::<TokensArtifact>() {
-                let green = build_flat_tree(&text, &tokens.0.tokens);
+            if let Some(tokens) = compiled.tokens() {
+                let green = build_flat_tree(&text, tokens);
                 let node = SyntaxNode::new_root(green);
                 print_cst(&node, 0);
             }
         }
         Emit::Cst => {
-            if let Some(green) = compiled.get::<GreenTreeArtifact>() {
-                let node = SyntaxNode::new_root(green.0.clone());
+            if let Some(green) = compiled.green_tree() {
+                let node = SyntaxNode::new_root(green);
                 print_cst(&node, 0);
             }
         }
@@ -238,17 +219,17 @@ pub fn run() -> Result<ExitCode> {
             }
         }
         Emit::Fmt => {
-            if let Some(artifact) = compiled.get::<FormattedArtifact>() {
-                // The pipeline artifact is unverified. Print nothing
-                // rather than corrupt LeekScript when the formatter
-                // would change the program — same policy as `miku fmt`.
-                if let Err(err) = leek_fmt::check_equivalence(&text, &artifact.0, version) {
+            if let Some(formatted) = compiled.formatted(&fmt_opts) {
+                // The formatter's output is unverified. Print nothing
+                // rather than corrupt LeekScript when it would change the
+                // program — same policy as `miku fmt`.
+                if let Err(err) = leek_fmt::check_equivalence(&text, &formatted, version) {
                     eprintln!(
                         "error: refusing to emit formatted source: {err} (please report this)"
                     );
                     return Ok(ExitCode::from(1));
                 }
-                print!("{}", artifact.0);
+                print!("{formatted}");
             } else {
                 eprintln!("leekc: parse failed; no formatted output");
             }

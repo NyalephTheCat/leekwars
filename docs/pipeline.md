@@ -124,6 +124,15 @@ target, while `program_diagnostics` always reports the whole frontend;
 without slicing, swapping one for the other is a drop-in replacement at
 exactly one target and a behaviour change at every other.
 
+`file_diagnostics_upto(file, stage)` is the single-file counterpart: the same
+stage slicing over the per-file cascade, parsing under the empty
+`ProgramClasses` set so `include(…)` is left unresolved. `leekc`'s textual
+emits (`tokens`, `flat-cst`, `cst`, `fmt`) want exactly that — they describe
+the bytes in front of them, and the formatter must stay byte-faithful to the
+file it was handed. `leek_session::Scope` is which of the two a compilation
+asks for. At `Stage::Tokens` the two answer identically, because resolving an
+include means lexing it, which is already past that stage.
+
 Lint findings are deliberately *not* in there. `leek_lint::lint_query` and
 `diagnostics_with_lints` live in `leek-lint`, which depends *down* on
 `leek-db`; `crates/db` may not depend on `crates/tools`, so a tool's query
@@ -160,15 +169,18 @@ Two orchestration models still coexist, which is what epic
 with stage ordering in `RecipePlan`. Each pass ships *both* a `Step` and a
 tracked query, and `Step::run` dispatches to the query when
 `Context::salsa()` returns `Some`. `leek-session` (`Session`, `Compilation`)
-is what the binaries call; it drives the pipeline and hands out a database
-handle.
+is what the binaries call.
 
 **Landed.** `leek-db` owns the façade. The LSP is entirely off the pipeline —
 no handler plans one; diagnostics come from `program_diagnostics_with_lints`
 and formatting from an options-keyed `format_query`. `leek-driver` and
 `leek-recipes` are merged into `leek-session`, which now owns one database per
-invocation rather than one per compiled file. The include closure is
-incremental. salsa is an ordinary workspace dependency.
+invocation rather than one per compiled file, and every `Compilation` it hands
+out answers from queries. The include closure is incremental. salsa is an
+ordinary workspace dependency. `leek-bench`, `leek-test-driver` and `leekc`
+are off the pipeline; `leekc` compiles through a `Session` over the one-file
+project `Project::standalone` builds for a path with no `Miku.toml`, which is
+what let its per-`--emit` pipelines go.
 
 ### Reproducing a `Run`'s answers
 
@@ -199,16 +211,13 @@ one that does not.
 
 Tracked on [#99](https://github.com/NyalephTheCat/leekwars/issues/99):
 
-- **Move `Compilation`.** All-or-nothing, not consumer by consumer: a `Run`
-  planned for a late target has already computed everything on the way there,
-  so serving one accessor from a query while another reads the run pays for
-  both. The queries behind every accessor now exist and are pinned against the
-  pipeline, so what remains is the switch itself plus `sources()` and
-  `input()`, which still read the run.
-- **Then `leek-test-driver` and `leekc`.** `leekc` has no session at all — it
-  plans its own pipeline per `--emit` — so it is the last `Run` consumer and
-  the one that decides when `Compilation::get::<A>()` can go.
+- **The last three `Run` consumers.** `leek-scenario` compiles an AI's source
+  to HIR, `leek-migrate` compiles a migrated text to check it still compiles,
+  and `miku dev pipeline` exists to print per-step timings. The first two
+  compile a string with no path; the third has to become stage timings,
+  because a query layer has no steps to time.
 - **Then the deletions.** `Step`, `Context`, `RecipePlan`, `define_step!` and
-  the twelve per-crate `pipeline` modules, and
-  [`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt) shrinks to zero:
-  every entry in it today is an edge this migration removes.
+  the step halves of the twelve per-crate `pipeline` modules — the tracked
+  queries live *inside* those modules, so they move rather than vanish. With
+  them goes [`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt), whose
+  every entry today is an edge this migration removes.

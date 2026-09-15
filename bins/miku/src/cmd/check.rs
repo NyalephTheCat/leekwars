@@ -28,7 +28,10 @@ pub fn run(
         params: RecipeParams::default(),
         color: color.into(),
         format: format.into(),
-        timing: None,
+        // `scope` and `timing` stay at their defaults: every `miku`
+        // subcommand compiles the whole program, and only `build --verbose`
+        // wants timings.
+        ..DriverConfig::default()
     };
     let session = Session::new(&project, config)?;
     let compiled = session.compile_entry()?;

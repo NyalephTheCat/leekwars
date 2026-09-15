@@ -56,6 +56,7 @@ pub fn run(
         color: color.into(),
         format: format.into(),
         timing: sink.clone(),
+        ..DriverConfig::default()
     };
     let session = Session::new(&project, config)?;
     let compiled = session.compile_entry()?;
