@@ -122,8 +122,8 @@ fn int_dispatch(sw: &SwitchStmt, cases: &[SwitchCase<'_>]) -> Option<Vec<Vec<i32
 
 impl super::Emitter<'_> {
     pub(crate) fn emit_switch(&mut self, sw: &SwitchStmt) {
-        let id = self.switch_counter.get();
-        self.switch_counter.set(id + 1);
+        let id = self.shared.switch_counter.get();
+        self.shared.switch_counter.set(id + 1);
         let sw_var = format!("__sw_{id}");
         let si_var = format!("__si_{id}");
         let cases = group_cases(sw);

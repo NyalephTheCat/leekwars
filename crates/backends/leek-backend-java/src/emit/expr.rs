@@ -1296,9 +1296,12 @@ impl Emitter<'_> {
     /// reference at the use site. Repeated references to the same function thus
     /// reuse one instance, so `f == f` compares equal.
     pub(crate) fn fn_singleton(&self, field: String, make: impl FnOnce() -> String) -> String {
-        if !self.fn_singletons.borrow().contains_key(&field) {
+        if !self.shared.fn_singletons.borrow().contains_key(&field) {
             let decl = format!("private FunctionLeekValue {field} = {};", make());
-            self.fn_singletons.borrow_mut().insert(field.clone(), decl);
+            self.shared
+                .fn_singletons
+                .borrow_mut()
+                .insert(field.clone(), decl);
         }
         field
     }
@@ -1307,9 +1310,10 @@ impl Emitter<'_> {
     /// declaration (e.g. a runtime-dispatch helper method) emitted at class-body
     /// end alongside the function singletons.
     pub(crate) fn hoist_member(&self, key: &str, make: impl FnOnce() -> String) {
-        if !self.fn_singletons.borrow().contains_key(key) {
+        if !self.shared.fn_singletons.borrow().contains_key(key) {
             let decl = make();
-            self.fn_singletons
+            self.shared
+                .fn_singletons
                 .borrow_mut()
                 .insert(key.to_string(), decl);
         }
