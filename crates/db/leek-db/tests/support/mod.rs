@@ -1,18 +1,28 @@
 //! Shared fixture for the query tests: a workspace of files and a
 //! database that says which queries actually ran.
 //!
-//! Re-running is observed through salsa's own event stream
-//! ([`EventDb`]) rather than a counter inside one crate's query, so a
-//! test can say "that leaf's lex re-ran and the entry's did not" about
-//! queries owned by three different crates — and so a query can be
-//! moved between crates without rewriting the tests that watch it.
+//! The database half is `leek_db::testing`: `EventDb` and `ran` were
+//! promoted out of this file into the library behind the `testing`
+//! feature, so a consumer outside this crate (the LSP's incremental
+//! tests) watches the *same* mechanism instead of a second copy of it.
+//! They are re-exported here so the test files that already import them
+//! from `support` keep working.
+
+// Each test binary that includes this module uses a different slice of
+// it — `diagnostics.rs` never edits a file, `include_queries.rs` never
+// asks for `EventDb`'s log — and dead-code analysis runs per binary, so
+// every unused-in-this-target item would otherwise be a `-D warnings`
+// error in whichever target happens not to want it.
+#![allow(dead_code, unused_imports)]
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use leek_db::queries::{IncludeGraph, include_graph};
-use leek_db::{Db, SourceFile, WorkspaceFiles};
+use leek_db::{SourceFile, WorkspaceFiles};
 use leek_syntax::Version;
+
+pub use leek_db::testing::{EventDb, ran};
 
 /// A directory that does not exist, so `canonical_or_normalized` takes
 /// its lexical branch for every fixture path — the same branch the
@@ -23,61 +33,6 @@ pub const ROOT: &str = "/leek-db-query-tests";
 /// The fixture path for `name`.
 pub fn vpath(name: &str) -> String {
     format!("{ROOT}/{name}")
-}
-
-// ---- A database that records which queries actually executed ----
-
-/// A [`leek_db::Db`] that logs every `WillExecute` event.
-///
-/// Salsa fires that event when a query body is about to run — i.e. on
-/// a miss or an invalidation, never on a hit — so the log is exactly
-/// the set of queries a revision made the engine recompute.
-#[salsa::db]
-#[derive(Clone)]
-pub struct EventDb {
-    storage: salsa::Storage<Self>,
-    executed: Arc<Mutex<Vec<String>>>,
-}
-
-#[salsa::db]
-impl salsa::Database for EventDb {}
-
-#[salsa::db]
-impl Db for EventDb {}
-
-impl EventDb {
-    pub fn new() -> Self {
-        let executed: Arc<Mutex<Vec<String>>> = Arc::default();
-        let sink = Arc::clone(&executed);
-        Self {
-            storage: salsa::Storage::new(Some(Box::new(move |event: salsa::Event| {
-                if let salsa::EventKind::WillExecute { database_key } = event.kind {
-                    sink.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(format!("{database_key:?}"));
-                }
-            }))),
-            executed,
-        }
-    }
-
-    /// Everything that executed since the last call, emptying the log.
-    pub fn drain(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .executed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-    }
-}
-
-/// How many times `query` executed in the recorded event log.
-///
-/// Salsa renders a tracked function's database key as `name(Id(n))`,
-/// so the query's name is the prefix of the event.
-pub fn ran(events: &[String], query: &str) -> usize {
-    events.iter().filter(|e| e.starts_with(query)).count()
 }
 
 // ---- Fixture ----

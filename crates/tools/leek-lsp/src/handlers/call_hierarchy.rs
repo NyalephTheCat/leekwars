@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 
 use leek_hir::Def;
-use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::salsa::SourceFile;
 use leek_resolver::{ResolveTable, SymbolKind};
 use leek_span::{LineTable, Span};
@@ -36,9 +35,8 @@ pub fn prepare(
 ) -> Option<Vec<lsp::CallHierarchyItem>> {
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
-
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     if let Some(sym) = crate::handlers::resolve_symbol(table, offset)
@@ -94,21 +92,9 @@ pub fn incoming(
         HashMap::new();
 
     for file in crate::handlers::program_scope::program_scope(ws, &item.uri) {
-        let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Hir)
-        else {
-            continue;
-        };
-        let Some(table) = run
-            .get::<leek_resolver::pipeline::ResolveArtifact>()
-            .map(|a| &a.table)
-        else {
-            continue;
-        };
-        let Some(hir) = run.get::<HirArtifact>() else {
-            continue;
-        };
-        let fns = hir_functions(&hir.0);
+        let resolved = crate::analysis::resolved(&ws.db, file.source_file);
+        let table = &resolved.table;
+        let fns = hir_functions(&crate::analysis::hir(&ws.db, file.source_file).hir);
 
         let occs = crate::handlers::occurrences_in_file(
             ws,
@@ -161,14 +147,14 @@ pub fn outgoing(
 ) -> Option<Vec<lsp::CallHierarchyOutgoingCall>> {
     let scope = crate::handlers::program_scope::program_scope(ws, &item.uri);
     let home = scope.iter().find(|f| f.uri == item.uri)?;
-    let run = crate::pipeline::run_on_file(ws, home.source_file, leek_session::Target::Hir)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
-    let hir = run.get::<HirArtifact>()?;
+    let resolved = crate::analysis::resolved(&ws.db, home.source_file);
+    let table = &resolved.table;
+    let hir = crate::analysis::hir(&ws.db, home.source_file);
     let root = crate::analysis::syntax_root(&ws.db, home.source_file);
 
     // The caller's body span (the resolver's full_span is the ident
     // token only, so use the HIR function span).
-    let caller_span = hir.0.defs.iter().find_map(|d| match d {
+    let caller_span = hir.hir.defs.iter().find_map(|d| match d {
         Def::Function(f) if f.name == item.name => Some(f.span),
         _ => None,
     })?;
@@ -250,21 +236,10 @@ fn program_functions(
 ) -> HashMap<String, FuncInfo> {
     let mut out: HashMap<String, FuncInfo> = HashMap::new();
     for file in scope {
-        let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Hir)
-        else {
-            continue;
-        };
-        let Some(table) = run
-            .get::<leek_resolver::pipeline::ResolveArtifact>()
-            .map(|a| &a.table)
-        else {
-            continue;
-        };
-        let Some(hir) = run.get::<HirArtifact>() else {
-            continue;
-        };
-        for def in &hir.0.defs {
+        let resolved = crate::analysis::resolved(&ws.db, file.source_file);
+        let table = &resolved.table;
+        let hir = crate::analysis::hir(&ws.db, file.source_file);
+        for def in &hir.hir.defs {
             let Def::Function(f) = def else { continue };
             if let Some(sym) = top_level_fn_symbol(table, &f.name, f.span) {
                 out.entry(f.name.clone()).or_insert(FuncInfo {

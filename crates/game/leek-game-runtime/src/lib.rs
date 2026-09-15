@@ -33,12 +33,12 @@ pub mod state;
 pub mod weapons;
 
 pub use builtins::{
-    CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, CELL_PLAYER, USE_CRITICAL, USE_FAILED,
-    USE_INVALID_POSITION, USE_INVALID_TARGET, USE_NOT_ENOUGH_TP, USE_SUCCESS, USE_TOO_MANY_USES,
-    call_game_builtin, is_game_builtin,
+    USE_CRITICAL, USE_FAILED, USE_INVALID_POSITION, USE_INVALID_TARGET, USE_NOT_ENOUGH_TP,
+    USE_SUCCESS, USE_TOO_MANY_USES, call_game_builtin, is_game_builtin,
 };
 pub use effect::{ActiveEffect, Effect, EffectKind, Stat};
 pub use entity::Entity;
 pub use fight::{Fight, FightRef, shared};
 pub use host::GameHost;
 pub use rng::OfficialRng;
+pub use state::{CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, CELL_PLAYER};

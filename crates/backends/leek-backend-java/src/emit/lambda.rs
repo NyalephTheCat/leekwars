@@ -50,7 +50,7 @@ impl super::Emitter<'_> {
                 debug_assert!(
                     {
                         let unboxed: std::collections::HashSet<_> = {
-                            let boxed = self.boxed_locals.borrow();
+                            let boxed = &self.analysis.boxed_locals;
                             let ref_boxes = self.ref_boxes.borrow();
                             captures
                                 .iter()
@@ -252,7 +252,7 @@ impl super::Emitter<'_> {
             // plain capture is passed by value as `final Object`. The call site
             // emits the raw mangled name for both — for a boxed local that name
             // *is* the array, so no `[0]` there.
-            if self.boxed_locals.borrow().contains(def_id) {
+            if self.analysis.boxed_locals.contains(def_id) {
                 factory_buf.push_str("final Object[] ");
             } else if self.ref_boxes.borrow().contains(def_id) {
                 // A captured `@`-ref-box param keeps its `Box` type so the body's
@@ -690,79 +690,4 @@ pub(crate) fn lambda_writes_to_outer(
         found
     }
     block.stmts.iter().any(|s| stmt(s, captures))
-}
-
-/// Compute the file-wide set of VarDecl-declared locals that must be heap-boxed
-/// because a lambda captures **and writes** them. LeekScript closures capture
-/// by reference, so a write inside the lambda must be visible in the enclosing
-/// scope; Java's effectively-final rule forbids that for a plain captured
-/// local, so we share a one-element `Object[]` instead.
-///
-/// Lambdas are inspected at **every** nesting depth, on both sides:
-/// - a `var` declared *inside* a lambda body is collected too, so a lambda
-///   nested in that body can box it, and
-/// - a write performed by a deeper lambda is attributed to the capture of
-///   every lambda between it and the declaration, so each factory level
-///   threads the same `Object[]` through.
-///
-/// The other binding forms carry their own box: a captured-written
-/// function/method/constructor/lambda **parameter** binds to a runtime `Box`
-/// at entry (see `emit_function` / `emit_class_method` / `write_lambda_inline`)
-/// and so does a captured foreach binding (see `emit_foreach`). Between them
-/// every binding form a lambda can write is shared, which is what lets
-/// `write_lambda` outline unconditionally.
-///
-/// `DefId`s are unique across the whole HIR file, so one set serves every
-/// function/method/main body.
-///
-/// Both halves are file-level walks over [`leek_hir::walk_file_bodies`]: the
-/// declarations through the statement walk that crosses lambda boundaries, the
-/// lambdas through the expression walk that crosses them *and* a lambda's own
-/// parameter defaults. The hand-rolled `defs` match this replaced enumerated
-/// top-level functions, class methods and constructors and the main block, so
-/// a lambda living in a global initialiser, a field initialiser or a parameter
-/// default was never analysed at all (#253).
-pub(crate) fn collect_boxed_locals(
-    hir: &leek_hir::HirFile,
-    out: &mut std::collections::HashSet<leek_hir::DefId>,
-) {
-    let mut var_decls = std::collections::HashSet::new();
-    leek_hir::walk_file_stmts_deep(hir, &mut |s| {
-        if let Stmt::VarDecl(v) = s {
-            var_decls.insert(v.def);
-        }
-    });
-
-    let mut captured_written = std::collections::HashSet::new();
-    leek_hir::walk_file_exprs(hir, &mut |e| {
-        let ExprKind::Lambda(l) = &e.kind else {
-            return;
-        };
-        // An expression-bodied lambda is always emitted inline, so it needs no
-        // box of its own; the walk reaches any block-bodied lambda inside it
-        // on its own.
-        let LambdaBody::Block(b) = &l.body else {
-            return;
-        };
-        let mut inner: std::collections::HashSet<_> = l.params.iter().map(|p| p.def).collect();
-        collect_inner_decls(b, &mut inner);
-        // `lambda_outer_captures` / `lambda_writes_to_outer` both see through
-        // nested lambdas, so a write a deeper lambda performs is attributed to
-        // this lambda's capture as well — every factory level then declares
-        // the box as a parameter.
-        for c in lambda_outer_captures(b, &inner) {
-            let one = std::iter::once(c).collect();
-            if lambda_writes_to_outer(b, &one) {
-                captured_written.insert(c);
-            }
-        }
-    });
-
-    // A boxable local is one that is both a `var` declaration and is
-    // captured-and-written by some lambda.
-    out.extend(
-        captured_written
-            .into_iter()
-            .filter(|d| var_decls.contains(d)),
-    );
 }

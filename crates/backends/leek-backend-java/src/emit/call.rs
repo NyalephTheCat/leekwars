@@ -40,7 +40,7 @@ impl super::Emitter<'_> {
         // Read the shadow's value as a FunctionLeekValue and
         // `execute(...)` it.
         if let Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &c.callee
-            && self.shadowed_builtins.borrow().contains(name)
+            && self.analysis.shadowed_builtins.contains(name)
         {
             buf.push_str("(__shadows.containsKey(\"");
             buf.push_str(name);
@@ -599,7 +599,7 @@ impl super::Emitter<'_> {
                 // each written-`@` position so the lambda's `@a` aliases — and
                 // mutates — the caller's variable.
                 let positions = match name_ref {
-                    NameRef::Local(id) => self.var_ref_positions.get(&id.0).cloned(),
+                    NameRef::Local(id) => self.analysis.var_ref_positions.get(&id.0).cloned(),
                     _ => None,
                 };
                 self.write_execute_args_maybe_ref(buf, &c.args, positions.as_deref());

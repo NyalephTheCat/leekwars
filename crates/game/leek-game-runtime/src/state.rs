@@ -25,6 +25,21 @@ use crate::outcome::{entity_snapshot, map_json};
 use crate::rng::OfficialRng;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Fight constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Cell contents (`CELL_EMPTY`, `CELL_ENTITY`, `CELL_OBSTACLE`, `CELL_PLAYER`),
+// what `getCellContent` answers with. Generated from the same table the
+// language side resolves and folds, so the engine's answers and an AI's
+// `CELL_*` constants cannot drift apart — see tools/game-builtin-extract.sh.
+//
+// They live here, next to the official [`State`] they describe, rather than in
+// `crate::builtins`: that module is the approximate engine and is scheduled
+// for deletion with the `Fight` sandbox (#348), and the official
+// `getCellContent` must keep answering afterwards.
+include!("consts_gen.rs");
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Stats  (leek/Stats.java)
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -166,7 +166,7 @@ impl Emitter<'_> {
             // v2+ — upstream emits `Object u_x = 5l; ops(0);`, no declaration
             // tick. v1 keeps the +1 (the Box ctor's runtime charge).
             let base = u32::from(
-                !self.synthetic_default_decls.contains(&v.def)
+                !self.analysis.synthetic_default_decls.contains(&v.def)
                     || matches!(self.opts.version, leek_syntax::Version::V1),
             );
             let raw = self.v1_clone_with_ops(e, base);
@@ -223,7 +223,7 @@ impl Emitter<'_> {
                 };
                 self.writer
                     .add_line_at(&format!("Box {name} = {ctor};"), line);
-            } else if self.boxed_locals.borrow().contains(&v.def) {
+            } else if self.analysis.boxed_locals.contains(&v.def) {
                 // Heap-box: a nested lambda captures-and-writes this local, so
                 // it's shared through a one-element `Object[]`. Reads/writes
                 // elsewhere go via `[0]` (see `write_name`).
@@ -299,7 +299,7 @@ impl Emitter<'_> {
     /// hands its caller a `Box`; `var x = f()` compiles upstream to
     /// `new Box(ai, f())` whose 2-arg ctor clones Box inputs. We return raw
     /// values instead, so mirror that dynamic clone here: wrap the call in
-    /// `copy(...)` when the callee is in the `v1_box_returners` set.
+    /// `copy(...)` when the callee is in the `Analysis::returns_box_*` sets.
     /// Charge-identical (`copy` = upstream `LeekOperations.clone`, free for
     /// scalars) and breaks the alias the caller must not observe
     /// (OPS_DRIFT L2958/L2990/L3000/L3172/L3611).
@@ -312,12 +312,16 @@ impl Emitter<'_> {
     }
 
     /// Whether `e` is a call whose result is a `Box` upstream (callee returns
-    /// a plain variable, directly or transitively). See [`super::v1_box_returners`].
+    /// a plain variable, directly or transitively). See `crate::analysis`.
     fn call_returns_box(&self, e: &Expr) -> bool {
         if let ExprKind::Call(c) = &e.kind {
             match &c.callee {
-                Callee::Function(NameRef::Function(fid)) => self.returns_box_fns.contains(&fid.0),
-                Callee::Function(NameRef::Local(id)) => self.returns_box_vars.contains(&id.0),
+                Callee::Function(NameRef::Function(fid)) => {
+                    self.analysis.returns_box_fns.contains(&fid.0)
+                }
+                Callee::Function(NameRef::Local(id)) => {
+                    self.analysis.returns_box_vars.contains(&id.0)
+                }
                 _ => false,
             }
         } else {
@@ -534,7 +538,7 @@ impl Emitter<'_> {
                     } else {
                         format!("Box {name} = new Box({ai}, {inner})")
                     }
-                } else if self.boxed_locals.borrow().contains(&v.def) {
+                } else if self.analysis.boxed_locals.contains(&v.def) {
                     // Box the loop variable too if a nested lambda captures-and-
                     // writes it, so its declaration matches the `[0]` accesses
                     // `write_name` emits elsewhere (consistency with `emit_var_decl`).
@@ -738,7 +742,7 @@ impl Emitter<'_> {
         if !self.is_ref_box(&bind.target)
             && bind
                 .local_def()
-                .is_some_and(|d| self.boxed_locals.borrow().contains(&d))
+                .is_some_and(|d| self.analysis.boxed_locals.contains(&d))
         {
             return format!("{local}[0] = {value}");
         }
@@ -776,13 +780,8 @@ impl Emitter<'_> {
             outline_counter: std::cell::Cell::new(self.outline_counter.get()),
             initializing_def: std::cell::Cell::new(self.initializing_def.get()),
             self_rec_def: std::cell::Cell::new(self.self_rec_def.get()),
-            shadowed_builtins: std::cell::RefCell::new(self.shadowed_builtins.borrow().clone()),
-            boxed_locals: std::cell::RefCell::new(self.boxed_locals.borrow().clone()),
             current_class: std::cell::Cell::new(self.current_class.get()),
-            var_ref_positions: self.var_ref_positions.clone(),
-            returns_box_fns: self.returns_box_fns.clone(),
-            returns_box_vars: self.returns_box_vars.clone(),
-            synthetic_default_decls: self.synthetic_default_decls.clone(),
+            analysis: self.analysis,
             diagnostics: std::cell::RefCell::new(Vec::new()),
             cur_span: std::cell::Cell::new(self.cur_span.get()),
         };

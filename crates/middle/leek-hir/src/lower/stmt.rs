@@ -336,8 +336,8 @@ impl Lowerer {
     }
 
     pub(crate) fn lower_do_while(&mut self, dw: &ast::DoWhileStmt, span: Span) -> Stmt {
-        let body = self.lower_stmt_or_empty(dw.syntax().children().find_map(AstStmt::cast), span);
-        let cond = self.lower_expr_or_null(dw.syntax().children().find_map(AstExpr::cast), span);
+        let body = self.lower_stmt_or_empty(dw.body(), span);
+        let cond = self.lower_expr_or_null(dw.condition(), span);
         Stmt::DoWhile(DoWhileStmt { body, cond, span })
     }
 

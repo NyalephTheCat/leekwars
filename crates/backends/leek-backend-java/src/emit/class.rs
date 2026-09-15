@@ -208,12 +208,10 @@ impl<'a> super::Emitter<'a> {
         // The decl shape is charge-identical to upstream's: `ops(<default>,
         // cost+1)` statically vs. Box-ctor 1 + `ops(cost);` runtime.
         let decls: Vec<leek_hir::Stmt> = if f.body.is_some() {
-            // Mark the spliced defs so `emit_var_decl` knows to drop the +1
-            // declaration tick at v2+ (upstream binds an omitted param with
-            // only the default expression's own cost).
-            for p in &f.params[arity..] {
-                self.synthetic_default_decls.insert(p.def);
-            }
+            // The spliced defs are already in `Analysis::synthetic_default_decls`
+            // — that is what tells `emit_var_decl` to drop the +1 declaration
+            // tick at v2+ (upstream binds an omitted param with only the default
+            // expression's own cost).
             f.params[arity..]
                 .iter()
                 .map(|p| {

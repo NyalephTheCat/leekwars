@@ -28,14 +28,19 @@
 //!   *down* on this crate.
 //!
 //! Most of what [`queries`] exposes is a re-export of a query that
-//! already exists somewhere else. The exceptions are [`include`] and
-//! [`program`], the queries this crate *owns*: both span several files,
-//! so neither can be a per-file query in a pass crate, and both need
-//! [`WorkspaceFiles`] — an input, which lives here.
+//! already exists somewhere else. The exceptions are [`include`],
+//! [`program`] and [`diagnostics`], the queries this crate *owns*: the
+//! first two span several files, so neither can be a per-file query in
+//! a pass crate, and both need [`WorkspaceFiles`] — an input, which
+//! lives here. The third composes every other one, so it can only live
+//! where they all are.
 
+pub mod diagnostics;
 pub mod include;
 pub mod program;
 pub mod queries;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use leek_pipeline::salsa::{Db, LeekDb, ProgramClasses, SourceFile, WorkspaceFiles};
 
@@ -100,6 +105,15 @@ mod tests {
                 .defs
                 .is_empty()
         );
+
+        // The assembled streams over all of the above, and the filter a
+        // consumer takes one file's slice with. `tests/diagnostics.rs`
+        // pins what is *in* them; this only says they are reachable
+        // through the façade like everything else.
+        assert!(queries::diagnostics_without_lints(&db, file).is_empty());
+        let program = queries::program_diagnostics(&db, files, file, Version::V4);
+        assert!(program.is_empty());
+        assert!(queries::for_source(&program, file.source(&db)).is_empty());
     }
 
     /// A workspace holding exactly `file`, keyed by its canonical path.

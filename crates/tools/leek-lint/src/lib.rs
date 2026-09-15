@@ -34,9 +34,15 @@ pub mod registry;
 pub mod rules;
 
 pub use allow::{AllowMap, collect_allows};
-pub use group::{LintGroup, LintOptions};
+pub use group::{LintGroup, LintGroups, LintOptions};
 pub use pass::{Body, BodyKind, LintCx, LintMeta, LintPass, run_passes};
 pub use pipeline::{Lint, LintFindings};
+/// The tracked queries, when the `salsa` feature is on: one file's
+/// lint findings, and the complete diagnostic stream that appends them
+/// to `leek-db`'s. See [`pipeline`] for why the second one lives here
+/// and not in `leek-db`.
+#[cfg(feature = "salsa")]
+pub use pipeline::{diagnostics_with_lints, lint_query};
 
 use leek_diagnostics::Diagnostic;
 use leek_hir::HirFile;

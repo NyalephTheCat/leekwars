@@ -24,6 +24,7 @@ use leek_text::EscapeMode;
 use leek_types::Type;
 use std::fmt::Write as _;
 
+use crate::analysis::Analysis;
 use crate::mangle;
 use crate::options::Options;
 use crate::writer::JavaWriter;
@@ -70,7 +71,8 @@ pub fn emit(hir: &HirFile, opts: &Options) -> EmittedJava {
         hir
     };
 
-    let mut em = Emitter::new(opts, hir_ref);
+    let analysis = Analysis::compute(hir_ref, opts.version);
+    let mut em = Emitter::new(opts, hir_ref, &analysis);
     em.emit_file();
     let class_name = opts.class_name();
     let diagnostics = em.diagnostics.take();
@@ -147,53 +149,19 @@ pub(crate) struct Emitter<'a> {
     /// emits `_self_box[0]` (the array-box holding the
     /// in-construction lambda) instead of the user-facing name.
     self_rec_def: std::cell::Cell<Option<leek_hir::DefId>>,
-    /// Builtin names the source reassigns somewhere (`push = 1`,
-    /// `cos = function(...) {...}`). At v1 upstream allows this
-    /// and subsequent reads/calls of the name see the user's
-    /// value instead of the builtin. We route those through a
-    /// `__shadows` HashMap field on the AI class — see
-    /// `emit_file`. Populated by `collect_shadowed_builtins`
-    /// before the file's statements emit, and read-only from then
-    /// on: the fallback arm of a shadow ternary is emitted through
-    /// `write_call_unshadowed` / `write_name_unshadowed` rather
-    /// than by clearing this set and re-entering.
-    shadowed_builtins: std::cell::RefCell<std::collections::HashSet<String>>,
-    /// Function-local variables that must be heap-boxed (`Object[]`) because a
-    /// directly-nested lambda captures *and writes* them. LeekScript closures
-    /// capture by reference, so the write must be visible in the enclosing
-    /// scope — Java's effectively-final rule forbids that for a plain captured
-    /// local, so the variable is shared through a 1-element array and every
-    /// read/write goes via `[0]` (the same trick as `_self_box`). Populated
-    /// once by `collect_boxed_locals` in `emit_file`. `DefId`s are unique
-    /// file-wide, so a single set serves every function.
-    boxed_locals: std::cell::RefCell<std::collections::HashSet<leek_hir::DefId>>,
     /// The user class whose method body is currently being emitted, if any.
     /// Lets `this.field` / `this.method(...)` resolve to direct Java field /
     /// method access (the generated class has real Java fields + `u_<m>`
     /// methods) instead of the reflective `getField` / `callObjectAccess`
     /// fallback used for `Object`-typed bases. `None` outside a class method.
     current_class: std::cell::Cell<Option<&'a leek_hir::Class>>,
-    /// v1 only. `var f = function(@a){…}` bindings → which call positions are
-    /// written-`@` (so an `execute(f, …)` arm passes the box for a ref-box arg
-    /// there, aliasing the caller's variable). Keyed by the var's `DefId.0`.
-    /// Empty at v2+ (no by-ref propagation). Built by [`caller_box_locals`].
-    var_ref_positions: std::collections::HashMap<u32, Vec<bool>>,
-    /// v1 only. Callees whose call *result* is a `Box` upstream: their body
-    /// `return`s a plain variable (every v1 local is a Box there) — directly
-    /// or transitively through another such callee. A v1 `var x = f()` then
-    /// mirrors upstream's `new Box(ai, f())` clone-if-box with a `copy(...)`
-    /// wrapper (see `v1_store_clone`). Two id spaces: named-function defs
-    /// (index into `hir.defs`) and lambda-holding local vars (`DefId.0`).
-    /// Built by [`v1_box_returners`]; empty at v2+.
-    returns_box_fns: std::collections::HashSet<u32>,
-    returns_box_vars: std::collections::HashSet<u32>,
-    /// Param defs spliced as synthetic body-leading locals into a
-    /// default-param overload (see `emit_default_overload`). At v2+ upstream
-    /// binds an omitted param with only the default expression's own cost
-    /// (`ops(0);` for a literal) — no +1 declaration tick — so
-    /// `emit_var_decl` drops its base cost for these. v1 keeps the +1 (it
-    /// matches the Box ctor's runtime charge).
-    synthetic_default_decls: std::collections::HashSet<leek_hir::DefId>,
+    /// Everything about this file that emission only ever *reads* — the
+    /// shadowed builtins, the boxed locals, the two v1 by-ref analyses and the
+    /// synthetic default-param decls. Computed once by [`Analysis::compute`]
+    /// before emission starts and shared by reference, so a scratch emitter
+    /// (see `render_block_to_string`) costs a pointer copy rather than six set
+    /// clones per block lambda (#307).
+    analysis: &'a Analysis,
     /// Constructs this run could not render faithfully. `RefCell` because
     /// every `write_*` method takes `&self` — the same reason
     /// `switch_counter` and `lambda_depth` are `Cell`s. Drained into
@@ -209,36 +177,18 @@ pub(crate) struct Emitter<'a> {
 mod call;
 mod class;
 mod expr;
-mod lambda;
+pub(crate) mod lambda;
 mod literals;
 mod stmt;
 mod switch;
 
 impl<'a> Emitter<'a> {
-    pub(crate) fn new(opts: &'a Options, hir: &'a HirFile) -> Self {
+    pub(crate) fn new(opts: &'a Options, hir: &'a HirFile, analysis: &'a Analysis) -> Self {
         // v1: a local passed as a *mutated* `@`-ref argument must be a runtime
         // `Box` at its declaration so the callee (or a closure it returns)
         // aliases and mutates it (`function f(@a){ -> { a += 2 } } var x = 10;
-        // f(x)(); return x` → 12). Seeds `ref_boxes` (the read/write routing) and
-        // `var_ref_positions` (local-callee dispatch). No-op at v2+.
-        let (caller_boxes, var_ref_positions) = if matches!(opts.version, leek_syntax::Version::V1)
-        {
-            caller_box_locals(hir)
-        } else {
-            (
-                std::collections::HashSet::new(),
-                std::collections::HashMap::new(),
-            )
-        };
-        let (returns_box_fns, returns_box_vars) =
-            if matches!(opts.version, leek_syntax::Version::V1) {
-                v1_box_returners(hir)
-            } else {
-                (
-                    std::collections::HashSet::new(),
-                    std::collections::HashSet::new(),
-                )
-            };
+        // f(x)(); return x` → 12). `ref_boxes` starts at that analysed set and
+        // grows as `@` params are rebound during emission; empty at v2+.
         Self {
             opts,
             hir,
@@ -250,17 +200,12 @@ impl<'a> Emitter<'a> {
             outlined: std::cell::RefCell::new(Vec::new()),
             fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             in_outlined: std::cell::Cell::new(false),
-            ref_boxes: std::cell::RefCell::new(caller_boxes),
+            ref_boxes: std::cell::RefCell::new(analysis.caller_boxes.clone()),
             outline_counter: std::cell::Cell::new(0),
             initializing_def: std::cell::Cell::new(None),
             self_rec_def: std::cell::Cell::new(None),
-            shadowed_builtins: std::cell::RefCell::new(std::collections::HashSet::new()),
-            boxed_locals: std::cell::RefCell::new(std::collections::HashSet::new()),
             current_class: std::cell::Cell::new(None),
-            var_ref_positions,
-            returns_box_fns,
-            returns_box_vars,
-            synthetic_default_decls: std::collections::HashSet::new(),
+            analysis,
             diagnostics: std::cell::RefCell::new(Vec::new()),
             cur_span: std::cell::Cell::new(Span::synthetic()),
         }
@@ -358,16 +303,6 @@ impl<'a> Emitter<'a> {
 
     pub(crate) fn emit_file(&mut self) {
         let hir = self.hir;
-        // Pre-scan for builtin reassignments (`push = 1`,
-        // `cos = function() {...}`). At v1 upstream allows
-        // reassigning a builtin name; the new value shadows the
-        // builtin for subsequent reads / calls. We route those
-        // through an instance HashMap on the AI class.
-        collect_shadowed_builtins(hir, &mut self.shadowed_builtins.borrow_mut());
-        // Pre-scan for locals a directly-nested lambda captures *and writes*;
-        // those become shared `Object[]` boxes (see `boxed_locals`).
-        lambda::collect_boxed_locals(hir, &mut self.boxed_locals.borrow_mut());
-
         self.writer.add_line("import leekscript.runner.*;");
         self.writer.add_line("import leekscript.runner.values.*;");
         self.writer.add_line("import leekscript.runner.classes.*;");
@@ -380,7 +315,7 @@ impl<'a> Emitter<'a> {
                 self.writer.add_line(&format!("import {ns};"));
             }
         }
-        if !self.shadowed_builtins.borrow().is_empty() {
+        if !self.analysis.shadowed_builtins.is_empty() {
             self.writer.add_line("import java.util.HashMap;");
         }
         self.writer.newline();
@@ -419,9 +354,9 @@ impl<'a> Emitter<'a> {
         }
         // `__shadows` field — holds user-assigned values for any
         // builtin name the source reassigns. See
-        // `collect_shadowed_builtins`. Empty when the program
+        // `Analysis::shadowed_builtins`. Empty when the program
         // doesn't reassign any builtin.
-        if !self.shadowed_builtins.borrow().is_empty() {
+        if !self.analysis.shadowed_builtins.is_empty() {
             self.writer
                 .add_line("private final HashMap<String, Object> __shadows = new HashMap<>();");
         }
@@ -1150,342 +1085,8 @@ pub(crate) fn java_class_name(ty: &Type) -> &'static str {
     }
 }
 
-/// Collect every builtin name this file *writes*.
-///
-/// A write to a name-keyed reference (`NameRef::Builtin` / `Unresolved`) has
-/// no Java variable behind it, so the emitter routes it through the AI class's
-/// `__shadows` map and makes every later read or call of that name test the
-/// map first. Two positions write a name that way:
-///
-/// - an **assignment** whose left-hand side is such a reference. Every form in
-///   the family counts, not just plain `=`: `cos += 1` stores to `cos` as
-///   surely as `cos = 1` does, and the store site (`write_place_store`) needs
-///   the name in this set either way.
-/// - a bare **`foreach` binding** (`for (push in […])`), which stores one slot
-///   per iteration into whatever the name already denotes with no assignment
-///   anywhere in the file (#371). The bind targets are l-values that
-///   `walk_stmt_child_exprs` deliberately does not report, so they are asked
-///   for by name through [`lambda::foreach_bind_targets`], the same helper
-///   every other walk in this backend uses for the question.
-///
-/// Both walks are rooted at [`leek_hir::walk_file_bodies`] (through the
-/// expression- and statement-shaped conveniences over it), so a class method,
-/// a constructor, a field initialiser, a global initialiser and a parameter
-/// default all count. The hand-rolled walker this replaced re-derived the
-/// whole `ExprKind` descent and rooted it at the main block plus
-/// `Def::Function` bodies, so a builtin reassigned anywhere inside a class
-/// body was invisible (#253).
-///
-/// One gap is inherited from [`leek_hir::walk_file_stmts_deep`] and documented
-/// there: a `foreach` inside a lambda that is itself nested in *another
-/// lambda's* parameter default contributes no statements. The assignment walk
-/// has no such gap.
-pub(crate) fn collect_shadowed_builtins(
-    hir: &leek_hir::HirFile,
-    out: &mut std::collections::HashSet<String>,
-) {
-    /// The builtin name a write to `target` shadows, when `target` is one of
-    /// the two name-keyed references — the exact pair `write_place_store` and
-    /// `write_name` test the set with.
-    fn shadowed_name(target: &Expr) -> Option<&str> {
-        match &target.kind {
-            ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) => Some(name),
-            _ => None,
-        }
-    }
-    leek_hir::walk_file_exprs(hir, &mut |e| {
-        if let ExprKind::Binary(op, lhs, _) = &e.kind
-            && op.is_assignment()
-            && let Some(name) = shadowed_name(lhs)
-        {
-            out.insert(name.to_owned());
-        }
-    });
-    leek_hir::walk_file_stmts_deep(hir, &mut |s| {
-        if let Stmt::Foreach(fe) = s {
-            out.extend(
-                lambda::foreach_bind_targets(fe)
-                    .filter_map(shadowed_name)
-                    .map(str::to_owned),
-            );
-        }
-    });
-}
-
 pub(crate) fn is_div_expr(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Binary(BinaryOp::Div, _, _))
-}
-/// `(locals to box, var-binding → written-`@` positions)` — see
-/// [`caller_box_locals`].
-pub(crate) type CallerBoxInfo = (
-    std::collections::HashSet<leek_hir::DefId>,
-    std::collections::HashMap<u32, Vec<bool>>,
-);
-
-/// v1 by-ref propagation analysis. A local passed as an argument at ANY `@`-ref
-/// parameter position binds to a runtime `Box` at its declaration, so the
-/// callee can alias it (upstream boxes *every* v1 local; we only need the ones
-/// a `@` param might alias — the 2-arg Box ctor's runtime `ops(1)` replaces
-/// the plain decl's static `ops(init, 1)`, so plain decls stay
-/// charge-equivalent without boxing). Returns the set of such locals (seeded
-/// into `ref_boxes`) plus, for `var f = function(@a){…}` bindings, the `@`
-/// positions keyed by the var's def (so an `execute(f, …)` call can pass the
-/// bare box at the right argument).
-///
-/// Foreach bindings are exempt: `emit_foreach` declares them as plain
-/// `Object` slots with a static setup charge, so boxing them here would
-/// emit `.get()` reads against a non-Box declaration.
-pub(crate) fn caller_box_locals(hir: &HirFile) -> CallerBoxInfo {
-    use leek_hir::Param;
-    use std::collections::{HashMap, HashSet};
-
-    fn ref_positions(params: &[Param]) -> Vec<bool> {
-        params.iter().map(|p| p.is_by_ref).collect()
-    }
-
-    // `var f = function(@a){…}` bindings → the lambda's `@` positions, so a
-    // `f(b)` call resolves. Also the assign form (`var aux; aux =
-    // function(@a){…}` — the usual v1 recursion idiom). Store the owned
-    // `Vec<bool>` (not a reference) so it outlives the walk.
-    let mut var_lambda_pos: HashMap<u32, Vec<bool>> = HashMap::new();
-    fn collect_var_lambdas(s: &Stmt, m: &mut HashMap<u32, Vec<bool>>) {
-        match s {
-            Stmt::VarDecl(v) => {
-                if let Some(init) = &v.init
-                    && let ExprKind::Lambda(l) = &init.kind
-                {
-                    m.insert(v.def.0, ref_positions(&l.params));
-                }
-            }
-            Stmt::Expr(e) => {
-                if let ExprKind::Binary(leek_hir::BinaryOp::Assign, lhs, rhs) = &e.kind
-                    && let ExprKind::Name(NameRef::Local(id)) = &lhs.kind
-                    && let ExprKind::Lambda(l) = &rhs.kind
-                {
-                    m.insert(id.0, ref_positions(&l.params));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Foreach bindings can't take the Box declaration shape (see doc above) —
-    // collect their defs so the marking pass skips them.
-    fn collect_foreach_binds(s: &Stmt, out: &mut HashSet<leek_hir::DefId>) {
-        if let Stmt::Foreach(fe) = s {
-            out.extend(
-                fe.key
-                    .iter()
-                    .chain([&fe.value])
-                    .filter_map(leek_hir::ForeachBind::local_def),
-            );
-        }
-    }
-
-    // `walk_file_stmts_deep`, not `walk_file_stmts`: by-ref propagation has to
-    // see recursive `aux(copy, …)` calls *inside* the lambda that defines
-    // `aux` — that's where the `@`-aliased locals are declared. What changed
-    // is only where the walk starts. This used to hand-list main + top-level
-    // functions + class methods and constructors, which left a `@`-ref call in
-    // a field initialiser, a global initialiser or a parameter default
-    // unanalysed; `walk_file_bodies` underneath answers that once, for every
-    // walk in this crate (#253).
-    leek_hir::walk_file_stmts_deep(hir, &mut |s| collect_var_lambdas(s, &mut var_lambda_pos));
-
-    let mut foreach_binds: HashSet<leek_hir::DefId> = HashSet::new();
-    leek_hir::walk_file_stmts_deep(hir, &mut |s| collect_foreach_binds(s, &mut foreach_binds));
-
-    // Resolve each call's `@` positions, then mark the local args sitting in
-    // them. `walk_file_exprs` carries the same lambda-crossing contract the
-    // hand-rolled descent here had, and closes the two holes it left: a
-    // lambda's own parameter defaults, and the roots above.
-    let mut out: HashSet<leek_hir::DefId> = HashSet::new();
-    leek_hir::walk_file_exprs(hir, &mut |e| {
-        let ExprKind::Call(c) = &e.kind else { return };
-        let positions = match &c.callee {
-            Callee::Function(NameRef::Function(fid)) => match hir.defs.get(fid.0 as usize) {
-                Some(Def::Function(f)) => Some(ref_positions(&f.params)),
-                _ => None,
-            },
-            Callee::Function(NameRef::Local(fid)) => var_lambda_pos.get(&fid.0).cloned(),
-            _ => None,
-        };
-        if let Some(positions) = positions {
-            for (i, arg) in c.args.iter().enumerate() {
-                if positions.get(i).copied().unwrap_or(false)
-                    && let ExprKind::Name(NameRef::Local(id)) = &arg.kind
-                {
-                    out.insert(*id);
-                }
-            }
-        }
-        // `t[i](args)` — dynamically dispatched through
-        // `executeArrayAccess`, so the callee (and its `@` positions)
-        // is unknowable statically. Upstream passes every variable arg
-        // as its Box and the callee's `instanceof Box` binding decides
-        // aliasing (an `@` param aliases for free; a by-value param
-        // copies). Mark every local arg so the call site can hand over
-        // the box (charge-neutral for by-value callees — they copy the
-        // content either way).
-        if let Callee::Expr(inner) = &c.callee
-            && matches!(inner.kind, ExprKind::Index(..))
-        {
-            for arg in &c.args {
-                if let ExprKind::Name(NameRef::Local(id)) = &arg.kind {
-                    out.insert(*id);
-                }
-            }
-        }
-    });
-
-    for d in &foreach_binds {
-        out.remove(d);
-    }
-    (out, var_lambda_pos)
-}
-
-/// v1 box-return analysis. Upstream boxes *every* v1 local, so a function or
-/// lambda whose `return` hands back a plain variable (or an array/object
-/// element — legacy array `get` returns the element's `Box`) returns a `Box`
-/// to its caller; `var x = f()` then compiles upstream to `new Box(ai, f())`
-/// whose 2-arg ctor clones Box inputs. We return raw (unboxed) values, so the
-/// store sites consult this set to add the equivalent `copy(...)` (see
-/// `v1_store_clone`). A return of a *call* propagates the callee's verdict
-/// (`return cellsInRange(10)` forwards the inner Box untouched), hence the
-/// fixpoint. Returns `(named-function defs, lambda-holding var defs)`, both
-/// keyed by `DefId.0` in their respective id spaces.
-pub(crate) fn v1_box_returners(
-    hir: &HirFile,
-) -> (
-    std::collections::HashSet<u32>,
-    std::collections::HashSet<u32>,
-) {
-    use std::collections::{HashMap, HashSet};
-
-    enum Dep {
-        Fn(u32),
-        Var(u32),
-    }
-    #[derive(Default)]
-    struct Ev {
-        direct: bool,
-        deps: Vec<Dep>,
-    }
-
-    fn expr_evidence(e: &Expr, ev: &mut Ev) {
-        match &e.kind {
-            // A variable (Box upstream) or an element read (legacy array
-            // `get` returns the element Box).
-            ExprKind::Name(NameRef::Local(_) | NameRef::Global(_))
-            | ExprKind::Field(..)
-            | ExprKind::Index(..) => ev.direct = true,
-            ExprKind::Call(c) => match &c.callee {
-                Callee::Function(NameRef::Function(fid)) => ev.deps.push(Dep::Fn(fid.0)),
-                Callee::Function(NameRef::Local(id)) => ev.deps.push(Dep::Var(id.0)),
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    // Top-level returns of a body — recurse through control flow but NOT into
-    // nested lambdas (their returns belong to the lambda, not this callee).
-    fn stmt_evidence(s: &Stmt, ev: &mut Ev) {
-        if let Stmt::Return(Some(e)) = s {
-            expr_evidence(e, ev);
-        }
-        leek_hir::visit::walk_stmt_child_stmts(s, &mut |c| stmt_evidence(c, ev));
-    }
-    fn body_evidence(stmts: &[Stmt]) -> Ev {
-        let mut ev = Ev::default();
-        for s in stmts {
-            stmt_evidence(s, &mut ev);
-        }
-        ev
-    }
-    fn lambda_evidence(l: &leek_hir::LambdaExpr) -> Ev {
-        match &l.body {
-            leek_hir::LambdaBody::Block(b) => body_evidence(&b.stmts),
-            leek_hir::LambdaBody::Expr(e) => {
-                let mut ev = Ev::default();
-                expr_evidence(e, &mut ev);
-                ev
-            }
-        }
-    }
-
-    let mut fn_ev: HashMap<u32, Ev> = HashMap::new();
-    let mut var_ev: HashMap<u32, Ev> = HashMap::new();
-
-    // The per-function evidence table is keyed by index into `hir.defs` —
-    // the id space `returns_box_fns` is consulted in — so it stays a `defs`
-    // scan: it is a table, not a walk over the file's code.
-    for (i, d) in (0u32..).zip(hir.defs.iter()) {
-        if let Def::Function(f) = d
-            && let Some(b) = &f.body
-        {
-            fn_ev.insert(i, body_evidence(&b.stmts));
-        }
-    }
-    let mut collect_var_lambda = |s: &Stmt| match s {
-        Stmt::VarDecl(v) => {
-            if let Some(init) = &v.init
-                && let ExprKind::Lambda(l) = &init.kind
-            {
-                var_ev.insert(v.def.0, lambda_evidence(l));
-            }
-        }
-        Stmt::Expr(e) => {
-            if let ExprKind::Binary(leek_hir::BinaryOp::Assign, lhs, rhs) = &e.kind
-                && let ExprKind::Name(NameRef::Local(id)) = &lhs.kind
-                && let ExprKind::Lambda(l) = &rhs.kind
-            {
-                var_ev.insert(id.0, lambda_evidence(l));
-            }
-        }
-        _ => {}
-    };
-    // Deep walk (crosses lambda boundaries) for *finding* the candidates —
-    // `var aux = function(){…}` bindings can live inside other lambdas — now
-    // rooted at every body in the file through `walk_file_bodies`. The
-    // hand-listed main + top-level functions this replaced reached neither a
-    // class body nor a parameter default (#253).
-    leek_hir::walk_file_stmts_deep(hir, &mut collect_var_lambda);
-
-    // Fixpoint over the call-forwarding deps (cycles settle at "no").
-    let mut fns: HashSet<u32> = fn_ev
-        .iter()
-        .filter(|(_, e)| e.direct)
-        .map(|(k, _)| *k)
-        .collect();
-    let mut vars: HashSet<u32> = var_ev
-        .iter()
-        .filter(|(_, e)| e.direct)
-        .map(|(k, _)| *k)
-        .collect();
-    loop {
-        let mut changed = false;
-        let resolved = |d: &Dep, fns: &HashSet<u32>, vars: &HashSet<u32>| match d {
-            Dep::Fn(id) => fns.contains(id),
-            Dep::Var(id) => vars.contains(id),
-        };
-        for (k, e) in &fn_ev {
-            if !fns.contains(k) && e.deps.iter().any(|d| resolved(d, &fns, &vars)) {
-                fns.insert(*k);
-                changed = true;
-            }
-        }
-        for (k, e) in &var_ev {
-            if !vars.contains(k) && e.deps.iter().any(|d| resolved(d, &fns, &vars)) {
-                vars.insert(*k);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    (fns, vars)
 }
 
 pub(crate) fn ends_with_return(stmts: &[Stmt], emit_ops: bool) -> bool {

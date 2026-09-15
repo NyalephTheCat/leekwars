@@ -127,18 +127,23 @@ pub(crate) fn occurrences_in_file(
     kind: SymbolKind,
 ) -> Vec<Occurrence> {
     let mut out: Vec<Occurrence> = Vec::new();
-    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_session::Target::Resolved)
-    else {
-        return out;
-    };
-    let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
-        return out;
-    };
-    let table = &art.table;
+    let resolved = crate::analysis::resolved(&ws.db, source_file);
+    let table = &resolved.table;
     let root = crate::analysis::syntax_root(&ws.db, source_file);
-    let text = source_file.text(&ws.db);
-    let line_table = leek_span::LineTable::new(text);
-    let pm = crate::util::position::PosMap::new(&line_table, text);
+    // Reuse the workspace's line table. This scan runs once per file in
+    // the program, and building a table means walking every line of the
+    // file — the workspace already did that once, at the mutation that
+    // produced this revision. The fallback covers a file the target list
+    // does not hold; every caller here passes a file that came *from*
+    // that list, so it is a total function rather than a live path.
+    let own_table;
+    let pm = if let Some(pm) = ws.pos_map_for(source_file) {
+        pm
+    } else {
+        let text = source_file.text(&ws.db);
+        own_table = leek_span::LineTable::new(text);
+        crate::util::position::PosMap::new(&own_table, text)
+    };
 
     for tok in root
         .descendants_with_tokens()
@@ -358,16 +363,9 @@ pub(crate) fn find_top_level_decl(
     name: &str,
 ) -> Option<(crate::handlers::program_scope::ScopeFile, Symbol)> {
     for file in crate::handlers::program_scope::program_scope(ws, home_uri) {
-        let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Resolved)
-        else {
-            continue;
-        };
-        let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
-            continue;
-        };
+        let resolved = crate::analysis::resolved(&ws.db, file.source_file);
         let root = crate::analysis::syntax_root(&ws.db, file.source_file);
-        if let Some(sym) = art.table.symbols.iter().find(|s| {
+        if let Some(sym) = resolved.table.symbols.iter().find(|s| {
             s.name == name
                 && is_workspace_global(s.kind)
                 && !offset_in_class(&root, s.def_span.start)

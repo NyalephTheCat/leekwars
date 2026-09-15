@@ -607,17 +607,10 @@ fn push_cross_file_items(
     seen: &mut std::collections::HashSet<String>,
     items: &mut Vec<lsp::CompletionItem>,
 ) {
-    let Some(run) =
-        crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Resolved)
-    else {
-        return;
-    };
-    let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
-        return;
-    };
+    let resolved = crate::analysis::resolved(&ws.db, file.source_file);
     let root = crate::analysis::syntax_root(&ws.db, file.source_file);
 
-    for sym in &art.table.symbols {
+    for sym in &resolved.table.symbols {
         // A top-level `var` is a `Local` to the resolver but still
         // lands in the shared file scope, so it crosses an include
         // just like a `global` does. Params and fields never do.

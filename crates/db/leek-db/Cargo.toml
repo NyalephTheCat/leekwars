@@ -36,5 +36,21 @@ leek-hir         = { workspace = true, features = ["salsa"] }
 leek-mir         = { workspace = true, features = ["salsa"] }
 leek-complexity  = { workspace = true, features = ["salsa"] }
 
+[features]
+default = []
+# Exposes `leek_db::testing` — the event-logging database every
+# incremental assertion in epic #345 is written against. A feature rather
+# than `#[cfg(test)]` alone because the consumers live in *other* crates'
+# tests (the LSP's, this crate's own integration tests), and a
+# `#[cfg(test)]` item is invisible to both.
+testing = []
+
+[dev-dependencies]
+# This crate's integration tests need `leek_db::testing`, and a test target
+# links the library as an ordinary dependency — so the feature has to be
+# turned on the same way any other dev-only feature is. Same shape as
+# `leek-mir` and `leek-complexity` do for their own `salsa` feature.
+leek-db = { path = ".", features = ["testing"] }
+
 [lints]
 workspace = true

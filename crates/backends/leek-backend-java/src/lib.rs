@@ -21,6 +21,7 @@
 //!
 //! See `docs/java-backend.md` for the full spec.
 
+mod analysis;
 mod builtins;
 mod emit;
 mod mangle;

@@ -6,9 +6,10 @@
 //!     with this one — far too much for a request the editor fires on
 //!     every scroll. [`resolve`] fills in the title and the command for
 //!     the handful of lenses the editor is about to draw.
-//!  2. `Complexity: O(...)` / `Cost: N operations` (from the pipeline's
-//!     [`ComplexityArtifact`]), matched to the declaration by span so a
-//!     method never borrows a same-named free function's record.
+//!  2. `Complexity: O(...)` / `Cost: N operations` (from
+//!     [`crate::analysis::complexity`]), matched to the declaration by
+//!     span so a method never borrows a same-named free function's
+//!     record.
 //!
 //! The resolved reference lens carries `leek.showReferences` with the
 //! `(uri, position, locations)` triple `editor.action.showReferences`
@@ -17,8 +18,6 @@
 //! the server answers in `workspace/executeCommand`.
 
 use leek_complexity::Complexity;
-use leek_complexity::pipeline::ComplexityArtifact;
-use leek_resolver::pipeline::ResolveArtifact;
 use leek_resolver::{Symbol, SymbolKind};
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;
@@ -27,12 +26,11 @@ use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::CodeLens>> {
     let doc = ws.doc(uri)?;
-    // `Target::Complexity` plans HIR (and resolve) transitively, and the
-    // report it carries is salsa-cached per file revision — a code lens
-    // request fires on every scroll. See #165.
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Complexity)?;
-    let table = &run.get::<ResolveArtifact>()?.table;
-    let complexities = &run.get::<ComplexityArtifact>()?.0;
+    // Both halves are salsa-cached per file revision, which is what makes
+    // a request the editor fires on every scroll affordable. See #165.
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
+    let complexities = crate::analysis::complexity(&ws.db, doc.source_file).0;
 
     let mut out: Vec<lsp::CodeLens> = Vec::new();
     for sym in &table.symbols {
@@ -50,7 +48,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::CodeLens>> {
                 "symbol_offset": sym.def_span.start,
             })),
         });
-        if let Some(c) = complexity_for(complexities, sym) {
+        if let Some(c) = complexity_for(&complexities, sym) {
             // For a constant-cost function/method the operation count is
             // more useful than `O(1)` — show the cost directly (mirrors
             // the hover row).
@@ -83,8 +81,8 @@ pub fn resolve(ws: &Workspace, lens: lsp::CodeLens) -> Option<lsp::CodeLens> {
     let uri = lsp::Url::parse(data.get("uri")?.as_str()?).ok()?;
     let offset = u32::try_from(data.get("symbol_offset")?.as_u64()?).ok()?;
     let doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_session::Target::Resolved)?;
-    let table = &run.get::<ResolveArtifact>()?.table;
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
     let sym = table
         .symbols
