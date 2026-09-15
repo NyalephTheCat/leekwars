@@ -18,8 +18,10 @@ leek-parser      = { workspace = true, features = ["salsa"] }
 leek-resolver    = { workspace = true, features = ["salsa"] }
 leek-types       = { workspace = true, features = ["salsa"] }
 leek-pipeline    = { workspace = true, features = ["salsa"] }
-# The query façade. Program scope is an include-graph question, and the
-# include-graph queries live there; tools -> db is a downward edge.
+# The query facade. `crate::analysis` reaches every tracked frontend query
+# through this one import path instead of through each pass crate's own
+# `pipeline` module, and program scope is an include-graph question whose
+# queries live there too; tools -> db is a downward edge.
 leek-db          = { workspace = true }
 leek-session     = { workspace = true }
 leek-fmt         = { workspace = true, features = ["salsa"] }
