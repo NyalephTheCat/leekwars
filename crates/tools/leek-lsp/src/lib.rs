@@ -43,7 +43,10 @@
 //!
 //! # Where the rest is written down
 //!
-//! [`log`] owns the single logging seam and the `LEEK_LSP_LOG` contract,
+//! [`analysis`] is the typed way to ask a file's green tree, syntax root,
+//! resolve table, type table, HIR or complexity report — one memoized
+//! `leek-db` query each, and the route handlers move onto as they come off
+//! [`pipeline`]. [`log`] owns the single logging seam and the `LEEK_LSP_LOG` contract,
 //! [`settings`] the editor-pushed configuration, [`workspace`] the salsa
 //! DB and document registry, and [`handlers::program_scope`] the
 //! per-program symbol scoping Leekscript's flat namespace forces.
@@ -55,6 +58,7 @@
 // user's bug report can never contain.
 #![warn(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod analysis;
 pub mod diagnostics;
 pub mod documents;
 pub mod handlers;
