@@ -240,20 +240,23 @@ pub fn compile(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtifact, Na
 }
 
 /// The MIR half of a compile: everything between the HIR and the choice of
-/// backend target. Shared by the inspection / object paths and by
-/// [`compile_program`], so all four see exactly the same program.
-struct Lowered {
-    program: leek_mir::ir::MirProgram,
-    main_idx: usize,
-    lang: Lang,
+/// backend target. Shared by the inspection / object paths, by
+/// [`compile_program`], and by the AOT path ([`crate::aot`]), so every one of
+/// them sees exactly the same program — in particular the AOT
+/// unsupported-construct guard and the object emitter it gates cannot inspect
+/// two differently-specialized lowerings of one file.
+pub(crate) struct Lowered {
+    pub(crate) program: leek_mir::ir::MirProgram,
+    pub(crate) main_idx: usize,
+    pub(crate) lang: Lang,
     /// Class `DefId` raw → constructor-thunk `program.functions` index.
-    class_thunks: HashMap<u32, usize>,
-    fn_rets: translate::FnRets,
-    global_tys: HashMap<String, ValTy>,
-    native_directives: HashMap<leek_hir::DefId, String>,
+    pub(crate) class_thunks: HashMap<u32, usize>,
+    pub(crate) fn_rets: translate::FnRets,
+    pub(crate) global_tys: HashMap<String, ValTy>,
+    pub(crate) native_directives: HashMap<leek_hir::DefId, String>,
 }
 
-fn lower(hir: &HirFile, opts: &NativeOptions) -> Result<Lowered, NativeError> {
+pub(crate) fn lower(hir: &HirFile, opts: &NativeOptions) -> Result<Lowered, NativeError> {
     let (mut program, errs) = leek_mir::lower_file(hir);
     if let Some(first) = errs.first() {
         // Keep the whole set, not just the first: each lowering diagnostic
@@ -851,28 +854,29 @@ pub fn compile_object_with_meta(
     opts: &NativeOptions,
     obj_path: &std::path::Path,
 ) -> Result<aot_meta::AotMeta, NativeError> {
-    let (mut program, errs) = leek_mir::lower_file(hir);
-    if let Some(first) = errs.first() {
-        return Err(NativeError::compile(format!(
-            "MIR lowering failed: {}",
-            first.message
-        )));
-    }
-    let main_idx = program
-        .functions
-        .iter()
-        .position(|f| f.kind == leek_mir::ir::FunctionKind::Main)
-        .ok_or_else(|| NativeError::compile("no main function"))?;
-    let lang = Lang {
-        version: opts.version,
-        strict: opts.strict,
-    };
-    let class_thunks = translate::append_ctor_thunks(&mut program, opts.version);
-    translate::specialize_param_types(&mut program, lang);
-    let fn_rets = translate::compute_fn_rets(&program, lang);
-    let global_tys = translate::global_scalar_tys(&program);
-    let native_directives = collect_native_directives(hir);
-    let main = &program.functions[main_idx];
+    emit_object_with_meta(&lower(hir, opts)?, opts, obj_path)
+}
+
+/// [`compile_object_with_meta`] over an already-lowered program.
+///
+/// The executable path ([`aot::compile_to_executable`]) lowers once and emits
+/// from that very [`Lowered`], so the object it links is the one its
+/// unsupported-construct guard vetted.
+pub(crate) fn emit_object_with_meta(
+    lowered: &Lowered,
+    opts: &NativeOptions,
+    obj_path: &std::path::Path,
+) -> Result<aot_meta::AotMeta, NativeError> {
+    let Lowered {
+        program,
+        main_idx,
+        lang,
+        class_thunks,
+        fn_rets,
+        global_tys,
+        native_directives,
+    } = lowered;
+    let main = &program.functions[*main_idx];
 
     let isa = build_isa(opts)?;
     let ob = cranelift_object::ObjectBuilder::new(isa, "leek", default_libcall_names())
@@ -889,13 +893,13 @@ pub fn compile_object_with_meta(
         class_string_method,
     ) = define_program(
         &mut module,
-        &program,
+        program,
         main,
-        lang,
-        &fn_rets,
-        &global_tys,
-        &native_directives,
-        &class_thunks,
+        *lang,
+        fn_rets,
+        global_tys,
+        native_directives,
+        class_thunks,
         opts.debug_hooks,
         opts.link_game,
         /* external_uniform */ true,
@@ -909,14 +913,14 @@ pub fn compile_object_with_meta(
     std::fs::write(obj_path, bytes).map_err(|e| NativeError::compile(e.to_string()))?;
 
     Ok(aot_meta::AotMeta::build(
-        &program,
+        program,
         &lambda_funcs,
         method_resolve,
         static_init,
         user_fn_idx,
         exact_arity,
         class_string_method,
-        &class_thunks,
+        class_thunks,
     ))
 }
 

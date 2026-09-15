@@ -124,17 +124,7 @@ mod salsa_tests {
     use super::salsa_probe::{COMPLEXITY_QUERY_CALLS, SERIAL};
 
     fn source(db: &mut LeekDb, text: &str) -> SourceFile {
-        SourceFile::new(
-            db,
-            String::new(),
-            1,
-            text.into(),
-            4,
-            false,
-            false,
-            0,
-            Vec::new(),
-        )
+        SourceFile::new(db, String::new(), 1, text.into(), 4, false, false, 0)
     }
 
     fn pipeline() -> Pipeline {

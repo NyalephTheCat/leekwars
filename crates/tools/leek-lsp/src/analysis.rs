@@ -48,17 +48,33 @@
 //! outside salsa and deliberately bypasses the single-file queries, so
 //! diagnostics — the one consumer that needs the compiler's shared
 //! program scope — keeps using the pipeline.
+//!
+//! That is also the whole scope of the program-wide `class` set here.
+//! Each of these parses with no cross-file classes at all, because a
+//! file analyzed on its own has none: the workspace-wide union the
+//! server used to push into every file's salsa input made a class typed
+//! into one AI change how an unrelated AI parsed (#163), and it is
+//! gone. The closure's classes reach the include-aware pipeline through
+//! `ResolveIncludes`, and reach the tracked passes through
+//! `leek_db::queries::program_classes`, which keys them per program.
 
 use leek_db::queries;
-use leek_db::{Db, SourceFile};
+use leek_db::{Db, ProgramClasses, SourceFile};
 use leek_syntax::SyntaxNode;
 use leek_syntax::language::GreenNode;
 
 /// The file's green tree.
 ///
 /// Replaces `run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0`.
+///
+/// Parsed under the empty [`ProgramClasses`] set, like every other
+/// accessor here and like the single-file queries they wrap: these
+/// answer for one file, so the only classes in scope are the ones the
+/// parser's own token pre-scan finds in it. A program's class set comes
+/// from `leek_db::queries::program_classes` and belongs to the
+/// include-aware path — see the [module docs](self).
 pub fn green_tree(db: &dyn Db, file: SourceFile) -> GreenNode {
-    queries::parse_query(db, file).green
+    queries::parse_query(db, file, ProgramClasses::none(db)).green
 }
 
 /// The file's syntax tree, as an owned rowan red-tree root.

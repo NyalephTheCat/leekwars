@@ -23,7 +23,12 @@ use crate::{Artifact, Pipeline, Step, TimedBox, TimingSink};
 /// passes (lint, complexity) that report on the code as written. Codegen
 /// recipes (`miku run`, `miku build --clean`, native) request [`OptLevel::O1`]
 /// to shrink the program's static op budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// `Hash` (and `salsa::Update`) so it can key a tracked query:
+/// `leek_db::lower_program` is memoized per optimization level, which is
+/// what lets an `O1` caller read an optimized tree out of the cache
+/// instead of cloning the `O0` one and optimizing it on every run.
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OptLevel {
     /// No optimization. The IR mirrors the source structure.
     #[default]

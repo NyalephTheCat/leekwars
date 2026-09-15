@@ -15,6 +15,9 @@
 //! - [`WorkspaceFiles`] — the one input that says which files a
 //!   workspace currently holds, keyed by the same canonical path
 //!   [`SourceFile::canonical_path`] carries.
+//! - [`ProgramClasses`] — the interned program-wide class-name set a
+//!   parse is keyed on, so one file can parse differently in two
+//!   programs without either answer evicting the other.
 //!
 //! The pipeline itself doesn't force memoization on any step. A step
 //! that wants caching does:
@@ -104,13 +107,6 @@ pub struct SourceFile {
     /// Experimental [`leek_span::FeatureFlags`] packed as a bitmask (a
     /// primitive, so no `salsa::Update` impl is needed on the flags type).
     pub flags_bits: u8,
-    /// Class names declared elsewhere in the program (other files of
-    /// the include closure / project). The parser treats these as
-    /// valid type heads — `lowercaseClassFromOtherFile x = …` —
-    /// mirroring upstream's program-wide `getDefinedClass` lookup.
-    /// Keep sorted + deduped so salsa's equality check is stable.
-    #[returns(ref)]
-    pub extra_classes: Vec<String>,
 }
 
 impl SourceFile {
@@ -123,6 +119,44 @@ impl SourceFile {
     pub fn path(self, db: &dyn Db) -> Option<&str> {
         let path = self.canonical_path(db);
         (!path.is_empty()).then_some(path.as_str())
+    }
+}
+
+/// The program-wide `class IDENT` names a parse must treat as type
+/// heads, interned so that it can be a tracked query *argument*.
+///
+/// Upstream resolves a potential type word against the whole program's
+/// defined-class set, so `lowercaseClassFromInclude x = …` is a typed
+/// declaration in every file of a closure that declares it. That set is
+/// a property of the *program*, not of the file: the same leaf parses
+/// differently under two entries that include it alongside different
+/// siblings.
+///
+/// It is therefore a key, not a field on [`SourceFile`]. As an input
+/// field it forced one answer per file — which is what made the LSP
+/// maintain a workspace-wide union and re-parse every open document
+/// whenever anyone typed a class name (#163). As a key, two programs'
+/// parses of one leaf are two memo entries, and an edit that leaves the
+/// program's class set alone re-parses only the file that changed.
+///
+/// Interned rather than passed as a loose `Vec<String>` because a
+/// tracked query's arguments have to be `Copy`, and because interning
+/// gives the set one identity: two callers that assemble the same names
+/// hit the same memo.
+#[salsa::interned]
+pub struct ProgramClasses<'db> {
+    /// The class names, sorted and deduplicated by whoever built them
+    /// (the interned identity is the `Vec`, so an unsorted duplicate
+    /// spelling would be a second key for the same set).
+    #[returns(ref)]
+    pub names: Vec<String>,
+}
+
+impl<'db> ProgramClasses<'db> {
+    /// The empty set — what a file parsed on its own, outside any
+    /// include closure, knows about other files' classes.
+    pub fn none(db: &'db dyn Db) -> Self {
+        Self::new(db, Vec::new())
     }
 }
 

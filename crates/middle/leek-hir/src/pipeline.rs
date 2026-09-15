@@ -213,6 +213,7 @@ pub fn lower_hir_query(
     file: leek_pipeline::salsa::SourceFile,
 ) -> LowerHirResult {
     use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
+    use leek_pipeline::salsa::ProgramClasses;
     use leek_syntax::SyntaxNode;
 
     // Entry boundary for the compilation configuration (#98, #226): sampled
@@ -224,7 +225,7 @@ pub fn lower_hir_query(
     let libraries = leek_prelude::active_library_set();
     let fold = leek_prelude::active_fold_set();
 
-    let parse = leek_parser::pipeline::parse_query(db, file);
+    let parse = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return LowerHirResult {
             hir: Arc::new(HirFile::default()),

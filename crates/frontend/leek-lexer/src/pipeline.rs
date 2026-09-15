@@ -77,17 +77,7 @@ mod salsa_tests {
 
     /// Build a `SourceFile` from a text snippet at a fixed source id.
     fn source(db: &mut LeekDb, text: &str) -> SourceFile {
-        SourceFile::new(
-            db,
-            String::new(),
-            1,
-            text.into(),
-            4,
-            false,
-            false,
-            0,
-            Vec::new(),
-        )
+        SourceFile::new(db, String::new(), 1, text.into(), 4, false, false, 0)
     }
 
     #[test]

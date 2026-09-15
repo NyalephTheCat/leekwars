@@ -23,6 +23,10 @@ leek-diagnostics = { workspace = true, features = ["salsa"] }
 # feature on so the query exists to re-export. No tools-layer crate appears
 # here: `leek-fmt`'s `format_query` stays in `leek-fmt`, which depends *down*
 # on this crate, because db -> tools is a layering breach.
+# The compilation configuration `lower_program` samples at its entry
+# boundary (which libraries and constant catalogs are active). A core
+# crate, so the db -> core edge is downward.
+leek-prelude     = { workspace = true }
 leek-syntax      = { workspace = true, features = ["salsa"] }
 leek-lexer       = { workspace = true, features = ["salsa"] }
 leek-parser      = { workspace = true, features = ["salsa"] }

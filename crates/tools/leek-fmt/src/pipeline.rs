@@ -118,7 +118,9 @@ pub fn format_query(
     db: &dyn leek_pipeline::salsa::Db,
     file: leek_pipeline::salsa::SourceFile,
 ) -> FormatQueryResult {
-    let parsed = leek_parser::pipeline::parse_query(db, file);
+    use leek_pipeline::salsa::ProgramClasses;
+
+    let parsed = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
     let version = version_from_byte(file.version_byte(db));
     let text = crate::format(&parsed.green, version, &FormatOptions::default());
     FormatQueryResult {
