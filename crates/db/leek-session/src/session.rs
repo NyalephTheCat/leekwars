@@ -726,12 +726,28 @@ mod tests {
     ///
     /// The second divergence between a `Run`'s stream and a query's, and
     /// the one still open. Slicing to a stage handles the first —
-    /// `every_targets_run_matches_its_stage` — but not this: when the
-    /// parse produces no `AstArtifact`, the resolver, checker and HIR
-    /// steps quietly no-op, so a `Target::Hir` run reports only what lexing
-    /// and parsing found. The tracked passes have no such notion. They work
-    /// off the green tree, which always exists, so they carry on and
-    /// report against a tree the parser has already given up on.
+    /// `every_targets_run_matches_its_stage` — but not this.
+    ///
+    /// The mechanism, precisely (an earlier version of this comment, and
+    /// the commit that introduced it, blamed a missing `AstArtifact`;
+    /// that was wrong — `Parse` always inserts one, because the root cast
+    /// cannot fail). `leek_parser::pipeline::Parse` is the single
+    /// production step implementing `RecipeStepStopOnError`, so when
+    /// `RecipeParams::stop_on_diagnostics` is set it is wrapped in
+    /// `StopOnDiagnostics::abort`. That records the diagnostic count
+    /// before the step, and if the *parse itself* adds one at or above
+    /// the threshold it calls `Context::abort`, which makes
+    /// `Pipeline::drive` break before any later step runs. Nothing
+    /// no-ops; the pipeline simply stops.
+    ///
+    /// The tracked passes have no such notion. They work off the green
+    /// tree, which always exists, so they carry on and report against a
+    /// tree the parser has already given up on.
+    ///
+    /// `a_permissive_run_does_not_stop_and_so_agrees` is the other half
+    /// of that claim: drop the threshold and the run keeps going, and the
+    /// two streams line up again. That is what makes this a statement
+    /// about the abort rather than about parse errors in general.
     ///
     /// Not obviously the wrong answer — more is arguably better than
     /// silence — but it is a *different* answer, and deciding which one
@@ -775,6 +791,59 @@ mod tests {
         assert!(
             from_query.len() > from_run.len(),
             "and so reports strictly more: run={from_run:?} query={from_query:?}"
+        );
+    }
+
+    /// With no stop-on-error threshold the run does not abort, and its
+    /// stream matches the query's again — on the same fixture that
+    /// diverges under the default params.
+    ///
+    /// The discriminating half of `a_failed_parse_stops_the_run_but_not_the_queries`.
+    /// If the divergence were about the parse failing, it would persist
+    /// here; it does not, which places the cause in the `StopOnDiagnostics`
+    /// wrapper and nowhere else. It also explains why the LSP never hit
+    /// this: `lsp_params` is `RecipeParams::permissive`, so its runs have
+    /// always behaved the way the queries do.
+    #[test]
+    fn a_permissive_run_does_not_stop_and_so_agrees() {
+        let dir = scratch("permissive-parse");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar bad = \u{a3};\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+        let config = DriverConfig {
+            target: Target::Resolved,
+            color: ColorWhen::Never,
+            format: MessageFormat::Human,
+            params: leek_pipeline::RecipeParams::permissive(),
+            ..DriverConfig::default()
+        };
+        let session = Session::new(&project, config).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let from_run: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let sliced = leek_db::queries::program_diagnostics_upto(
+            db,
+            files,
+            file,
+            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_db::queries::Stage::Resolved,
+        );
+        let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            from_run.contains(&"E0202"),
+            "no threshold, so resolution still ran: {from_run:?}"
+        );
+        assert_eq!(
+            from_run, from_query,
+            "and the streams agree again once nothing aborts"
         );
     }
 
