@@ -25,7 +25,7 @@ leek-hir         = { workspace = true }
 leek-types       = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-project     = { workspace = true }
-leek-session     = { workspace = true }
+leek-db          = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

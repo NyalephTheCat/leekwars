@@ -86,3 +86,67 @@ impl Default for EventDb {
 pub fn ran(events: &[String], query: &str) -> usize {
     events.iter().filter(|e| e.starts_with(query)).count()
 }
+
+/// A workspace of in-memory files, for a test that lowers a small
+/// multi-file project.
+///
+/// `files` is `(path, text)`; `entry_path` must name one of them. The
+/// entry takes `SourceId(1)` and the rest follow in the order given,
+/// which is the numbering a `leek_session::Session` hands out and what
+/// the `ResolveIncludes` step this replaced did.
+///
+/// Each file's language settings are settled from its own `@version` /
+/// `@strict` pragma over `lang`, the `(version, strict)` defaults, which
+/// is what
+/// `leek_project::ProjectIndex::language_settings` does for a real
+/// project — so a pragma-less include inherits the default and a pragma'd
+/// one keeps its own. `seed_library` is off.
+///
+/// Returns the file set and the entry, ready for `lower_program` and the
+/// other whole-program queries.
+pub fn workspace(
+    db: &mut crate::LeekDb,
+    entry_path: &str,
+    files: &[(&str, &str)],
+    lang: (u8, bool),
+    flags_bits: u8,
+) -> (crate::WorkspaceFiles, crate::SourceFile) {
+    use std::collections::BTreeMap;
+
+    let key = |path: &str| {
+        leek_span::paths::canonical_or_normalized(std::path::Path::new(path))
+            .display()
+            .to_string()
+    };
+    let entry_key = key(entry_path);
+
+    let mut next = 2u32;
+    let mut map: BTreeMap<String, crate::SourceFile> = BTreeMap::new();
+    for (path, text) in files {
+        let path = key(path);
+        let id = if path == entry_key {
+            1
+        } else {
+            let id = next;
+            next += 1;
+            id
+        };
+        let settled = leek_span::pragma::LanguageSettings::resolve(text, None, lang.0, lang.1);
+        let file = crate::SourceFile::new(
+            db,
+            path.clone(),
+            id,
+            std::sync::Arc::from(*text),
+            settled.version,
+            settled.strict,
+            false,
+            flags_bits,
+        );
+        map.insert(path, file);
+    }
+
+    let entry = *map.get(&entry_key).expect("entry is one of the files");
+    let set = crate::WorkspaceFiles::empty(db);
+    set.set_all(db, map);
+    (set, entry)
+}

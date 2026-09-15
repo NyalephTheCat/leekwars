@@ -15,8 +15,6 @@ use crate::cases::{CaseAudit, TestCase};
 /// A case is one self-contained snippet with no `include`, so the per-file
 /// queries answer it — no workspace file set, no closure.
 pub fn audit_case(case: &TestCase, source: SourceId) -> CaseAudit {
-    use leek_pipeline::salsa::{LeekDb, SourceFile};
-
     let input = Input {
         source,
         text: case.code.clone().into(),
@@ -25,17 +23,8 @@ pub fn audit_case(case: &TestCase, source: SourceId) -> CaseAudit {
         flags: leek_span::FeatureFlags::from_env(),
     };
 
-    let db = LeekDb::default();
-    let file = SourceFile::new(
-        &db,
-        String::new(),
-        input.source.get(),
-        std::sync::Arc::clone(&input.text),
-        input.version_byte,
-        input.strict,
-        leek_types::seed_library_enabled(),
-        input.flags.to_bits(),
-    );
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
 
     let mut audit = CaseAudit::default();
     for d in leek_db::queries::diagnostics_without_lints(&db, file).iter() {
@@ -49,8 +38,8 @@ pub fn audit_case(case: &TestCase, source: SourceId) -> CaseAudit {
     // simplification introduced by the move. The old check asked whether
     // the run inserted `HirArtifact`; `Parse` always inserts an
     // `AstArtifact` (its root cast cannot fail), `LowerHir` skips only
-    // when that is absent, and `RecipeParams::permissive` never aborts the
-    // run — so on this path the artifact was always there.
+    // when that is absent, and the permissive params this used never
+    // aborted the run — so on this path the artifact was always there.
     //
     // Left as a field rather than deleted because `CaseAudit` is a
     // serialized record shared with the corpus manifests. Tempting to

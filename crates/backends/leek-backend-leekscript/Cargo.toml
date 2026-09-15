@@ -24,4 +24,4 @@ leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
 leek-resolver       = { workspace = true }
 leek-project        = { workspace = true }
-leek-session        = { workspace = true }
+leek-db             = { workspace = true, features = ["testing"] }

@@ -1,8 +1,6 @@
 //! End-to-end `@allow(LXXXX)` suppression tests.
 
-use leek_lint::pipeline::LintFindings;
 use leek_project::Input;
-use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 
 fn lint_with_allows(src: &str) -> Vec<leek_diagnostics::Diagnostic> {
@@ -13,12 +11,11 @@ fn lint_with_allows(src: &str) -> Vec<leek_diagnostics::Diagnostic> {
         strict: false,
         flags: leek_span::FeatureFlags::from_env(),
     };
-    let pipeline =
-        leek_session::pipeline(Target::Linted, &RecipeParams::permissive()).expect("recipe");
-    let run = pipeline.run(input);
-    run.get::<LintFindings>()
-        .map(|f| f.0.clone())
-        .unwrap_or_default()
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
+    leek_lint::pipeline::lint_query(&db, file, leek_lint::LintGroups::default())
+        .as_ref()
+        .clone()
 }
 
 #[test]

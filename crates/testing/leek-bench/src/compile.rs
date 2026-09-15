@@ -31,19 +31,8 @@ pub struct CompiledHir {
 ///
 /// Returns the diagnostics alongside, since there is no `Run` to ask.
 pub fn compile_hir(input: &Input) -> Result<(CompiledHir, Vec<leek_diagnostics::Diagnostic>)> {
-    use leek_pipeline::salsa::{LeekDb, SourceFile};
-
-    let db = LeekDb::default();
-    let file = SourceFile::new(
-        &db,
-        String::new(),
-        input.source.get(),
-        Arc::clone(&input.text),
-        input.version_byte,
-        input.strict,
-        leek_types::seed_library_enabled(),
-        input.flags.to_bits(),
-    );
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), input);
 
     let sink = TimingSink::new();
     let diagnostics = sink.time("diagnostics", || {

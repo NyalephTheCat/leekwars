@@ -1,58 +1,46 @@
-//! End-to-end Pipeline composition: prove that include resolution slots
-//! between parse and HIR lowering and switches the lowerer to the
+//! End-to-end whole-program lowering: prove that include resolution
+//! slots between parse and HIR lowering and switches the lowerer to the
 //! multi-file path automatically.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use leek_hir::pipeline::HirArtifact;
+use leek_db::queries::{OptLevel, lower_hir_query, lower_program};
 use leek_hir::{Def, ExprKind, Literal, Stmt};
 use leek_project::Input;
-use leek_resolver::folder::MemFolder;
-use leek_resolver::interner::PathInterner;
-use leek_resolver::pipeline::ResolveIncludes;
-use leek_session::{RecipeParams, pipeline_hir_from_parse, pipeline_hir_with_includes};
 use leek_span::SourceId;
 
-fn run_pipeline(entry_path: &str, files: &[(&str, &str)]) -> Arc<leek_hir::HirFile> {
-    let mut folder = MemFolder::new();
-    for (p, t) in files {
-        folder.insert(*p, *t);
-    }
-    let entry_text = files
-        .iter()
-        .find(|(p, _)| *p == entry_path)
-        .map(|(_, t)| (*t).to_string())
-        .expect("entry exists in fixture");
+/// Lower `files` as one program reached from `entry_path`.
+fn lower_closure(entry_path: &str, files: &[(&str, &str)]) -> Arc<leek_hir::HirFile> {
+    lower_closure_at(entry_path, files, 4)
+}
 
-    let entry = SourceId::new(1).unwrap();
-    let input = Input {
-        source: entry,
-        text: entry_text.into(),
-        version_byte: 4,
-        strict: false,
-        flags: leek_span::FeatureFlags::from_env(),
-    };
-
-    let resolve_includes = ResolveIncludes::new(
-        Arc::new(folder),
-        PathBuf::from(entry_path),
-        Arc::new(PathInterner::starting_at(2)),
+fn lower_closure_at(
+    entry_path: &str,
+    files: &[(&str, &str)],
+    default_version: u8,
+) -> Arc<leek_hir::HirFile> {
+    let mut db = leek_db::LeekDb::default();
+    let (set, entry) = leek_db::testing::workspace(
+        &mut db,
+        entry_path,
+        files,
+        (default_version, false),
+        leek_span::FeatureFlags::from_env().to_bits(),
     );
+    let version = leek_syntax::pipeline::version_from_byte(default_version);
+    lower_program(&db, set, entry, version, OptLevel::O0).hir
+}
 
-    let params = RecipeParams::permissive();
-    let pipeline = pipeline_hir_with_includes(Box::new(resolve_includes), &params).expect("recipe");
-    let run = pipeline.run(input);
-
-    run.get::<HirArtifact>()
-        .expect("HirArtifact present")
-        .0
-        .clone()
+/// Lower one file on its own, with no include resolution at all.
+fn lower_alone(input: &Input) -> Arc<leek_hir::HirFile> {
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), input);
+    lower_hir_query(&db, file).hir
 }
 
 #[test]
-fn step_pipeline_merges_include_decls() {
-    let hir = run_pipeline(
+fn whole_program_lowering_merges_include_decls() {
+    let hir = lower_closure(
         "/main.leek",
         &[
             ("/main.leek", "include(\"util\")\nfunction main() {}"),
@@ -72,8 +60,8 @@ fn step_pipeline_merges_include_decls() {
 }
 
 #[test]
-fn step_pipeline_splices_main_at_include_site() {
-    let hir = run_pipeline(
+fn whole_program_lowering_splices_main_at_include_site() {
+    let hir = lower_closure(
         "/main.leek",
         &[
             (
@@ -124,13 +112,10 @@ fn single_file_lowering_uses_input_version_not_pragma() {
     // applied override > pragma > default). HIR lowering used to re-read
     // the pragma, so `leekc --version-pragma 2` on a `@version:1` file was
     // lexed/parsed at v2 but lowered (v1 string escapes) at v1.
-    let pipeline = pipeline_hir_from_parse(&RecipeParams::permissive()).expect("recipe");
-    let run = pipeline.run(input("// @version:1\nvar s = \"a\\\"b\"\n", 2));
-    let hir = run.get::<HirArtifact>().expect("HirArtifact").0.clone();
+    let hir = lower_alone(&input("// @version:1\nvar s = \"a\\\"b\"\n", 2));
     assert_eq!(string_inits(&hir), [("s".to_string(), "a\"b".to_string())]);
 
-    let run = pipeline.run(input("// @version:4\nvar s = \"a\\\"b\"\n", 1));
-    let hir = run.get::<HirArtifact>().expect("HirArtifact").0.clone();
+    let hir = lower_alone(&input("// @version:4\nvar s = \"a\\\"b\"\n", 1));
     assert_eq!(
         string_inits(&hir),
         [("s".to_string(), "a\\\"b".to_string())]
@@ -143,21 +128,16 @@ fn include_pipeline_lowers_each_file_at_its_version() {
     // lowered at v1), the pragma'd include keeps its own v4. Previously the
     // include graph defaulted pragma-less files to v4 and `lower_files`
     // lowered every file at v4.
-    let mut folder = MemFolder::new();
     let entry = "var e = \"a\\\"b\"\ninclude(\"inherits\")\ninclude(\"modern\")\n";
-    folder.insert("/main.leek", entry);
-    folder.insert("/inherits.leek", "var i = \"a\\\"b\"\n");
-    folder.insert("/modern.leek", "// @version:4\nvar m = \"a\\\"b\"\n");
-    let resolve_includes = ResolveIncludes::new(
-        Arc::new(folder),
-        PathBuf::from("/main.leek"),
-        Arc::new(PathInterner::starting_at(2)),
+    let hir = lower_closure_at(
+        "/main.leek",
+        &[
+            ("/main.leek", entry),
+            ("/inherits.leek", "var i = \"a\\\"b\"\n"),
+            ("/modern.leek", "// @version:4\nvar m = \"a\\\"b\"\n"),
+        ],
+        1,
     );
-    let pipeline =
-        pipeline_hir_with_includes(Box::new(resolve_includes), &RecipeParams::permissive())
-            .expect("recipe");
-    let run = pipeline.run(input(entry, 1));
-    let hir = run.get::<HirArtifact>().expect("HirArtifact").0.clone();
     assert_eq!(
         string_inits(&hir),
         [
@@ -169,8 +149,8 @@ fn include_pipeline_lowers_each_file_at_its_version() {
 }
 
 #[test]
-fn step_pipeline_without_resolveincludes_stays_single_file() {
-    // Without `ResolveIncludes` the single-file lower path runs; the
+fn lowering_one_file_alone_stays_single_file() {
+    // With no include closure the single-file lower path runs; the
     // `include(...)` call is preserved as a `Stmt::Include` in main.
     let input = Input {
         source: SourceId::new(1).unwrap(),
@@ -181,9 +161,7 @@ fn step_pipeline_without_resolveincludes_stays_single_file() {
         strict: false,
         flags: leek_span::FeatureFlags::from_env(),
     };
-    let pipeline = pipeline_hir_from_parse(&RecipeParams::permissive()).expect("recipe");
-    let run = pipeline.run(input);
-    let hir = run.get::<HirArtifact>().expect("HirArtifact").0.clone();
+    let hir = lower_alone(&input);
     let has_main = hir
         .defs
         .iter()

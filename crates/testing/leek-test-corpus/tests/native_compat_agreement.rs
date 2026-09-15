@@ -27,9 +27,7 @@
 //! compile fails alongside the diagnostic the check produced.
 
 use leek_backend_native::{NativeOptions, check_native_compat, compile_program};
-use leek_hir::pipeline::HirArtifact;
 use leek_project::Input;
-use leek_session::{RecipeParams, Target};
 use leek_span::{FeatureFlags, SourceId};
 use leek_test_cases::TestCase;
 use leek_test_corpus::{embedded_manifest, run_on_large_stack};
@@ -49,26 +47,24 @@ struct Disagreement {
 }
 
 fn hir_of(case: &TestCase, source: SourceId) -> Option<std::sync::Arc<leek_hir::HirFile>> {
-    let pipeline =
-        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
-    let run = pipeline.run(Input {
+    let input = Input {
         source,
         text: case.code.clone().into(),
         version_byte: case.version,
         strict: case.strict,
         flags: FeatureFlags::from_env(),
-    });
+    };
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
     // A case the frontend rejects never reaches the backend in anger, and the
     // two paths agree trivially on it (both report the lowering diagnostics).
-    if run
-        .diagnostics()
+    if leek_db::queries::file_diagnostics_upto(&db, file, leek_db::queries::Stage::Hir)
         .iter()
         .any(|d| d.severity == leek_diagnostics::Severity::Error)
     {
         return None;
     }
-    run.get::<HirArtifact>()
-        .map(|a| std::sync::Arc::clone(&a.0))
+    Some(leek_db::queries::lower_hir_query(&db, file).hir)
 }
 
 #[test]

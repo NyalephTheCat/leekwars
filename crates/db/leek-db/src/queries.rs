@@ -71,10 +71,14 @@ pub use crate::include::{
     IncludeGraph, IncludeGraphFile, IncludeRef, class_names, include_edges, include_graph,
     include_parse_failures, program_classes, resolve_include,
 };
-/// The whole-program passes over that closure — see [`crate::program`].
 pub use crate::program::{
     lower_program, lower_program_mir, program_complexity, resolve_program, typecheck_program,
 };
+/// The whole-program passes over that closure — see [`crate::program`].
+/// The optimization level a whole-program lowering is keyed on. Owned by
+/// the database substrate, re-exported here so a caller of
+/// [`lower_program`] needs no other import.
+pub use leek_pipeline::OptLevel;
 /// The per-file include scan's result type, from the pure scan the
 /// graph and the folder-backed walk share.
 pub use leek_resolver::include_graph::{IncludeCall, IncludeEdges, IncludeSite};

@@ -17,14 +17,8 @@ use leek_backend_native::{NativeOptions, run};
 use leek_diagnostics::Severity;
 use leek_hir::HirFile;
 use leek_hir::lower::lower_file_versioned_with_flags;
-use leek_hir::pipeline::HirArtifact;
 use leek_hir::{LowerUnit, lower_files};
 use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
-use leek_project::Input;
-use leek_resolver::folder::MemFolder;
-use leek_resolver::interner::PathInterner;
-use leek_resolver::pipeline::ResolveIncludes;
-use leek_session::{RecipeParams, pipeline_hir_with_includes};
 use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::{SyntaxNode, Version};
 
@@ -441,40 +435,16 @@ fn prelude_defs_still_dropped() {
 
 // ---- multi-file projects, through the real include pipeline ----
 
-/// Lower a whole project the way `miku build` does: a real folder, the real
-/// [`ResolveIncludes`] step, the real recipe. Nothing about the include
-/// graph or the splicer is simulated, so an `include(…)` that survives
-/// lowering is visible here.
+/// Lower a whole project the way `miku build` does: a real workspace file
+/// set and the real whole-program lowering query. Nothing about the
+/// include graph or the splicer is simulated, so an `include(…)` that
+/// survives lowering is visible here.
 fn lower_project(entry_path: &str, files: &[(&str, &str)], ff: FeatureFlags) -> Arc<HirFile> {
-    let mut folder = MemFolder::new();
-    for (path, text) in files {
-        folder.insert(*path, *text);
-    }
-    let entry_text = files
-        .iter()
-        .find(|(path, _)| *path == entry_path)
-        .map(|(_, text)| (*text).to_string())
-        .expect("entry exists in the fixture");
-
-    let input = Input {
-        source: SOURCE,
-        text: entry_text.into(),
-        version_byte: 4,
-        strict: false,
-        flags: ff,
-    };
-    let resolve = ResolveIncludes::new(
-        Arc::new(folder),
-        PathBuf::from(entry_path),
-        Arc::new(PathInterner::starting_at(2)),
-    );
-    let pipeline = pipeline_hir_with_includes(Box::new(resolve), &RecipeParams::permissive())
-        .expect("recipe builds");
-    let run = pipeline.run(input);
-    run.get::<HirArtifact>()
-        .expect("HirArtifact present")
-        .0
-        .clone()
+    let mut db = leek_db::LeekDb::default();
+    let (set, entry) =
+        leek_db::testing::workspace(&mut db, entry_path, files, (4, false), ff.to_bits());
+    leek_db::queries::lower_program(&db, set, entry, Version::V4, leek_db::queries::OptLevel::O0)
+        .hir
 }
 
 #[test]

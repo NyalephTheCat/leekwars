@@ -24,7 +24,6 @@ salsa            = { workspace = true }
 
 [dev-dependencies]
 leek-project     = { workspace = true }
-leek-session     = { workspace = true }
 leek-rewrite     = { workspace = true }
 
 [lints]
