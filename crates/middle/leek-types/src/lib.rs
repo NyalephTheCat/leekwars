@@ -62,7 +62,7 @@ pub use leek_diagnostics::codes;
 
 /// Test-only probe: counts how many times `typecheck_query` actually
 /// executed (vs cached). Used by the memoization smoke test.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 pub(crate) mod salsa_probe {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;

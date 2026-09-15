@@ -95,12 +95,11 @@ impl Pipeline {
 
     /// Drive the pipeline over a salsa-tracked input, allowing steps
     /// that implement tracked queries to short-circuit on identical
-    /// re-runs. Only available with the `salsa` feature.
+    /// re-runs.
     ///
     /// Steps that don't know about salsa fall back to the same
     /// direct computation as [`run`](Self::run); steps that do
     /// dispatch through `cx.salsa()`.
-    #[cfg(feature = "salsa")]
     pub fn run_memoized<'db>(
         &self,
         db: &'db dyn crate::salsa::Db,

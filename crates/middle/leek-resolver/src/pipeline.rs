@@ -23,8 +23,7 @@ use crate::{FileUnit, Options, ResolveResult, resolve_collecting, resolve_collec
 /// Carries both the diagnostic list and the LSP-facing
 /// [`ResolveTable`] of symbols + references. Direct callers that
 /// only need diagnostics ignore `table`.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolveArtifact {
     pub diagnostics: Vec<Diagnostic>,
     pub table: ResolveTable,
@@ -85,7 +84,6 @@ fn run_resolve(cx: &Context<'_>) -> ResolveResult {
         });
         return resolve_collecting_files(&files, Some(&graph.resolved), resolve_options(cx));
     }
-    #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let art = resolve_query(db, file);
         return ResolveResult {
@@ -259,7 +257,6 @@ impl Step for ResolveIncludes {
 /// Salsa-tracked entry point for name resolution. Re-runs only when
 /// the upstream [`parse_query`](leek_parser::pipeline::parse_query)'s
 /// green tree changes or the `strict` flag flips.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn resolve_query(
     db: &dyn leek_pipeline::salsa::Db,

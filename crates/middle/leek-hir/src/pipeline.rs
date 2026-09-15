@@ -74,12 +74,9 @@ impl Step for LowerHir {
             // Some pipelines wire LowerHir without Parse for the
             // salsa path (where parse_query is dispatched internally
             // by lower_hir_query). Fall through in that case too.
-            #[cfg(feature = "salsa")]
             if cx.salsa().is_none() {
                 return Ok(());
             }
-            #[cfg(not(feature = "salsa"))]
-            return Ok(());
         }
         let (hir, diagnostics) = run_lower(cx, self.opt);
         cx.emit_all(diagnostics);
@@ -160,7 +157,6 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
         return (finish(hir, &fold_map(fold), opt), diagnostics);
     }
 
-    #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let out = lower_hir_query(db, file);
         // The salsa-tracked query is keyed only on the source file, not on the
@@ -196,8 +192,7 @@ fn run_lower(cx: &Context<'_>, opt: OptLevel) -> (Arc<HirFile>, Vec<Diagnostic>)
 
 /// Tracked return type for [`lower_hir_query`]: the HIR (in an
 /// `Arc` for cheap cloning) plus the lowering pass's own diagnostics.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct LowerHirResult {
     pub hir: Arc<HirFile>,
     pub diagnostics: Vec<Diagnostic>,
@@ -206,7 +201,6 @@ pub struct LowerHirResult {
 /// Salsa-tracked entry point for HIR lowering. Re-runs only when the
 /// upstream [`parse_query`](leek_parser::pipeline::parse_query)'s
 /// green tree changes.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn lower_hir_query(
     db: &dyn leek_pipeline::salsa::Db,

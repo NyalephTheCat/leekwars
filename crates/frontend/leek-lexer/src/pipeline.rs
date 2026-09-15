@@ -7,8 +7,7 @@ use leek_syntax::version::version_from_byte;
 use crate::LexResult;
 
 /// Token stream + lex diagnostics.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone)]
+#[derive(salsa::Update, Debug, Clone)]
 pub struct TokensArtifact(pub LexResult);
 impl Artifact for TokensArtifact {}
 
@@ -40,7 +39,6 @@ fn run_lex_step(cx: &Context<'_>) -> (LexResult, Vec<leek_diagnostics::Diagnosti
 /// are cache hits. Otherwise falls through to a direct [`crate::lex`]
 /// call.
 fn run_lex(cx: &Context<'_>) -> LexResult {
-    #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         return lex_query(db, file);
     }
@@ -50,7 +48,6 @@ fn run_lex(cx: &Context<'_>) -> LexResult {
 /// Salsa-tracked entry point. Re-runs only when the input
 /// [`SourceFile`](leek_pipeline::salsa::SourceFile)'s text or version
 /// byte changes.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn lex_query(
     db: &dyn leek_pipeline::salsa::Db,
@@ -64,7 +61,7 @@ pub fn lex_query(
     crate::lex(text, source, version)
 }
 
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod salsa_tests {
     use std::sync::atomic::Ordering;
 

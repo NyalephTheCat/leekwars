@@ -41,8 +41,7 @@ mod serde_impls;
 
 // ---- Severity ----
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Severity {
     Error,
     Warning,
@@ -76,8 +75,7 @@ impl std::fmt::Display for Severity {
 ///
 /// `Code` is kept as a `&'static str` newtype so the wire format is
 /// trivially serializable and the in-process value is cheap to copy.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Code(pub &'static str);
 
 impl Code {
@@ -141,8 +139,7 @@ pub struct CodeMeta {
 /// A diagnostic with optional labels, notes, and machine-applicable
 /// fix suggestions. `Diagnostic::new(code, sev, span, msg)` remains
 /// the minimal constructor; the rest are opt-in via builder methods.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: Code,
     pub severity: Severity,
@@ -214,8 +211,7 @@ impl Diagnostic {
 }
 
 /// A secondary labeled location attached to a diagnostic.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct Label {
     pub span: Span,
     pub message: String,
@@ -223,8 +219,7 @@ pub struct Label {
 
 /// A machine-applicable fix suggestion — one or more text edits that
 /// would resolve the diagnostic.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct Suggestion {
     pub message: String,
     pub edits: Vec<TextEdit>,
@@ -269,8 +264,7 @@ impl Suggestion {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
     pub span: Span,
     pub replacement: String,
@@ -279,8 +273,7 @@ pub struct TextEdit {
 /// How confident we are that applying a suggestion is correct.
 /// Editors should auto-apply only `MachineApplicable` ones without
 /// confirmation.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applicability {
     /// Trivially correct — safe to apply unattended.
     MachineApplicable,

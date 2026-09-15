@@ -31,7 +31,6 @@ pub use leek_manifest::{
 };
 pub use pipeline::{Fmt, FormattedArtifact};
 
-#[cfg(feature = "salsa")]
 pub use pipeline::{FormatQueryResult, format_query};
 
 use leek_span::SourceId;

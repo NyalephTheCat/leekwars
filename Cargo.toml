@@ -110,8 +110,7 @@ leek-test-driver  = { path = "crates/testing/leek-test-driver" }
 leek-test-corpus  = { path = "crates/testing/leek-test-corpus" }
 leek-bench        = { path = "crates/testing/leek-bench" }
 
-# External — kept small for the first slice. We'll add winnow, rowan, salsa,
-# etc. as the slices that need them land.
+# External.
 clap        = { version = "4", features = ["derive"] }
 num-bigint  = "0.4"
 num-traits  = "0.2"
@@ -127,6 +126,11 @@ toml        = { version = "0.8", default-features = false, features = ["parse", 
 # `toml` already pulls in — no new dependency.
 toml_edit   = { version = "0.22", default-features = false, features = ["parse"] }
 comfy-table = "7"
+
+# The query engine. Pinned once for the whole workspace: the `Update` derives
+# on the IR types and the `#[salsa::tracked]` queries returning them have to
+# come from the same salsa, and a per-crate pin lets the two drift.
+salsa       = "0.26"
 
 # Debug Adapter Protocol types + server scaffolding for `leek-dap`.
 dap         = "0.4.1-alpha1"

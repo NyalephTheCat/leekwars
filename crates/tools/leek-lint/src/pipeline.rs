@@ -92,7 +92,6 @@ impl Step for Lint {
 /// The version comes off the file input rather than out of the key; see
 /// [`LintOptions::from_groups`](crate::LintOptions::from_groups) for why that
 /// is not the same thing as keying on a whole `LintOptions`.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn lint_query(
     db: &dyn leek_pipeline::salsa::Db,
@@ -130,7 +129,6 @@ pub fn lint_query(
 /// requires `HirArtifact`, so the `Lint` step is planned after every
 /// stage above and emits into the run's diagnostic stream after all of
 /// them.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn diagnostics_with_lints(
     db: &dyn leek_db::Db,

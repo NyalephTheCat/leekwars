@@ -21,22 +21,7 @@ leek-config      = { workspace = true }
 leek-environment = { workspace = true }
 rowan            = { workspace = true }
 num-bigint       = { workspace = true }
-salsa            = { version = "0.26", optional = true }
-
-[features]
-default = []
-# Adds `salsa::Update` derives on every HIR type and exposes a
-# `lower_hir_query` tracked entry point. The artifact is
-# `Arc<HirFile>` on this path so cache hits are pointer-cheap.
-salsa = [
-  "dep:salsa",
-  "leek-pipeline/salsa",
-  "leek-parser/salsa",
-  "leek-syntax/salsa",
-  "leek-types/salsa",
-  "leek-diagnostics/salsa",
-  "leek-span/salsa",
-]
+salsa            = { workspace = true }
 
 [lints]
 workspace = true

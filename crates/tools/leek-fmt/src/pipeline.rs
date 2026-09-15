@@ -1,9 +1,8 @@
 //! Pipeline integration: formatter as a [`Step`].
 //!
 //! Mirrors [`leek_parser::pipeline`] — the formatter ships a
-//! direct-call step plus a salsa-tracked [`format_query`] when the
-//! `salsa` feature is enabled. The step inserts a
-//! [`FormattedArtifact`] into the pipeline context.
+//! direct-call step plus a salsa-tracked [`format_query`]. The step
+//! inserts a [`FormattedArtifact`] into the pipeline context.
 
 use std::sync::Arc;
 
@@ -72,7 +71,6 @@ fn run_format(cx: &Context<'_>, opts: &FormatOptions) -> String {
     // The salsa-tracked path always uses defaults; non-default
     // options short-circuit to the direct path so the user's
     // settings actually take effect.
-    #[cfg(feature = "salsa")]
     if opts == &FormatOptions::default()
         && let Some((db, file)) = cx.salsa()
     {
@@ -102,9 +100,7 @@ fn parse_or_reuse(cx: &Context<'_>) -> GreenNode {
 
 // ---- Salsa-tracked entry point ----
 
-#[cfg(feature = "salsa")]
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct FormatQueryResult {
     pub text: Arc<String>,
 }
@@ -112,7 +108,6 @@ pub struct FormatQueryResult {
 /// Salsa-tracked formatter entry point. Re-runs only when
 /// [`leek_parser::pipeline::parse_query`]'s result changes — which
 /// itself only re-runs when the input file's text changes.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn format_query(
     db: &dyn leek_pipeline::salsa::Db,

@@ -7,8 +7,7 @@ use leek_syntax::{SyntaxKind, SyntaxNode};
 /// Canonical Leekscript types. The lattice they form — assignability,
 /// joins, and the canonical forms of unions and nullables — is written
 /// up in `docs/semantics.md` §5.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     /// Top type / unknown — accepts anything.
     Any,

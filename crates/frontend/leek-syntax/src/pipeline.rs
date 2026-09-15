@@ -45,7 +45,6 @@ impl RecipeArtifact for PragmasArtifact {
 /// [`Pipeline::run_memoized`](leek_pipeline::Pipeline::run_memoized);
 /// otherwise calls [`parse_pragmas`] directly.
 fn run_pragma(cx: &Context<'_>) -> (Pragmas, Vec<Diagnostic>) {
-    #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let out = pragma_query(db, file);
         return (out.pragmas, out.diagnostics);
@@ -55,8 +54,7 @@ fn run_pragma(cx: &Context<'_>) -> (Pragmas, Vec<Diagnostic>) {
 
 /// Tracked return value: pragmas + their parse-time diagnostics.
 /// Single-struct return so the salsa-tracked query is well-formed.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct PragmaResult {
     pub pragmas: Pragmas,
     pub diagnostics: Vec<Diagnostic>,
@@ -65,7 +63,6 @@ pub struct PragmaResult {
 /// Salsa-tracked entry point for pragma preprocessing. Re-runs only
 /// when the input [`SourceFile`](leek_pipeline::salsa::SourceFile)'s
 /// text changes.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn pragma_query(
     db: &dyn leek_pipeline::salsa::Db,

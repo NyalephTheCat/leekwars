@@ -27,8 +27,7 @@ use crate::{Artifact, Pipeline, Step, TimedBox, TimingSink};
 /// `leek_db::lower_program` is memoized per optimization level, which is
 /// what lets an `O1` caller read an optimized tree out of the cache
 /// instead of cloning the `O0` one and optimizing it on every run.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OptLevel {
     /// No optimization. The IR mirrors the source structure.
     #[default]
@@ -55,8 +54,7 @@ impl OptLevel {
 /// property of the file such a query is already keyed on, which is what
 /// makes this the right key and `leek_lint::LintOptions`, which does
 /// carry a version, the wrong one.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct LintGroups {
     /// Strictness lints — verbose-but-fine code worth tightening.
     pub pedantic: bool,

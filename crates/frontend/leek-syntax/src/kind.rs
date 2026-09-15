@@ -10,7 +10,7 @@
 
 use crate::Version;
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(salsa::Update)]
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SyntaxKind {

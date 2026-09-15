@@ -58,7 +58,6 @@ fn run_analyze(cx: &Context<'_>) -> Option<Arc<Vec<Complexity>>> {
     // `leek.showComplexity` — only ever through `crate::pipeline::run` /
     // `run_on_file`, which build a plain `leek_session::pipeline`. Nothing
     // routes `Target::Complexity` through `pipeline_with_includes` yet.
-    #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         return Some(complexity_query(db, file).0);
     }
@@ -68,14 +67,12 @@ fn run_analyze(cx: &Context<'_>) -> Option<Arc<Vec<Complexity>>> {
 
 /// Tracked return type — newtype over `Arc<Vec<Complexity>>` so the
 /// salsa query has a single `Update`-able return.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct ComplexityReport(pub Arc<Vec<Complexity>>);
 
 /// Salsa-tracked entry point. Re-runs only when
 /// [`lower_hir_query`](leek_hir::pipeline::lower_hir_query)'s HIR
 /// changes.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn complexity_query(
     db: &dyn leek_pipeline::salsa::Db,
@@ -87,20 +84,7 @@ pub fn complexity_query(
     ComplexityReport(Arc::new(analyze_file(hir.hir.as_ref())))
 }
 
-// The salsa cascade tests below are `#[cfg(feature = "salsa")]`, and a
-// cfg'd-out test is an absent test, not a passing one. The self
-// dev-dependency in `Cargo.toml` turns the feature on for test builds;
-// refusing to build the test target without it makes losing that line a
-// loud failure rather than the caching proof quietly disappearing. (The
-// same trap leek-mir's `lower_mir_query` fell into — see
-// `leek_mir::pipeline`.)
-#[cfg(all(test, not(feature = "salsa")))]
-compile_error!(
-    "leek-complexity's test build needs the `salsa` feature — restore the self \
-     dev-dependency in crates/middle/leek-complexity/Cargo.toml"
-);
-
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod salsa_probe {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
@@ -108,7 +92,7 @@ mod salsa_probe {
     pub(super) static SERIAL: Mutex<()> = Mutex::new(());
 }
 
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod salsa_tests {
     use std::sync::atomic::Ordering;
 

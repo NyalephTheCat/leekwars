@@ -1,7 +1,4 @@
-//! Optional salsa-backed memoization layer.
-//!
-//! Enable via the `salsa` feature on `leek-pipeline`. This module
-//! provides:
+//! The salsa-backed memoization layer. This module provides:
 //!
 //! - [`Db`] — the database trait pass crates can write tracked
 //!   queries against.
@@ -37,9 +34,7 @@
 //! ```
 //!
 //! The per-crate tracked queries land in each pass crate (lexer,
-//! parser, …) when those crates opt in to the salsa feature
-//! themselves, each behind that crate's own `salsa` feature so a
-//! consumer that doesn't want the dependency keeps the plain [`Step`].
+//! parser, …); [`leek_db`] re-exports them all under one import path.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

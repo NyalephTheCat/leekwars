@@ -18,7 +18,6 @@ use leek_syntax::version::version_from_byte;
 
 use crate::ast::{AstNode, SourceFile};
 use crate::parse_tokens_with_classes;
-#[cfg(feature = "salsa")]
 use leek_pipeline::salsa::ProgramClasses;
 
 /// The parser's green tree.
@@ -134,7 +133,6 @@ impl RecipeArtifact for AstArtifact {
 /// [`leek_lexer::pipeline::TokensArtifact`] when an earlier
 /// [`Lex`](leek_lexer::pipeline::Lex) step has already produced one.
 fn run_parse(cx: &Context<'_>) -> (GreenNode, Vec<Diagnostic>) {
-    #[cfg(feature = "salsa")]
     if cx.get::<KnownClassesArtifact>().is_none()
         && let Some((db, file)) = cx.salsa()
     {
@@ -184,8 +182,7 @@ fn run_parse(cx: &Context<'_>) -> (GreenNode, Vec<Diagnostic>) {
 /// Tracked return value for [`parse_query`]: the green tree plus the
 /// parser's own diagnostics (lex diagnostics are emitted separately by
 /// the [`Lex`](leek_lexer::pipeline::Lex) step).
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct ParseQueryResult {
     pub green: GreenNode,
     pub diagnostics: Vec<Diagnostic>,
@@ -226,7 +223,6 @@ pub struct ParseQueryResult {
 /// [`SourceFile`](leek_pipeline::salsa::SourceFile), and both reach the
 /// parser through a pipeline whose `Lex` step emitted the lex
 /// diagnostics once.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn parse_query<'db>(
     db: &'db dyn leek_pipeline::salsa::Db,
@@ -256,7 +252,7 @@ pub fn parse_query<'db>(
 /// The two parse paths agree on the tree, and disagree about lex
 /// diagnostics only where the [entry module docs](crate::entry) say they
 /// should.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod parse_path_agreement_tests {
     use leek_diagnostics::codes;
     use leek_pipeline::Pipeline;

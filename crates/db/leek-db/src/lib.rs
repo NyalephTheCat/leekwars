@@ -2,10 +2,9 @@
 //! tracked query.
 //!
 //! Today the database lives in [`leek_pipeline::salsa`] and each tracked
-//! query lives in the pass crate that computes it, behind that crate's own
-//! `salsa` feature. A caller that wants to run the memoized frontend has to
-//! know all of that — which crate owns which query, and which feature to
-//! turn on. This crate is the single place that knows it instead: it
+//! query lives in the pass crate that computes it. A caller that wants to
+//! run the memoized frontend has to know all of that — which crate owns
+//! which query. This crate is the single place that knows it instead: it
 //! re-exports the database items here at the root and the queries in
 //! [`queries`], so a consumer writes `leek_db::{Db, LeekDb, SourceFile}`
 //! and `leek_db::queries::*` and nothing else.

@@ -57,8 +57,7 @@ const RETURN: u64 = 1;
 const LOOP_HEADER: u64 = 1;
 
 /// Result of analysing one user function.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct Complexity {
     pub name: String,
     pub params: Vec<ParamInfo>,
@@ -74,8 +73,7 @@ pub struct Complexity {
     pub span: Option<Span>,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct ParamInfo {
     pub name: String,
     pub size_var: Option<SizeVar>,

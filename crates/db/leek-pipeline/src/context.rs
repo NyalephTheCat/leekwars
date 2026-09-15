@@ -33,20 +33,15 @@ pub struct Context<'db> {
     diagnostics: Vec<Diagnostic>,
     artifacts: HashMap<TypeId, Box<dyn Any>>,
     aborted: bool,
-    #[cfg(feature = "salsa")]
     salsa: Option<SalsaHandle<'db>>,
     _marker: PhantomData<&'db ()>,
 }
 
-#[cfg(feature = "salsa")]
 struct SalsaHandle<'db> {
     db: &'db dyn crate::salsa::Db,
     file: crate::salsa::SourceFile,
 }
 
-// `'db` is only used by the `#[cfg(feature = "salsa")]` `with_salsa` method below,
-// so default-feature clippy thinks it's elidable — but eliding breaks the salsa build.
-#[allow(clippy::elidable_lifetime_names)]
 impl<'db> Context<'db> {
     pub(crate) fn new(input: Input) -> Self {
         Self {
@@ -54,13 +49,11 @@ impl<'db> Context<'db> {
             diagnostics: Vec::new(),
             artifacts: HashMap::new(),
             aborted: false,
-            #[cfg(feature = "salsa")]
             salsa: None,
             _marker: PhantomData,
         }
     }
 
-    #[cfg(feature = "salsa")]
     pub(crate) fn with_salsa(
         input: Input,
         db: &'db dyn crate::salsa::Db,
@@ -160,9 +153,6 @@ impl<'db> Context<'db> {
     /// returns the underlying salsa database and input handle. Steps
     /// use this to dispatch into tracked queries when memoization is
     /// available; otherwise they fall back to direct computation.
-    ///
-    /// Only present when the `salsa` feature is enabled.
-    #[cfg(feature = "salsa")]
     pub fn salsa(&self) -> Option<(&dyn crate::salsa::Db, crate::salsa::SourceFile)> {
         self.salsa.as_ref().map(|h| (h.db, h.file))
     }

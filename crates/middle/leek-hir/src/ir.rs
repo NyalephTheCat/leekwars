@@ -22,8 +22,7 @@ leek_span::newtype_index! {
 
 /// Per-file HIR. Top-level statements (the "main block") run in the
 /// order they appear, threaded with the items in declaration order.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq)]
 pub struct HirFile {
     /// All declarations indexed by `DefId.0`. Position is the
     /// canonical slot for the `DefId` to look up its definition.
@@ -43,8 +42,7 @@ pub type ItemId = DefId;
 /// A registered declaration. The body lives separately so multiple
 /// queries (resolver, type checker, interpreter) can share the
 /// signature view without cloning the body.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Def {
     Function(Function),
     Class(Class),
@@ -74,8 +72,7 @@ impl Def {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Function {
     pub name: String,
     pub span: Span,
@@ -89,8 +86,7 @@ pub struct Function {
     pub backend_directives: Vec<(String, String)>,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Param {
     pub def: DefId,
     pub name: String,
@@ -102,8 +98,7 @@ pub struct Param {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Class {
     pub name: String,
     pub span: Span,
@@ -113,8 +108,7 @@ pub struct Class {
     pub constructors: Vec<MethodDef>,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Field {
     pub def: DefId,
     pub name: String,
@@ -126,8 +120,7 @@ pub struct Field {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct MethodDef {
     pub def: DefId,
     pub name: String,
@@ -139,16 +132,14 @@ pub struct MethodDef {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
     Public,
     Private,
     Protected,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Global {
     pub name: String,
     pub ty: Option<Type>,
@@ -156,23 +147,20 @@ pub struct Global {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Local {
     pub name: String,
     pub ty: Option<Type>,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// Bare expression statement: `foo()`, `x + 1`, etc.
     Expr(Expr),
@@ -237,8 +225,7 @@ impl Stmt {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct VarDecl {
     pub def: DefId,
     pub name: String,
@@ -248,8 +235,7 @@ pub struct VarDecl {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct IfStmt {
     pub cond: Expr,
     pub then_branch: Box<Stmt>,
@@ -261,24 +247,21 @@ pub struct IfStmt {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct WhileStmt {
     pub cond: Expr,
     pub body: Box<Stmt>,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct DoWhileStmt {
     pub body: Box<Stmt>,
     pub cond: Expr,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct ForStmt {
     pub init: Option<Box<Stmt>>,
     pub cond: Option<Expr>,
@@ -287,8 +270,7 @@ pub struct ForStmt {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct ForeachStmt {
     /// Optional key binding (`for (k : v in arr)`).
     pub key: Option<ForeachBind>,
@@ -298,8 +280,7 @@ pub struct ForeachStmt {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct ForeachBind {
     /// Where each iteration stores its key/value — an l-value expression
     /// resolved exactly like the left-hand side of an assignment to `name`:
@@ -341,46 +322,40 @@ impl ForeachBind {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct SwitchStmt {
     pub discriminant: Expr,
     pub arms: Vec<SwitchArm>,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct SwitchArm {
     /// `None` for the `default` arm.
     pub case: Option<Expr>,
     pub body: Vec<Stmt>,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct IncludeStmt {
     pub path: String,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct ImportStmt {
     pub path: String,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Expr {
     pub kind: ExprKind,
     pub ty: Type,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Literal(Literal),
     /// Resolved name reference.
@@ -422,15 +397,13 @@ pub enum ExprKind {
 /// One set-literal element: a plain value (`end` is `None`) or an
 /// inclusive integer range `start..end` expanded at runtime
 /// (`<1..3>` → `<1, 2, 3>`, descending allowed — upstream #2335).
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct SetItem {
     pub start: Expr,
     pub end: Option<Expr>,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct Call {
     pub callee: Callee,
     pub args: Vec<Expr>,
@@ -447,8 +420,7 @@ pub struct Call {
 /// Resolved call target. `Method` and `StaticMethod` keep the
 /// receiver expression separately so the interpreter can evaluate
 /// `this`/`obj` before dispatching.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Callee {
     /// Bare function call: `foo(args)`.
     Function(NameRef),
@@ -465,8 +437,7 @@ pub enum Callee {
     Expr(Expr),
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct SliceExpr {
     pub base: Box<Expr>,
     pub start: Option<Box<Expr>>,
@@ -474,8 +445,7 @@ pub struct SliceExpr {
     pub step: Option<Box<Expr>>,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct IntervalExpr {
     pub start: Option<Box<Expr>>,
     pub end: Option<Box<Expr>>,
@@ -484,30 +454,26 @@ pub struct IntervalExpr {
     pub end_inclusive: bool,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct NewExpr {
     pub class: String,
     pub args: Vec<Expr>,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct LambdaExpr {
     pub params: Vec<Param>,
     pub body: LambdaBody,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum LambdaBody {
     Block(Block),
     Expr(Box<Expr>),
 }
 
 /// Resolved name reference. The interpreter dispatches on this.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum NameRef {
     /// Local variable / parameter (declared in some enclosing scope).
     Local(DefId),
@@ -530,8 +496,7 @@ pub enum NameRef {
     Unresolved(String),
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Literal {
     Int(i64),
     Real(f64),
@@ -567,8 +532,7 @@ pub mod op_cost {
     pub const FREE: u32 = 0;
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -687,8 +651,7 @@ impl BinaryOp {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     /// Numeric negation `-x`.
     Neg,
@@ -724,8 +687,7 @@ impl UnaryOp {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostfixOp {
     /// `x++`.
     PostInc,

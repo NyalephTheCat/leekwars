@@ -74,7 +74,6 @@ fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>>
     // built by `pipeline_with_includes` would lower MIR from the entry
     // file alone. Dormant: the only `run_memoized` caller is the LSP, which
     // never asks for this target.
-    #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         // The MIR query is keyed only on the source file, so it caches
         // *unoptimized* MIR: a codegen driver's program would have to be
@@ -98,22 +97,19 @@ fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>>
 }
 
 /// Tracked return: MIR program plus lowering diagnostics.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct LowerMirQueryResult {
     pub program: Arc<MirProgram>,
     pub diagnostics: Vec<leek_diagnostics::Diagnostic>,
 }
 
 /// Tracked return: `Arc<MirProgram>` newtype, salsa-friendly.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct LoweredMir(pub Arc<MirProgram>);
 
 /// Salsa-tracked entry point. Re-runs only when
 /// [`lower_hir_query`](leek_hir::pipeline::lower_hir_query)'s HIR
 /// changes.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn lower_mir_query(
     db: &dyn leek_pipeline::salsa::Db,
@@ -131,20 +127,7 @@ pub fn lower_mir_query(
     }
 }
 
-// The salsa cascade tests below are `#[cfg(feature = "salsa")]`, and a
-// cfg'd-out test is an absent test, not a passing one — which is how
-// `lower_mir_query` and its two tests went unbuilt in every gate for as
-// long as nothing in the workspace requested `leek-mir/salsa`. The self
-// dev-dependency in `Cargo.toml` turns the feature on for test builds;
-// refusing to build the test target without it makes losing that line a
-// loud failure rather than two tests quietly disappearing.
-#[cfg(all(test, not(feature = "salsa")))]
-compile_error!(
-    "leek-mir's test build needs the `salsa` feature — restore the self \
-     dev-dependency in crates/middle/leek-mir/Cargo.toml"
-);
-
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod salsa_probe {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
@@ -152,7 +135,7 @@ mod salsa_probe {
     pub(super) static SERIAL: Mutex<()> = Mutex::new(());
 }
 
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod salsa_tests {
     use std::sync::atomic::Ordering;
 

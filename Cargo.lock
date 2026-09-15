@@ -1091,7 +1091,6 @@ version = "0.0.1"
 dependencies = [
  "leek-backend-native",
  "leek-builtins",
- "leek-complexity",
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
@@ -1268,7 +1267,6 @@ dependencies = [
  "leek-db",
  "leek-diagnostics",
  "leek-hir",
- "leek-lint",
  "leek-parser",
  "leek-pipeline",
  "leek-project",
@@ -1352,7 +1350,6 @@ dependencies = [
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
- "leek-mir",
  "leek-parser",
  "leek-pipeline",
  "leek-span",

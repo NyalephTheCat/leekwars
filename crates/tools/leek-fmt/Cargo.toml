@@ -15,19 +15,7 @@ leek-parser      = { workspace = true }
 leek-pipeline    = { workspace = true }
 leek-manifest    = { workspace = true }
 rowan            = { workspace = true }
-salsa            = { version = "0.26", optional = true }
-
-[features]
-default = []
-salsa = [
-  "dep:salsa",
-  "leek-pipeline/salsa",
-  "leek-parser/salsa",
-  "leek-lexer/salsa",
-  "leek-syntax/salsa",
-  "leek-diagnostics/salsa",
-  "leek-span/salsa",
-]
+salsa            = { workspace = true }
 
 [dev-dependencies]
 insta       = "1"

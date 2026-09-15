@@ -21,15 +21,14 @@
 //! same pipeline pull cached results from [`Context`] rather than
 //! recomputing.
 //!
-//! ## Optional: cross-run memoization with salsa
+//! ## Cross-run memoization with salsa
 //!
-//! Enable the `salsa` feature to gain a [`mod@salsa`] module that
-//! exposes a [`salsa::Db`] trait, [`salsa::LeekDb`] concrete database,
-//! and [`salsa::SourceFile`] input. Pass crates can then expose
-//! tracked queries and dispatch their [`Step`] impl to the tracked
-//! form when [`Context::salsa`] returns `Some` — this is how the LSP
-//! avoids re-parsing unchanged files across edits. See
-//! [`Pipeline::run_memoized`].
+//! The [`mod@salsa`] module exposes a [`salsa::Db`] trait, a
+//! [`salsa::LeekDb`] concrete database, and a [`salsa::SourceFile`]
+//! input. Pass crates expose tracked queries and dispatch their
+//! [`Step`] impl to the tracked form when [`Context::salsa`] returns
+//! `Some` — this is how the LSP avoids re-parsing unchanged files
+//! across edits. See [`Pipeline::run_memoized`].
 
 // Printing is an API decision in a library, not a convenience: a crate that
 // writes to the terminal behind its caller's back is unusable from a language
@@ -46,7 +45,6 @@ mod project;
 mod recipe;
 mod timed;
 
-#[cfg(feature = "salsa")]
 pub mod salsa;
 
 pub use adapters::{IfPresent, RepeatUntilStable, RequireArtifact, StopOnDiagnostics, Tap};

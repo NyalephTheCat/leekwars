@@ -7,14 +7,7 @@ license.workspace = true
 description = "Source positions, spans, and line tables for Leekscript."
 
 [dependencies]
-salsa = { version = "0.26", optional = true }
-
-[features]
-default = []
-# Adds `salsa::Update` derives on the public types so they can cross
-# a tracked-query return boundary. Off by default — enable on the LSP
-# / `miku watch` build path.
-salsa = ["dep:salsa"]
+salsa = { workspace = true }
 
 [lints]
 workspace = true

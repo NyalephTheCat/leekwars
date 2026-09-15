@@ -11,38 +11,20 @@ leek-hir      = { workspace = true }
 leek-builtins = { workspace = true }
 leek-pipeline = { workspace = true }
 leek-span     = { workspace = true }
-salsa         = { version = "0.26", optional = true }
+salsa         = { workspace = true }
 
 [dev-dependencies]
 leek-project  = { workspace = true }
-# Self dev-dependency: turns this crate's own `salsa` feature on whenever
-# it is built as a test target, so `complexity_query` and the memoization
-# tests in `pipeline.rs` actually compile. Without it nothing in a
-# `-p leek-complexity` build requests the feature and those tests vanish
-# silently. Must be `path`, not `workspace`; cargo rejects a workspace
-# self-reference.
-leek-complexity  = { path = ".", features = ["salsa"] }
 leek-diagnostics = { workspace = true }
 leek-backend-native = { workspace = true }
 leek-runtime        = { workspace = true }
-# Cascade memoization tests pull salsa-enabled frontend stages and use
-# the input setter.
-leek-lexer       = { workspace = true, features = ["salsa"] }
-leek-parser      = { workspace = true, features = ["salsa"] }
+# Cascade memoization tests drive the frontend stages and use the
+# input setter.
+leek-lexer       = { workspace = true }
+leek-parser      = { workspace = true }
 leek-resolver    = { workspace = true }
-leek-syntax      = { workspace = true, features = ["salsa"] }
+leek-syntax      = { workspace = true }
 leek-types       = { workspace = true }
-
-[features]
-default = []
-# Adds a `complexity_query` salsa-tracked entry point. Calls
-# `lower_hir_query` and re-runs only when the lowered HIR changes.
-salsa = [
-  "dep:salsa",
-  "leek-pipeline/salsa",
-  "leek-hir/salsa",
-  "leek-span/salsa",
-]
 
 [lints]
 workspace = true

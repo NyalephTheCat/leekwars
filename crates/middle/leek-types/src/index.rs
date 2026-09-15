@@ -12,8 +12,7 @@ use crate::ty::Type;
 /// the LSP can render a declaration's return/field type even when the
 /// source omits the annotation. Keyed by name (and, for members, by the
 /// owning class). `Type::Any` entries mean "no better information".
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct InferredSignatures {
     /// Top-level function name → inferred/declared return type.
     pub fn_returns: HashMap<String, Type>,
@@ -31,15 +30,13 @@ pub struct InferredSignatures {
 /// Hover does a "smallest span that covers cursor" binary search
 /// over [`TypeTable::exprs`] — the smallest containing entry is the
 /// most-nested expression and yields the most specific type.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct TypedExpr {
     pub span: Span,
     pub ty: Type,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeTable {
     /// Sorted by `span.start` so callers can binary-search by cursor
     /// position.

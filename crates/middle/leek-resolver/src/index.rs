@@ -14,8 +14,7 @@ leek_span::newtype_index! {
 }
 
 /// One declared name and the span where it lives.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
     pub id: SymbolId,
     pub kind: SymbolKind,
@@ -35,8 +34,7 @@ pub struct Symbol {
 /// declaration. `name_offset` / `name_len` give the source-byte
 /// range of the *reference* — the LSP locates a click via offset
 /// binary-search over [`ResolveTable::references`].
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedRef {
     pub name_offset: u32,
     pub name_len: u32,
@@ -44,8 +42,7 @@ pub struct ResolvedRef {
 }
 
 /// Everything the resolver collected for LSP-style navigation.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolveTable {
     pub symbols: Vec<Symbol>,
     /// Sorted by `name_offset` so callers can binary-search by

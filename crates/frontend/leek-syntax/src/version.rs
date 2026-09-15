@@ -2,8 +2,7 @@
 //!
 //! Spec: `doc/versioning.md`.
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Version {
     V1 = 1,
     V2 = 2,

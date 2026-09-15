@@ -24,8 +24,7 @@ use crate::Version;
 /// central catalog in [`leek_diagnostics::codes`].
 pub use leek_diagnostics::codes;
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pragmas {
     pub version: Version,
     /// True when an explicit `// @version:N` directive set `version`.

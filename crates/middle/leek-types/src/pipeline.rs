@@ -14,8 +14,7 @@ use crate::{Options, TypeCheckResult, check_collecting, check_collecting_files};
 /// Carries both the diagnostic list and the LSP-facing
 /// [`TypeTable`]. Direct callers that only need diagnostics ignore
 /// `table`.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeCheckArtifact {
     pub diagnostics: Vec<Diagnostic>,
     pub table: TypeTable,
@@ -88,7 +87,6 @@ fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
         });
         return check_collecting_files(&files, Some(&graph.resolved), type_options(cx));
     }
-    #[cfg(feature = "salsa")]
     if let Some((db, file)) = cx.salsa() {
         let art = typecheck_query(db, file);
         return TypeCheckResult {
@@ -128,7 +126,6 @@ fn type_options(cx: &Context<'_>) -> Options {
 /// Every setting the checker options are built from comes off that
 /// input. Reading a process-global here instead would be invisible to
 /// salsa, and the memo would survive a change it depends on.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn typecheck_query(
     db: &dyn leek_pipeline::salsa::Db,
@@ -173,7 +170,7 @@ pub fn typecheck_query(
 /// backdated and unchanged while this query still has to re-run. Getting
 /// that wrong leaves the LSP showing yesterday's diagnostics after a
 /// `// @strict` pragma is added.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod salsa_invalidation_tests {
     use std::sync::atomic::Ordering;
 
@@ -285,7 +282,7 @@ mod salsa_invalidation_tests {
 /// `any` for every builtin call it had already checked with the library
 /// unseeded. Pinning it here means two inputs that differ in nothing
 /// else must still type-check differently.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod seed_library_is_an_input_tests {
     use leek_pipeline::salsa::{LeekDb, SourceFile};
 
