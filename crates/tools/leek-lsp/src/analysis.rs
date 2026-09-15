@@ -53,43 +53,28 @@
 //! moved onto them provably behaviour-preserving rather than hopefully
 //! so.
 //!
-//! **What is deliberately missing.** There is no `lints` accessor and no
-//! `formatted` accessor, and neither is an oversight — but the two are
-//! blocked on different things.
+//! **Nothing is deliberately missing any more.** Formatting and linting
+//! were the two holdouts, for different reasons, and both are resolved:
+//! `format_query` now interns its [`FormatOptions`](leek_fmt::FormatOptions)
+//! into the key instead of formatting with defaults, so the editor's own
+//! settings go through the cache rather than around it; and
+//! [`crate::diagnostics`] moved onto `program_diagnostics_with_lints` once
+//! `Workspace::resync` began closing its file set under includes, which is
+//! what made the query layer's closure match the include folder's.
 //!
-//! `leek-fmt`'s [`format_query`](leek_fmt::format_query) is keyed on the
-//! source file alone and formats with `FormatOptions::default()`, where
-//! [`crate::pipeline::run_formatted`] formats with the options the editor
-//! pushed — an accessor over it would quietly ignore the user's settings.
-//! Formatting stays on the pipeline until an options-keyed `format_query`
-//! exists.
-//!
-//! Linting is no longer blocked on a missing query: `leek_lint::lint_query`
-//! and `leek_lint::diagnostics_with_lints` both exist. It is blocked on the
-//! *file set*. [`crate::diagnostics`] needs the whole include closure, and
-//! the two paths disagree about what is in one. The pipeline resolves
-//! includes through [`Workspace::include_folder`](crate::workspace::Workspace),
-//! which falls back to **disk**, so it reaches a file that is neither open
-//! nor indexed. `leek_db::queries::program_diagnostics` walks
-//! [`WorkspaceFiles`](leek_db::WorkspaceFiles), which holds exactly the open
-//! and indexed files. Moving diagnostics across as-is would silently drop
-//! every diagnostic from an include outside the index, so the switch needs
-//! the walker's finds registered as inputs first — the same `#191` interner
-//! sharing that already keeps their `SourceId`s consistent.
-//!
-//! Those two are the whole of the pipeline's remaining surface:
-//! `handlers::formatting` (options-keyed) and [`crate::diagnostics`]
-//! (include-aware). Every other reader of a frontend artifact in this crate
-//! is below.
+//! What is left of [`crate::pipeline`] is [`crate::pipeline::run`] and
+//! [`crate::pipeline::run_on_file`], and the only callers are this file's
+//! own tests — they compare each accessor against the artifact the
+//! equivalent recipe produces, which is what makes the handler rewrites
+//! provably behaviour-preserving. No handler plans a pipeline.
 //!
 //! # Includes
 //!
 //! These accessors answer for *one* file, exactly like
-//! [`crate::pipeline::run_on_file`]. The include-aware path
-//! ([`crate::pipeline::run_on_file_with_includes`]) assembles a graph
-//! outside salsa and deliberately bypasses the single-file queries, so
-//! diagnostics — the one consumer that needs the compiler's shared
-//! program scope — keeps using the pipeline.
+//! [`crate::pipeline::run_on_file`]. The consumer that needs the
+//! compiler's shared program scope — [`crate::diagnostics`] — does not
+//! come through here at all: it asks the whole-program queries, over an
+//! include closure `Workspace::resync` keeps registered as inputs.
 //!
 //! That is also the whole scope of the program-wide `class` set here.
 //! Each of these parses with no cross-file classes at all, because a
@@ -99,6 +84,8 @@
 //! gone. The closure's classes reach the include-aware pipeline through
 //! `ResolveIncludes`, and reach the tracked passes through
 //! `leek_db::queries::program_classes`, which keys them per program.
+
+use std::sync::Arc;
 
 use leek_db::queries;
 use leek_db::{Db, ProgramClasses, SourceFile};
@@ -189,6 +176,26 @@ pub fn hir(db: &dyn Db, file: SourceFile) -> queries::LowerHirResult {
 /// about.
 pub fn complexity(db: &dyn Db, file: SourceFile) -> queries::ComplexityReport {
     queries::complexity_query(db, file)
+}
+
+/// The formatted text for a file, under `opts`.
+///
+/// Replaces `run.get::<leek_fmt::pipeline::FormattedArtifact>()`. The
+/// settings are interned into the query key rather than defaulted, so the
+/// editor's own `[format]` table goes through the cache instead of around
+/// it — formatting on a keystroke used to be the one path that could
+/// never hit a memo, because any project with a `[format]` table had
+/// non-default options and the query only ever formatted with defaults.
+///
+/// **Unverified**, exactly like the artifact it replaces: the caller must
+/// run [`leek_fmt::check_equivalence`] before putting this in a buffer.
+pub fn formatted(db: &dyn Db, file: SourceFile, opts: &leek_fmt::FormatOptions) -> Arc<String> {
+    leek_fmt::pipeline::format_query(
+        db,
+        file,
+        leek_fmt::pipeline::FormatConfig::new(db, opts.clone()),
+    )
+    .text
 }
 
 /// Each accessor must return exactly what the handler it replaced used

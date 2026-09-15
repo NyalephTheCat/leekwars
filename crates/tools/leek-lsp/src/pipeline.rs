@@ -1,9 +1,20 @@
-//! Shared pipeline drivers for LSP handlers.
+//! What is left of the LSP's pipeline drivers.
+//!
+//! No handler comes through here any more: every frontend artifact a
+//! handler reads is a [`crate::analysis`] accessor, and the diagnostic
+//! stream is a whole-program query. The two `run*` functions below exist
+//! only so `analysis`'s tests can compare each accessor against the
+//! artifact the equivalent recipe produces — the check that makes those
+//! rewrites a refactor rather than a second opinion. They go when
+//! `Step` does (#99).
+//!
+//! [`include_folder`] is not part of that and does not go with it: the
+//! include walker behind `Workspace::resync` still resolves names
+//! through it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use leek_fmt::FormatOptions;
 use leek_pipeline::Run;
 use leek_pipeline::salsa::SourceFile;
 use leek_resolver::folder::{Folder, LoadError, LoadedFile, MemFolder};
@@ -21,17 +32,6 @@ pub fn run_on_file(ws: &Workspace, source_file: SourceFile, target: Target) -> O
 pub fn run<'db>(ws: &'db Workspace, uri: &lsp::Url, target: Target) -> Option<Run<'db>> {
     let doc = ws.doc(uri)?;
     run_on_file(ws, doc.source_file, target)
-}
-
-/// Run parse + format with the given options.
-pub fn run_formatted<'db>(
-    ws: &'db Workspace,
-    uri: &lsp::Url,
-    opts: FormatOptions,
-) -> Option<Run<'db>> {
-    let doc = ws.doc(uri)?;
-    let pipeline = leek_session::pipeline_formatted(opts, &leek_session::lsp_params()).ok()?;
-    Some(pipeline.run_memoized(&ws.db, doc.source_file))
 }
 
 /// Include resolver for the LSP. Open buffers shadow indexed/disk contents;

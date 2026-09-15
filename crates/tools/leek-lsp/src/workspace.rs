@@ -372,10 +372,11 @@ impl Workspace {
     /// The [`leek_span::SourceId`] comes from the workspace interner, not
     /// from the owning [`ProjectIndex`] — each index numbers its own
     /// files from 1, so two roots (or a root and an open buffer) would
-    /// otherwise hand the same id to different files, and
-    /// [`crate::pipeline::run_on_file_with_includes`] maps a source back
-    /// to a URI by exactly that id. The index's own numbering is never
-    /// read from here, so letting the two diverge costs nothing.
+    /// otherwise hand the same id to different files, and a diagnostic's
+    /// span is mapped back to a URI by exactly that id
+    /// ([`crate::diagnostics::LabelSources`]). The index's own numbering
+    /// is never read from here, so letting the two diverge costs
+    /// nothing.
     ///
     /// Leaves the derived caches alone: callers registering a whole tree
     /// rebuild them once at the end.
