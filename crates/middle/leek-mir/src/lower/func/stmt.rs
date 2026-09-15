@@ -571,31 +571,33 @@ impl FnLowerer<'_> {
             }
         };
 
-        // Pre-allocate one body block per case + a body block for
-        // the default arm (used both for direct default match and
-        // for fall-through after the last case).
-        let mut case_bodies: Vec<BlockId> = Vec::new();
-        let mut default_body: Option<BlockId> = None;
-        for arm in &sw.arms {
-            if arm.case.is_some() {
-                case_bodies.push(self.new_block());
-            } else {
-                default_body = Some(self.new_block());
-            }
-        }
+        // One body block per arm, in source order — which is also
+        // fall-through order. `default` is an arm like any other: it can sit
+        // in the middle, and a body that falls off its end continues into
+        // whatever is written next, not into the default.
+        let bodies: Vec<BlockId> = sw.arms.iter().map(|_| self.new_block()).collect();
+        let default_body = sw
+            .arms
+            .iter()
+            .position(|a| a.case.is_none())
+            .map(|i| bodies[i]);
         let exit = self.new_block();
 
         self.loop_stack.push(LoopCtx {
-            continue_target: exit,
+            // `break` leaves the switch; `continue` belongs to the enclosing
+            // loop and passes straight through — a switch is not a loop.
+            // With no loop around it, `continue` has nowhere to go but out.
+            continue_target: self
+                .loop_stack
+                .last()
+                .map_or(exit, |outer| outer.continue_target),
             break_target: exit,
         });
 
         // First pass: emit the test chain.
         let default_target = default_body.unwrap_or(exit);
-        let mut case_iter = case_bodies.iter().copied();
-        for arm in &sw.arms {
+        for (arm, &body_bb) in sw.arms.iter().zip(&bodies) {
             let Some(case_expr) = &arm.case else { continue };
-            let body_bb = case_iter.next().unwrap();
             let case = self.lower_expr_to_operand(case_expr);
             let cmp = self.fresh_temp(Type::Boolean, sw.span);
             // The comparison is `Synthetic`: upstream charges one op per
@@ -605,7 +607,10 @@ impl FnLowerer<'_> {
             self.push_stmt(Statement::Assign(
                 Place::Local(cmp),
                 Rvalue::Synthetic(Box::new(Rvalue::Binary(
-                    BinOp::Eq,
+                    // `eq()`, not `==`: a switch's loose comparison is the
+                    // same in every version, so `switch ('1') { case 1: … }`
+                    // matches at v4 as it does at v1.
+                    BinOp::LooseEq,
                     Operand::Local(disc_local),
                     case,
                 ))),
@@ -623,17 +628,8 @@ impl FnLowerer<'_> {
         }
         self.goto(default_target);
 
-        // Second pass: emit each case body. Tail fall-through
-        // goto chains to the next body in source order; the
-        // default body (if any) is the chain's final stop before
-        // `exit`.
-        let body_after =
-            |i: usize, case_bodies: &[BlockId], default: Option<BlockId>, exit: BlockId| {
-                if let Some(next) = case_bodies.get(i + 1).copied() {
-                    return next;
-                }
-                default.unwrap_or(exit)
-            };
+        // Second pass: emit each body, each falling through to the next arm
+        // in source order and the last one to `exit`.
         //
         // Every body entered — by a match or by falling through from
         // the previous body — costs 1 op: upstream opens each Java
@@ -642,22 +638,11 @@ impl FnLowerer<'_> {
         // return 99 } case 2: ... }` = 7 ops, #78). Upstream merges
         // stacked labels (`case 1: case 2:`) into one test charged per
         // label; charging each empty body here yields the same total.
-        let mut case_index = 0usize;
-        for arm in &sw.arms {
-            if arm.case.is_some() {
-                let body_bb = case_bodies[case_index];
-                self.resume(body_bb);
-                self.push_stmt(Statement::Charge(1));
-                self.lower_block_stmts(&arm.body);
-                let next = body_after(case_index, &case_bodies, default_body, exit);
-                self.goto(next);
-                case_index += 1;
-            } else if let Some(default_bb) = default_body {
-                self.resume(default_bb);
-                self.push_stmt(Statement::Charge(1));
-                self.lower_block_stmts(&arm.body);
-                self.goto(exit);
-            }
+        for (i, arm) in sw.arms.iter().enumerate() {
+            self.resume(bodies[i]);
+            self.push_stmt(Statement::Charge(1));
+            self.lower_block_stmts(&arm.body);
+            self.goto(bodies.get(i + 1).copied().unwrap_or(exit));
         }
 
         self.loop_stack.pop();

@@ -797,3 +797,55 @@ id = "a_call_in_a_condition_still_pays_for_its_branch"
 version = 2
 source = "function no() { return false } if (no()) { return 1 } return 2"
 expect = { equals = "2" }
+
+# A static field lives in a box that starts null, so a numeric or boolean
+# one is initialized explicitly; an instance field is a real slot and
+# already reads back zero. Types that accept null keep it on both sides —
+# a static `Set` field is meant to read back null.
+[[tests]]
+id = "a_typed_static_field_starts_at_its_types_value"
+version = 4
+source = "class Z { public static integer i public static real r public static boolean b public static BigInteger n public static string s } return [Z.i, Z.r, Z.b, Z.n, Z.s]"
+expect = { equals = "[0, 0.0, false, 0, null]" }
+
+[[tests]]
+id = "a_typed_static_field_default_is_inherited"
+version = 4
+source = "class A { public static integer b } class B extends A {} return B.b"
+expect = { equals = "0" }
+
+[[tests]]
+id = "a_nullable_field_keeps_its_null"
+version = 4
+source = "class A { integer | null x } var a = new A() return a.x"
+expect = { equals = "null" }
+
+# `switch` fall-through follows source order, and `default` is an arm like
+# any other — it can sit in the middle of the chain.
+[[tests]]
+id = "a_default_arm_falls_through_in_source_order"
+version = 3
+source = "integer x = 1 var r = '' switch (x) { case 1: r += 'a' default: r += 'd' case 2: r += 'b' } return r"
+expect = { equals = "\"adb\"" }
+
+[[tests]]
+id = "an_unmatched_switch_enters_the_default_where_it_is_written"
+version = 3
+source = "var x = 9 var r = '' switch (x) { case 1: r += 'a' default: r += 'd' case 2: r += 'b' } return r"
+expect = { equals = "\"db\"" }
+
+# `break` leaves the switch, but `continue` belongs to the enclosing loop —
+# a switch is not a loop.
+[[tests]]
+id = "continue_inside_a_switch_continues_the_loop"
+version = 3
+source = "var s = 0 for (var i = 0; i < 3; i++) { switch (i) { case 0: continue default: continue } s += 1 } return s"
+expect = { equals = "0" }
+
+# A switch compares with `eq()`, the loose equality, in every version —
+# `==` narrows at v4 but this does not.
+[[tests]]
+id = "a_switch_label_compares_loosely_even_at_v4"
+version = 4
+source = "var r = '' switch ('1') { case 1: r += 'a' } switch (true) { case 1: r += 'b' } switch ('') { case 0: r += 'c' } return [r, '1' == 1]"
+expect = { equals = "[\"abc\", false]" }

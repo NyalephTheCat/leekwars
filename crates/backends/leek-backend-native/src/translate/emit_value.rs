@@ -435,14 +435,17 @@ impl Tx<'_, '_> {
         //     (`true == 12` is true, `false == 0` is true).
         if matches!(
             op,
-            BinOp::Eq | BinOp::Ne | BinOp::IdentityEq | BinOp::IdentityNe
+            BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::IdentityEq | BinOp::IdentityNe
         ) && lt != rt
             && lt != ValTy::Real
             && rt != ValTy::Real
         {
             let identity = matches!(op, BinOp::IdentityEq | BinOp::IdentityNe);
-            let want_eq = matches!(op, BinOp::Eq | BinOp::IdentityEq);
-            if identity || self.lang.version >= 4 {
+            let want_eq = matches!(op, BinOp::Eq | BinOp::LooseEq | BinOp::IdentityEq);
+            // `eq()` has no version in it — a `switch` label compares by
+            // truthiness even at v4, which is how `switch (true) { case 1: }`
+            // matches.
+            if identity || (self.lang.version >= 4 && !matches!(op, BinOp::LooseEq)) {
                 let c = self.b.ins().iconst(types::I64, i64::from(!want_eq));
                 return Ok((c, ValTy::Bool));
             }
@@ -519,7 +522,9 @@ impl Tx<'_, '_> {
                 BinOp::Div => (ins.fdiv(a, b), ValTy::Real),
                 // `===` / `!==` on numbers compares numerically, like
                 // `==` / `!=` (`1 === 1.0` is true).
-                BinOp::Eq | BinOp::IdentityEq => return Ok(self.fcmp(FloatCC::Equal, a, b)),
+                BinOp::Eq | BinOp::LooseEq | BinOp::IdentityEq => {
+                    return Ok(self.fcmp(FloatCC::Equal, a, b));
+                }
                 BinOp::Ne | BinOp::IdentityNe => return Ok(self.fcmp(FloatCC::NotEqual, a, b)),
                 BinOp::Lt => return Ok(self.fcmp(FloatCC::LessThan, a, b)),
                 BinOp::Le => return Ok(self.fcmp(FloatCC::LessThanOrEqual, a, b)),
@@ -550,7 +555,9 @@ impl Tx<'_, '_> {
             BinOp::ShiftL => (ins.ishl(a, b), ValTy::Int),
             BinOp::ShiftR => (ins.sshr(a, b), ValTy::Int),
             BinOp::UShiftR => (ins.ushr(a, b), ValTy::Int),
-            BinOp::Eq | BinOp::IdentityEq => return Ok(self.icmp(IntCC::Equal, a, b)),
+            BinOp::Eq | BinOp::LooseEq | BinOp::IdentityEq => {
+                return Ok(self.icmp(IntCC::Equal, a, b));
+            }
             BinOp::Ne | BinOp::IdentityNe => return Ok(self.icmp(IntCC::NotEqual, a, b)),
             BinOp::Lt => return Ok(self.icmp(IntCC::SignedLessThan, a, b)),
             BinOp::Le => return Ok(self.icmp(IntCC::SignedLessThanOrEqual, a, b)),

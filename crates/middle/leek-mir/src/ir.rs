@@ -798,6 +798,11 @@ pub enum BinOp {
     Pow,
     Eq,
     Ne,
+    /// Upstream's `eq()` — loose equality with no version in it. `Eq` (`==`)
+    /// narrows at v4, comparing across kinds as false; this does not, and a
+    /// `switch` tests its subject with it whatever the version, so
+    /// `switch ('1') { case 1: … }` matches in v4 as it does in v1.
+    LooseEq,
     IdentityEq,
     IdentityNe,
     Lt,

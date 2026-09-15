@@ -322,7 +322,7 @@ shim! {
 fn apply_binop_charged(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
     match op {
         BinOp::Add => super::state::charge_concat(l, r),
-        BinOp::Eq | BinOp::Ne => super::state::charge_eq(l, r),
+        BinOp::Eq | BinOp::Ne | BinOp::LooseEq => super::state::charge_eq(l, r),
         _ => {}
     }
     apply_binop(op, l, r, v)
@@ -436,6 +436,7 @@ pub fn apply_binop(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
         Pow => rt::pow(l, r),
         Eq => rt::eq(l, r, v),
         Ne => rt::ne(l, r, v),
+        BinOp::LooseEq => rt::loose_eq_any(l, r),
         IdentityEq => rt::identity_eq(l, r),
         IdentityNe => rt::identity_ne(l, r),
         Lt => rt::lt(l, r),
@@ -479,6 +480,7 @@ pub(super) fn binop_from_code(c: i64) -> Option<BinOp> {
         x if x == Pow as i64 => Pow,
         x if x == Eq as i64 => Eq,
         x if x == Ne as i64 => Ne,
+        x if x == BinOp::LooseEq as i64 => BinOp::LooseEq,
         x if x == IdentityEq as i64 => IdentityEq,
         x if x == IdentityNe as i64 => IdentityNe,
         x if x == Lt as i64 => Lt,

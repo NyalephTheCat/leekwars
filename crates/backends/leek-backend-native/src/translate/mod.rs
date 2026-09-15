@@ -2062,6 +2062,7 @@ fn rvalue_ty(rv: &Rvalue, tys: &HashMap<LocalId, ValTy>) -> Option<ValTy> {
             Some(match op {
                 BinOp::Eq
                 | BinOp::Ne
+                | BinOp::LooseEq
                 | BinOp::IdentityEq
                 | BinOp::IdentityNe
                 | BinOp::Lt

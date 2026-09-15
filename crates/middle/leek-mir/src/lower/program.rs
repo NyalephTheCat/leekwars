@@ -315,7 +315,21 @@ impl<'a> ProgramCtx<'a> {
         // these on demand (per-instance for instance fields, lazily
         // on first access for static).
         for f in &c.fields {
-            let init_fn = f.init.as_ref().map(|init_expr| {
+            // A typed field with no initializer starts at its type's own
+            // value rather than null — upstream's "typed slots are never
+            // null" rule, the same one a typed local follows. Synthesizing
+            // the initializer here means one lowering path, so the default
+            // is stored (and read back) exactly like a written one.
+            let default = f
+                .init
+                .is_none()
+                .then(|| {
+                    f.ty.as_ref()
+                        .and_then(|ty| default_init_expr(ty, f.span, f.is_static))
+                })
+                .flatten();
+            let init_expr = f.init.as_ref().or(default.as_ref());
+            let init_fn = init_expr.map(|init_expr| {
                 self.lower_field_init(
                     init_expr,
                     f.span,
@@ -586,4 +600,30 @@ impl<'a> ProgramCtx<'a> {
         fl.close_with_implicit_return(main_span);
         fl.finish()
     }
+}
+
+/// The initializer a typed field with none of its own gets.
+///
+/// Upstream's rule, and its reason: an instance field is a real Java field,
+/// so a numeric or boolean one already reads back as `0` / `0.0` / `false`;
+/// a *static* field lives in a box that starts null, so the same four
+/// scalar types — `big_integer` among them, since its box is what would be
+/// unwrapped — are initialized explicitly. Every type that accepts null
+/// (`string`, `Array`, a class, a nullable) keeps it, on either side: a
+/// static `Set<integer>` field is meant to read back null, and upstream has
+/// a test pinning the error that produces.
+fn default_init_expr(ty: &Type, span: Span, is_static: bool) -> Option<Expr> {
+    use leek_hir::{ExprKind, Literal};
+    let kind = match ty {
+        Type::Integer => ExprKind::Literal(Literal::Int(0)),
+        Type::Real => ExprKind::Literal(Literal::Real(0.0)),
+        Type::Boolean => ExprKind::Literal(Literal::Bool(false)),
+        Type::BigInteger if is_static => ExprKind::Literal(Literal::BigInt("0".into())),
+        _ => return None,
+    };
+    Some(Expr {
+        kind,
+        ty: ty.clone(),
+        span,
+    })
 }
