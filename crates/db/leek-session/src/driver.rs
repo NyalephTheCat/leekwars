@@ -411,10 +411,15 @@ mod tests {
     #[test]
     fn a_diagnostic_from_an_included_file_renders_against_that_file() {
         let dir = scratch("include-render");
-        let main_path = dir.join("main.leek");
+        // Under `src/`, where a project's sources live: the session's file
+        // set is the project's, so a fixture that scatters `.leek` files
+        // at the root is not a project the include graph can see.
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let main_path = src.join("main.leek");
         std::fs::write(&main_path, "include(\"inc\")\nvar kept = 1;\n").unwrap();
         std::fs::write(
-            dir.join("inc.leek"),
+            src.join("inc.leek"),
             "var helper = 1;\nvar broken = notDeclaredAnywhere;\n",
         )
         .unwrap();

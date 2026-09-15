@@ -333,8 +333,16 @@ fn register_project_files(
         Some(file)
     };
 
+    // The project's files are `[paths].src`, which the index walks, *and*
+    // `[paths].tests`, which it does not — `ProjectIndex::from_manifest`
+    // enumerates the source root only. Every command that compiles more
+    // than the entry (`fix`, `doc`, `analyze`, `test`) already pairs
+    // `walk_sources` with `walk_tests` for exactly that reason, so a file
+    // set built from the index alone knows nothing about the tests tree
+    // and an `include(...)` between two test helpers resolves against
+    // nothing.
     let mut frontier = Vec::new();
-    for path in index.files() {
+    for path in index.files().iter().chain(&project.walk_tests()) {
         if let Some(file) = register(db, &mut out, path) {
             frontier.push(file);
         }

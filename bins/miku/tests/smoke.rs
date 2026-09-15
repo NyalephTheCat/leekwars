@@ -1867,6 +1867,44 @@ version = "0.1.0"
     dir
 }
 
+/// A test file that includes a helper living only under `[paths].tests`.
+///
+/// The project index walks `[paths].src` and nothing else, so a session
+/// whose file set came from the index alone knew nothing about the tests
+/// tree — and an `include(...)` between two test files resolved against
+/// nothing, reporting `E0272` for a file sitting right next to the one
+/// that names it.
+#[test]
+fn a_test_file_includes_a_helper_that_lives_only_under_tests() {
+    let dir = scratch_dir("tests_tree_include");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname    = \"tested\"\nversion = \"0.1.0\"\n",
+    );
+    write(&dir, "src/main.leek", "return 1\n");
+    write(
+        &dir,
+        "tests/helpers/util.leek",
+        "function util() { return 9 }\n",
+    );
+    write(
+        &dir,
+        "tests/uses_helper.leek",
+        "// miku-test: expect-output: 9\ninclude(\"helpers/util\")\nreturn util()\n",
+    );
+
+    let out = miku(&["test", "--color", "never"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.contains("PASS tests/uses_helper.leek"),
+        "stdout: {}\nstderr: {}",
+        out.stdout,
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn include_project_passes_check_lint_and_fix() {
     let dir = include_project("include_check");
