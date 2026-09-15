@@ -77,7 +77,17 @@ mod salsa_tests {
 
     /// Build a `SourceFile` from a text snippet at a fixed source id.
     fn source(db: &mut LeekDb, text: &str) -> SourceFile {
-        SourceFile::new(db, 1, text.to_string(), 4, false, false, 0, Vec::new())
+        SourceFile::new(
+            db,
+            String::new(),
+            1,
+            text.into(),
+            4,
+            false,
+            false,
+            0,
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -122,7 +132,7 @@ mod salsa_tests {
 
         // Mutating the salsa input invalidates any tracked-query
         // result that read it.
-        file.set_text(&mut db).to("var y = 6;".to_string());
+        file.set_text(&mut db).to("var y = 6;".into());
 
         let _ = pipeline.run_memoized(&db, file);
         let after_second = LEX_QUERY_CALLS.load(Ordering::Relaxed);

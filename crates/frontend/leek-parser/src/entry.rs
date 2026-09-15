@@ -17,13 +17,11 @@
 //! * A caller that hands in tokens it lexed itself
 //!   ([`parse_tokens_with_classes`](crate::parse_tokens_with_classes) and
 //!   friends) already owns the lex diagnostics, and gets the parser's only.
-//! * On the salsa path,
-//!   [`parse_query`](crate::pipeline::parse_query) follows the second rule
-//!   — the [`Lex`](leek_lexer::pipeline::Lex) step already emitted the
-//!   lexer's — while
-//!   [`parse_project_file_query`](crate::pipeline::parse_project_file_query)
-//!   follows the first, because nothing else emits them for an indexed
-//!   on-disk file.
+//! * On the salsa path, [`parse_query`](crate::pipeline::parse_query)
+//!   follows the second rule — the [`Lex`](leek_lexer::pipeline::Lex) step
+//!   already emitted the lexer's. Every salsa-driven file, indexed on disk
+//!   or open in an editor, runs through that step, so there is no path on
+//!   which the query itself has to merge them.
 
 use leek_diagnostics::Diagnostic;
 use leek_syntax::SyntaxNode;

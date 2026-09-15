@@ -198,7 +198,7 @@ fn user_documentation(ws: &Workspace, data: &ResolveData) -> Option<String> {
     let targets = ws.analysis_targets();
     let text: &str = match ws.doc(&uri) {
         Some(doc) => &doc.text,
-        None => targets.iter().find(|t| *t.uri == uri)?.text,
+        None => &targets.iter().find(|t| t.uri == uri)?.text,
     };
     let comment = leek_ide::doc::doc_comment_before(text, start)?;
     let comment = comment.trim();

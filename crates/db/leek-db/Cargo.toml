@@ -7,7 +7,7 @@ license.workspace = true
 description = "The query façade: one salsa database and every tracked query under a single import path."
 
 [dependencies]
-# Owns the database itself — `Db`, `LeekDb`, `SourceFile`, `ProjectFile`.
+# Owns the database itself — `Db`, `LeekDb`, `SourceFile`, `WorkspaceFiles`.
 # This crate sits *above* `leek-pipeline`, never below: the pass crates write
 # their queries against `leek_pipeline::salsa::Db`, so the opposite edge would
 # be a cycle.

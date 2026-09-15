@@ -32,16 +32,26 @@
 
 pub mod queries;
 
-pub use leek_pipeline::salsa::{Db, LeekDb, ProjectFile, SourceFile};
+pub use leek_pipeline::salsa::{Db, LeekDb, SourceFile, WorkspaceFiles};
 
 #[cfg(test)]
 mod tests {
-    use super::{LeekDb, ProjectFile, SourceFile, queries};
+    use super::{LeekDb, SourceFile, WorkspaceFiles, queries};
 
     const SRC: &str = "function sum(arr) { var t = 0 for (var x in arr) { t = t + x } return t }\n";
 
     fn source(db: &LeekDb) -> SourceFile {
-        SourceFile::new(db, 1, SRC.to_string(), 4, false, false, 0, Vec::new())
+        SourceFile::new(
+            db,
+            "/project/sum.leek".to_string(),
+            1,
+            SRC.into(),
+            4,
+            false,
+            false,
+            0,
+            Vec::new(),
+        )
     }
 
     /// The façade is the *only* import a consumer needs: database, input
@@ -63,24 +73,22 @@ mod tests {
         assert!(!queries::complexity_query(&db, file).0.is_empty());
     }
 
-    /// `parse_project_file_query` is keyed on the other input — an indexed
-    /// on-disk file rather than an editor buffer.
+    /// An indexed on-disk file used to need an input and a parse query of
+    /// its own. It needs neither: the canonical path rides on the same
+    /// `SourceFile` every other query already takes, and
+    /// [`WorkspaceFiles`] is what maps that path back to the input.
     #[test]
-    fn project_file_parse_runs_off_the_project_input() {
-        let db = LeekDb::default();
-        let file = ProjectFile::new(
-            &db,
-            "/tmp/sum.leek".to_string(),
-            1,
-            SRC.to_string(),
-            4,
-            false,
-            false,
-            0,
-            Vec::new(),
-        );
+    fn a_path_keyed_file_is_an_ordinary_source_file() {
+        let mut db = LeekDb::default();
+        let file = source(&db);
+        assert_eq!(file.path(&db), Some("/project/sum.leek"));
 
-        let parsed = queries::parse_project_file_query(&db, file);
-        assert!(parsed.diagnostics.is_empty());
+        let files = WorkspaceFiles::empty(&db);
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(file.canonical_path(&db).clone(), file);
+        files.set_all(&mut db, map);
+
+        assert!(files.get(&db, "/project/sum.leek") == Some(file));
+        assert!(queries::parse_query(&db, file).diagnostics.is_empty());
     }
 }

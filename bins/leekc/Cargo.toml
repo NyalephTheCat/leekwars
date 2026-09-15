@@ -20,7 +20,6 @@ leek-pipeline    = { workspace = true }
 leek-project     = { workspace = true }
 leek-session     = { workspace = true }
 leek-environment = { workspace = true }
-leek-prelude     = { workspace = true }
 leek-backend-java = { workspace = true }
 leek-backend-leekscript = { workspace = true }
 leek-backend-native = { workspace = true }

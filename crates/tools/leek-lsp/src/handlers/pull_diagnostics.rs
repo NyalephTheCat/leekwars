@@ -28,8 +28,8 @@ pub fn handle_textdoc(ws: &Workspace, uri: &lsp::Url) -> lsp::DocumentDiagnostic
 }
 
 pub fn handle_workspace(ws: &Workspace) -> lsp::WorkspaceDiagnosticReportResult {
-    workspace_report(&ws.analysis_targets(), |target| {
-        collect_target(ws, target.uri, target.pos_map(), target.source_file)
+    workspace_report(ws.analysis_targets(), |target| {
+        collect_target(ws, &target.uri, target.pos_map(), target.source_file)
     })
 }
 
@@ -62,9 +62,9 @@ fn document_report(
 /// Shape a workspace report, guarding each file **separately** so one buffer
 /// that panics analysis loses only its own entry instead of blanking the
 /// report for the whole workspace.
-fn workspace_report<'a>(
-    targets: &[AnalysisTarget<'a>],
-    mut collect: impl FnMut(&AnalysisTarget<'a>) -> Vec<lsp::Diagnostic>,
+fn workspace_report(
+    targets: &[AnalysisTarget],
+    mut collect: impl FnMut(&AnalysisTarget) -> Vec<lsp::Diagnostic>,
 ) -> lsp::WorkspaceDiagnosticReportResult {
     let mut entries: Vec<lsp::WorkspaceDocumentDiagnosticReport> =
         Vec::with_capacity(targets.len());
@@ -157,9 +157,9 @@ mod tests {
         let targets = ws.analysis_targets();
 
         let report = quietly(|| {
-            workspace_report(&targets, |target| {
+            workspace_report(targets, |target| {
                 assert!(
-                    target.uri != &uri("bad.leek"),
+                    target.uri != uri("bad.leek"),
                     "analysis blew up on this file"
                 );
                 vec![marker()]
