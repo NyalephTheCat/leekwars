@@ -22,15 +22,12 @@ use leek_hir::HirFile;
 use leek_hir::pipeline::HirArtifact;
 use leek_mir::MirProgram;
 use leek_mir::pipeline::MirArtifact;
-use leek_pipeline::{Artifact, Pipeline, Run};
+use leek_pipeline::{Artifact, Run};
 use leek_project::{Input, Project};
 use leek_span::SourceId;
 
 use crate::Target;
-use crate::driver::{
-    DriverConfig, PathInterner, SourceInterner, file_pipeline, file_pipeline_shared, reporter_for,
-    run_sources,
-};
+use crate::driver::{DriverConfig, PathInterner, SourceInterner, reporter_for, run_sources};
 use crate::error::SessionError;
 
 /// The entry file's own `SourceId`; its includes get the ones after it.
@@ -129,8 +126,7 @@ impl<'p> Session<'p> {
         path: &Path,
         source_id: SourceId,
     ) -> Result<Compilation<'_>, SessionError> {
-        let pipeline = file_pipeline(self.project, path, source_id, &self.config)?;
-        self.compile(&pipeline, path, source_id)
+        self.compile(path, source_id)
     }
 
     /// Compile the project's entry file.
@@ -147,11 +143,11 @@ impl<'p> Session<'p> {
     /// its includes take the ids just above the entry's hands file 2 the id
     /// file 1's first include already has (#191).
     pub fn compile_shared(&self, path: &Path) -> Result<Compilation<'_>, SessionError> {
-        // Plan first: the pipeline interns the entry, and its id is what
-        // this file's `Input` — and so every span it raises — has to carry.
-        let (pipeline, source_id) =
-            file_pipeline_shared(self.project, path, &self.config, &self.interner)?;
-        self.compile(&pipeline, path, source_id)
+        // Intern first: the entry's id is what this file's `Input` — and so
+        // every span it raises — has to carry. For a project file
+        // `Session::input_for` already holds that id; this covers the rest.
+        let source_id = self.interner.intern(path);
+        self.compile(path, source_id)
     }
 
     /// Read `path`, build its [`Input`] and drive `pipeline` over it.
@@ -159,12 +155,7 @@ impl<'p> Session<'p> {
     /// The text is read exactly once per compiled file and then shared: the
     /// `Input`, the `Sources` map and [`Compilation::text`] are all the same
     /// buffer.
-    fn compile(
-        &self,
-        pipeline: &Pipeline,
-        path: &Path,
-        source_id: SourceId,
-    ) -> Result<Compilation<'_>, SessionError> {
+    fn compile(&self, path: &Path, source_id: SourceId) -> Result<Compilation<'_>, SessionError> {
         let text = std::fs::read_to_string(path).map_err(|source| SessionError::Io {
             path: path.to_path_buf(),
             source,
@@ -186,26 +177,6 @@ impl<'p> Session<'p> {
         let label = path.display().to_string();
         let shape = self.shape();
 
-        // The one case that still drives the pipeline: `DriverConfig::timing`
-        // records a duration per planned *step*, and queries have no steps —
-        // `miku build --verbose` and `miku dev` print that list. The epic's
-        // answer is to re-home timing on a salsa event hook, which reports
-        // query names instead of step names; that is a visible change to what
-        // those two commands print, so it is its own change rather than a
-        // side effect of this one. Until then a timed run pays for the
-        // pipeline, and every other invocation does not.
-        if self.config.timing.is_some() {
-            return Ok(Compilation::adopt_in_session(
-                pipeline.run(input),
-                label,
-                &self.reporter,
-                &self.db,
-                file,
-                self.files,
-                shape,
-            ));
-        }
-
         Ok(Compilation::in_session(
             input,
             label,
@@ -214,6 +185,7 @@ impl<'p> Session<'p> {
             file,
             self.files,
             shape,
+            self.config.timing.clone(),
         ))
     }
 
@@ -385,6 +357,9 @@ pub struct Compilation<'a> {
     /// The entry's `Input`, kept rather than read off the run: a session
     /// compilation has no run to read it from.
     input: Input,
+    /// Where to record how long each stage took, when the driver asked
+    /// for timings.
+    timing: Option<leek_pipeline::TimingSink>,
     /// Query answers behind the reference-returning accessors. Each holds
     /// an `Arc`, so the cache is a pointer rather than a copy of the tree.
     hir_cache: OnceLock<Option<Arc<HirFile>>>,
@@ -411,6 +386,18 @@ struct RunShape {
     opt: leek_pipeline::OptLevel,
 }
 
+/// Time `f` into `sink` under `name`, or just run it when there is none.
+fn timed<T>(
+    sink: Option<&leek_pipeline::TimingSink>,
+    name: &'static str,
+    f: impl FnOnce() -> T,
+) -> T {
+    match sink {
+        Some(sink) => sink.time(name, f),
+        None => f(),
+    }
+}
+
 impl<'a> Compilation<'a> {
     /// Wrap a run a front-end drove itself.
     ///
@@ -430,6 +417,7 @@ impl<'a> Compilation<'a> {
             db: None,
             files: None,
             shape: None,
+            timing: None,
             hir_cache: OnceLock::new(),
             mir_cache: OnceLock::new(),
             complexity_cache: OnceLock::new(),
@@ -445,28 +433,6 @@ impl<'a> Compilation<'a> {
     /// planned for a late target has already computed everything on the
     /// way there — which is why the move is all-or-nothing rather than
     /// consumer by consumer.
-    /// A [`Session`] compilation that also drove the pipeline, for the
-    /// timing path — see `Session::compile`. Answers from the run, exactly
-    /// as before, while still carrying the database so `db_handle` and the
-    /// query accessors work.
-    #[must_use]
-    fn adopt_in_session(
-        run: Run<'a>,
-        file_label: String,
-        reporter: &'a Reporter,
-        db: &'a leek_db::LeekDb,
-        file: leek_db::SourceFile,
-        files: leek_db::WorkspaceFiles,
-        shape: RunShape,
-    ) -> Self {
-        Self {
-            db: Some((db, file)),
-            files: Some(files),
-            shape: Some(shape),
-            ..Self::adopt(run, file_label, reporter)
-        }
-    }
-
     #[must_use]
     fn in_session(
         input: Input,
@@ -476,6 +442,7 @@ impl<'a> Compilation<'a> {
         file: leek_db::SourceFile,
         files: leek_db::WorkspaceFiles,
         shape: RunShape,
+        timing: Option<leek_pipeline::TimingSink>,
     ) -> Self {
         Self {
             text: Arc::clone(&input.text),
@@ -487,6 +454,7 @@ impl<'a> Compilation<'a> {
             db: Some((db, file)),
             files: Some(files),
             shape: Some(shape),
+            timing,
             hir_cache: OnceLock::new(),
             mir_cache: OnceLock::new(),
             complexity_cache: OnceLock::new(),
@@ -545,8 +513,11 @@ impl<'a> Compilation<'a> {
         if let Some(run) = &self.run {
             return run.diagnostics();
         }
-        self.diagnostics_cache
-            .get_or_init(|| self.query_diagnostics().unwrap_or_default())
+        self.diagnostics_cache.get_or_init(|| {
+            timed(self.timing.as_ref(), "diagnostics", || {
+                self.query_diagnostics().unwrap_or_default()
+            })
+        })
     }
 
     /// Any artifact the planned pipeline produced. The escape hatch for the
@@ -590,8 +561,10 @@ impl<'a> Compilation<'a> {
         }
         self.hir_cache
             .get_or_init(|| {
-                self.with_program(|db, files, file, version| {
-                    leek_db::queries::lower_program(db, files, file, version, self.opt()).hir
+                timed(self.timing.as_ref(), "hir", || {
+                    self.with_program(|db, files, file, version| {
+                        leek_db::queries::lower_program(db, files, file, version, self.opt()).hir
+                    })
                 })
             })
             .as_deref()
@@ -605,9 +578,11 @@ impl<'a> Compilation<'a> {
         }
         self.mir_cache
             .get_or_init(|| {
-                self.with_program(|db, files, file, version| {
-                    leek_db::queries::lower_program_mir(db, files, file, version, self.opt())
-                        .program
+                timed(self.timing.as_ref(), "mir", || {
+                    self.with_program(|db, files, file, version| {
+                        leek_db::queries::lower_program_mir(db, files, file, version, self.opt())
+                            .program
+                    })
                 })
             })
             .as_deref()
@@ -621,8 +596,10 @@ impl<'a> Compilation<'a> {
         }
         self.complexity_cache
             .get_or_init(|| {
-                self.with_program(|db, files, file, version| {
-                    leek_db::queries::program_complexity(db, files, file, version).0
+                timed(self.timing.as_ref(), "complexity", || {
+                    self.with_program(|db, files, file, version| {
+                        leek_db::queries::program_complexity(db, files, file, version).0
+                    })
                 })
             })
             .as_deref()

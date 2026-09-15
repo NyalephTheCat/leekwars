@@ -12,11 +12,36 @@ use std::time::{Duration, Instant};
 use crate::context::Context;
 use crate::pipeline::{Step, StepError};
 
-/// Recorded step duration entry.
+/// Recorded duration entry.
+///
+/// `step` names whatever was measured. It used to be a pipeline step's
+/// `Step::name`; a session now records the *stage* it asked the database
+/// for (`hir`, `diagnostics`, …), because there are no steps to time once
+/// a compilation answers from queries.
+///
+/// Salsa cannot supply this on its own, which is worth recording since the
+/// epic's plan was to make timing "a salsa event hook". It fires
+/// `WillExecute` before a query body runs and nothing on completion, so
+/// the event stream says *which* queries recomputed and never how long any
+/// of them took. That is a genuinely useful signal — `leek_db::testing`
+/// is built on it — but it is not this one.
 #[derive(Debug, Clone)]
 pub struct StepTiming {
     pub step: &'static str,
     pub duration: Duration,
+}
+
+impl TimingSink {
+    /// Time `f`, record it under `name`, and hand back its value.
+    pub fn time<T>(&self, name: &'static str, f: impl FnOnce() -> T) -> T {
+        let start = Instant::now();
+        let out = f();
+        self.push(StepTiming {
+            step: name,
+            duration: start.elapsed(),
+        });
+        out
+    }
 }
 
 /// Collector of step timings, shareable between many [`TimedBox`]
@@ -54,7 +79,7 @@ impl TimingSink {
             .clear();
     }
 
-    fn push(&self, entry: StepTiming) {
+    pub(crate) fn push(&self, entry: StepTiming) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

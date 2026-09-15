@@ -789,12 +789,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `miku build --verbose` must time the pipeline the plain build runs —
-    /// same steps, one entry each — and must still get the manifest's lint
-    /// groups. The old `run_file_timed` re-inlined the planning code, so
-    /// either half could drift from `file_pipeline` unnoticed.
+    /// `miku build --verbose` times the *stages* a compilation asks the
+    /// database for, and the numbers describe the same work the plain
+    /// build does.
+    ///
+    /// This used to assert the sink saw every planned pipeline step, once
+    /// each. There are no steps to see: a session compilation answers from
+    /// queries. The entries are stage names now — `diagnostics`, `hir` —
+    /// which is a visible change to what `miku build --verbose` and
+    /// `miku dev` print.
+    ///
+    /// Salsa cannot give back what was lost. It fires `WillExecute` before
+    /// a query body runs and nothing on completion, so its event stream
+    /// says which queries recomputed and never how long any took. The
+    /// epic's "timing becomes a salsa event hook" is therefore a different
+    /// measurement, not a port of this one; timing the calls keeps
+    /// durations, which is what these three consumers print.
+    ///
+    /// Recorded lazily, when an accessor is first called, so the list
+    /// reflects what the command actually asked for rather than what a
+    /// recipe would have planned regardless.
     #[test]
-    fn a_timing_sink_records_the_same_plan_the_untimed_config_builds() {
+    fn a_timing_sink_records_the_stages_the_compilation_asked_for() {
         let dir = scratch("timed");
         std::fs::create_dir_all(dir.join("src")).expect("src dir");
         std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
@@ -806,14 +822,6 @@ mod tests {
         };
         let plain_session = Session::new(&project, untimed.clone()).expect("session");
         let plain = plain_session.compile_entry().expect("untimed run");
-        let expected = file_pipeline(
-            &project,
-            &project.entry_path(),
-            SourceId::new(1).unwrap(),
-            &untimed,
-        )
-        .expect("pipeline")
-        .step_names();
 
         let sink = TimingSink::new();
         let timed_session = Session::new(
@@ -826,15 +834,38 @@ mod tests {
         .expect("session");
         let timed = timed_session.compile_entry().expect("timed run");
 
+        assert!(
+            sink.entries().is_empty(),
+            "nothing is computed until something is asked for"
+        );
+
+        assert_eq!(timed.had_error(), plain.had_error());
         let names: Vec<&str> = sink.entries().iter().map(|e| e.step).collect();
         assert_eq!(
-            names, expected,
-            "the sink must see every step of the untimed plan, once each"
+            names,
+            ["diagnostics"],
+            "asking whether it failed costs exactly the diagnostic stream"
         );
-        assert_eq!(timed.had_error(), plain.had_error());
-        // The manifest's `pedantic = true` reached the timed plan too: the
-        // lint step is planned, so the merge happened on this path as well.
-        assert!(names.contains(&"lint"), "{names:?}");
+
+        let _ = timed.hir();
+        let names: Vec<&str> = sink.entries().iter().map(|e| e.step).collect();
+        assert_eq!(names, ["diagnostics", "hir"], "and lowering adds one entry");
+
+        let _ = timed.hir();
+        assert_eq!(
+            sink.entries().len(),
+            2,
+            "a second ask is a cache hit, not a second entry"
+        );
+
+        // The manifest's `pedantic = true` still reaches this path: the
+        // timed and plain compilations agree about what counts as an error,
+        // which is what the merge decides.
+        assert_eq!(
+            timed.diagnostics().len(),
+            plain.diagnostics().len(),
+            "timing changes what is measured, never what is reported"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

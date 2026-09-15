@@ -1042,13 +1042,16 @@ dependencies = [
  "anyhow",
  "leek-backend-java",
  "leek-backend-native",
+ "leek-db",
  "leek-diagnostics",
  "leek-hir",
  "leek-pipeline",
+ "leek-prelude",
  "leek-project",
  "leek-session",
  "leek-span",
  "leek-syntax",
+ "leek-types",
 ]
 
 [[package]]
