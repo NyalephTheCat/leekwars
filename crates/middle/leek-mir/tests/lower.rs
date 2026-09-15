@@ -34,6 +34,17 @@ fn lit_bool(b: bool) -> Expr {
     }
 }
 
+/// A boolean-typed expression the lowerer cannot evaluate — a comparison of
+/// two literals is folded by the HIR passes, but MIR lowering does not fold
+/// arithmetic, so this reaches it as a real operand.
+fn opaque_bool() -> Expr {
+    Expr {
+        kind: ExprKind::Binary(BinaryOp::Lt, Box::new(lit_int(1)), Box::new(lit_int(2))),
+        ty: Type::Boolean,
+        span: span(),
+    }
+}
+
 fn build(main: Vec<Stmt>) -> MirProgram {
     let h = HirFile {
         main,
@@ -113,9 +124,13 @@ fn binary_add_flattens_into_temps_and_an_assign() {
 
 #[test]
 fn if_else_forks_into_three_blocks() {
-    // if (true) return 1; else return 2;
+    // if (unknown) return 1; else return 2;
+    //
+    // The condition has to be one the lowerer cannot decide: a literal
+    // `true` folds to the taken branch with no fork at all, which is what
+    // `a_constant_condition_lowers_only_the_taken_branch` covers.
     let i = IfStmt {
-        cond: lit_bool(true),
+        cond: opaque_bool(),
         then_branch: Box::new(Stmt::Return(Some(lit_int(1)))),
         else_branch: Some(Box::new(Stmt::Return(Some(lit_int(2))))),
         soft: false,
@@ -137,6 +152,40 @@ fn if_else_forks_into_three_blocks() {
         }
     }
     assert_eq!(returns, 2, "both arms should end in Return");
+}
+
+/// A condition that is already a boolean literal decides the branch at
+/// compile time: only the taken arm is lowered, and no test is emitted —
+/// which is also how it comes to cost no operation.
+#[test]
+fn a_constant_condition_lowers_only_the_taken_branch() {
+    for (cond, expected) in [(true, 1i64), (false, 2)] {
+        let i = IfStmt {
+            cond: lit_bool(cond),
+            then_branch: Box::new(Stmt::Return(Some(lit_int(1)))),
+            else_branch: Some(Box::new(Stmt::Return(Some(lit_int(2))))),
+            soft: false,
+            span: span(),
+        };
+        let prog = build(vec![Stmt::If(i)]);
+        let main = prog.main().unwrap();
+        assert_eq!(main.blocks.len(), 1, "no fork for `if ({cond})`");
+        assert!(
+            !main.blocks[0]
+                .statements
+                .iter()
+                .any(|s| matches!(s, Statement::Charge(_))),
+            "a folded condition charges nothing",
+        );
+        assert!(
+            matches!(
+                &main.blocks[0].terminator,
+                Terminator::Return(Some(Operand::Const(Const::Int(n)))) if *n == expected
+            ),
+            "`if ({cond})` should return {expected}, got {:?}",
+            main.blocks[0].terminator,
+        );
+    }
 }
 
 #[test]

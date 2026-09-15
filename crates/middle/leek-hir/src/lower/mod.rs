@@ -211,6 +211,10 @@ pub fn finish(
     opt: OptLevel,
 ) -> Arc<HirFile> {
     crate::transform::fold_constants(&mut hir, fold);
+    // Not gated on the optimization level: upstream's `ConstantFolder`
+    // inlines a `static final` literal on every compile, and what a program
+    // costs in operations is part of what it *is*.
+    crate::transform::inline_static_final_literals(&mut hir);
     if opt.optimizes() {
         crate::transform::optimize_hir(&mut hir);
     }

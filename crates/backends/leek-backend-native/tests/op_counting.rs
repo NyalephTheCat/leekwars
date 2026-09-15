@@ -156,7 +156,11 @@ fn switch_charges_one_op_per_case_test() {
             (v, "var x = 1 switch (x) { case 1: return 'one' } return 'none'", 3),
             (v, "var x = 2 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 4),
             (v, "var x = 3 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 3),
-            (v, "var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r", 7),
+            // 6, not the 7 `reference.tsv` records: that dataset was
+            // captured before upstream's `ConstantFolder`, which stopped
+            // charging for an `if` whose condition is a literal. The other
+            // rows here have no constant condition and are unaffected.
+            (v, "var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r", 6),
             (v, "var x = 2 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 7),
             (v, "var x = 3 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 4),
             (v, "var x = 3 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 5),

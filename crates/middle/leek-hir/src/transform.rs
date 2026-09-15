@@ -16,7 +16,7 @@ use leek_types::Type;
 
 use crate::ir::{
     BinaryOp, Block, Callee, Def, DefId, Expr, ExprKind, HirFile, LambdaBody, Literal, NameRef,
-    PostfixOp, Stmt, UnaryOp,
+    PostfixOp, Stmt, UnaryOp, Visibility,
 };
 use crate::visit::{
     Flow, VisitMut, VisitableMut, walk_expr_children, walk_expr_children_mut,
@@ -130,6 +130,204 @@ pub fn optimize_hir(hir: &mut HirFile) -> usize {
     }
     total
 }
+
+/// Replace every read of a `static final` field with a literal initializer
+/// by that literal. Returns the number of substitutions made.
+///
+/// Upstream's `ConstantFolder` inlines these at codegen, exactly as it does
+/// the engine's own constants, which is what lets `if (A.DEBUG)` fold away
+/// to nothing. Three things keep it honest:
+///
+/// * only `static final` counts — a plain `static` is mutable, and an
+///   instance field belongs to an object;
+/// * only a *literal* initializer counts. The runtime idiom
+///   `static final X = tune()` stays a runtime read, and so does a
+///   field-to-field one (`static final Y = A.X`), whose value would depend
+///   on class initialization order;
+/// * the read is matched by the class the field is declared on or by any
+///   descendant (`class B extends A {} B.X`), and inside the class itself
+///   `class.X` and the bare `X` both reach it.
+///
+/// This runs on every compile, not just an optimizing one: it is part of
+/// what a program *costs*, and the op budget is the game's own currency.
+pub fn inline_static_final_literals(hir: &mut HirFile) -> usize {
+    // (class, field) -> (literal, visibility), for the classes that declare
+    // one. The visibility is the runtime's, mirrored: a read the runtime
+    // would deny answers null there, so inlining it would leak the value.
+    let mut declared: HashMap<(String, String), (Literal, Visibility)> = HashMap::new();
+    let mut parents: HashMap<String, String> = HashMap::new();
+    for def in &hir.defs {
+        let Def::Class(c) = def else { continue };
+        if let Some(parent) = &c.parent {
+            parents.insert(c.name.clone(), parent.clone());
+        }
+        for field in &c.fields {
+            if !(field.is_static && field.is_final) {
+                continue;
+            }
+            if let Some(Expr {
+                kind: ExprKind::Literal(lit),
+                ..
+            }) = &field.init
+            {
+                declared.insert(
+                    (c.name.clone(), field.name.clone()),
+                    (lit.clone(), field.visibility),
+                );
+            }
+        }
+    }
+    if declared.is_empty() {
+        return 0;
+    }
+    // Class names by `DefId`, so a `ClassName.X` read can name its class.
+    let class_names: HashMap<u32, String> = hir
+        .defs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| match d {
+            Def::Class(c) => Some((
+                u32::try_from(i).expect("def index fits a DefId"),
+                c.name.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    let mut inliner = StaticFinalInliner {
+        declared,
+        parents,
+        class_names,
+        here: None,
+        count: 0,
+    };
+    for i in 0..hir.defs.len() {
+        // The enclosing class is what `class.X` and a bare `X` resolve
+        // against, so it is set around each class's own bodies.
+        let here = match &hir.defs[i] {
+            Def::Class(c) => Some(c.name.clone()),
+            _ => None,
+        };
+        inliner.here = here;
+        match &mut hir.defs[i] {
+            Def::Function(f) => {
+                if let Some(b) = &mut f.body {
+                    let _ = b.walk_mut(&mut inliner);
+                }
+            }
+            Def::Class(c) => {
+                for field in &mut c.fields {
+                    if let Some(e) = &mut field.init {
+                        let _ = e.walk_mut(&mut inliner);
+                    }
+                }
+                for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
+                    if let Some(b) = &mut m.body {
+                        let _ = b.walk_mut(&mut inliner);
+                    }
+                }
+            }
+            Def::Global(g) => {
+                if let Some(e) = &mut g.init {
+                    let _ = e.walk_mut(&mut inliner);
+                }
+            }
+            Def::Local(_) => {}
+        }
+    }
+    inliner.here = None;
+    for s in &mut hir.main {
+        let _ = s.walk_mut(&mut inliner);
+    }
+    inliner.count
+}
+
+/// The walker behind [`inline_static_final_literals`].
+struct StaticFinalInliner {
+    declared: HashMap<(String, String), (Literal, Visibility)>,
+    parents: HashMap<String, String>,
+    class_names: HashMap<u32, String>,
+    /// The class whose body is being walked, for `class.X` and bare `X`.
+    here: Option<String>,
+    count: usize,
+}
+
+impl StaticFinalInliner {
+    /// The literal `field` has on `class_name` or on the nearest ancestor
+    /// that declares it — when the code being walked may actually read it.
+    ///
+    /// The visibility check mirrors the runtime exactly: a `private` field
+    /// is readable only inside the class that declares it (not from a
+    /// subclass), a `protected` one anywhere in its subtree, and a denied
+    /// read answers null rather than the value. Inlining one the runtime
+    /// would deny would leak the constant.
+    fn lookup(&self, class_name: &str, field: &str) -> Option<&Literal> {
+        let mut cur = class_name.to_string();
+        // A malformed `extends` cycle would loop; the chain is short, so a
+        // simple depth bound is enough to make that impossible.
+        for _ in 0..64 {
+            if let Some((lit, visibility)) = self.declared.get(&(cur.clone(), field.to_string())) {
+                return self.may_read(&cur, *visibility).then_some(lit);
+            }
+            cur = self.parents.get(&cur)?.clone();
+        }
+        None
+    }
+
+    /// Whether the body being walked may read a member of `owner` declared
+    /// with `visibility`.
+    fn may_read(&self, owner: &str, visibility: Visibility) -> bool {
+        match visibility {
+            Visibility::Public => true,
+            Visibility::Private => self.here.as_deref() == Some(owner),
+            Visibility::Protected => self
+                .here
+                .as_deref()
+                .is_some_and(|here| self.descends_from(here, owner)),
+        }
+    }
+
+    /// Whether `here` is `owner` or one of its descendants.
+    fn descends_from(&self, here: &str, owner: &str) -> bool {
+        let mut cur = here.to_string();
+        for _ in 0..64 {
+            if cur == owner {
+                return true;
+            }
+            match self.parents.get(&cur) {
+                Some(parent) => cur = parent.clone(),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The class a field read's base names, if it names one at all.
+    fn base_class(&self, base: &Expr) -> Option<String> {
+        match &base.kind {
+            ExprKind::Name(NameRef::Class(def)) => self.class_names.get(&def.0).cloned(),
+            ExprKind::Name(NameRef::Class_) => self.here.clone(),
+            _ => None,
+        }
+    }
+}
+
+impl VisitMut<Expr> for StaticFinalInliner {
+    fn visit_mut(&mut self, e: &mut Expr) -> Flow {
+        if let ExprKind::Field(base, name, _) = &e.kind
+            && let Some(class_name) = self.base_class(base)
+            && let Some(lit) = self.lookup(&class_name, name)
+        {
+            e.kind = ExprKind::Literal(lit.clone());
+            self.count += 1;
+            return Flow::Skip; // a literal has no children to recurse into
+        }
+        Flow::Walk
+    }
+}
+
+impl VisitMut<Block> for StaticFinalInliner {}
+impl VisitMut<Stmt> for StaticFinalInliner {}
 
 /// Evaluate constant sub-expressions to literals, in place, throughout
 /// `hir`. Returns the number of expressions rewritten.

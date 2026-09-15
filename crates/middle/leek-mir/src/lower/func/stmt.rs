@@ -230,6 +230,22 @@ impl FnLowerer<'_> {
 
     pub(crate) fn lower_if(&mut self, i: &IfStmt) {
         let cond = self.lower_expr_to_operand(&i.cond);
+        // A condition that folded to a boolean literal decides the branch at
+        // compile time: upstream's `ConstantFolder` emits the taken side
+        // alone, with no test, so it costs *no* operation at all — not even
+        // the one a real test would. Only the taken branch is lowered, which
+        // is also what keeps the dead one from charging for its body.
+        if let Operand::Const(Const::Bool(taken)) = cond {
+            let branch = if taken {
+                Some(&i.then_branch)
+            } else {
+                i.else_branch.as_ref()
+            };
+            if let Some(branch) = branch {
+                self.lower_stmt(branch);
+            }
+            return;
+        }
         let then_bb = self.new_block();
         let else_bb = self.new_block();
         let join_bb = self.new_block();
