@@ -3,7 +3,6 @@ schema_version = 3
 [backends.java-emit.outcomes]
 "TestClass.java::testClass_static_field_uninitialized_errors::0@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::1@v4" = "skipped_unknown"
-"TestFunction.java::testDefault_parameter_incompatible_type::3@v4" = "fail_missing_error"
 "TestFunction.java::testTypes::21@v1" = "skipped_disabled"
 "TestFunction.java::testTypes::2@v1" = "skipped_disabled"
 "TestFunction.java::testTypes::2@v2" = "skipped_disabled"
@@ -48,9 +47,9 @@ schema_version = 3
 [backends.java-emit.summary]
 total = 12254
 pass = 11288
-pass_expected_error = 923
+pass_expected_error = 924
 fail_parse_error = 0
-fail_missing_error = 1
+fail_missing_error = 0
 fail_wrong_value = 0
 skipped_disabled = 24
 skipped_unknown = 18
@@ -61,7 +60,6 @@ skipped_unknown = 18
 "TestConstantFolding.java::testElimination_guards::5@v2" = "fail_wrong_value"
 "TestConstantFolding.java::testElimination_guards::5@v3" = "fail_wrong_value"
 "TestFunction.java::testDefault_parameter_incompatible_type::10@v4" = "skipped_unknown"
-"TestFunction.java::testDefault_parameter_incompatible_type::3@v4" = "skipped_unknown"
 "TestFunction.java::testDefault_parameter_incompatible_type::8@v4" = "skipped_unknown"
 "TestFunction.java::testTypes::21@v1" = "skipped_disabled"
 "TestFunction.java::testTypes::2@v1" = "skipped_disabled"
@@ -120,17 +118,16 @@ skipped_unknown = 18
 [backends.native.summary]
 total = 12254
 pass = 11271
-pass_expected_error = 923
+pass_expected_error = 924
 fail_parse_error = 0
 fail_missing_error = 0
 fail_wrong_value = 5
 skipped_disabled = 24
-skipped_unknown = 31
+skipped_unknown = 30
 
 [backends.pipeline.outcomes]
 "TestClass.java::testClass_static_field_uninitialized_errors::0@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::1@v4" = "skipped_unknown"
-"TestFunction.java::testDefault_parameter_incompatible_type::3@v4" = "fail_missing_error"
 "TestFunction.java::testTypes::21@v1" = "skipped_disabled"
 "TestFunction.java::testTypes::2@v1" = "skipped_disabled"
 "TestFunction.java::testTypes::2@v2" = "skipped_disabled"
@@ -175,9 +172,9 @@ skipped_unknown = 31
 [backends.pipeline.summary]
 total = 12254
 pass = 11288
-pass_expected_error = 923
+pass_expected_error = 924
 fail_parse_error = 0
-fail_missing_error = 1
+fail_missing_error = 0
 fail_wrong_value = 0
 skipped_disabled = 24
 skipped_unknown = 18

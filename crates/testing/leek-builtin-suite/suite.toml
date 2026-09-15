@@ -1087,3 +1087,18 @@ id = "writing_an_element_of_a_null_global_container_faults"
 version = 1
 source = "global Map m m['a'] = 7 return m['a']"
 expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+# A function called as a *value* fills its parameter defaults like a direct
+# call does: the calling convention tells the body how many arguments it was
+# actually given, not how many slots it has.
+[[tests]]
+id = "a_function_value_fills_its_parameter_defaults"
+version = 4
+source = "function f(a, b = 5) { return b } var h = f function g(Function<integer => integer> k) { return k(1) } return [f(1), h(1), g(f)]"
+expect = { equals = "[5, 5, 5]" }
+
+[[tests]]
+id = "a_bound_method_value_fills_its_parameter_defaults"
+version = 4
+source = "class A { m(a, b = 7) { return b } } var o = new A() var h = o.m return [o.m(1), h(1)]"
+expect = { equals = "[7, 7]" }

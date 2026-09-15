@@ -1517,8 +1517,25 @@ pub fn translate_function(
     // `default_fill` tells the block's terminator to store its value into the
     // param var + jump to the continuation instead of returning.
     let mut default_fill: HashMap<BlockId, (LocalId, Block)> = HashMap::new();
-    if sig.has_defaults && !uniform_abi {
-        let argc = entry_params[sig.params.len()];
+    // The uniform ABI is declared with a dummy signature (its shape is the
+    // same for every function), so whether this body has defaults to fill is
+    // read off the MIR rather than off `sig`.
+    let has_defaults = sig.has_defaults
+        || (uniform_abi
+            && mir_fn
+                .params
+                .iter()
+                .any(|&p| fillable_default(mir_fn, p).is_some()));
+    if has_defaults {
+        // The count the caller supplied: a hidden trailing param on the direct
+        // convention, the uniform one's own second argument. Reading it on
+        // both is what lets a function called as a *value* — `var h = f;
+        // h(1)` — fill its defaults like a direct call does.
+        let argc = if uniform_abi {
+            entry_params[1]
+        } else {
+            entry_params[sig.params.len()]
+        };
         for (i, &param_local) in mir_fn.params.iter().enumerate() {
             // Fillable defaults (a sub-CFG of control-flow + `Return(Some)`
             // exits) are run by the entry chain; an unfillable param is never
