@@ -5,7 +5,7 @@
 
 use leek_diagnostics::{Diagnostic, Severity};
 use leek_parser::ast::{self, AstNode, Expr};
-use leek_syntax::{SyntaxKind, SyntaxNode};
+use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::Resolver;
 use crate::builtins;
@@ -126,6 +126,37 @@ impl Resolver {
             }
         }
 
+        // `super.x` inside a `static` method, where `x` is an *instance*
+        // member of an ancestor. A static method has no `this`, so the
+        // dynamic member read upstream emits there is a cast that cannot
+        // succeed — it raises IMPOSSIBLE_CAST rather than letting the fight
+        // fail at run time. A *static* ancestor member resolves on the
+        // parent class instead and is fine.
+        if self.in_static_method
+            && expr_is_super(&base)
+            && let Some(class_name) = self.current_class.clone()
+            && let Some(parent) = self.class_parent.get(&class_name).cloned()
+            && let Some(owner) = self.walk_class_chain(&parent, |c| {
+                self.class_fields_all
+                    .get(c)
+                    .is_some_and(|s| s.contains(field_text))
+            })
+            && !self
+                .class_static_members
+                .get(&owner)
+                .is_some_and(|s| s.contains(field_text))
+        {
+            self.err(
+                codes::IMPOSSIBLE_CAST,
+                self.span_of(&field_tok),
+                format!(
+                    "`super.{field_text}` is an instance field of `{owner}`, \
+                     and a static method has no instance to read it from"
+                ),
+            );
+            return;
+        }
+
         let Expr::Name(base_name) = base else { return };
         // `this.x` from inside a subclass where `x` is a private
         // field of an ancestor (but not the current class itself) is
@@ -190,28 +221,33 @@ impl Resolver {
         // We skip the check for classes that inherit from an
         // unanalyzed parent — they may have inherited members we
         // can't see.
-        if self.lookup(base_text) == Some(SymbolKind::Class)
-            && !self.class_has_unknown_parent.contains(base_text)
-        {
-            let exists = INTRINSIC_FINAL_CLASS_FIELDS.contains(&field_text)
-                || self
-                    .class_static_members
-                    .get(base_text)
-                    .is_some_and(|s| s.contains(field_text))
-                || self
-                    .class_fields_all
-                    .get(base_text)
-                    .is_some_and(|s| s.contains(field_text));
-            if !exists {
-                self.err(
-                    codes::CLASS_STATIC_MEMBER_DOES_NOT_EXIST,
-                    self.span_of(&field_tok),
-                    format!("`{base_text}` has no static member `{field_text}`"),
-                );
-                return;
+        if self.lookup(base_text) == Some(SymbolKind::Class) {
+            // Existence is only checkable when the whole chain is in view —
+            // a subclass may have inherited the member from a parent whose
+            // members this pass has not unified.
+            if !self.class_has_unknown_parent.contains(base_text) {
+                let exists = INTRINSIC_FINAL_CLASS_FIELDS.contains(&field_text)
+                    || self
+                        .class_static_members
+                        .get(base_text)
+                        .is_some_and(|s| s.contains(field_text))
+                    || self
+                        .class_fields_all
+                        .get(base_text)
+                        .is_some_and(|s| s.contains(field_text));
+                if !exists {
+                    self.err(
+                        codes::CLASS_STATIC_MEMBER_DOES_NOT_EXIST,
+                        self.span_of(&field_tok),
+                        format!("`{base_text}` has no static member `{field_text}`"),
+                    );
+                    return;
+                }
             }
-            // Static-field privacy is enforced only at call sites
-            // (`A.field()`), not raw reads. See `resolve_field_call`.
+            // Privacy walks the chain itself and only fires on an ancestor it
+            // can actually see, so `B.x` for `A`'s private static field is
+            // caught even though B's members are not unified.
+            self.check_static_field_privacy(base_text, field_text, &field_tok);
             return;
         }
 
@@ -247,6 +283,63 @@ impl Resolver {
                 );
             }
         }
+    }
+
+    /// `ClassName.field` where `field` is a `private` / `protected` static
+    /// member — a read *or* a write, both of which upstream denies.
+    ///
+    /// `private` is private: only the declaring class may reach it, and a
+    /// subclass may not. `protected` opens up to the descendants. Naming the
+    /// member through a subclass (`B.x` for `A`'s field) is checked against
+    /// the class that declared it, which is what walking the chain finds.
+    ///
+    /// Outside `// @strict` this is a *warning*: upstream compiles the
+    /// program and the access answers `null` at runtime rather than failing
+    /// the build. Only strict mode turns it into an error.
+    fn check_static_field_privacy(
+        &mut self,
+        base_text: &str,
+        field_text: &str,
+        field_tok: &SyntaxToken,
+    ) {
+        let here = self.current_class.clone();
+        let (code, owner) = if let Some(owner) =
+            self.lookup_private_static_field_owner(base_text, field_text)
+        {
+            // Inside the declaring class itself, nothing is hidden.
+            if here.as_deref() == Some(owner.as_str()) {
+                return;
+            }
+            (codes::PRIVATE_STATIC_FIELD, owner)
+        } else if let Some(owner) = self.lookup_protected_static_field_owner(base_text, field_text)
+        {
+            // `protected` reaches every descendant, not just the owner.
+            if here
+                .as_deref()
+                .is_some_and(|here| self.inherits_from(here, &owner))
+            {
+                return;
+            }
+            (codes::PROTECTED_STATIC_FIELD, owner)
+        } else {
+            return;
+        };
+        let visibility = if code == codes::PRIVATE_STATIC_FIELD {
+            "private"
+        } else {
+            "protected"
+        };
+        let severity = if self.opts.strict {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        self.diagnostics.push(Diagnostic::new(
+            code,
+            severity,
+            self.span_of(field_tok),
+            format!("static field `{field_text}` is {visibility} on class `{owner}`"),
+        ));
     }
 
     /// Emit `CANT_ASSIGN_VALUE` when the assignment target isn't a
@@ -408,4 +501,16 @@ impl Resolver {
             );
         }
     }
+}
+
+/// Whether an expression is the bare `super` keyword — the base of a
+/// `super.x` field read. `super` lexes as a keyword inside a `NameRef`, not
+/// as an identifier, so the ordinary base-class resolution never sees it.
+fn expr_is_super(e: &Expr) -> bool {
+    let Expr::Name(name) = e else { return false };
+    name.syntax()
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|t| !t.kind().is_trivia())
+        .is_some_and(|t| t.kind() == SyntaxKind::KwSuper)
 }

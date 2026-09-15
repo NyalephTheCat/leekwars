@@ -14,6 +14,11 @@ use crate::codes;
 use crate::scope::{FnMeta, SymbolKind};
 use crate::util::{REMOVED_BUILTINS, first_ident, is_assignment_binary};
 
+/// The methods `AI.NativeObjectLeekValue` declares, which every user class
+/// inherits whether or not it names a parent — so `super.<name>()` reaches
+/// them even when no ancestor in the source declares one.
+const NATIVE_OBJECT_METHODS: &[&str] = &["keys"];
+
 impl Resolver {
     pub(crate) fn resolve_expr(&mut self, expr: &Expr) {
         match expr {
@@ -245,6 +250,8 @@ impl Resolver {
                         self.span_of(&class_tok),
                         format!("constructor of class `{class_name}` is protected"),
                     );
+                } else {
+                    self.check_inherited_private_constructor(&class_name, &class_tok);
                 }
             }
         }
@@ -253,6 +260,39 @@ impl Resolver {
                 self.resolve_expr(&e);
             }
         }
+    }
+
+    /// `new B()` where an *ancestor* declares a `private` zero-argument
+    /// constructor.
+    ///
+    /// A class with no constructor of its own still runs one: the implicit
+    /// `super()` chain reaches the ancestor's, private or not, so upstream
+    /// flags it (#2760). Only a zero-argument private constructor blocks —
+    /// one that takes parameters is not what the implicit call reaches —
+    /// and a `protected` one is exactly what a subclass may use.
+    ///
+    /// Real AIs shipped with this, so upstream keeps it a warning outside
+    /// `// @strict` rather than breaking them.
+    fn check_inherited_private_constructor(&mut self, class_name: &str, class_tok: &SyntaxToken) {
+        let Some(parent) = self.class_parent.get(class_name).cloned() else {
+            return;
+        };
+        let Some(owner) = self.walk_class_chain(&parent, |c| {
+            self.class_private_zero_arg_constructor.contains(c)
+        }) else {
+            return;
+        };
+        let severity = if self.opts.strict {
+            leek_diagnostics::Severity::Error
+        } else {
+            leek_diagnostics::Severity::Warning
+        };
+        self.diagnostics.push(leek_diagnostics::Diagnostic::new(
+            codes::PRIVATE_CONSTRUCTOR,
+            severity,
+            self.span_of(class_tok),
+            format!("constructor of class `{owner}` is private"),
+        ));
     }
 
     fn resolve_lambda(&mut self, l: &leek_parser::ast::LambdaExpr) {
@@ -528,6 +568,13 @@ impl Resolver {
             return;
         }
         let method = field_tok.text().to_string();
+        // Every user class extends `NativeObjectLeekValue`, which carries
+        // exactly one `u_`-prefixed method of its own — so `super.keys()`
+        // emits `super.u_keys()` and resolves, on a base class no
+        // `class_method_arities` table describes.
+        if NATIVE_OBJECT_METHODS.contains(&method.as_str()) {
+            return;
+        }
         let resolved = self
             .walk_class_chain(&parent, |c| {
                 self.class_method_arities

@@ -203,6 +203,12 @@ impl Resolver {
     fn resolve_class_method_body(&mut self, m: &ClassMethod) {
         let saved_loop = std::mem::take(&mut self.loop_depth);
         let saved_breakable = std::mem::take(&mut self.breakable_depth);
+        let is_static = m
+            .syntax()
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|t| t.kind() == SyntaxKind::KwStatic);
+        let saved_static = std::mem::replace(&mut self.in_static_method, is_static);
         self.push_function_scope();
         if let Some(params) = m
             .syntax()
@@ -224,6 +230,7 @@ impl Resolver {
         self.pop_scope();
         self.loop_depth = saved_loop;
         self.breakable_depth = saved_breakable;
+        self.in_static_method = saved_static;
     }
 
     fn resolve_class_constructor_body(&mut self, ctor: &leek_syntax::SyntaxNode) {
