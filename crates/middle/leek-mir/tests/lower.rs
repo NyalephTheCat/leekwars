@@ -126,14 +126,15 @@ fn binary_add_flattens_into_temps_and_an_assign() {
 fn if_else_forks_into_three_blocks() {
     // if (unknown) return 1; else return 2;
     //
-    // The condition has to be one the lowerer cannot decide: a literal
-    // `true` folds to the taken branch with no fork at all, which is what
-    // `a_constant_condition_lowers_only_the_taken_branch` covers.
+    // The condition has to be one HIR left unmarked: a decided one lowers to
+    // the taken branch with no fork at all, which is what
+    // `a_condition_marked_constant_lowers_only_the_taken_branch` covers.
     let i = IfStmt {
         cond: opaque_bool(),
         then_branch: Box::new(Stmt::Return(Some(lit_int(1)))),
         else_branch: Some(Box::new(Stmt::Return(Some(lit_int(2))))),
         soft: false,
+        const_taken: None,
         span: span(),
     };
     let prog = build(vec![Stmt::If(i)]);
@@ -154,35 +155,35 @@ fn if_else_forks_into_three_blocks() {
     assert_eq!(returns, 2, "both arms should end in Return");
 }
 
-/// A condition that is already a boolean literal decides the branch at
-/// compile time: only the taken arm is lowered, and no test is emitted —
-/// which is also how it comes to cost no operation.
+/// An `if` HIR marked as decided lowers to the taken arm alone: no test is
+/// emitted, which is also how it comes to cost no operation.
 #[test]
-fn a_constant_condition_lowers_only_the_taken_branch() {
-    for (cond, expected) in [(true, 1i64), (false, 2)] {
+fn a_condition_marked_constant_lowers_only_the_taken_branch() {
+    for (taken, expected) in [(true, 1i64), (false, 2)] {
         let i = IfStmt {
-            cond: lit_bool(cond),
+            cond: lit_bool(taken),
             then_branch: Box::new(Stmt::Return(Some(lit_int(1)))),
             else_branch: Some(Box::new(Stmt::Return(Some(lit_int(2))))),
             soft: false,
+            const_taken: Some(taken),
             span: span(),
         };
         let prog = build(vec![Stmt::If(i)]);
         let main = prog.main().unwrap();
-        assert_eq!(main.blocks.len(), 1, "no fork for `if ({cond})`");
+        assert_eq!(main.blocks.len(), 1, "no fork for `if ({taken})`");
         assert!(
             !main.blocks[0]
                 .statements
                 .iter()
                 .any(|s| matches!(s, Statement::Charge(_))),
-            "a folded condition charges nothing",
+            "a decided condition charges nothing",
         );
         assert!(
             matches!(
                 &main.blocks[0].terminator,
                 Terminator::Return(Some(Operand::Const(Const::Int(n)))) if *n == expected
             ),
-            "`if ({cond})` should return {expected}, got {:?}",
+            "`if ({taken})` should return {expected}, got {:?}",
             main.blocks[0].terminator,
         );
     }

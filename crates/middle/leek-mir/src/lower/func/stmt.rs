@@ -229,13 +229,18 @@ impl FnLowerer<'_> {
     }
 
     pub(crate) fn lower_if(&mut self, i: &IfStmt) {
-        let cond = self.lower_expr_to_operand(&i.cond);
-        // A condition that folded to a boolean literal decides the branch at
-        // compile time: upstream's `ConstantFolder` emits the taken side
-        // alone, with no test, so it costs *no* operation at all — not even
-        // the one a real test would. Only the taken branch is lowered, which
-        // is also what keeps the dead one from charging for its body.
-        if let Operand::Const(Const::Bool(taken)) = cond {
+        // `leek_hir::transform::mark_constant_conditions` decided this `if`
+        // at compile time: emit the taken side alone, with no test, so it
+        // costs *no* operation — not even the one a real test charges — and
+        // the dead arm charges nothing for its body either. The condition is
+        // never lowered, which is what makes `if (DEBUG && expensive())` free
+        // rather than merely cheap.
+        //
+        // Reading the mark rather than re-deciding here is what keeps
+        // `if (constant_call())` a real branch: the mark predates the call
+        // substitution that made its condition a literal, as upstream's own
+        // pass order does.
+        if let Some(taken) = i.const_taken {
             let branch = if taken {
                 Some(&i.then_branch)
             } else {
@@ -246,6 +251,7 @@ impl FnLowerer<'_> {
             }
             return;
         }
+        let cond = self.lower_expr_to_operand(&i.cond);
         let then_bb = self.new_block();
         let else_bb = self.new_block();
         let join_bb = self.new_block();

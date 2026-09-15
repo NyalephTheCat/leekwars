@@ -244,6 +244,18 @@ pub struct IfStmt {
     /// `if (x) return x`). The reference compiles a soft return without the
     /// per-`if` op tick on the condition, so backends skip it.
     pub soft: bool,
+    /// The branch this `if` takes, when
+    /// [`mark_constant_conditions`](crate::transform::mark_constant_conditions)
+    /// could decide it — upstream's `ConstantFolder` emits that side alone,
+    /// with no test, so the `if` costs *no* operation and the dead arm
+    /// charges nothing for its body either.
+    ///
+    /// A mark rather than a rewrite: the `if` stays in the tree for the lint
+    /// and IDE passes that read HIR as source, and only codegen acts on it.
+    /// It is also why the mark is set *before* calls are substituted, which
+    /// is upstream's own order — `if (constant_call())` is left unmarked and
+    /// keeps paying for its test even though its value is known.
+    pub const_taken: Option<bool>,
     pub span: Span,
 }
 

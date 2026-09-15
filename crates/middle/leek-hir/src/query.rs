@@ -75,7 +75,12 @@ pub fn lower_hir_query(
         prelude.as_ref().map(|(tree, source)| (tree, *source)),
     );
     LowerHirResult {
-        hir: finish(hir, &fold_map(fold), OptLevel::O0),
+        hir: finish(
+            hir,
+            &fold_map(fold),
+            OptLevel::O0,
+            Version::from_byte(version_byte),
+        ),
         diagnostics,
     }
 }

@@ -732,3 +732,68 @@ class B extends P { static m() { return X } }
 return [A.S, A.m(), P.X, B.m()]
 """
 expect = { equals = "[null, 42, null, 9]" }
+
+# A call to a function that does nothing, or that only returns a literal, is
+# worth exactly that — which is what makes a debug guard free rather than
+# merely cheap.
+[[tests]]
+id = "an_empty_or_constant_call_costs_nothing"
+version = 2
+source = "class C { static final PROFILE = false } function guard(x) { if (C.PROFILE) { debug(x) } } function two() { return 2 } guard(1) return two()"
+expect = { ops_at_most = 0 }
+
+# A guard that returns early reduces the same way: everything after the
+# `return` the constant condition selects is dead.
+[[tests]]
+id = "an_early_return_guard_reduces_to_nothing"
+version = 2
+source = "class C { static final P = false } function g(x) { if (!C.P) { return } debug(x) } g(1) return 8"
+expect = { ops_at_most = 0 }
+
+# A bare `O.start(1)` statement of an empty static method leaves nothing.
+[[tests]]
+id = "an_empty_static_method_statement_call_is_dropped"
+version = 2
+source = "class O { private static final P = false static start(x) { if (!P) return } } O.start(2) return 4"
+expect = { ops_at_most = 0 }
+
+# A typed function that falls off its end answers the type's default, so
+# that — not null — is what the substituted call is worth.
+[[tests]]
+id = "a_typed_empty_function_substitutes_its_type_default"
+version = 4
+source = "function f() -> integer {} function s() -> string {} return [f(), s()]"
+expect = { equals = "[0, \"\"]" }
+
+# Nothing observable may go with the call: an impure argument is the
+# caller's to evaluate, an index can raise, and an impure parameter default
+# is the callee's.
+[[tests]]
+id = "an_impure_argument_or_default_keeps_the_call"
+version = 2
+source = """
+global c = 0
+global g = 0
+var i = 0
+function foo(x) {}
+function f(x = c++) {}
+var a = [1]
+foo(i++) foo(g = 5) foo(a[0]) f()
+return [i, g, c]
+"""
+expect = { equals = "[1, 5, 1]" }
+
+# Upstream decides which conditions are constant before it substitutes
+# calls, so a call in a condition keeps its branch — and the operation that
+# branch charges — while a condition that was constant all along is free.
+[[tests]]
+id = "a_constant_condition_is_free_but_a_constant_call_in_one_is_not"
+version = 2
+source = "class A { static final D = false } function f() { return true } if (A.D && f()) { return 0 } return 1"
+expect = { ops_at_most = 0 }
+
+[[tests]]
+id = "a_call_in_a_condition_still_pays_for_its_branch"
+version = 2
+source = "function no() { return false } if (no()) { return 1 } return 2"
+expect = { equals = "2" }

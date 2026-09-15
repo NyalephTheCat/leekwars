@@ -192,6 +192,7 @@ mod tests {
             then_branch: Box::new(Stmt::Expr(add(int(1), int(2)))), // 1 + 3
             else_branch: Some(Box::new(Stmt::Break(span()))),       // 1
             soft: false,
+            const_taken: None,
             span: span(),
         })]);
         let charged = add_charges(&f, ChargeOpts::default());
@@ -294,6 +295,7 @@ mod tests {
                     then_branch: Box::new(Stmt::Break(span())),
                     else_branch: None,
                     soft: false,
+                    const_taken: None,
                     span: span(),
                 }),
                 Stmt::Return(None),
@@ -344,6 +346,7 @@ mod tests {
             then_branch: Box::new(Stmt::Expr(int(0))),
             else_branch: None,
             soft: false,
+            const_taken: None,
             span: span(),
         })]);
         let charged = add_charges(

@@ -156,11 +156,14 @@ fn switch_charges_one_op_per_case_test() {
             (v, "var x = 1 switch (x) { case 1: return 'one' } return 'none'", 3),
             (v, "var x = 2 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 4),
             (v, "var x = 3 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 3),
-            // 6, not the 7 `reference.tsv` records: that dataset was
-            // captured before upstream's `ConstantFolder`, which stopped
-            // charging for an `if` whose condition is a literal. The other
-            // rows here have no constant condition and are unaffected.
-            (v, "var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r", 6),
+            // 7, the count `reference.tsv` records for the *unfolded*
+            // program: `ops_v` lowers with `lower_file_versioned`, which
+            // hands back raw HIR, while upstream's `ConstantFolder` — which
+            // would drop this `if (true)` to 0 ops — is a pipeline pass and
+            // runs in `leek_hir::lower::finish`. That is the split these
+            // rows want: one construct's charge at a time, with the folded
+            // end-to-end counts checked by leek-test-corpus instead.
+            (v, "var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r", 7),
             (v, "var x = 2 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 7),
             (v, "var x = 3 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 4),
             (v, "var x = 3 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 5),

@@ -209,12 +209,17 @@ pub fn finish(
     mut hir: HirFile,
     fold: &HashMap<String, crate::ir::Literal>,
     opt: OptLevel,
+    version: Version,
 ) -> Arc<HirFile> {
     crate::transform::fold_constants(&mut hir, fold);
-    // Not gated on the optimization level: upstream's `ConstantFolder`
-    // inlines a `static final` literal on every compile, and what a program
-    // costs in operations is part of what it *is*.
+    // Neither of these is gated on the optimization level: upstream's
+    // `ConstantFolder` runs on every compile, and what a program costs in
+    // operations is part of what it *is*. They run in order — inlining the
+    // constants is what lets a debug guard's body reduce to nothing, which
+    // is what lets its calls go.
     crate::transform::inline_static_final_literals(&mut hir);
+    crate::transform::mark_constant_conditions(&mut hir);
+    crate::transform::eliminate_constant_calls(&mut hir, version.as_u32());
     if opt.optimizes() {
         crate::transform::optimize_hir(&mut hir);
     }
