@@ -969,31 +969,50 @@ impl State {
 
     /// `State.slideEntity(entity, cell, caster)` — a forced move (push or
     /// attract). Updates the occupancy only; like Java, it produces NO action
-    /// (the statistics manager is the sole observer there). The `onMoved`
-    /// passives are weapon passive effects — none in the leek scope.
-    pub fn slide_entity(&mut self, fid: usize, cell: usize) {
+    /// (the statistics manager is the sole observer there), but it does fire
+    /// the moved entity's `onMoved` passives.
+    pub fn slide_entity(&mut self, fid: usize, cell: usize, caster: usize) {
         // A STATIC entity cannot be pushed or attracted.
         if self.fighters[fid].has_state(EntityState::Static) {
+            return;
+        }
+        // Nor can a ROOTED one — the 2.50 plants. The difference between the
+        // two states is that a permutation still moves a ROOTED entity.
+        if self.fighters[fid].has_state(EntityState::Rooted) {
             return;
         }
         if self.fighters[fid].cell == Some(cell) {
             return;
         }
         self.place_entity(fid, cell);
+        self.on_moved(fid, caster);
     }
 
     /// `State.teleportEntity(entity, cell, caster, itemId)` — like a slide,
     /// it only moves the occupancy; statistics-only in Java, no action.
     /// (Unlike the slides, Java has NO STATIC guard here — a static entity
     /// can still teleport.)
-    pub fn teleport_entity(&mut self, fid: usize, cell: usize) {
+    pub fn teleport_entity(&mut self, fid: usize, cell: usize, caster: usize) {
+        let start = self.fighters[fid].cell;
         self.place_entity(fid, cell);
+        // `if (start != cell)` — teleporting onto your own cell moves nobody.
+        if start != Some(cell) {
+            self.on_moved(fid, caster);
+        }
+    }
+
+    /// `Entity.onMoved(by)` — the displacement passives, skipped when the
+    /// entity moved itself (`by == this`: only a move you *suffer* counts).
+    fn on_moved(&mut self, fid: usize, by: usize) {
+        if fid != by {
+            self.fire_passives(fid, crate::attack::PassiveHook::Moved, 0);
+        }
     }
 
     /// `State.invertEntities(caster, target)` — permutation: swap the two
     /// entities' cells. Occupancy-only like the slides (statistics-only in
-    /// Java, no action logged). The `onMoved` passives are weapon passive
-    /// effects — none in the leek scope.
+    /// Java, no action logged), plus both entities' `onMoved` passives —
+    /// though the caster moved itself, so only the target's can fire.
     pub fn invert_entities(&mut self, a: usize, b: usize) {
         // Java checks ONLY the target for STATIC — a static caster still
         // swaps (and moves itself doing so).
@@ -1009,6 +1028,8 @@ impl State {
         self.fighters[b].cell = Some(ca);
         // `map.entity_cells` already holds both cells — the swap doesn't
         // change the set.
+        self.on_moved(b, a);
+        self.on_moved(a, a);
     }
 
     /// `State.init()` — draw the obstacle count, generate the map, place the
@@ -1697,6 +1718,25 @@ impl State {
             entity_id: fid as i64,
             killer_id: killer.map_or(-1, |k| k as i64),
         });
+
+        // The death passives, in Java's order. A summon's death rouses
+        // nobody — only a real teammate's does — and the dead entity itself
+        // is skipped (`fire_passives` would refuse it anyway).
+        if !self.fighters[fid].is_summon() {
+            let team = self.fighters[fid].team;
+            let allies: Vec<usize> = self.teams[team]
+                .fighters
+                .iter()
+                .copied()
+                .filter(|&ally| ally != fid)
+                .collect();
+            for ally in allies {
+                self.fire_passives(ally, crate::attack::PassiveHook::AllyKilled, 0);
+            }
+        }
+        if let Some(killer) = killer {
+            self.fire_passives(killer, crate::attack::PassiveHook::Kill, 0);
+        }
     }
 
     /// `Entity.die()` — zero the life, drop every effect in both directions,
@@ -1780,7 +1820,9 @@ impl State {
             cell: target_cell as i32,
             success: result,
         });
-        // launcher.onCritical(): weapon passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
         self.apply_on_cell(
             fid,
             target_cell,
@@ -1893,7 +1935,9 @@ impl State {
             cell: target_cell as i32,
             success: result,
         });
-        // caster.onCritical(): passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
         self.apply_on_cell(
             fid,
             target_cell,
@@ -1988,7 +2032,9 @@ impl State {
             cell: target_cell as i32,
             success: result,
         });
-        // caster.onCritical(): passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
 
         let bulb = self.create_summon(
             fid,
@@ -2167,7 +2213,9 @@ impl State {
             cell: target_cell as i32,
             success: result,
         });
-        // caster.onCritical(): passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
 
         self.resurrect(fid, target_entity, target_cell, critical, full_life);
 

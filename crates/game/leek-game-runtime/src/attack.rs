@@ -265,6 +265,28 @@ pub enum AttackType {
     Chip,
 }
 
+/// The `Entity` events a weapon's `passive_effects` can answer.
+///
+/// One hook per `Entity.onX()` method upstream; `State::fire_passives` walks
+/// the carrier's weapons and fires the lines that name this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassiveHook {
+    /// `onDirectDamage(damage)` — took direct damage.
+    DirectDamage,
+    /// `onNovaDamage(erosion)` — lost max life.
+    NovaDamage,
+    /// `onPoisonDamage(damage)` — took poison damage.
+    PoisonDamage,
+    /// `onMoved(by)` — was displaced by somebody else.
+    Moved,
+    /// `onAllyKilled()` — a (non-summon) teammate died.
+    AllyKilled,
+    /// `onCritical()` — landed a critical.
+    Critical,
+    /// `onKill()` — killed somebody.
+    Kill,
+}
+
 impl AttackType {
     /// The raw `Attack.getType()` value, as `ActionAddEffect.createEffect`
     /// receives it.
@@ -682,7 +704,7 @@ impl State {
                         let dest =
                             self.map
                                 .attract_last_available_cell(cell, target_cell, launch_cell);
-                        self.slide_entity(fid, dest);
+                        self.slide_entity(fid, dest, caster);
                     }
                 }
             } else if params.effect == EffectType::Push {
@@ -691,14 +713,14 @@ impl State {
                         let dest =
                             self.map
                                 .push_last_available_cell(cell, target_cell, launch_cell);
-                        self.slide_entity(fid, dest);
+                        self.slide_entity(fid, dest, caster);
                     }
                 }
             }
 
             match params.effect {
                 EffectType::Teleport => {
-                    self.teleport_entity(caster, target_cell);
+                    self.teleport_entity(caster, target_cell, caster);
                     // Java adds the caster unconditionally (no dedup).
                     return_entities.push(caster);
                 }
@@ -973,8 +995,8 @@ impl State {
                         erosion,
                     });
                     self.remove_life(target, damages, erosion, Some(caster));
-                    // onPoisonDamage / onNovaDamage: passive effects — none
-                    // in the leek scope.
+                    self.fire_passives(target, PassiveHook::PoisonDamage, damages);
+                    self.fire_passives(target, PassiveHook::NovaDamage, erosion);
                 }
             }
             EffectType::Heal => {
@@ -1015,11 +1037,185 @@ impl State {
                     erosion,
                 });
                 self.remove_life(target, value, erosion, Some(caster));
+                // `EffectAftereffect` fires only the nova hook — it is not
+                // direct damage, and it is not poison either.
+                self.fire_passives(target, PassiveHook::NovaDamage, erosion);
             }
             // Every other ported effect keeps the default no-op
             // `applyStartTurn`.
             _ => {}
         }
+    }
+
+    // ── Passive effects ──────────────────────────────────────────────────────
+
+    /// One of `Entity`'s passive-effect hooks.
+    ///
+    /// A weapon's `passive_effects` never fire on use: they fire from the
+    /// *carrier's* own events, for as long as the weapon is in its inventory,
+    /// and each one answers exactly one hook. Nine weapons ship them, and
+    /// between them they are the entire reason effect types 33–36, 50, 55, 56,
+    /// 58 and 63 exist — none of those is ever an item's active line.
+    pub(crate) fn fire_passives(&mut self, fid: usize, hook: PassiveHook, input: i32) {
+        // `if (isDead()) return;` guards every one of the hooks upstream.
+        if self.fighters[fid].is_dead() {
+            return;
+        }
+        // The carrier's weapons, in inventory order, and their passive lines
+        // — collected first because firing one mutates `self`.
+        let lines: Vec<(i32, EffectParams)> = self.fighters[fid]
+            .weapons
+            .iter()
+            .filter_map(|&item| Some((item, self.weapon_specs.get(&item)?)))
+            .flat_map(|(item, spec)| {
+                spec.passive_effects
+                    .iter()
+                    .map(move |p| (item, p.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (item, passive) in lines {
+            self.activate_passive(fid, hook, input, item, &passive);
+        }
+    }
+
+    /// `Entity.activateOnXPassiveEffect` — one passive line against one hook.
+    ///
+    /// Each translates into an ordinary `createEffect` of a `RAW_*` type on
+    /// the carrier itself, so the buff stacks, expires and shows in the fight
+    /// log like any other. The conversions scale `input` (the damage just
+    /// taken) by `value1` percent; the flat ones ignore it.
+    fn activate_passive(
+        &mut self,
+        fid: usize,
+        hook: PassiveHook,
+        input: i32,
+        item: i32,
+        passive: &EffectParams,
+    ) {
+        use EffectType as T;
+
+        // `value = inputValue * (value1 / 100)`, the share of the damage the
+        // conversion passives carry over.
+        let share = || f64::from(input) * (passive.value1 / 100.0);
+        let stackable = passive.modifiers.contains(EffectModifiers::STACKABLE);
+
+        // `(becomes, value1, value2, turns, jet, stackable, target_count)`,
+        // transcribed one for one from the `activateOn…` methods. A hook the
+        // line does not answer is `None` and fires nothing.
+        let fired = match (hook, passive.effect) {
+            (PassiveHook::Moved, T::MovedToMp) => Some((
+                T::RawBuffMp,
+                passive.value1,
+                0.0,
+                passive.turns,
+                0.0,
+                stackable,
+                1,
+            )),
+            (PassiveHook::DirectDamage, T::DamageToAbsoluteShield) => Some((
+                T::RawAbsoluteShield,
+                share(),
+                0.0,
+                passive.turns,
+                0.0,
+                stackable,
+                0,
+            )),
+            (PassiveHook::DirectDamage, T::DamageToStrength) => Some((
+                T::RawBuffStrength,
+                share(),
+                0.0,
+                passive.turns,
+                0.0,
+                stackable,
+                0,
+            )),
+            (PassiveHook::DirectDamage, T::DamageToResistance) => Some((
+                T::RawBuffResistance,
+                share(),
+                0.0,
+                passive.turns,
+                0.0,
+                stackable,
+                0,
+            )),
+            (PassiveHook::NovaDamage, T::NovaDamageToMagic) => Some((
+                T::RawBuffMagic,
+                share(),
+                0.0,
+                passive.turns,
+                0.0,
+                stackable,
+                0,
+            )),
+            (PassiveHook::PoisonDamage, T::PoisonToScience) => Some((
+                T::RawBuffScience,
+                share(),
+                0.0,
+                passive.turns,
+                0.0,
+                stackable,
+                0,
+            )),
+            (PassiveHook::AllyKilled, T::AllyKilledToAgility) => Some((
+                T::RawBuffAgility,
+                passive.value1,
+                0.0,
+                passive.turns,
+                0.0,
+                stackable,
+                0,
+            )),
+            // The heal is skipped outright on a target already at full life,
+            // and it is the one passive that rolls a jet.
+            (PassiveHook::Critical, T::CriticalToHeal) => {
+                let f = &self.fighters[fid];
+                if f.life >= f.total_life {
+                    return;
+                }
+                let jet = self.rng.get_double();
+                Some((T::RawHeal, passive.value1, passive.value2, 0, jet, false, 1))
+            }
+            // `value, value` — upstream passes the same number twice, so the
+            // TP buff is `value1` with a `value2` that no jet of 0 can reach.
+            (PassiveHook::Kill, T::KillToTp) => Some((
+                T::RawBuffTp,
+                passive.value1,
+                passive.value1,
+                passive.turns,
+                0.0,
+                true,
+                1,
+            )),
+            _ => None,
+        };
+
+        let Some((effect, value1, value2, turns, jet, stackable, target_count)) = fired else {
+            return;
+        };
+        let params = EffectParams {
+            effect,
+            value1,
+            value2,
+            turns,
+            targets: passive.targets,
+            modifiers: passive.modifiers,
+        };
+        self.create_effect(
+            &params,
+            1.0,
+            false,
+            fid,
+            fid,
+            item,
+            AttackType::Weapon,
+            jet,
+            stackable,
+            0,
+            target_count,
+            0,
+        );
     }
 
     /// `Entity.endTurn()`'s propagation block — every effect on `fid` with a
@@ -1377,8 +1573,22 @@ impl State {
             // attract/push). A repel line is dead: it moves nothing, logs
             // nothing, stores nothing.
             EffectType::Repel => {}
-            // `EffectAllyKilledToAgility` is another EMPTY class — dead.
-            EffectType::AllyKilledToAgility => {}
+            // The passive-only types. None of them has an `Effect` subclass
+            // upstream, so as an *active* line each inherits the base no-op
+            // `Effect.apply` — value stays 0, nothing logs, nothing stores.
+            // They do their work through `State::fire_passives` instead, off
+            // the carrier's hooks; no catalog item lists one as an active
+            // line, and a scenario that injects one gets upstream's no-op
+            // rather than a panic.
+            EffectType::AllyKilledToAgility
+            | EffectType::PoisonToScience
+            | EffectType::DamageToAbsoluteShield
+            | EffectType::DamageToStrength
+            | EffectType::NovaDamageToMagic
+            | EffectType::MovedToMp
+            | EffectType::KillToTp
+            | EffectType::CriticalToHeal
+            | EffectType::DamageToResistance => {}
             // `EffectAftereffect.apply` — science-scaled damage that ALSO
             // ticks every turn (see `apply_start_turn_effect`). Logs
             // `DamageType.AFTEREFFECT` (the POISON wire id, 110). Unlike
@@ -1406,6 +1616,7 @@ impl State {
                     erosion,
                 });
                 self.remove_life(target, inst.value, erosion, Some(caster));
+                self.fire_passives(target, PassiveHook::NovaDamage, erosion);
             }
             // `EffectKill.apply` — the INVINCIBLE guard is COMMENTED OUT in
             // the reference ("// Graal"), so kill pierces invincibility.
@@ -1453,6 +1664,7 @@ impl State {
                     erosion: 0,
                 });
                 self.remove_life(target, 0, inst.value, Some(caster));
+                self.fire_passives(target, PassiveHook::NovaDamage, inst.value);
             }
             // `EffectNovaVitality.apply` — science-scaled max-life bump with
             // NO floor at 0, NO invincible check and NO heal (unlike
@@ -1746,6 +1958,8 @@ impl State {
                         erosion,
                     });
                     self.remove_life(target, inst.value, erosion, Some(caster));
+                    self.fire_passives(target, PassiveHook::PoisonDamage, inst.value);
+                    self.fire_passives(target, PassiveHook::NovaDamage, erosion);
                 }
             }
             other => panic!("effect type {other:?} not ported yet (corpus-first)"),
@@ -1987,6 +2201,8 @@ impl State {
             erosion,
         });
         self.remove_life(target, value, erosion, Some(caster));
+        self.fire_passives(target, PassiveHook::DirectDamage, value);
+        self.fire_passives(target, PassiveHook::NovaDamage, erosion);
 
         // Return damage — an INVINCIBLE caster takes none back.
         if return_damage > 0 && !self.fighters[caster].has_state(EntityState::Invincible) {
@@ -2076,8 +2292,8 @@ impl State {
             erosion,
         });
         self.remove_life(target, value, erosion, Some(caster));
-        // onDirectDamage / onNovaDamage: weapon passive effects — none in
-        // the leek scope yet.
+        self.fire_passives(target, PassiveHook::DirectDamage, value);
+        self.fire_passives(target, PassiveHook::NovaDamage, erosion);
 
         // Life steal — an UNHEALABLE caster steals nothing.
         if !self.fighters[caster].is_dead()
@@ -2112,6 +2328,9 @@ impl State {
                     erosion: return_erosion,
                 });
                 self.remove_life(caster, return_damage, return_erosion, Some(target));
+                // `EffectDamage` answers its own return damage with the
+                // caster's nova hook — `EffectLifeDamage` does not.
+                self.fire_passives(caster, PassiveHook::NovaDamage, return_erosion);
             }
         }
         value
@@ -2121,7 +2340,8 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::{
-        Area, AttackType, EffectModifiers, EffectParams, EffectTargets, EffectType, java_round,
+        Area, AttackType, EffectModifiers, EffectParams, EffectTargets, EffectType, EntityState,
+        java_round,
     };
     use crate::state::{STAT_LIFE, State};
 
@@ -2146,6 +2366,47 @@ mod tests {
         }
         assert_eq!(EffectType::from_id(0), None);
         assert_eq!(EffectType::from_id(65), None);
+    }
+
+    /// Two fighters with `life` life and nothing else, placed a few cells
+    /// apart — the minimum an effect needs to land.
+    fn two_fighters(life: i32) -> State {
+        let mut stats = crate::state::Stats::default();
+        stats.set(STAT_LIFE, life);
+        let mut state = State::new(1);
+        let caster = state.add_entity(
+            0,
+            crate::state::Fighter::new(0, 1, "caster".into(), 0, stats.clone()),
+        );
+        let target = state.add_entity(
+            1,
+            crate::state::Fighter::new(1, 2, "target".into(), 1, stats),
+        );
+        state.place_entity(caster, 306);
+        state.place_entity(target, 300);
+        state
+    }
+
+    /// One effect line with no jet component.
+    fn line(effect: EffectType, value1: f64, turns: i32) -> EffectParams {
+        EffectParams {
+            effect,
+            value1,
+            value2: 0.0,
+            turns,
+            targets: EffectTargets::all(),
+            modifiers: EffectModifiers::empty(),
+        }
+    }
+
+    /// Register a real catalog weapon so its passive lines are reachable.
+    fn register_weapon(state: &mut State, item: i32) {
+        let spec = crate::official_items::weapon_spec(item).expect("catalog weapon");
+        assert!(
+            !spec.passive_effects.is_empty(),
+            "weapon {item} is supposed to carry a passive",
+        );
+        state.weapon_specs.insert(item, spec);
     }
 
     /// `EffectSuperinfection` converts a slice of every timed poison into
@@ -2239,6 +2500,124 @@ mod tests {
         assert_eq!(rest, 30, "the remaining 10 a turn, over 3 turns");
         assert!(state.fighters[target].effects.is_empty());
         assert_eq!(state.fighters[target].life, 40);
+    }
+
+    /// A weapon's `passive_effects` fire from the carrier's own events, not
+    /// from using it. The revoked m-laser (119) carries
+    /// `DAMAGE_TO_STRENGTH 5%`: every point of direct damage its owner takes
+    /// turns 5 % of itself into a permanent raw strength buff.
+    #[test]
+    fn a_damage_passive_converts_damage_taken_into_a_buff() {
+        let mut state = two_fighters(500);
+        // Only the *target* carries the weapon: the passive answers to being
+        // hit, not to hitting.
+        state.fighters[1].weapons = vec![119];
+        register_weapon(&mut state, 119);
+
+        // A plain 100-damage line: caster strength and power are 0, the
+        // target has no shields, so it takes exactly 100.
+        let damage = line(EffectType::Damage, 100.0, 0);
+        let dealt = state.create_effect(
+            &damage,
+            1.0,
+            false,
+            1,
+            0,
+            119,
+            AttackType::Chip,
+            0.0,
+            false,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(dealt, 100);
+        assert_eq!(
+            state.fighters[1].stat(crate::state::STAT_STRENGTH),
+            5,
+            "100 damage × 5 %",
+        );
+
+        // It is permanent (`turns: -1`) and stackable, so a second hit adds.
+        state.create_effect(
+            &damage,
+            1.0,
+            false,
+            1,
+            0,
+            119,
+            AttackType::Chip,
+            0.0,
+            false,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(state.fighters[1].stat(crate::state::STAT_STRENGTH), 10);
+
+        // The attacker carries no such weapon and dealt no damage to itself.
+        assert_eq!(state.fighters[0].stat(crate::state::STAT_STRENGTH), 0);
+    }
+
+    /// The kill passive of the enhanced lightninger (225): `KILL_TO_TP 1`,
+    /// permanent, on the *killer*.
+    #[test]
+    fn a_kill_passive_answers_the_killer_not_the_corpse() {
+        let mut state = two_fighters(10);
+        state.fighters[0].weapons = vec![225];
+        register_weapon(&mut state, 225);
+        let before = state.fighters[0].stat(crate::state::STAT_TP);
+
+        // 100 damage onto a 10-life target kills it.
+        state.create_effect(
+            &line(EffectType::Damage, 100.0, 0),
+            1.0,
+            false,
+            1,
+            0,
+            225,
+            AttackType::Chip,
+            0.0,
+            false,
+            0,
+            1,
+            0,
+        );
+        assert!(state.fighters[1].is_dead());
+        assert_eq!(state.fighters[0].stat(crate::state::STAT_TP), before + 1);
+    }
+
+    /// The displacement passive of the explorer rifle (175): `MOVED_TO_MP 1`
+    /// for 2 turns, and only for a move the carrier *suffers* — walking on
+    /// your own two feet is not one.
+    #[test]
+    fn a_moved_passive_ignores_a_move_you_made_yourself() {
+        let mut state = two_fighters(500);
+        state.fighters[1].weapons = vec![175];
+        register_weapon(&mut state, 175);
+        let before = state.fighters[1].stat(crate::state::STAT_MP);
+
+        let destination = state.fighters[1].cell.expect("placed") - 1;
+        state.slide_entity(1, destination, 1);
+        assert_eq!(
+            state.fighters[1].stat(crate::state::STAT_MP),
+            before,
+            "a self-move fires nothing",
+        );
+
+        state.slide_entity(1, destination - 1, 0);
+        assert_eq!(state.fighters[1].stat(crate::state::STAT_MP), before + 1);
+    }
+
+    /// A ROOTED entity — the 2.50 plants — is not pushed or attracted at
+    /// all, so nothing moves and no displacement passive fires.
+    #[test]
+    fn a_rooted_entity_does_not_slide() {
+        let mut state = two_fighters(500);
+        state.fighters[1].states.push(EntityState::Rooted);
+        let start = state.fighters[1].cell.expect("placed");
+        state.slide_entity(1, start - 1, 0);
+        assert_eq!(state.fighters[1].cell, Some(start));
     }
 
     #[test]
