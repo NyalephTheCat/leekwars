@@ -875,14 +875,16 @@ fn eliminate_in_children(s: &mut Stmt, count: &mut usize) {
 ///   user code (a call, `new`, or unspliced `include`). A read from a static
 ///   field initializer (run before `main`) disqualifies outright.
 ///
-/// Every rule keys on the global's `DefId`. That is sound only because a
-/// global can never be reached *by name*, and it now isn't: lowering
-/// registers every file-level `global` in `file_decls`
-/// (`Lowerer::predeclare_globals`) before it lowers a single
-/// expression — a bodiless signature's parameter defaults, the one pass-1
-/// holdout, are deferred past it — and `builtin_or_unresolved`, the only
-/// site that builds a [`NameRef::Builtin`] / [`NameRef::Unresolved`] from a
-/// real name, runs only after a `file_decls` miss. So neither tag can carry
+/// Every rule but the declaration count keys on the global's `DefId` (that one
+/// counts by name too, so a `global` whose declarations somehow don't share a
+/// def is still seen as multiply-declared, #443). Keying on `DefId` is sound
+/// only because a global can never be reached *by name*, and it now isn't:
+/// lowering registers every file-level `global` in `file_decls`
+/// (`Lowerer::predeclare_globals`) before it lowers a single expression — a
+/// bodiless signature's parameter defaults, the one pass-1 holdout, are
+/// deferred past it — and `builtin_or_unresolved`, the only site that builds
+/// a [`NameRef::Builtin`] / [`NameRef::Unresolved`] from a real name, runs
+/// only after a `file_decls` miss. So neither tag can carry
 /// a candidate global's name, and the pass needs no by-name disqualification
 /// on top of its `DefId` rules (#53). `no_global_is_ever_tagged_by_name`
 /// pins the invariant; if a future lowering change reopens it, that test
@@ -894,12 +896,23 @@ pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
     //    position, so count declarations across the whole file: one inside a
     //    function or lambda body is a store that runs when that body is
     //    called, which the ordering rules below can't reason about.
+    //    Count by `DefId` *and* by name: two `global` declarations of one name
+    //    should always share a `DefId` (`Lowerer::declare_global` is
+    //    idempotent), but a lowering bug that hands one of them a different
+    //    def — a lambda initializer once bound a `Def::Local` under an
+    //    `is_global: true` declarator — is invisible to the `DefId` count
+    //    alone, and the global then folds away while the second declaration
+    //    still stores into its slot (#443). The name count is keyed on
+    //    global-ness too, so a local shadowing the name in some function body
+    //    doesn't disqualify the global it never reaches.
     let mut decl_counts: HashMap<DefId, usize> = HashMap::new();
+    let mut global_name_counts: HashMap<String, usize> = HashMap::new();
     for_each_file_stmt(hir, &mut |s| {
         if let Stmt::VarDecl(v) = s
             && v.is_global
         {
             *decl_counts.entry(v.def).or_default() += 1;
+            *global_name_counts.entry(v.name.clone()).or_default() += 1;
         }
     });
     let mut candidates: HashMap<DefId, (Literal, usize)> = HashMap::new();
@@ -907,6 +920,7 @@ pub fn propagate_const_globals(hir: &mut HirFile) -> usize {
         if let Stmt::VarDecl(v) = s
             && v.is_global
             && decl_counts.get(&v.def) == Some(&1)
+            && global_name_counts.get(v.name.as_str()) == Some(&1)
             && let Some(init) = &v.init
             && let ExprKind::Literal(lit) = &init.kind
             && literal_matches_decl(lit, v.ty.as_ref())

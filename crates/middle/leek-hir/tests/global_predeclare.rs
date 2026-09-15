@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use leek_hir::{
-    Block, Def, DefId, Expr, ExprKind, HirFile, LowerUnit, NameRef, Stmt, lower_file, lower_files,
+    Block, Def, DefId, Expr, ExprKind, HirFile, LambdaBody, LowerUnit, NameRef, Stmt, VarDecl,
+    lower_file, lower_files,
 };
 use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_span::{FeatureFlags, SourceId};
@@ -141,4 +142,79 @@ fn a_global_declared_only_in_a_body_is_still_one_global() {
     };
     assert!(v.is_global);
     assert_eq!(v.def, g);
+}
+
+/// Every `VarDecl` in `main`, in source order.
+fn main_var_decls(hir: &HirFile) -> Vec<&VarDecl> {
+    hir.main
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::VarDecl(v) => Some(v),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A lambda initializer pre-declares its own name so the lambda body can see
+/// its binding, and for a `global` declarator that pre-declaration has to land
+/// in the *global* namespace. It used to always declare a local, so
+/// `global G = function() {...}` produced an `is_global: true` `VarDecl`
+/// carrying a `Def::Local` — the same global then looked singly-declared to
+/// `propagate_const_globals` and was folded away at O1 (#443).
+#[test]
+fn a_global_redeclared_with_a_lambda_stays_one_global() {
+    let hir = lower(
+        "global G = 1
+global G = function() { return 2 }
+",
+    );
+    let g = global(&hir, "G");
+    assert!(matches!(hir.defs[g.0 as usize], Def::Global(_)));
+    let decls = main_var_decls(&hir);
+    assert_eq!(decls.len(), 2, "two declarations, got {decls:?}");
+    for v in &decls {
+        assert!(v.is_global, "declarator not marked global: {v:?}");
+        assert_eq!(v.def, g, "declarator bound to something else: {v:?}");
+    }
+    assert!(
+        !hir.defs
+            .iter()
+            .any(|d| matches!(d, Def::Local(_)) && d.name() == "G"),
+        "a `Def::Local` named G was declared: {:?}",
+        hir.defs
+    );
+}
+
+/// The global flavour of the fix must not cost the lambda path its ordering:
+/// a lambda initializer is still declared *before* its body is lowered, so a
+/// recursive local closure resolves its own name to its own declarator.
+#[test]
+fn a_lambda_initializer_still_sees_its_own_binding() {
+    let hir = lower(
+        "var f = function() { return f }
+return f
+",
+    );
+    let decls = main_var_decls(&hir);
+    let [decl] = decls[..] else {
+        panic!("expected one declaration, got {decls:?}")
+    };
+    let Some(Expr {
+        kind: ExprKind::Lambda(l),
+        ..
+    }) = &decl.init
+    else {
+        panic!("expected a lambda initializer, got {:?}", decl.init)
+    };
+    let LambdaBody::Block(b) = &l.body else {
+        panic!("expected a block body, got {:?}", l.body)
+    };
+    let Some(Stmt::Return(Some(e))) = b.stmts.last() else {
+        panic!("expected `return f`, got {:?}", b.stmts)
+    };
+    assert_eq!(
+        e.kind,
+        ExprKind::Name(NameRef::Local(decl.def)),
+        "the lambda body doesn't see its own binding"
+    );
 }
