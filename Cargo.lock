@@ -1154,6 +1154,7 @@ dependencies = [
  "leek-mir",
  "leek-parser",
  "leek-pipeline",
+ "leek-prelude",
  "leek-resolver",
  "leek-span",
  "leek-syntax",

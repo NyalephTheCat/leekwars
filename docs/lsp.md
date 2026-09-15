@@ -65,12 +65,21 @@ merge two independent AIs the moment they shared one library file.
 it. Rename in particular depends on it being right: renaming across a
 scope that is too wide corrupts an unrelated AI.
 
-Class names are the one deliberate exception. Upstream resolves
-`getDefinedClass` program-wide, so the server feeds the sorted union of
-every file's `class IDENT` declarations into every salsa input's
-`extra_classes` — that is what lets any file use any project class as a
-type head. The union is only written back when it actually changed, since
-writing a salsa input re-parses.
+Class names follow the same scope. Upstream resolves `getDefinedClass`
+program-wide, so a file's parse has to know every `class IDENT` its
+*program* declares to read `lowercaseClassFromInclude x = …` as a typed
+declaration. The server used to feed one workspace-wide union into every
+salsa input, which made a class typed into one AI change how an unrelated
+AI parsed and re-parsed every open document on each keystroke (#163).
+
+It is a per-program derived value now: `leek_db::queries::program_classes`
+folds the include closure into an interned set, and that set is a **key**
+on `parse_query` rather than a field on the file. Two programs that share
+a leaf get two parses of it, neither evicting the other, and an edit that
+leaves a program's class set alone re-parses only the file that changed.
+The single-file accessors in `analysis.rs` pass the empty set, because a
+file analyzed on its own has no other file's classes; the include-aware
+pipeline gets the closure's set from `ResolveIncludes`.
 
 ## Threading
 

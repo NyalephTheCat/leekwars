@@ -28,19 +28,23 @@
 //!   *down* on this crate.
 //!
 //! Most of what [`queries`] exposes is a re-export of a query that
-//! already exists somewhere else. The exception is [`include`], the
-//! first set of queries this crate *owns*: an include graph spans
-//! several files, so it cannot be a per-file query in a pass crate,
-//! and it needs [`WorkspaceFiles`] — an input, which lives here.
+//! already exists somewhere else. The exceptions are [`include`] and
+//! [`program`], the queries this crate *owns*: both span several files,
+//! so neither can be a per-file query in a pass crate, and both need
+//! [`WorkspaceFiles`] — an input, which lives here.
 
 pub mod include;
+pub mod program;
 pub mod queries;
 
-pub use leek_pipeline::salsa::{Db, LeekDb, SourceFile, WorkspaceFiles};
+pub use leek_pipeline::salsa::{Db, LeekDb, ProgramClasses, SourceFile, WorkspaceFiles};
 
 #[cfg(test)]
 mod tests {
-    use super::{LeekDb, SourceFile, WorkspaceFiles, queries};
+    use leek_pipeline::OptLevel;
+    use leek_syntax::Version;
+
+    use super::{LeekDb, ProgramClasses, SourceFile, WorkspaceFiles, queries};
 
     const SRC: &str = "function sum(arr) { var t = 0 for (var x in arr) { t = t + x } return t }\n";
 
@@ -54,7 +58,6 @@ mod tests {
             false,
             false,
             0,
-            Vec::new(),
         )
     }
 
@@ -64,17 +67,48 @@ mod tests {
     /// and then fail at the first caller, so call each one.
     #[test]
     fn every_query_runs_off_one_database() {
-        let db = LeekDb::default();
+        let mut db = LeekDb::default();
         let file = source(&db);
 
         assert!(queries::pragma_query(&db, file).diagnostics.is_empty());
         assert!(!queries::lex_query(&db, file).tokens.is_empty());
-        assert!(queries::parse_query(&db, file).diagnostics.is_empty());
+        assert!(
+            queries::parse_query(&db, file, ProgramClasses::none(&db))
+                .diagnostics
+                .is_empty()
+        );
         let _ = queries::resolve_query(&db, file);
         let _ = queries::typecheck_query(&db, file);
         assert!(!queries::lower_hir_query(&db, file).hir.defs.is_empty());
         let _ = queries::lower_mir_query(&db, file);
         assert!(!queries::complexity_query(&db, file).0.is_empty());
+
+        // The whole-program queries take the workspace and the entry's
+        // settled version on top, and answer for the include closure.
+        let files = workspace(&mut db, file);
+        assert!(queries::class_names(&db, file).is_empty());
+        assert!(
+            queries::program_classes(&db, files, file, Version::V4)
+                .names(&db)
+                .is_empty()
+        );
+        let _ = queries::resolve_program(&db, files, file, Version::V4);
+        let _ = queries::typecheck_program(&db, files, file, Version::V4);
+        assert!(
+            !queries::lower_program(&db, files, file, Version::V4, OptLevel::O0)
+                .hir
+                .defs
+                .is_empty()
+        );
+    }
+
+    /// A workspace holding exactly `file`, keyed by its canonical path.
+    fn workspace(db: &mut LeekDb, file: SourceFile) -> WorkspaceFiles {
+        let files = WorkspaceFiles::empty(db);
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(file.canonical_path(db).clone(), file);
+        files.set_all(db, map);
+        files
     }
 
     /// An indexed on-disk file used to need an input and a parse query of
@@ -87,12 +121,13 @@ mod tests {
         let file = source(&db);
         assert_eq!(file.path(&db), Some("/project/sum.leek"));
 
-        let files = WorkspaceFiles::empty(&db);
-        let mut map = std::collections::BTreeMap::new();
-        map.insert(file.canonical_path(&db).clone(), file);
-        files.set_all(&mut db, map);
+        let files = workspace(&mut db, file);
 
         assert!(files.get(&db, "/project/sum.leek") == Some(file));
-        assert!(queries::parse_query(&db, file).diagnostics.is_empty());
+        assert!(
+            queries::parse_query(&db, file, ProgramClasses::none(&db))
+                .diagnostics
+                .is_empty()
+        );
     }
 }

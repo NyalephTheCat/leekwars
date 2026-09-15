@@ -266,9 +266,10 @@ pub fn resolve_query(
     file: leek_pipeline::salsa::SourceFile,
 ) -> ResolveArtifact {
     use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
+    use leek_pipeline::salsa::ProgramClasses;
     use leek_syntax::SyntaxNode;
 
-    let parse = leek_parser::pipeline::parse_query(db, file);
+    let parse = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return ResolveArtifact::default();
     };

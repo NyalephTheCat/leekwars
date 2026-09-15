@@ -135,12 +135,13 @@ pub fn typecheck_query(
     file: leek_pipeline::salsa::SourceFile,
 ) -> TypeCheckArtifact {
     use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
+    use leek_pipeline::salsa::ProgramClasses;
     use leek_syntax::SyntaxNode;
 
     #[cfg(test)]
     crate::salsa_probe::TYPECHECK_QUERY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let parse = leek_parser::pipeline::parse_query(db, file);
+    let parse = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return TypeCheckArtifact::default();
     };
@@ -193,17 +194,7 @@ mod salsa_invalidation_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut db = LeekDb::default();
-        let file = SourceFile::new(
-            &db,
-            String::new(),
-            1,
-            SRC.into(),
-            4,
-            false,
-            false,
-            0,
-            Vec::new(),
-        );
+        let file = SourceFile::new(&db, String::new(), 1, SRC.into(), 4, false, false, 0);
         // No `Resolve` step: without an `IncludeGraphArtifact` in the
         // context `TypeCheck` takes the single-file salsa branch, which is
         // the one under test.
@@ -308,17 +299,7 @@ mod seed_library_is_an_input_tests {
     const SRC: &str = "var x = getLife();\nreturn x;\n";
 
     fn checked(db: &LeekDb, seed_library: bool) -> TypeCheckArtifact {
-        let file = SourceFile::new(
-            db,
-            String::new(),
-            1,
-            SRC.into(),
-            4,
-            false,
-            seed_library,
-            0,
-            Vec::new(),
-        );
+        let file = SourceFile::new(db, String::new(), 1, SRC.into(), 4, false, seed_library, 0);
         typecheck_query(db, file)
     }
 

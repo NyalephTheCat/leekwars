@@ -2,19 +2,14 @@
 //! file changes, and that they agree with the folder-backed walk they
 //! are the memoized half of.
 //!
-//! Re-running is observed through salsa's own event stream
-//! ([`EventDb`]) rather than a counter inside one crate's query, so a
-//! test can say "that leaf's lex re-ran and the entry's did not" about
-//! queries owned by three different crates.
+//! The fixture and the event-logging database live in [`support`],
+//! shared with `program_queries.rs`.
 
-use std::collections::BTreeMap;
+mod support;
+
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
-use leek_db::queries::{
-    IncludeGraph, include_edges, include_graph, include_parse_failures, resolve_include,
-};
-use leek_db::{Db, SourceFile, WorkspaceFiles};
+use leek_db::queries::{IncludeGraph, include_edges, include_parse_failures, resolve_include};
 use leek_diagnostics::{Diagnostic, codes};
 use leek_resolver::closure::resolve_include_closure;
 use leek_resolver::folder::MemFolder;
@@ -22,180 +17,51 @@ use leek_resolver::include_graph::{IncludeGraphResult, build_include_graph};
 use leek_resolver::interner::{PathInterner, SourceInterner};
 use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::Version;
+use support::{Fixture, ran, vpath};
 
-/// A directory that does not exist, so `canonical_or_normalized` takes
-/// its lexical branch for every fixture path — the same branch the
-/// folder-backed walk takes for the same paths, which is what lets the
-/// two halves of the parity test be compared at all.
-const ROOT: &str = "/leek-db-include-queries";
-
-fn vpath(name: &str) -> String {
-    format!("{ROOT}/{name}")
+/// The same closure, walked the non-memoized way: a `MemFolder` over
+/// the same texts and an interner pre-bound to the same ids, so paths,
+/// versions and spans are directly comparable.
+fn pure_walk(fixture: &Fixture, entry: &str, version: Version) -> IncludeGraphResult {
+    let (folder, interner) = pure_inputs(fixture);
+    let entry_path = vpath(entry);
+    let entry_text = fixture.text(entry);
+    build_include_graph(
+        Path::new(&entry_path),
+        &entry_text,
+        version,
+        &folder,
+        |path| interner.intern(path),
+    )
 }
 
-// ---- A database that records which queries actually executed ----
-
-/// A [`leek_db::Db`] that logs every `WillExecute` event.
-///
-/// Salsa fires that event when a query body is about to run — i.e. on
-/// a miss or an invalidation, never on a hit — so the log is exactly
-/// the set of queries a revision made the engine recompute.
-#[salsa::db]
-#[derive(Clone)]
-struct EventDb {
-    storage: salsa::Storage<Self>,
-    executed: Arc<Mutex<Vec<String>>>,
+/// The pure closure's diagnostics, which include the per-site
+/// `INCLUDE_PARSE_FAILED` reports the memoized path must match.
+fn pure_closure_diagnostics(fixture: &Fixture, entry: &str, version: Version) -> Vec<Diagnostic> {
+    let (folder, interner) = pure_inputs(fixture);
+    let entry_path = vpath(entry);
+    let entry_text = fixture.text(entry);
+    let (_, diagnostics) = resolve_include_closure(
+        Path::new(&entry_path),
+        &entry_text,
+        version,
+        &folder,
+        &interner,
+        FeatureFlags::none(),
+    );
+    diagnostics
 }
 
-#[salsa::db]
-impl salsa::Database for EventDb {}
-
-#[salsa::db]
-impl Db for EventDb {}
-
-impl EventDb {
-    fn new() -> Self {
-        let executed: Arc<Mutex<Vec<String>>> = Arc::default();
-        let sink = Arc::clone(&executed);
-        Self {
-            storage: salsa::Storage::new(Some(Box::new(move |event: salsa::Event| {
-                if let salsa::EventKind::WillExecute { database_key } = event.kind {
-                    sink.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(format!("{database_key:?}"));
-                }
-            }))),
-            executed,
-        }
+/// A folder over the fixture's texts and an interner already bound to
+/// the ids its inputs carry.
+fn pure_inputs(fixture: &Fixture) -> (MemFolder, PathInterner) {
+    let mut folder = MemFolder::new();
+    let interner = PathInterner::new();
+    for (path, file) in &fixture.inputs {
+        folder.insert(path.clone(), file.text(&fixture.db).as_ref());
+        interner.assign(Path::new(path), file.source(&fixture.db));
     }
-
-    /// Everything that executed since the last call, emptying the log.
-    fn drain(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .executed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-    }
-}
-
-// ---- Fixture ----
-
-struct Fixture {
-    db: EventDb,
-    files: WorkspaceFiles,
-    inputs: BTreeMap<String, SourceFile>,
-    sources: Vec<(String, String)>,
-}
-
-impl Fixture {
-    /// A workspace holding `files`, each at `<ROOT>/<name>`, numbered
-    /// from `SourceId` 1 in the order given.
-    fn new(files: &[(&str, &str)]) -> Self {
-        let mut db = EventDb::new();
-        let workspace = WorkspaceFiles::empty(&db);
-        let mut inputs = BTreeMap::new();
-        let mut map = BTreeMap::new();
-        let mut sources = Vec::new();
-        for (index, (name, text)) in files.iter().enumerate() {
-            let path = vpath(name);
-            let file = SourceFile::new(
-                &db,
-                path.clone(),
-                u32::try_from(index + 1).expect("fixture is small"),
-                (*text).into(),
-                u8::from(Version::V4),
-                false,
-                false,
-                0,
-                Vec::new(),
-            );
-            inputs.insert(path.clone(), file);
-            map.insert(path.clone(), file);
-            sources.push((path, (*text).to_string()));
-        }
-        workspace.set_all(&mut db, map);
-        Self {
-            db,
-            files: workspace,
-            inputs,
-            sources,
-        }
-    }
-
-    fn file(&self, name: &str) -> SourceFile {
-        self.inputs[&vpath(name)]
-    }
-
-    fn edit(&mut self, name: &str, text: &str) {
-        use salsa::Setter;
-        let file = self.inputs[&vpath(name)];
-        file.set_text(&mut self.db).to(text.into());
-        let path = vpath(name);
-        for entry in &mut self.sources {
-            if entry.0 == path {
-                entry.1 = text.to_string();
-            }
-        }
-    }
-
-    fn graph(&self, entry: &str, version: Version) -> IncludeGraph {
-        include_graph(&self.db, self.files, self.file(entry), version)
-    }
-
-    /// The same closure, walked the non-memoized way: a `MemFolder`
-    /// over the same texts and an interner pre-bound to the same ids,
-    /// so paths, versions and spans are directly comparable.
-    fn pure_walk(&self, entry: &str, version: Version) -> IncludeGraphResult {
-        let mut folder = MemFolder::new();
-        let interner = PathInterner::new();
-        for (path, text) in &self.sources {
-            folder.insert(path.clone(), text.as_str());
-            let file = self.inputs[path];
-            interner.assign(Path::new(path), file.source(&self.db));
-        }
-        let entry_path = vpath(entry);
-        let entry_text = self.inputs[&entry_path].text(&self.db).clone();
-        build_include_graph(
-            Path::new(&entry_path),
-            &entry_text,
-            version,
-            &folder,
-            |path| interner.intern(path),
-        )
-    }
-
-    /// The pure closure's diagnostics, which include the per-site
-    /// `INCLUDE_PARSE_FAILED` reports the memoized path must match.
-    fn pure_closure_diagnostics(&self, entry: &str, version: Version) -> Vec<Diagnostic> {
-        let mut folder = MemFolder::new();
-        let interner = PathInterner::new();
-        for (path, text) in &self.sources {
-            folder.insert(path.clone(), text.as_str());
-            let file = self.inputs[path];
-            interner.assign(Path::new(path), file.source(&self.db));
-        }
-        let entry_path = vpath(entry);
-        let entry_text = self.inputs[&entry_path].text(&self.db).clone();
-        let (_, diagnostics) = resolve_include_closure(
-            Path::new(&entry_path),
-            &entry_text,
-            version,
-            &folder,
-            &interner,
-            FeatureFlags::none(),
-        );
-        diagnostics
-    }
-}
-
-/// How many times `query` executed in the recorded event log.
-///
-/// Salsa renders a tracked function's database key as `name(Id(n))`,
-/// so the query's name is the prefix of the event.
-fn ran(events: &[String], query: &str) -> usize {
-    events.iter().filter(|e| e.starts_with(query)).count()
+    (folder, interner)
 }
 
 fn version_of(graph: &IncludeGraph, name: &str) -> Version {
@@ -333,7 +199,7 @@ fn the_tracked_graph_matches_the_folder_backed_walk() {
         ("shared.leek", "// @version:2\nfunction helper() {}\n"),
     ]);
     let tracked = fixture.graph("main.leek", Version::V4);
-    let pure = fixture.pure_walk("main.leek", Version::V4);
+    let pure = pure_walk(&fixture, "main.leek", Version::V4);
 
     assert_eq!(
         paths(&tracked),
@@ -400,8 +266,7 @@ fn the_per_site_parse_failures_match_the_pure_closure_and_replay_on_a_hit() {
         "a cache hit must report exactly what the miss reported"
     );
 
-    let pure: Vec<Diagnostic> = fixture
-        .pure_closure_diagnostics("main.leek", Version::V4)
+    let pure: Vec<Diagnostic> = pure_closure_diagnostics(&fixture, "main.leek", Version::V4)
         .into_iter()
         .filter(|d| d.code == codes::INCLUDE_PARSE_FAILED)
         .collect();

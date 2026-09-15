@@ -1,9 +1,10 @@
 //! Every salsa-tracked query in the workspace, under one import path.
 //!
-//! Re-exports, with one group of exceptions: the include-graph queries
-//! in [`crate::include`] are defined here, because they span several
-//! files and read the [`WorkspaceFiles`](crate::WorkspaceFiles) input
-//! this crate owns. Each query still lives in the pass crate that computes
+//! Re-exports, with two groups of exceptions: the include-graph queries
+//! in [`crate::include`] and the whole-program passes in
+//! [`crate::program`] are defined here, because they span several files
+//! and read the [`WorkspaceFiles`](crate::WorkspaceFiles) input this
+//! crate owns. Each query still lives in the pass crate that computes
 //! it and keeps its single memo table there — calling
 //! `leek_db::queries::parse_query` and `leek_parser::pipeline::parse_query`
 //! hits the same cache entry, because they are the same function. Nothing
@@ -18,7 +19,10 @@
 //! [`SourceFile`](crate::SourceFile): `complexity_query` → `lower_hir_query`
 //! → `parse_query` → `lex_query`, with `typecheck_query`, `resolve_query`
 //! and `lower_mir_query` hanging off it, so asking for the deepest one
-//! computes each stage once. There is no second cascade for an indexed
+//! computes each stage once. That cascade answers for **one file**;
+//! `resolve_program`, `typecheck_program` and `lower_program` answer for
+//! a whole include closure, sharing one `parse_query` per file keyed on
+//! the closure's own `program_classes`. There is no second cascade for an indexed
 //! on-disk file: it is the same input, carrying its canonical path, so it
 //! shares every memo on this one.
 //!
@@ -52,12 +56,15 @@ pub use leek_mir::pipeline::{LowerMirQueryResult, lower_mir_query};
 pub use leek_complexity::pipeline::{ComplexityReport, complexity_query};
 
 /// The include closure: one file's include sites, one include name
-/// resolved against the workspace, and the whole graph an entry file
-/// reaches. Owned by this crate — see [`crate::include`].
+/// resolved against the workspace, the whole graph an entry file
+/// reaches, and the program-wide class set every parse in it is keyed
+/// on. Owned by this crate — see [`crate::include`].
 pub use crate::include::{
-    IncludeGraph, IncludeGraphFile, IncludeRef, include_edges, include_graph,
-    include_parse_failures, resolve_include,
+    IncludeGraph, IncludeGraphFile, IncludeRef, class_names, include_edges, include_graph,
+    include_parse_failures, program_classes, resolve_include,
 };
+/// The whole-program passes over that closure — see [`crate::program`].
+pub use crate::program::{lower_program, resolve_program, typecheck_program};
 /// The per-file include scan's result type, from the pure scan the
 /// graph and the folder-backed walk share.
 pub use leek_resolver::include_graph::{IncludeCall, IncludeEdges, IncludeSite};
