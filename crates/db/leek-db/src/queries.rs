@@ -71,7 +71,9 @@ pub use crate::include::{
     include_parse_failures, program_classes, resolve_include,
 };
 /// The whole-program passes over that closure — see [`crate::program`].
-pub use crate::program::{lower_program, resolve_program, typecheck_program};
+pub use crate::program::{
+    lower_program, lower_program_mir, program_complexity, resolve_program, typecheck_program,
+};
 /// The per-file include scan's result type, from the pure scan the
 /// graph and the folder-backed walk share.
 pub use leek_resolver::include_graph::{IncludeCall, IncludeEdges, IncludeSite};

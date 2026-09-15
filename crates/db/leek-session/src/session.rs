@@ -830,6 +830,87 @@ mod tests {
         );
     }
 
+    /// The program-level MIR and complexity queries answer what the
+    /// pipeline's `Target::Mir` and `Target::Complexity` runs produce, and
+    /// — the point of them — they see the whole closure.
+    ///
+    /// `leek_mir::pipeline`'s `run_lower_mir` notes (#428) that its salsa
+    /// branch lowers the entry alone, so a memoized include-aware
+    /// `Target::Mir` run would silently drop every included function. It is
+    /// dormant because nothing asks a memoized run for that target, but it
+    /// is exactly the trap `Compilation` would fall into on being moved to
+    /// queries. The assertions below are on the *included* function, so a
+    /// per-file answer fails them.
+    #[test]
+    fn the_program_mir_and_complexity_queries_see_the_closure() {
+        let dir = scratch("program-mir");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "include(\"util\")\nreturn helper(3);\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            dir.join("src/util.leek"),
+            "function helper(n) {\n\tvar t = 0;\n\tfor (var i = 0; i < n; i++) { t = t + i; }\n\treturn t;\n}\n",
+        )
+        .expect("include");
+        let project = project_at(dir.clone(), "");
+
+        let mir_session = Session::new(&project, quiet(Target::Mir)).expect("session");
+        let mir_compiled = mir_session.compile_entry().expect("compile");
+        let run_mir = mir_compiled
+            .mir()
+            .expect("the pipeline lowered MIR")
+            .clone();
+        let (db, files) = mir_session.db();
+        let (_, file) = mir_compiled.db_handle().expect("session database");
+        let version = leek_syntax::pipeline::version_from_byte(file.version_byte(db));
+        let query_mir = leek_db::queries::lower_program_mir(
+            db,
+            files,
+            file,
+            version,
+            leek_pipeline::OptLevel::O0,
+        );
+
+        let cx_session = Session::new(&project, quiet(Target::Complexity)).expect("session");
+        let cx_compiled = cx_session.compile_entry().expect("compile");
+        let run_cx: Vec<String> = cx_compiled
+            .complexity()
+            .expect("the pipeline analyzed")
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        let (cx_db, cx_files) = cx_session.db();
+        let (_, cx_file) = cx_compiled.db_handle().expect("session database");
+        let query_cx = leek_db::queries::program_complexity(
+            cx_db,
+            cx_files,
+            cx_file,
+            leek_syntax::pipeline::version_from_byte(cx_file.version_byte(cx_db)),
+        );
+        let query_cx_names: Vec<String> = query_cx.0.iter().map(|c| c.name.clone()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // The closure's function is the discriminator: a per-file answer
+        // would not have it.
+        assert!(
+            run_cx.iter().any(|n| n == "helper"),
+            "the pipeline measured the included function: {run_cx:?}"
+        );
+        assert_eq!(
+            run_cx, query_cx_names,
+            "complexity: the query measured the same functions"
+        );
+        assert_eq!(
+            run_mir.functions.len(),
+            query_mir.program.functions.len(),
+            "MIR: the query lowered the same functions"
+        );
+        assert_eq!(run_mir, *query_mir.program, "MIR: and the same program");
+    }
+
     /// `query_diagnostics` reproduces the run's stream across every
     /// target, both stop-on-error settings, and a file that parses and one
     /// that does not.

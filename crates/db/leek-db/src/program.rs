@@ -240,3 +240,57 @@ fn file_units(parsed: &[ProgramFile]) -> Vec<FileUnit<'_>> {
         })
         .collect()
 }
+
+/// The whole program's MIR, lowered from [`lower_program`]'s merged HIR.
+///
+/// The include-aware counterpart of
+/// [`lower_mir_query`](leek_mir::pipeline::lower_mir_query), which is keyed
+/// on one file and so lowers the entry alone. `leek_mir::pipeline`'s
+/// `run_lower_mir` carries a note about exactly that (#428): a memoized
+/// `Target::Mir` pipeline built with includes would lower MIR without them,
+/// dormant only because nothing asks a memoized run for that target. This
+/// is the answer it should have been asking for.
+///
+/// Keyed on `opt` for the reason [`lower_program`] is: an optimized program
+/// is a different program, and keying it means a codegen driver reads its
+/// own tree out of the cache instead of cloning the `O0` one and
+/// optimizing the copy on every run.
+#[salsa::tracked]
+pub fn lower_program_mir(
+    db: &dyn Db,
+    files: WorkspaceFiles,
+    entry: SourceFile,
+    entry_version: Version,
+    opt: OptLevel,
+) -> leek_mir::pipeline::LowerMirQueryResult {
+    let hir = lower_program(db, files, entry, entry_version, opt);
+    let (program, diagnostics) = leek_mir::lower::lower_and_optimize(hir.hir.as_ref(), opt);
+    leek_mir::pipeline::LowerMirQueryResult {
+        program: std::sync::Arc::new(program),
+        diagnostics,
+    }
+}
+
+/// The whole program's per-function complexity rows, over
+/// [`lower_program`]'s merged HIR.
+///
+/// The include-aware counterpart of
+/// [`complexity_query`](leek_complexity::pipeline::complexity_query). A
+/// `miku analyze` over a project with includes wants a row for every
+/// function the program defines, not only those the entry file spells out.
+///
+/// At [`OptLevel::O0`], matching the analysis drivers: folding constants
+/// before measuring would report the cost of a tree the author did not
+/// write.
+#[salsa::tracked]
+pub fn program_complexity(
+    db: &dyn Db,
+    files: WorkspaceFiles,
+    entry: SourceFile,
+    entry_version: Version,
+) -> leek_complexity::pipeline::ComplexityReport {
+    let hir = lower_program(db, files, entry, entry_version, OptLevel::O0);
+    leek_complexity::pipeline::ComplexityReport(std::sync::Arc::new(leek_complexity::analyze_file(
+        hir.hir.as_ref(),
+    )))
+}
