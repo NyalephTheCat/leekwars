@@ -82,7 +82,7 @@ pub fn run() -> Result<ExitCode> {
         DriverConfig {
             target,
             scope,
-            params: leek_session::driver_params().with_lints(leek_pipeline::LintGroups {
+            params: leek_session::driver_params().with_lints(leek_query::LintGroups {
                 pedantic: cli.pedantic,
                 nursery: cli.nursery,
             }),
@@ -219,7 +219,19 @@ pub fn run() -> Result<ExitCode> {
             }
         }
         Emit::Fmt => {
-            if let Some(formatted) = compiled.formatted(&fmt_opts) {
+            // Straight off the database rather than through a
+            // `Compilation` accessor: the formatter is a tool, and
+            // `crates/db` may not depend on `crates/tools` — `db_handle`
+            // is the seam that lets a front-end ask a tool's query about
+            // a session's file anyway.
+            if let Some(formatted) = compiled.db_handle().map(|(db, file)| {
+                leek_fmt::pipeline::format_query(
+                    db,
+                    file,
+                    leek_fmt::pipeline::FormatConfig::new(db, fmt_opts.clone()),
+                )
+                .text
+            }) {
                 // The formatter's output is unverified. Print nothing
                 // rather than corrupt LeekScript when it would change the
                 // program — same policy as `miku fmt`.

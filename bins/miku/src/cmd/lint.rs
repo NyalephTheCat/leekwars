@@ -4,9 +4,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use leek_pipeline::LintGroups;
 use leek_project::Project;
-use leek_session::{DriverConfig, RecipeParams, Session, Target};
+use leek_query::LintGroups;
+use leek_session::{CompileParams, DriverConfig, Session, Target};
 
 use crate::cli::{ColorWhen, Lint, MessageFormat};
 
@@ -26,7 +26,7 @@ pub fn run(
     // driver, so a flag can only widen what Miku.toml asks for.
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default().with_lints(LintGroups {
+        params: CompileParams::default().with_lints(LintGroups {
             pedantic: args.pedantic,
             nursery: args.nursery,
         }),

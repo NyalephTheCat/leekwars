@@ -18,7 +18,6 @@
 
 mod support;
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use leek_db::queries::{
@@ -26,12 +25,9 @@ use leek_db::queries::{
 };
 use leek_db::{ProgramClasses, SourceFile};
 use leek_diagnostics::Severity;
-use leek_parser::pipeline::GreenTreeArtifact;
-use leek_pipeline::{OptLevel, Pipeline};
-use leek_resolver::folder::MemFolder;
-use leek_resolver::interner::PathInterner;
+use leek_query::OptLevel;
 use leek_syntax::Version;
-use support::{EventDb, Fixture, ran, vpath};
+use support::{EventDb, Fixture, ran};
 
 // ---- What re-runs a parse ----
 
@@ -394,69 +390,50 @@ fn lower_program_is_keyed_on_the_optimization_level() {
     assert!(Arc::ptr_eq(&again.hir, &unoptimized.hir));
 }
 
-// ---- The two-green-trees defect ----
+// ---- One parse per file ----
 
-/// A zero-include entry driven through the include-aware pipeline is
-/// parsed **twice**, and this test exists to say so until the defect it
-/// records is fixed.
+/// A zero-include entry is parsed **once**.
 ///
-/// `ResolveIncludes` publishes a `KnownClassesArtifact` unconditionally,
-/// even for a closure of one file whose classes are empty. That artifact
-/// is exactly the gate `leek_parser::pipeline`'s `run_parse` uses to
-/// decide the salsa query cannot serve this run, so the `Parse` step
-/// parses directly — while `Resolve`, seeing an include graph with no
-/// includes, falls through to `resolve_query`, which parses the same
-/// text again through `parse_query`. Two green trees, one run, for a
-/// file with no includes at all.
+/// It used to be parsed twice, and this test asserted that (#522).
+/// `ResolveIncludes` published a `KnownClassesArtifact` unconditionally,
+/// even for a closure of one file whose classes are empty, and that
+/// artifact was exactly the gate `leek_parser::pipeline`'s `run_parse`
+/// used to decide the salsa query could not serve the run — so the
+/// `Parse` step parsed directly, while `Resolve`, seeing an include
+/// graph with no includes, fell through to `resolve_query` and parsed
+/// the same text again. Two green trees, one run, for a file with no
+/// includes at all.
 ///
-/// The fix is not a smaller gate: it is routing the include-aware
-/// pipeline through `resolve_program` / `typecheck_program` /
-/// `lower_program`, which is a later slice of epic #345 — the branches
-/// being bypassed are still the only multi-file path every non-LSP
-/// caller has. Filed as #522; when that lands, this test
-/// should assert the opposite (one parse, one tree) rather than be
-/// deleted.
+/// The fix was never a smaller gate. It was routing the include-aware
+/// path through `resolve_program` / `typecheck_program` /
+/// `lower_program`, which is what the whole program now does: every read
+/// of a file's tree in a whole-program pass goes through `parse_query`
+/// keyed on that program's own `program_classes`, so there is one memo
+/// and one allocation per file.
 #[test]
-fn a_zero_include_entry_is_parsed_twice_in_one_include_aware_run() {
+fn a_zero_include_entry_is_parsed_once() {
     let fixture = Fixture::new(&[("main.leek", "class c {}\nvar x = new c();\nreturn x;\n")]);
     let entry = fixture.file("main.leek");
 
-    let mut folder = MemFolder::new();
-    folder.insert(PathBuf::from(vpath("main.leek")), fixture.text("main.leek"));
-    let interner = PathInterner::new();
-    interner.assign(Path::new(&vpath("main.leek")), entry.source(&fixture.db));
-
-    // The shape `leek_session::plan_with_includes` builds for
-    // `Target::Resolved`: lex, walk the includes, parse, resolve.
-    let pipeline = Pipeline::new()
-        .with(leek_lexer::pipeline::Lex)
-        .with(leek_resolver::pipeline::ResolveIncludes::new(
-            Arc::new(folder),
-            PathBuf::from(vpath("main.leek")),
-            Arc::new(interner),
-        ))
-        .with(leek_parser::pipeline::Parse)
-        .with(leek_resolver::pipeline::Resolve);
     let _ = fixture.db.drain();
-    let run = pipeline.run_memoized(&fixture.db, entry);
+    let resolved = resolve_program(&fixture.db, fixture.files, entry, Version::V4);
     let events = fixture.db.drain();
-
+    assert!(resolved.diagnostics.is_empty(), "{resolved:?}");
     assert_eq!(
         ran(&events, "parse_query"),
         1,
-        "the resolve half parsed through salsa: {events:?}"
+        "one parse for a one-file program: {events:?}"
     );
-    let step_tree = &run
-        .get::<GreenTreeArtifact>()
-        .expect("the Parse step produced a tree")
-        .0;
-    let query_tree = parse_query(&fixture.db, entry, ProgramClasses::none(&fixture.db)).green;
-    assert_eq!(
-        step_tree, &query_tree,
-        "the two parses agree on the tree — the cost is that there are two"
-    );
+
+    // And the tree the program read is the memo, not a second copy.
+    let classes = program_classes(&fixture.db, fixture.files, entry, Version::V4);
+    let _ = fixture.db.drain();
+    let again = parse_query(&fixture.db, entry, classes).green;
+    let events = fixture.db.drain();
+    assert_eq!(ran(&events, "parse_query"), 0, "a cache hit: {events:?}");
+    let once_more = parse_query(&fixture.db, entry, classes).green;
     assert!(
-        !std::ptr::eq(&raw const **step_tree, &raw const *query_tree),
-        "…and they are two allocations, not one shared green tree"
+        std::ptr::eq(&raw const *again, &raw const *once_more),
+        "one shared green tree, not two allocations"
     );
 }

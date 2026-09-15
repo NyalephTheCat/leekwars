@@ -1,69 +1,21 @@
-//! Pipeline integration: parser as a [`Step`].
+//! The parser as a tracked query.
 //!
-//! Two parse paths live here — the direct [`Parse`] step and
+//! Two parse paths exist — the pure [`parse_file_with`] entry point and
 //! [`parse_query`] — and they differ only in *who lexed the text*, never
 //! in how the resulting diagnostics are ordered. A path that lexes its
-//! own text goes through [`crate::parse_file_with`] and reports the
-//! lexer's diagnostics ahead of the parser's; a path handed tokens
-//! somebody else lexed reports the parser's only, because that somebody
-//! already emitted the lexer's. The [entry module docs](crate::entry)
-//! state the convention in full.
+//! own text reports the lexer's diagnostics ahead of the parser's; a path
+//! handed tokens somebody else lexed reports the parser's only, because
+//! that somebody already emitted the lexer's. The [entry module
+//! docs](crate::entry) state the convention in full.
 
 use leek_diagnostics::Diagnostic;
-use leek_pipeline::{Artifact, Context, Step, StepError};
-use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStepStopOnError};
-use leek_syntax::SyntaxNode;
+use leek_query::salsa::ProgramClasses;
 use leek_syntax::language::GreenNode;
 use leek_syntax::version::version_from_byte;
 
-use crate::ast::{AstNode, SourceFile};
 use crate::parse_tokens_with_classes;
-use leek_pipeline::salsa::ProgramClasses;
 
-/// The parser's green tree.
-///
-/// One producer today: the [`Parse`] step publishes this and
-/// [`AstArtifact`] together, from a single parse. Later in R1 the pair
-/// becomes two queries over one green tree — the tree stays the single
-/// parse result, and the AST view is a cast on top of it — so treat
-/// them as two views of one artifact, never two parses.
-#[derive(Debug, Clone)]
-pub struct GreenTreeArtifact(pub GreenNode);
-impl Artifact for GreenTreeArtifact {}
-
-impl GreenTreeArtifact {
-    /// Wrap as a rowan red-tree root.
-    pub fn syntax(&self) -> SyntaxNode {
-        SyntaxNode::new_root(self.0.clone())
-    }
-}
-
-/// AST view (`SourceFile`) cast from the green tree.
-///
-/// Always present once the [`Parse`] step has run: `grammar::source_file`
-/// opens a `SourceFile` node before any production and closes it on every
-/// path, so the root cast cannot fail. Recovery from a syntax error builds
-/// an `ErrorNode` *inside* that root.
-///
-/// Shares its producer with [`GreenTreeArtifact`] today, and becomes the
-/// second of two queries over that one green tree later in R1.
-#[derive(Debug, Clone)]
-pub struct AstArtifact(pub SourceFile);
-impl Artifact for AstArtifact {}
-
-/// Class names declared anywhere in the program — the include
-/// closure's `class IDENT` declarations. Published *before* the
-/// [`Parse`] step (by `leek-resolver`'s `ResolveIncludes`) so the
-/// entry parse can recognize a lowercase class from an included file
-/// as a type head (`testClass tc = …`), mirroring upstream's
-/// program-wide `getDefinedClass` lookup. Classes declared in the
-/// file being parsed are found by the parser's own token pre-scan
-/// and don't need this artifact.
-#[derive(Debug, Clone, Default)]
-pub struct KnownClassesArtifact(pub Vec<String>);
-impl Artifact for KnownClassesArtifact {}
-
-/// The parse entry points now live in the crate's `entry` module and are
+/// The parse entry points live in the crate's `entry` module and are
 /// re-exported here so importers of `leek_parser::pipeline::parse_file*`
 /// keep compiling. New callers should use [`parse_file_with`], which takes
 /// its version, [`ParseFeatures`](crate::ParseFeatures) and class names in
@@ -76,122 +28,23 @@ pub use crate::entry::{ParseOptions, ParsedFile, parse_file_with};
 )]
 pub use crate::entry::{parse_file, parse_file_with_classes};
 
-/// Parser step. Lexes internally; produces a green tree + AST view.
-///
-/// Sequenced after [`leek_lexer::pipeline::Lex`] when both are
-/// present so that the parser's diagnostic stream stays the
-/// authoritative source — the lexer's `TokensArtifact` is mainly for
-/// `--emit tokens`.
-pub struct Parse;
-
-impl Step for Parse {
-    fn name(&self) -> &'static str {
-        "parse"
-    }
-    fn run(&self, cx: &mut Context) -> Result<(), StepError> {
-        let (green, diagnostics) = run_parse(cx);
-        cx.emit_all(diagnostics.iter().cloned());
-        let ast = SourceFile::cast(SyntaxNode::new_root(green.clone()))
-            .expect("grammar::source_file always opens a SourceFile root");
-        cx.insert(GreenTreeArtifact(green));
-        cx.insert(AstArtifact(ast));
-        Ok(())
-    }
-}
-
-impl RecipeStepStopOnError for Parse {
-    fn build_inner(_: &RecipeParams) -> Parse {
-        Parse
-    }
-}
-
-impl RecipeArtifact for GreenTreeArtifact {
-    type Producer = Parse;
-    type Requires = (
-        leek_syntax::pipeline::PragmasArtifact,
-        leek_lexer::pipeline::TokensArtifact,
-    );
-    type Produces = (GreenTreeArtifact, AstArtifact);
-}
-
-impl RecipeArtifact for AstArtifact {
-    type Producer = Parse;
-    type Requires = (
-        leek_syntax::pipeline::PragmasArtifact,
-        leek_lexer::pipeline::TokensArtifact,
-    );
-    type Produces = (GreenTreeArtifact, AstArtifact);
-}
-
-/// Salsa-aware parse driver. When the pipeline is driven through
-/// [`Pipeline::run_memoized`](leek_pipeline::Pipeline::run_memoized),
-/// dispatches into [`parse_query`] which itself calls
-/// [`leek_lexer::pipeline::lex_query`] — so the two stages share a
-/// single memoized lex.
-///
-/// On the direct path we keep the existing optimization of reusing
-/// [`leek_lexer::pipeline::TokensArtifact`] when an earlier
-/// [`Lex`](leek_lexer::pipeline::Lex) step has already produced one.
-fn run_parse(cx: &Context<'_>) -> (GreenNode, Vec<Diagnostic>) {
-    if cx.get::<KnownClassesArtifact>().is_none()
-        && let Some((db, file)) = cx.salsa()
-    {
-        // The gate above is why the class set handed over here is
-        // always empty: this branch is taken only when no
-        // `ResolveIncludes` step published a closure's classes. A run
-        // that *has* a closure parses directly below instead of keying
-        // the query on them, which is why such a run ends up with two
-        // green trees for the entry (#522) — fixing that means routing
-        // the include-aware pipeline through the whole-program queries
-        // in `leek-db`, not shrinking this gate.
-        let out = parse_query(db, file, ProgramClasses::none(db));
-        return (out.green, out.diagnostics);
-    }
-    let version = version_from_byte(cx.version_byte());
-    let features = crate::ParseFeatures::from(cx.flags());
-    // Class names from the include closure, when a `ResolveIncludes`
-    // step ran ahead of us (see [`KnownClassesArtifact`]).
-    let empty: Vec<String> = Vec::new();
-    let extra_classes = cx
-        .get::<KnownClassesArtifact>()
-        .map_or(&empty[..], |a| &a.0[..]);
-    if let Some(tokens) = cx.get::<leek_lexer::pipeline::TokensArtifact>() {
-        // The `Lex` step lexed and emitted the lexer's diagnostics, so
-        // this path reports the parser's only — see the [entry module
-        // docs](crate::entry).
-        let result = parse_tokens_with_classes(
-            cx.text(),
-            cx.source(),
-            &tokens.0.tokens,
-            version,
-            features,
-            extra_classes,
-        );
-        return (result.green, result.diagnostics);
-    }
-    let parsed = crate::parse_file_with(
-        cx.text(),
-        cx.source(),
-        &crate::ParseOptions::new(version)
-            .with_features(features)
-            .with_extra_classes(extra_classes),
-    );
-    (parsed.green, parsed.diagnostics)
-}
-
 /// Tracked return value for [`parse_query`]: the green tree plus the
-/// parser's own diagnostics (lex diagnostics are emitted separately by
-/// the [`Lex`](leek_lexer::pipeline::Lex) step).
+/// parser's own diagnostics. Lex diagnostics are not in here — a caller
+/// assembling a stream reports
+/// [`lex_query`](leek_lexer::pipeline::lex_query)'s first, which is what
+/// `leek_db::queries::file_diagnostics_upto` does.
 #[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct ParseQueryResult {
     pub green: GreenNode,
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Salsa-tracked entry point for parsing. Re-runs when the upstream
+/// The one parse entry point every driver reaches the tree through.
+///
+/// Re-runs when the upstream
 /// [`lex_query`](leek_lexer::pipeline::lex_query) result changes, when
 /// any input field this body reads off the
-/// [`SourceFile`](leek_pipeline::salsa::SourceFile) changes (`text`,
+/// [`SourceFile`](leek_query::salsa::SourceFile) changes (`text`,
 /// `version_byte`, `flags_bits`; `strict` is *not* read here — it only
 /// reaches the type checker), or when it is asked for a different
 /// [`ProgramClasses`] set.
@@ -210,23 +63,21 @@ pub struct ParseQueryResult {
 ///
 /// Deliberately *not* [`crate::parse_file_with`]:
 ///
-/// * it lexes through [`leek_lexer::pipeline::lex_query`] so the memoized
-///   lex is shared with the [`Lex`](leek_lexer::pipeline::Lex) step
-///   instead of re-lexed here;
-/// * it returns the parser's diagnostics *only*, because on this path the
-///   `Lex` step already emitted the lexer's. `parse_file_with` prepends
-///   them, so routing this query through it would double-report every lex
-///   diagnostic.
+/// * it lexes through [`leek_lexer::pipeline::lex_query`], so the
+///   memoized lex is shared with every other query over the same file
+///   rather than repeated here;
+/// * it returns the parser's diagnostics *only*, because a caller
+///   assembling a stream already reported the lexer's.
+///   `parse_file_with` prepends them, so routing this query through it
+///   would double-report every lex diagnostic.
 ///
-/// This is the only salsa parse entry point, and it serves an indexed
-/// on-disk file exactly as it serves an editor buffer: both are one
-/// [`SourceFile`](leek_pipeline::salsa::SourceFile), and both reach the
-/// parser through a pipeline whose `Lex` step emitted the lex
-/// diagnostics once.
+/// It serves an indexed on-disk file exactly as it serves an editor
+/// buffer: both are one
+/// [`SourceFile`](leek_query::salsa::SourceFile).
 #[salsa::tracked]
 pub fn parse_query<'db>(
-    db: &'db dyn leek_pipeline::salsa::Db,
-    file: leek_pipeline::salsa::SourceFile,
+    db: &'db dyn leek_query::salsa::Db,
+    file: leek_query::salsa::SourceFile,
     classes: ProgramClasses<'db>,
 ) -> ParseQueryResult {
     let lex = leek_lexer::pipeline::lex_query(db, file);
@@ -255,11 +106,10 @@ pub fn parse_query<'db>(
 #[cfg(test)]
 mod parse_path_agreement_tests {
     use leek_diagnostics::codes;
-    use leek_pipeline::Pipeline;
-    use leek_pipeline::salsa::{LeekDb, ProgramClasses, SourceFile};
+    use leek_query::salsa::{LeekDb, ProgramClasses, SourceFile};
     use leek_syntax::version::version_from_byte;
 
-    use super::{Parse, parse_query};
+    use super::parse_query;
 
     /// A clean file, and one that needs a program class set to parse its
     /// declaration *and* trips the parser on a second statement — so the
@@ -299,14 +149,13 @@ mod parse_path_agreement_tests {
         }
     }
 
-    /// An indexed on-disk file used to have a parse query of its own that
-    /// re-lexed and merged the lexer's diagnostics in, because nothing
-    /// else reported them for a file with no editor buffer. It is gone,
-    /// and this is the guard on what replaced it: the indexed file is an
-    /// ordinary [`SourceFile`] driven through the ordinary pipeline, and
-    /// the [`Lex`](leek_lexer::pipeline::Lex) step in front of [`Parse`]
-    /// emits each lex diagnostic — exactly once, since `parse_query`
-    /// still reports none of them itself.
+    /// An indexed on-disk file used to have a parse query of its own
+    /// that re-lexed and merged the lexer's diagnostics in, because
+    /// nothing else reported them for a file with no editor buffer. It is
+    /// gone, and this is the guard on what replaced it: the indexed file
+    /// is an ordinary [`SourceFile`], its lex diagnostics come from
+    /// `lex_query`, and `parse_query` reports none of them — so a stream
+    /// that concatenates the two has each exactly once.
     #[test]
     fn the_indexed_path_still_reports_each_lex_diagnostic_once() {
         let text = "var s = \"unclosed;\n";
@@ -321,34 +170,25 @@ mod parse_path_agreement_tests {
             false,
             0,
         );
-        let lexed = leek_lexer::lex(text, file.source(&db), version_from_byte(4));
+        let lexed = leek_lexer::pipeline::lex_query(&db, file);
+        let parsed = parse_query(&db, file, ProgramClasses::none(&db));
+        let stream: Vec<_> = lexed
+            .diagnostics
+            .iter()
+            .chain(&parsed.diagnostics)
+            .filter(|d| d.code == codes::STRING_NOT_CLOSED)
+            .collect();
         assert_eq!(
-            lexed
-                .diagnostics
-                .iter()
-                .filter(|d| d.code == codes::STRING_NOT_CLOSED)
-                .count(),
+            stream.len(),
             1,
-            "fixture must raise exactly one lex diagnostic to count"
-        );
-
-        let run = Pipeline::new()
-            .with(leek_lexer::pipeline::Lex)
-            .with(Parse)
-            .run_memoized(&db, file);
-        assert_eq!(
-            run.diagnostics()
-                .iter()
-                .filter(|d| d.code == codes::STRING_NOT_CLOSED)
-                .count(),
-            1,
-            "the Lex step reports it once, and the parse query not at all"
+            "the lex query reports it once, and the parse query not at all"
         );
     }
 
-    /// The counterpart: `parse_query` leaves lex diagnostics to the `Lex`
-    /// step, so it must *not* report them itself. Were it routed through
-    /// `parse_file_with` the pipeline would show every one of them twice.
+    /// The counterpart: `parse_query` leaves lex diagnostics to
+    /// `lex_query`, so it must *not* report them itself. Were it routed
+    /// through `parse_file_with` every stream would show each of them
+    /// twice.
     #[test]
     fn the_buffer_query_leaves_lex_diagnostics_to_the_lex_step() {
         let text = "var s = \"unclosed;\n";
@@ -359,7 +199,7 @@ mod parse_path_agreement_tests {
             !out.diagnostics
                 .iter()
                 .any(|d| d.code == codes::STRING_NOT_CLOSED),
-            "the Lex step owns this one: {:?}",
+            "the lex query owns this one: {:?}",
             out.diagnostics
         );
     }

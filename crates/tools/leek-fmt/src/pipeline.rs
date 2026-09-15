@@ -1,99 +1,17 @@
-//! Pipeline integration: formatter as a [`Step`].
+//! The formatter as a tracked query.
 //!
-//! Mirrors [`leek_parser::pipeline`] — the formatter ships a
-//! direct-call step plus a salsa-tracked [`format_query`]. The step
-//! inserts a [`FormattedArtifact`] into the pipeline context.
+//! **Unverified.** This formats; it does not run the safety net. Every
+//! consumer that writes the text to a file, an editor buffer or stdout
+//! must call [`check_equivalence`](crate::check_equivalence) against the
+//! input text first and refuse the output on error — the contract
+//! `miku fmt`, `leekc --emit fmt` and the LSP formatting handlers all
+//! honor.
 
 use std::sync::Arc;
 
-use leek_parser::pipeline::GreenTreeArtifact;
-use leek_pipeline::{Artifact, Context, RecipeArtifact, RecipeParams, RecipeStep, Step, StepError};
-use leek_syntax::language::GreenNode;
 use leek_syntax::version::version_from_byte;
 
 use crate::FormatOptions;
-
-/// Formatter output: the rendered source text.
-///
-/// **Unverified.** The step formats; it does not run the safety net.
-/// Every consumer that writes this text to a file, an editor buffer or
-/// stdout must call [`check_equivalence`](crate::check_equivalence)
-/// against the input text first and refuse the output on error — the
-/// contract `miku fmt`, `leekc --emit fmt` and the LSP formatting
-/// handlers all honor.
-#[derive(Debug, Clone)]
-pub struct FormattedArtifact(pub Arc<String>);
-impl Artifact for FormattedArtifact {}
-
-/// Formatter pipeline step. Sequenced after
-/// [`leek_parser::pipeline::Parse`] so the green tree is available
-/// in the context.
-///
-/// The default constructor uses [`FormatOptions::default`]. Build
-/// with [`Fmt::with_options`] to format with non-default settings
-/// (e.g. options loaded from `Miku.toml`).
-#[derive(Default)]
-pub struct Fmt {
-    opts: FormatOptions,
-}
-
-impl Fmt {
-    /// New step with the given options.
-    pub fn with_options(opts: FormatOptions) -> Self {
-        Self { opts }
-    }
-}
-
-impl RecipeStep for Fmt {
-    fn build(_: &RecipeParams) -> Box<dyn leek_pipeline::Step> {
-        Box::new(Fmt::default())
-    }
-}
-
-impl RecipeArtifact for FormattedArtifact {
-    type Producer = Fmt;
-    type Requires = (GreenTreeArtifact,);
-    type Produces = (FormattedArtifact,);
-}
-
-impl Step for Fmt {
-    fn name(&self) -> &'static str {
-        "fmt"
-    }
-    fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
-        let text = run_format(cx, &self.opts);
-        cx.insert(FormattedArtifact(Arc::new(text)));
-        Ok(())
-    }
-}
-
-fn run_format(cx: &Context<'_>, opts: &FormatOptions) -> String {
-    if let Some((db, file)) = cx.salsa() {
-        let out = format_query(db, file, FormatConfig::new(db, opts.clone()));
-        return out.text.as_ref().clone();
-    }
-
-    // Direct path: prefer the green tree the Parse step already
-    // produced; otherwise re-parse from raw text.
-    let green = parse_or_reuse(cx);
-    crate::format(&green, version_from_byte(cx.version_byte()), opts)
-}
-
-fn parse_or_reuse(cx: &Context<'_>) -> GreenNode {
-    if let Some(g) = cx.get::<GreenTreeArtifact>() {
-        return g.0.clone();
-    }
-    let version = version_from_byte(cx.version_byte());
-    leek_parser::parse_with_features(
-        cx.text(),
-        cx.source(),
-        version,
-        leek_parser::ParseFeatures::from(cx.flags()),
-    )
-    .green
-}
-
-// ---- Salsa-tracked entry point ----
 
 #[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct FormatQueryResult {
@@ -104,7 +22,7 @@ pub struct FormatQueryResult {
 /// that they can be a tracked-query *argument*.
 ///
 /// Interned rather than passed as a loose [`FormatOptions`] for the
-/// reason [`ProgramClasses`](leek_pipeline::salsa::ProgramClasses) is: a
+/// reason [`ProgramClasses`](leek_query::salsa::ProgramClasses) is: a
 /// tracked query's arguments have to be `Copy`, and interning gives one
 /// identity to a settings value, so two callers that assemble the same
 /// options hit the same memo.
@@ -127,11 +45,11 @@ pub struct FormatConfig<'db> {
 /// `config` names different settings.
 #[salsa::tracked]
 pub fn format_query<'db>(
-    db: &'db dyn leek_pipeline::salsa::Db,
-    file: leek_pipeline::salsa::SourceFile,
+    db: &'db dyn leek_query::salsa::Db,
+    file: leek_query::salsa::SourceFile,
     config: FormatConfig<'db>,
 ) -> FormatQueryResult {
-    use leek_pipeline::salsa::ProgramClasses;
+    use leek_query::salsa::ProgramClasses;
 
     let parsed = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
     let version = version_from_byte(file.version_byte(db));
@@ -143,7 +61,7 @@ pub fn format_query<'db>(
 
 #[cfg(test)]
 mod tests {
-    use leek_pipeline::salsa::{LeekDb, SourceFile};
+    use leek_query::salsa::{LeekDb, SourceFile};
 
     use super::{FormatConfig, format_query};
     use crate::{FormatOptions, IndentStyle};

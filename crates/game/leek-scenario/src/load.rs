@@ -222,7 +222,7 @@ fn build_entity(spec: &EntitySpec) -> Result<Entity> {
     Ok(e)
 }
 
-/// Compile one `.leek` file to HIR — the same recipe path the debugger's
+/// Compile one `.leek` file to HIR — the same path the debugger's
 /// `NativeTarget::compile` uses. The leek-wars game builtins must already be
 /// registered process-globally (via `--library leekwars`) for game AIs to
 /// resolve.
@@ -266,7 +266,7 @@ pub fn compile_ai_source(
     let db = leek_db::LeekDb::default();
     let file = leek_db::input_file(&db, String::new(), &input);
 
-    // The driver's stop-on-error rule, which is what the recipe this
+    // The driver's stop-on-error rule, which is what the pipeline this
     // replaced wrapped its parse in: a file that does not parse reports
     // its syntax errors and nothing the later passes made of the wreckage.
     let parsed = leek_db::queries::parse_query(&db, file, leek_db::ProgramClasses::none(&db));

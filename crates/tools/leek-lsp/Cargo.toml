@@ -17,7 +17,8 @@ leek-lexer       = { workspace = true }
 leek-parser      = { workspace = true }
 leek-resolver    = { workspace = true }
 leek-types       = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
+leek-project     = { workspace = true }
 # The query facade. `crate::analysis` reaches every tracked frontend query
 # through this one import path instead of through each pass crate's own
 # `pipeline` module, and program scope is an include-graph question whose

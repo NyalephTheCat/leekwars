@@ -1,9 +1,9 @@
 //! The native (Cranelift) debug target.
 //!
-//! Compiles the requested source to HIR through the standard recipe
-//! pipeline — the *project* pipeline, with `include()` resolved off disk
-//! exactly as `miku run` resolves it, so a program split across files
-//! debugs the same way it runs — then JIT-compiles and runs it via
+//! Compiles the requested source to HIR through a `leek_session::Session`
+//! — the same one `miku run` drives, `include()` and all, so a program
+//! split across files debugs the same way it runs — then JIT-compiles and
+//! runs it via
 //! `leek-backend-native` with [`NativeOptions::debug`] — no optimization,
 //! frame pointers kept, DWARF emitted — the configuration meant for
 //! stepping.

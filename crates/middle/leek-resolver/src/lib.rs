@@ -133,7 +133,7 @@ impl Options {
     /// Build the options from the settings that decide them: the file's
     /// pragmas (`None` when no pragma scan ran), the run's feature flags
     /// and strict mode. The single place the experimental opt-ins are
-    /// spelled out, so every driver — the pipeline step, the salsa query —
+    /// spelled out, so every driver — the include closure, the salsa query —
     /// agrees on what a pragma or a flag turns on.
     #[must_use]
     pub fn from_settings(

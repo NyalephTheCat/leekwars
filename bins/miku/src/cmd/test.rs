@@ -35,7 +35,7 @@ use leek_backend_native::{NativeArtifact, NativeError};
 
 use leek_diagnostics::{Code, Severity};
 use leek_project::Project;
-use leek_session::{DriverConfig, RecipeParams, Session, Target};
+use leek_session::{CompileParams, DriverConfig, Session, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Test};
 
@@ -58,7 +58,7 @@ pub fn run(
     // resolution, so a test file may `include(...)` its helpers.
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default(),
+        params: CompileParams::default(),
         color: color.into(),
         format: format.into(),
         // `scope` and `timing` stay at their defaults: every `miku`

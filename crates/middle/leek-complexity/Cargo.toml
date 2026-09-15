@@ -9,7 +9,7 @@ description = "Static complexity / big-O analysis for Leekscript functions."
 [dependencies]
 leek-hir      = { workspace = true }
 leek-builtins = { workspace = true }
-leek-pipeline = { workspace = true }
+leek-query    = { workspace = true }
 leek-span     = { workspace = true }
 salsa         = { workspace = true }
 

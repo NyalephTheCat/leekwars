@@ -16,40 +16,33 @@
 //!   parse is keyed on, so one file can parse differently in two
 //!   programs without either answer evicting the other.
 //!
-//! The pipeline itself doesn't force memoization on any step. A step
-//! that wants caching does:
+//! A pass crate writes one thin tracked wrapper over its own pure
+//! function:
 //!
 //! ```ignore
-//! impl Step for MyPass {
-//!     fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
-//!         let out = if let Some((db, file)) = cx.salsa() {
-//!             my_tracked_query(db, file)        // memoized
-//!         } else {
-//!             my_pure_fn(cx.text(), cx.version()) // direct
-//!         };
-//!         cx.insert(MyArtifact(out));
-//!         Ok(())
-//!     }
+//! #[salsa::tracked]
+//! pub fn my_query(db: &dyn Db, file: SourceFile) -> MyResult {
+//!     my_pure_fn(file.text(db), file.version_byte(db))
 //! }
 //! ```
 //!
-//! The per-crate tracked queries land in each pass crate (lexer,
-//! parser, …); [`leek_db`] re-exports them all under one import path.
+//! Those queries land in each pass crate (lexer, parser, …); `leek-db`
+//! re-exports them all under one import path.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use leek_span::SourceId;
 
-/// Database trait. Anything that wants to back pipeline steps with
-/// salsa caching implements this; pass crates write their tracked
+/// Database trait. Anything that wants to memoize the compiler's passes
+/// implements this; pass crates write their tracked
 /// queries against `&dyn Db`.
 #[salsa::db]
 pub trait Db: salsa::Database {}
 
 /// Concrete database. Single-threaded. `Clone` forks a copy sharing
 /// the underlying salsa storage so re-using the same memoized
-/// results across pipeline runs is just `let db = source_db.clone()`.
+/// results across compilations is just `let db = source_db.clone()`.
 #[salsa::db]
 #[derive(Default, Clone)]
 pub struct LeekDb {
@@ -83,10 +76,9 @@ pub struct SourceFile {
     /// `SourceId::get()` value. Stored as `u32` because `SourceId`
     /// itself isn't yet wired through salsa's `Update` trait.
     pub source_id: u32,
-    /// The file's text, shared rather than owned: a pipeline run takes
-    /// a refcount bump instead of copying the whole buffer, so running
-    /// N indexed files through [`crate::Pipeline::run_memoized`] no
-    /// longer copies N file texts.
+    /// The file's text, shared rather than owned: a reader takes a
+    /// refcount bump instead of copying the whole buffer, so compiling
+    /// N indexed files does not copy N file texts.
     #[returns(ref)]
     pub text: Arc<str>,
     /// Wire `Version` through as the `u8` byte so we don't need

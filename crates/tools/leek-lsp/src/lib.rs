@@ -2,7 +2,7 @@
 //! Leekscript.
 //!
 //! Wraps [`tower-lsp`] with a single workspace per server, backed by
-//! a salsa [`LeekDb`](leek_pipeline::salsa::LeekDb) so per-keystroke
+//! a salsa [`LeekDb`](leek_query::salsa::LeekDb) so per-keystroke
 //! re-runs hit cache.
 //!
 //! # What the server answers

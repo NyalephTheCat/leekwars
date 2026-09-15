@@ -8,10 +8,10 @@ description = "The query façade: one salsa database and every tracked query und
 
 [dependencies]
 # Owns the database itself — `Db`, `LeekDb`, `SourceFile`, `WorkspaceFiles`.
-# This crate sits *above* `leek-pipeline`, never below: the pass crates write
+# This crate sits *above* `leek-query`, never below: the pass crates write
 # their queries against `leek_pipeline::salsa::Db`, so the opposite edge would
 # be a cycle.
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 # The include-graph queries this crate owns are written against salsa
 # directly.
 salsa            = { workspace = true }

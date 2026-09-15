@@ -14,7 +14,7 @@ leek-lexer       = { workspace = true }
 leek-parser      = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-builtins    = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 rowan            = { workspace = true }
 salsa            = { workspace = true }
 

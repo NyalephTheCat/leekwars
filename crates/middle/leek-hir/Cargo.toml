@@ -15,7 +15,7 @@ leek-parser      = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-types       = { workspace = true }
 leek-resolver    = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 leek-prelude     = { workspace = true }
 leek-config      = { workspace = true }
 leek-environment = { workspace = true }

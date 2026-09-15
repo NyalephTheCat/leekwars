@@ -3,11 +3,12 @@
 //! Every other query in this crate answers one question about a file:
 //! its tokens, its tree, its symbol table. A *diagnostic stream* is not
 //! one of those — it is the concatenation of what each stage found, in
-//! a fixed order, and until now that order existed nowhere. It was an
-//! emergent property of the recipe planner: `Pragma` runs before `Lex`
-//! because `TokensArtifact` requires `PragmasArtifact`, `Parse` before
-//! `Resolve` because `ResolveArtifact` requires `AstArtifact`, and a
-//! `Run`'s diagnostics come out in the order the steps emitted them.
+//! a fixed order, and that order used to exist nowhere. It was an
+//! emergent property of the recipe planner that used to sequence the
+//! passes: `Pragma` ran before `Lex` because `TokensArtifact` required
+//! `PragmasArtifact`, `Parse` before `Resolve` because `ResolveArtifact`
+//! required `AstArtifact`, and a run's diagnostics came out in the order
+//! the steps emitted them.
 //!
 //! That order is load-bearing. `leek_lsp::handlers::code_action` matches
 //! the diagnostics a client hands back against the ones the server
@@ -36,15 +37,15 @@
 //! [`crate::program`]'s module docs describe: the whole-program queries
 //! deliberately carry neither the include walk's own diagnostics nor
 //! [`include_parse_failures`], so something has to concatenate them.
-//! The order is the one
-//! [`ResolveIncludes`](leek_resolver::pipeline::ResolveIncludes) and the
-//! steps around it emit today — see [`program_diagnostics`] for the
-//! sequence and for the one place the two genuinely differ.
+//! The order is the one the include-aware front end always emitted —
+//! see [`program_diagnostics`] for the sequence, and for the one place
+//! where a whole-closure query necessarily groups what the per-file walk
+//! interleaved.
 
 use std::sync::Arc;
 
 use leek_diagnostics::Diagnostic;
-use leek_pipeline::OptLevel;
+use leek_query::OptLevel;
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -61,11 +62,9 @@ use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 /// [`typecheck_query`](leek_types::pipeline::typecheck_query),
 /// [`lower_hir_query`](leek_hir::pipeline::lower_hir_query) and
 /// [`lower_mir_query`](leek_mir::pipeline::lower_mir_query), **in that
-/// order** — which is the order a `Target::Mir` recipe plans those
-/// steps in, and therefore the order a `Run`'s diagnostics come out in
-/// today. `diagnostics_order_is_the_pipelines` in
-/// `tests/diagnostics.rs` pins it against a real pipeline run rather
-/// than against this list, so the two cannot drift.
+/// order** — which is the order the passes ran in when a planner
+/// sequenced them, and the order a consumer still depends on.
+/// `tests/diagnostics.rs` spells the sequence out as a list of codes.
 ///
 /// This answers for **one file**, so it parses under the empty
 /// [`ProgramClasses`] set exactly as `leek_lsp::analysis` does: a file
@@ -130,9 +129,7 @@ pub fn file_diagnostics_upto(db: &dyn Db, file: SourceFile, stage: Stage) -> Arc
 
 /// Every diagnostic an entry file's whole include closure earns.
 ///
-/// The order, which
-/// `program_diagnostics_order_matches_the_include_aware_pipeline` pins
-/// against a real `ResolveIncludes`-driven run:
+/// The order, spelled out as a list of codes in `tests/diagnostics.rs`:
 ///
 /// 1. the entry's `pragma_query`,
 /// 2. the entry's `lex_query`,
@@ -152,7 +149,7 @@ pub fn file_diagnostics_upto(db: &dyn Db, file: SourceFile, stage: Stage) -> Arc
 /// in the program. That is why this query is wider than "graph +
 /// failures + program".
 ///
-/// ### The one divergence from `ResolveIncludes`, and why it is not one
+/// ### The one divergence from the per-file walk, and why it is not one
 ///
 /// [`resolve_include_closure`](leek_resolver::closure::resolve_include_closure)
 /// *interleaves* 4 and 5: for each included file it emits that file's
@@ -168,12 +165,11 @@ pub fn file_diagnostics_upto(db: &dyn Db, file: SourceFile, stage: Stage) -> Arc
 /// **after** *x* in dependency order. So within any one source id, both
 /// orders yield "the failures for the files this one includes, then
 /// this one's own lex and parse diagnostics".
-/// `interleaving_the_include_failures_is_invisible_per_source` pins
-/// exactly that.
+/// `the_include_failures_land_on_the_includer` pins exactly that.
 ///
 /// `lower_program` is asked at [`OptLevel::O0`]: an optimized tree is a
 /// different tree, not a different set of complaints, and `O0` is what
-/// the LSP's recipe parameters ask for.
+/// the LSP's parameters ask for.
 #[salsa::tracked]
 pub fn program_diagnostics(
     db: &dyn Db,

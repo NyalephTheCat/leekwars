@@ -251,11 +251,11 @@ first. Round-trip and JIT-equivalence tests live in
 ```
 bins/        leekc, miku, leek-lsp, leek-dap, leekbench
 crates/
-  core/      spans, diagnostics, manifest, runtime, prelude, environment
+  core/      spans, diagnostics, manifest, runtime, prelude, environment, query db
   frontend/  lexer, parser, syntax
   middle/    resolver, types, HIR, MIR, complexity
   backends/  java, native (cranelift), leekscript (source), backend registry
-  db/        pipeline, recipes, driver (the compilation orchestration)
+  db/        query façade + session (what the binaries compile through)
   game/      leek-game-runtime, leek-generator, leek-scenario  (fights)
   tools/     leek-lsp, leek-dap, leek-fmt, leek-lint, leek-ide, …
   testing/   builtin-suite, test-driver, corpus, bench

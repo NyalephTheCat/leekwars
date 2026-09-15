@@ -1,33 +1,33 @@
 //! One compiler session over a project, and one compiled file.
 //!
 //! [`Session`] is what a front-end holds for a whole invocation: the
-//! project, the driver configuration, the [`Reporter`] built from the
-//! manifest's `[lint]` levels, and the include interner. [`Compilation`] is
-//! what one compiled file *is*: the run, its text, its label, the
-//! [`Sources`] map its diagnostics render against, and the reporter that
-//! renders them.
+//! project, the driver configuration, the query database and the file set
+//! its includes resolve against, the [`Reporter`] built from the
+//! manifest's `[lint]` levels, and the include interner. [`Compilation`]
+//! is what one compiled file *is*: its text, its label, its diagnostics,
+//! the [`Sources`] map they render against, and the reporter that renders
+//! them.
 //!
-//! Before this, every `miku` subcommand assembled those five pieces itself
-//! — and three of them re-read the entry file off disk a second time to do
-//! it, because the driver returned a run and kept the text.
+//! Before this, every `miku` subcommand assembled those pieces itself —
+//! and three of them re-read the entry file off disk a second time to do
+//! it. One database per *invocation* rather than per compiled file is
+//! what makes a tracked query worth calling from a CLI at all: a
+//! `miku test` over N files re-parsed the stdlib headers N times and
+//! shared nothing between them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use leek_complexity::Complexity;
-use leek_complexity::pipeline::ComplexityArtifact;
 use leek_diagnostics::{Diagnostic, Reporter, Severity, Sources};
 use leek_hir::HirFile;
-use leek_hir::pipeline::HirArtifact;
 use leek_mir::MirProgram;
-use leek_mir::pipeline::MirArtifact;
-use leek_pipeline::{Artifact, Run};
 use leek_project::{Input, Project};
 use leek_span::SourceId;
 
 use crate::Target;
-use crate::driver::{DriverConfig, PathInterner, SourceInterner, reporter_for, run_sources};
+use crate::driver::{DriverConfig, PathInterner, SourceInterner, reporter_for};
 use crate::error::SessionError;
 
 /// The entry file's own `SourceId`; its includes get the ones after it.
@@ -150,7 +150,7 @@ impl<'p> Session<'p> {
         self.compile(path, source_id)
     }
 
-    /// Read `path`, build its [`Input`] and drive `pipeline` over it.
+    /// Read `path` and build the [`Compilation`] over it.
     ///
     /// The text is read exactly once per compiled file and then shared: the
     /// `Input`, the `Sources` map and [`Compilation::text`] are all the same
@@ -227,8 +227,8 @@ impl<'p> Session<'p> {
     /// **The session's interner is the single id authority.** A registered
     /// input already carries an id, and [`compile`](Self::compile) builds
     /// its [`Input`] from *that* rather than from the caller's
-    /// `source_id`. Two authorities would mean the pipeline's diagnostics
-    /// and the queries' disagree about which file a span belongs to, which
+    /// `source_id`. Two authorities would mean the `Input`'s spans and
+    /// the queries' disagree about which file a span belongs to, which
     /// `Sources` and
     /// [`for_source`](leek_db::queries::for_source) both key on — so a
     /// diagnostic would render against the wrong file or vanish.
@@ -275,8 +275,9 @@ impl<'p> Session<'p> {
 ///
 /// Version and strict mode are settled the same way
 /// [`Session::compile`] settles the entry's — the index's
-/// `language_settings` over the file's own text — so a query and the
-/// pipeline agree about what language a file is written in.
+/// `language_settings` over the file's own text — so an included file
+/// and the entry that includes it cannot disagree about what language
+/// either is written in.
 ///
 /// A file the index cannot read is skipped rather than failing the
 /// session: an unreadable file in the tree is the compile's problem to
@@ -350,10 +351,10 @@ fn register_project_files(
 
     // Close the set under includes. `resolve_include` resolves a name
     // against `WorkspaceFiles` and nothing else — a tracked query that read
-    // the filesystem would be impure — while the pipeline this replaced
-    // resolved through a folder that fell back to `DiskFolder`. So an
+    // the filesystem would be impure — where the disk-backed folder this
+    // replaced fell back to reading the file. So an
     // `include("../shared/lib")` escaping the project root resolved before
-    // and would report `E0272 IncludeNotFound` now.
+    // and would report `E0272 IncludeNotFound` without this walk.
     //
     // The same gap, and the same fix, as `leek_lsp::Workspace::resync`. It
     // is written twice because the two reach files differently — the server
@@ -398,9 +399,6 @@ pub struct IncludedFile {
 /// Borrowed from the [`Session`] that produced it, so a front-end holds one
 /// of these for as long as it is still reporting on the file.
 pub struct Compilation<'a> {
-    /// The pipeline run, for an adopted compilation. `None` for a session
-    /// compilation, which answers from queries and never plans one.
-    run: Option<Run<'a>>,
     text: Arc<str>,
     label: String,
     reporter: &'a Reporter,
@@ -408,18 +406,15 @@ pub struct Compilation<'a> {
     /// `migrate` compile a whole tree and render nothing, and a source map
     /// costs a copy of every file's text plus a line table over it.
     sources: OnceLock<Sources>,
-    /// The session's database and this file's input in it, when the
-    /// compilation came from a [`Session`]. `None` for an adopted run
-    /// (`leekc`, which plans its own pipeline and has no session).
+    /// The session's database and this file's input in it.
     db: Option<(&'a leek_db::LeekDb, leek_db::SourceFile)>,
     /// The session's file set, for the whole-program queries.
     files: Option<leek_db::WorkspaceFiles>,
-    /// The entry's `Input`, kept rather than read off the run: a session
-    /// compilation has no run to read it from.
+    /// The entry's `Input` — its id, text and settled language.
     input: Input,
     /// Where to record how long each stage took, when the driver asked
     /// for timings.
-    timing: Option<leek_pipeline::TimingSink>,
+    timing: Option<leek_query::TimingSink>,
     /// Query answers behind the reference-returning accessors. Each holds
     /// an `Arc`, so the cache is a pointer rather than a copy of the tree.
     tokens_cache: OnceLock<Option<Arc<Vec<leek_syntax::Token>>>>,
@@ -442,19 +437,15 @@ struct RunShape {
     /// The lint groups the run planned with, when the target plans the
     /// lint step at all. `None` when it does not.
     lints: Option<leek_lint::LintGroups>,
-    /// `RecipeParams::stop_on_diagnostics` — the severity at which the
+    /// `CompileParams::stop_on_diagnostics` — the severity at which the
     /// parse aborts the run.
     stop_at: Option<Severity>,
     /// The optimization level the recipe planned with.
-    opt: leek_pipeline::OptLevel,
+    opt: leek_query::OptLevel,
 }
 
 /// Time `f` into `sink` under `name`, or just run it when there is none.
-fn timed<T>(
-    sink: Option<&leek_pipeline::TimingSink>,
-    name: &'static str,
-    f: impl FnOnce() -> T,
-) -> T {
+fn timed<T>(sink: Option<&leek_query::TimingSink>, name: &'static str, f: impl FnOnce() -> T) -> T {
     match sink {
         Some(sink) => sink.time(name, f),
         None => f(),
@@ -462,41 +453,8 @@ fn timed<T>(
 }
 
 impl<'a> Compilation<'a> {
-    /// Wrap a run a front-end drove itself.
-    ///
-    /// The manifest-less half of [`Session::compile_file`], for `leekc`,
-    /// which plans its own pipeline per `--emit` and has no `Miku.toml` to
-    /// take a reporter from. The entry text comes off the run's own
-    /// [`Input`], so there is nothing to keep in sync.
-    #[must_use]
-    pub fn adopt(run: Run<'a>, file_label: String, reporter: &'a Reporter) -> Self {
-        Self {
-            text: Arc::clone(&run.input().text),
-            input: run.input().clone(),
-            run: Some(run),
-            label: file_label,
-            reporter,
-            sources: OnceLock::new(),
-            db: None,
-            files: None,
-            shape: None,
-            timing: None,
-            tokens_cache: OnceLock::new(),
-            hir_cache: OnceLock::new(),
-            mir_cache: OnceLock::new(),
-            complexity_cache: OnceLock::new(),
-            diagnostics_cache: OnceLock::new(),
-        }
-    }
-
-    /// A compilation a [`Session`] produced: no run at all, every answer
-    /// from the session's database.
-    ///
-    /// The pipeline is not planned and not driven. Serving one accessor
-    /// from a query while another read a run would pay for both — a run
-    /// planned for a late target has already computed everything on the
-    /// way there — which is why the move is all-or-nothing rather than
-    /// consumer by consumer.
+    /// A compilation a [`Session`] produced: every answer from the
+    /// session's database.
     #[must_use]
     fn in_session(
         input: Input,
@@ -506,12 +464,11 @@ impl<'a> Compilation<'a> {
         file: leek_db::SourceFile,
         files: leek_db::WorkspaceFiles,
         shape: RunShape,
-        timing: Option<leek_pipeline::TimingSink>,
+        timing: Option<leek_query::TimingSink>,
     ) -> Self {
         Self {
             text: Arc::clone(&input.text),
             input,
-            run: None,
             label: file_label,
             reporter,
             sources: OnceLock::new(),
@@ -548,9 +505,6 @@ impl<'a> Compilation<'a> {
     #[must_use]
     pub fn sources(&self) -> &Sources {
         self.sources.get_or_init(|| {
-            if let Some(run) = &self.run {
-                return run_sources(run, &self.text, &self.label);
-            }
             let mut sources = Sources::single(self.input.source, &self.label, &*self.text);
             // `includes()` is the one definition of what the program
             // reaches; it is empty under `Scope::File`, which resolves no
@@ -579,22 +533,6 @@ impl<'a> Compilation<'a> {
     /// include.
     #[must_use]
     pub fn includes(&self) -> Vec<IncludedFile> {
-        if let Some(run) = &self.run {
-            return run
-                .get::<leek_resolver::pipeline::IncludeGraphArtifact>()
-                .map(|graph| {
-                    graph
-                        .includes
-                        .iter()
-                        .map(|inc| IncludedFile {
-                            source: inc.source,
-                            path: inc.path.clone(),
-                            text: Arc::clone(&inc.text),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-        }
         if self.scope() == crate::Scope::File {
             return Vec::new();
         }
@@ -613,9 +551,6 @@ impl<'a> Compilation<'a> {
 
     #[must_use]
     pub fn diagnostics(&self) -> &[Diagnostic] {
-        if let Some(run) = &self.run {
-            return run.diagnostics();
-        }
         self.diagnostics_cache.get_or_init(|| {
             timed(self.timing.as_ref(), "diagnostics", || {
                 self.query_diagnostics().unwrap_or_default()
@@ -623,28 +558,11 @@ impl<'a> Compilation<'a> {
         })
     }
 
-    /// Any artifact the planned pipeline produced. The escape hatch for the
-    /// views with no named accessor below (tokens, the green tree, the
-    /// formatted text); prefer [`hir`](Self::hir) and friends where they
-    /// apply.
-    #[must_use]
-    pub fn get<A: Artifact>(&self) -> Option<&A> {
-        self.run.as_ref()?.get::<A>()
-    }
-
-    /// The entry's green tree.
-    ///
-    /// A named accessor because [`get`](Self::get) reads the run's
-    /// artifact bag, and a session compilation has no run. Parsed under
-    /// the *program's* class set, which is what the include-aware pipeline
-    /// parsed the entry under.
+    /// The entry's green tree, parsed under this compilation's class set
+    /// — the program's, or the empty one under
+    /// [`Scope::File`](crate::Scope).
     #[must_use]
     pub fn green_tree(&self) -> Option<leek_syntax::language::GreenNode> {
-        if let Some(run) = &self.run {
-            return run
-                .get::<leek_parser::pipeline::GreenTreeArtifact>()
-                .map(|g| g.0.clone());
-        }
         self.with_program(|db, files, file, version| {
             let classes = self.classes(db, files, file, version);
             leek_db::queries::parse_query(db, file, classes).green
@@ -658,11 +576,6 @@ impl<'a> Compilation<'a> {
     /// a program-scoped one does.
     #[must_use]
     pub fn tokens(&self) -> Option<&[leek_syntax::Token]> {
-        if let Some(run) = &self.run {
-            return run
-                .get::<leek_lexer::pipeline::TokensArtifact>()
-                .map(|t| t.0.tokens.as_slice());
-        }
         self.tokens_cache
             .get_or_init(|| {
                 timed(self.timing.as_ref(), "tokens", || {
@@ -675,47 +588,13 @@ impl<'a> Compilation<'a> {
             .map(Vec::as_slice)
     }
 
-    /// The entry, formatted under `options`.
-    ///
-    /// Unverified, exactly as the pipeline's `Fmt` step left it: whether
-    /// the formatted text still parses to the same program is the
-    /// caller's check to make (`leek_fmt::check_equivalence`), because
-    /// only the caller knows whether it is about to print the result or
-    /// write it over the original.
-    ///
-    /// The options are an argument rather than part of the session
-    /// because they are interned into the query key: two callers that
-    /// assemble the same settings share one memo, and a caller that
-    /// changes them does not invalidate anything else about the file.
-    #[must_use]
-    pub fn formatted(&self, options: &leek_fmt::FormatOptions) -> Option<Arc<String>> {
-        if let Some(run) = &self.run {
-            return run
-                .get::<leek_fmt::pipeline::FormattedArtifact>()
-                .map(|f| Arc::clone(&f.0));
-        }
-        let (db, file) = self.db?;
-        let db: &dyn leek_db::Db = db;
-        let config = leek_fmt::pipeline::FormatConfig::new(db, options.clone());
-        Some(
-            timed(self.timing.as_ref(), "fmt", || {
-                leek_fmt::pipeline::format_query(db, file, config)
-            })
-            .text,
-        )
-    }
-
     /// The lowered HIR, when the target reached it.
     ///
-    /// From `lower_program` for a session compilation, from the run for an
-    /// adopted one. Cached because the signature hands out a reference and
-    /// a tracked query returns a value; the `Arc` inside makes the cache a
-    /// pointer, not a copy of the tree.
+    /// Cached because the signature hands out a reference and a tracked
+    /// query returns a value; the `Arc` inside makes the cache a pointer,
+    /// not a copy of the tree.
     #[must_use]
     pub fn hir(&self) -> Option<&HirFile> {
-        if let Some(run) = &self.run {
-            return run.get::<HirArtifact>().map(|a| a.0.as_ref());
-        }
         self.hir_cache
             .get_or_init(|| {
                 timed(self.timing.as_ref(), "hir", || {
@@ -730,14 +609,10 @@ impl<'a> Compilation<'a> {
     /// [`hir`](Self::hir) as a shared pointer, for a caller that keeps
     /// the tree after the compilation is gone.
     ///
-    /// A refcount bump either way: a session compilation's cache holds
-    /// the `Arc` the query returned, and an adopted run's artifact holds
-    /// the one the lowering step produced.
+    /// A refcount bump, not a copy: the cache holds the `Arc` the query
+    /// returned.
     #[must_use]
     pub fn hir_arc(&self) -> Option<Arc<HirFile>> {
-        if let Some(run) = &self.run {
-            return run.get::<HirArtifact>().map(|a| Arc::clone(&a.0));
-        }
         // Through `hir`, so both go through the same cache and the same
         // stage timer.
         self.hir()?;
@@ -747,9 +622,6 @@ impl<'a> Compilation<'a> {
     /// The lowered MIR, when the target reached it.
     #[must_use]
     pub fn mir(&self) -> Option<&MirProgram> {
-        if let Some(run) = &self.run {
-            return run.get::<MirArtifact>().map(|a| a.0.as_ref());
-        }
         self.mir_cache
             .get_or_init(|| {
                 timed(self.timing.as_ref(), "mir", || {
@@ -765,9 +637,6 @@ impl<'a> Compilation<'a> {
     /// The per-function complexity rows, when the target asked for them.
     #[must_use]
     pub fn complexity(&self) -> Option<&[Complexity]> {
-        if let Some(run) = &self.run {
-            return run.get::<ComplexityArtifact>().map(|a| a.0.as_slice());
-        }
         self.complexity_cache
             .get_or_init(|| {
                 timed(self.timing.as_ref(), "complexity", || {
@@ -781,8 +650,8 @@ impl<'a> Compilation<'a> {
     }
 
     /// The optimization level this compilation's target asked for.
-    fn opt(&self) -> leek_pipeline::OptLevel {
-        self.shape.map_or(leek_pipeline::OptLevel::O0, |s| s.opt)
+    fn opt(&self) -> leek_query::OptLevel {
+        self.shape.map_or(leek_query::OptLevel::O0, |s| s.opt)
     }
 
     /// Whether this compilation's includes are part of it.
@@ -796,7 +665,7 @@ impl<'a> Compilation<'a> {
     /// HIR, MIR and complexity are whole-program answers: they are built
     /// over the merged tree of the include closure, and there is no
     /// file-scoped query that means the same thing at the
-    /// [`OptLevel`](leek_pipeline::OptLevel) the program ones are keyed
+    /// [`OptLevel`](leek_query::OptLevel) the program ones are keyed
     /// on. A file-scoped compilation never plans those passes, so `None`
     /// is the honest answer rather than a program-wide one it did not
     /// ask for.
@@ -896,37 +765,33 @@ impl<'a> Compilation<'a> {
     /// the first call and kept, so two queries asked of the same compilation
     /// share one memo table.
     ///
-    /// The file is a faithful copy of the run's own `Input`, under the same
-    /// canonical-path key the include graph uses (#181), so a query answers
-    /// about the bytes the pipeline actually compiled.
+    /// The file is registered under the same canonical-path key the
+    /// include graph uses (#181), so a query answers about the bytes this
+    /// compilation actually compiled.
     pub fn db_handle(&self) -> Option<(&dyn leek_db::Db, leek_db::SourceFile)> {
         self.db.map(|(db, file)| (db as &dyn leek_db::Db, file))
     }
 
-    /// This compilation's diagnostics, computed from tracked queries
-    /// instead of read off the run.
+    /// This compilation's diagnostics.
     ///
-    /// `None` for an adopted run, which has no session and so no database
-    /// to ask.
+    /// `None` when there is no database to ask. Two rules sit on top of
+    /// the queries, both pinned by the tests below:
     ///
-    /// Reproducing a `Run`'s stream takes two things beyond calling a
-    /// query, both established by the tests below:
-    ///
-    /// 1. **The stage.** A run reports what the steps it *ran* reported,
+    /// 1. **The stage.** A compilation reports what its target reaches,
     ///    so the stream is sliced to the target's
     ///    [`Stage`](leek_db::queries::Stage) rather than always reporting
-    ///    the whole frontend.
-    /// 2. **The abort.** `leek_parser::pipeline::Parse` is the one
-    ///    production step implementing `RecipeStepStopOnError`, so when
-    ///    `RecipeParams::stop_on_diagnostics` is set and the parse itself
-    ///    reports at or above that severity, `Pipeline::drive` stops
-    ///    before any later step. The check below is that rule: the
-    ///    *entry's own* parse, because the closure's parses happen in
-    ///    `ResolveIncludes`, which runs before `Parse` and so is not part
-    ///    of what the wrapper counts as new.
+    ///    the whole frontend. Widening the target only ever *adds*.
+    /// 2. **The abort.** When
+    ///    [`CompileParams::stop_on_diagnostics`](crate::CompileParams)
+    ///    is set and the parse itself reports at or above that severity,
+    ///    the stream stops there: the syntax errors, and nothing the
+    ///    later passes made of the wreckage. On the *entry's own* parse,
+    ///    because the closure's files are parsed before it and their
+    ///    errors are reported as `INCLUDE_PARSE_FAILED` at the include
+    ///    site rather than as the entry's own.
     ///
     /// `Severity` orders `Error < Warning`, so "at or above `min`" is
-    /// `severity <= min` — the same comparison `StopOnDiagnostics` makes.
+    /// `severity <= min`.
     #[must_use]
     pub fn query_diagnostics(&self) -> Option<Arc<Vec<Diagnostic>>> {
         use leek_db::queries;
@@ -1141,9 +1006,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `db_handle` is what a front-end hands a tracked query. The file it
-    /// returns must describe the bytes the pipeline compiled, and asking
-    /// twice must hand back the same input rather than a second one.
+    /// `db_handle` is what a front-end hands a tool's tracked query. The
+    /// file it returns must describe the bytes this compilation compiled,
+    /// and asking twice must hand back the same input rather than a
+    /// second one.
     #[test]
     fn the_db_handle_describes_the_compiled_file_and_is_built_once() {
         let dir = scratch("db-handle");
@@ -1175,20 +1041,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Every target's `Run` stream is exactly its stage's query stream.
+    /// Every target's stream is exactly its stage's.
     ///
-    /// The claim `the_program_stream_reports_what_the_pipeline_reported`
-    /// makes at `Target::Linted`, made at every target below it — which is
-    /// what `the_runs_diagnostics_grow_with_the_target` showed was
-    /// missing, and what `diagnostics()` needs before it can move off the
-    /// run.
+    /// The mapping `Session::shape` makes — `Target` to
+    /// [`Stage`](leek_db::queries::Stage) — asserted against the stage
+    /// query directly, so a target silently rewired to the wrong stage
+    /// fails here rather than in whatever command reads it.
     ///
     /// The fixture parses cleanly and earns its complaints after parsing,
     /// which is the case the slicing is for. A file that fails to parse is
     /// a different story — see
-    /// `a_failed_parse_stops_the_run_but_not_the_queries`.
+    /// `query_diagnostics_slices_aborts_and_stops_before_the_parse`.
     #[test]
-    fn every_targets_run_matches_its_stage() {
+    fn every_targets_stream_is_its_stages_stream() {
         let dir = scratch("stage-parity");
         std::fs::write(
             dir.join("src/main.leek"),
@@ -1209,7 +1074,7 @@ mod tests {
         for (target, stage) in cases {
             let session = Session::new(&project, quiet(target)).expect("session");
             let compiled = session.compile_entry().expect("compile");
-            let from_run: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+            let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
 
             let (db, files) = session.db();
             let (_, file) = compiled.db_handle().expect("session database");
@@ -1223,10 +1088,10 @@ mod tests {
             let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
 
             assert_eq!(
-                from_run, from_query,
+                reported, from_query,
                 "{target:?} and {stage:?} must report the same stream"
             );
-            widths.push((target, from_run.len()));
+            widths.push((target, reported.len()));
         }
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1242,17 +1107,14 @@ mod tests {
         );
     }
 
-    /// The program-level MIR and complexity queries answer what the
-    /// pipeline's `Target::Mir` and `Target::Complexity` runs produce, and
-    /// — the point of them — they see the whole closure.
+    /// `Compilation::mir` and `Compilation::complexity` see the whole
+    /// closure, which is the point of them.
     ///
-    /// `leek_mir::pipeline`'s `run_lower_mir` notes (#428) that its salsa
-    /// branch lowers the entry alone, so a memoized include-aware
-    /// `Target::Mir` run would silently drop every included function. It is
-    /// dormant because nothing asks a memoized run for that target, but it
-    /// is exactly the trap `Compilation` would fall into on being moved to
-    /// queries. The assertions below are on the *included* function, so a
-    /// per-file answer fails them.
+    /// The per-file `lower_mir_query` and `complexity_query` answer for
+    /// the entry alone, so a `Compilation` wired to either would silently
+    /// drop every function an include provides (#428). The assertions
+    /// below are on the *included* function, so a per-file answer fails
+    /// them.
     #[test]
     fn the_program_mir_and_complexity_queries_see_the_closure() {
         let dir = scratch("program-mir");
@@ -1270,26 +1132,18 @@ mod tests {
 
         let mir_session = Session::new(&project, quiet(Target::Mir)).expect("session");
         let mir_compiled = mir_session.compile_entry().expect("compile");
-        let run_mir = mir_compiled
-            .mir()
-            .expect("the pipeline lowered MIR")
-            .clone();
+        let from_accessor = mir_compiled.mir().expect("MIR was lowered").clone();
         let (db, files) = mir_session.db();
         let (_, file) = mir_compiled.db_handle().expect("session database");
         let version = leek_syntax::pipeline::version_from_byte(file.version_byte(db));
-        let query_mir = leek_db::queries::lower_program_mir(
-            db,
-            files,
-            file,
-            version,
-            leek_pipeline::OptLevel::O0,
-        );
+        let query_mir =
+            leek_db::queries::lower_program_mir(db, files, file, version, leek_query::OptLevel::O0);
 
         let cx_session = Session::new(&project, quiet(Target::Complexity)).expect("session");
         let cx_compiled = cx_session.compile_entry().expect("compile");
-        let run_cx: Vec<String> = cx_compiled
+        let cx_from_accessor: Vec<String> = cx_compiled
             .complexity()
-            .expect("the pipeline analyzed")
+            .expect("complexity was measured")
             .iter()
             .map(|c| c.name.clone())
             .collect();
@@ -1308,35 +1162,52 @@ mod tests {
         // The closure's function is the discriminator: a per-file answer
         // would not have it.
         assert!(
-            run_cx.iter().any(|n| n == "helper"),
-            "the pipeline measured the included function: {run_cx:?}"
+            cx_from_accessor.iter().any(|n| n == "helper"),
+            "the accessor measured the included function: {cx_from_accessor:?}"
         );
         assert_eq!(
-            run_cx, query_cx_names,
-            "complexity: the query measured the same functions"
+            cx_from_accessor, query_cx_names,
+            "complexity: the accessor is the whole-program query"
         );
         assert_eq!(
-            run_mir.functions.len(),
+            from_accessor.functions.len(),
             query_mir.program.functions.len(),
-            "MIR: the query lowered the same functions"
+            "MIR: the accessor lowered the same functions"
         );
-        assert_eq!(run_mir, *query_mir.program, "MIR: and the same program");
+        assert_eq!(
+            from_accessor, *query_mir.program,
+            "MIR: and the same program"
+        );
     }
 
-    /// `query_diagnostics` reproduces the run's stream across every
-    /// target, both stop-on-error settings, and a file that parses and one
-    /// that does not.
+    /// The three rules `query_diagnostics` implements, across every
+    /// target and both stop-on-error settings.
     ///
-    /// The whole matrix in one test on purpose. Each of the three axes hid
-    /// a divergence in turn — the target hid one until
-    /// `the_runs_diagnostics_grow_with_the_target`, the parse failure hid
-    /// one until a fixture was strengthened, and the threshold is what
-    /// turned out to explain the second. A test that fixed any axis would
-    /// have gone green over the bug that axis conceals.
+    /// The whole matrix in one test on purpose. Each of the three axes
+    /// hid a divergence in turn while this was still a comparison against
+    /// a pipeline run: the target hid one, the parse failure hid one, and
+    /// the threshold is what turned out to explain the second. A test that
+    /// fixed any axis would have gone green over the bug that axis
+    /// conceals.
+    ///
+    /// The run is gone, so these are the rules stated directly:
+    ///
+    /// 1. **The stage.** With no threshold, a wider target reports
+    ///    strictly more — never a different stream with the same length.
+    /// 2. **The abort.** With a threshold, a file whose *entry parse*
+    ///    errors reports the same stream at every target from `Parsed` up:
+    ///    the syntax errors, and nothing the later passes made of the
+    ///    wreckage.
+    /// 3. **The stage before parsing.** `Target::Tokens` never reports a
+    ///    parse diagnostic, threshold or not — it plans no parse, so
+    ///    there is nothing to abort and nothing to report.
     #[test]
-    fn query_diagnostics_reproduces_the_run_across_the_matrix() {
+    fn query_diagnostics_slices_aborts_and_stops_before_the_parse() {
+        // Parses; earns a redeclaration at resolution and a division by
+        // zero after it.
         let clean = "var a = 1;\nvar a = 2;\nvar z = 1 / 0;\nreturn a;\n";
-        let broken = "var a = 1;\nvar a = 2;\nvar bad = \u{a3};\n";
+        // Does not parse: the entry's own parse reports.
+        let broken = "var a = 1;\nfunction f( {\n";
 
         let targets = [
             Target::Tokens,
@@ -1350,13 +1221,16 @@ mod tests {
         let mut compared = 0;
         for (label, src) in [("clean", clean), ("broken", broken)] {
             for stop in [Some(Severity::Error), None] {
+                let mut streams = Vec::new();
                 for target in targets {
                     let dir = scratch(&format!("matrix-{label}-{}-{target:?}", stop.is_some()));
                     std::fs::write(dir.join("src/main.leek"), src).expect("entry");
                     let project = project_at(dir.clone(), "");
 
-                    let mut params = leek_pipeline::RecipeParams::default();
-                    params.stop_on_diagnostics = stop;
+                    let params = crate::CompileParams {
+                        stop_on_diagnostics: stop,
+                        ..crate::CompileParams::default()
+                    };
                     let session = Session::new(
                         &project,
                         DriverConfig {
@@ -1370,70 +1244,113 @@ mod tests {
                     .expect("session");
                     let compiled = session.compile_entry().expect("compile");
 
-                    // Compared on `(code, span)`, not code alone. The span
+                    // Kept as `(code, span)`, not code alone. The span
                     // carries the `SourceId`, which is what `Sources` and
                     // `for_source` key on to attribute a diagnostic to a
                     // file — two streams with the same codes and different
                     // ids render against the wrong file or vanish, and a
                     // code-only comparison cannot see it.
-                    let from_run: Vec<_> = compiled
+                    let stream: Vec<_> = compiled
                         .diagnostics()
                         .iter()
                         .map(|d| (d.code.id(), d.span))
                         .collect();
-                    let queried = compiled.query_diagnostics().expect("session compilation");
-                    let from_query: Vec<_> =
-                        queried.iter().map(|d| (d.code.id(), d.span)).collect();
-
                     std::fs::remove_dir_all(&dir).ok();
-
-                    assert_eq!(
-                        from_run, from_query,
-                        "{label} source, stop={stop:?}, {target:?}"
-                    );
+                    streams.push((target, stream));
                     compared += 1;
+                }
+
+                let at = |t: Target| {
+                    &streams
+                        .iter()
+                        .find(|(x, _)| *x == t)
+                        .expect("every target was compiled")
+                        .1
+                };
+
+                // Rule 3, at both thresholds and on both fixtures.
+                assert!(
+                    at(Target::Tokens).iter().all(|(code, _)| *code != "E0100"),
+                    "{label}/stop={stop:?}: a tokens target reported a parse \
+                     diagnostic: {:?}",
+                    at(Target::Tokens)
+                );
+
+                if label == "broken" && stop.is_some() {
+                    // Rule 2: the abort collapses every target from
+                    // `Parsed` up onto one stream.
+                    for target in [Target::Resolved, Target::Hir, Target::Linted] {
+                        assert_eq!(
+                            at(target),
+                            at(Target::Parsed),
+                            "{target:?} must stop where the parse did"
+                        );
+                    }
+                    assert!(
+                        !at(Target::Parsed).is_empty(),
+                        "the fixture must fail to parse for this to mean anything"
+                    );
+                } else {
+                    // Rule 1: nothing aborted, so each stage's stream is
+                    // a prefix of the next one's.
+                    {
+                        for pair in [
+                            (Target::Tokens, Target::Parsed),
+                            (Target::Parsed, Target::Resolved),
+                            (Target::Resolved, Target::TypeChecked),
+                            (Target::TypeChecked, Target::Hir),
+                        ] {
+                            assert!(
+                                at(pair.1).starts_with(at(pair.0)),
+                                "{label}/stop={stop:?}: {:?} is not a prefix of {:?}",
+                                pair.0,
+                                pair.1
+                            );
+                        }
+                        // And non-trivially so, on the fixture that gets
+                        // past its parse: five equal empty lists would
+                        // satisfy the prefix rule too.
+                        if label == "clean" {
+                            assert!(
+                                at(Target::Resolved).len() > at(Target::Parsed).len(),
+                                "resolution adds the redeclaration: {:?}",
+                                at(Target::Resolved)
+                            );
+                        }
+                    }
                 }
             }
         }
 
-        assert_eq!(compared, 24, "every combination was actually compared");
+        assert_eq!(compared, 24, "every combination was actually compiled");
     }
 
-    /// A file that fails to parse stops the run's later steps, and does
-    /// not stop the queries.
+    /// A failed parse stops the stream there, and the whole-program
+    /// query it is sliced from carries on regardless.
     ///
-    /// The second divergence between a `Run`'s stream and a query's, and
-    /// the one still open. Slicing to a stage handles the first —
-    /// `every_targets_run_matches_its_stage` — but not this.
-    ///
-    /// The mechanism, precisely (an earlier version of this comment, and
-    /// the commit that introduced it, blamed a missing `AstArtifact`;
-    /// that was wrong — `Parse` always inserts one, because the root cast
-    /// cannot fail). `leek_parser::pipeline::Parse` is the single
-    /// production step implementing `RecipeStepStopOnError`, so when
-    /// `RecipeParams::stop_on_diagnostics` is set it is wrapped in
-    /// `StopOnDiagnostics::abort`. That records the diagnostic count
-    /// before the step, and if the *parse itself* adds one at or above
-    /// the threshold it calls `Context::abort`, which makes
-    /// `Pipeline::drive` break before any later step runs. Nothing
-    /// no-ops; the pipeline simply stops.
+    /// The rule `query_diagnostics` implements, and where it came from:
+    /// `leek_parser::pipeline::Parse` was the single production step
+    /// implementing `RecipeStepStopOnError`, so with
+    /// `CompileParams::stop_on_diagnostics` set it was wrapped in a
+    /// `StopOnDiagnostics::abort` that stopped the pipeline before any
+    /// later step when the *parse itself* reported at or above the
+    /// threshold. (An earlier version of this comment blamed a missing
+    /// AST; that was wrong — the parse always produced one, because the
+    /// root cast cannot fail.)
     ///
     /// The tracked passes have no such notion. They work off the green
     /// tree, which always exists, so they carry on and report against a
-    /// tree the parser has already given up on.
+    /// tree the parser has already given up on. So the rule has to be
+    /// applied on top of them, which is what this pins: the compilation
+    /// stops, the query behind it does not.
     ///
-    /// `a_permissive_run_does_not_stop_and_so_agrees` is the other half
-    /// of that claim: drop the threshold and the run keeps going, and the
-    /// two streams line up again. That is what makes this a statement
-    /// about the abort rather than about parse errors in general.
-    ///
-    /// Not obviously the wrong answer — more is arguably better than
-    /// silence — but it is a *different* answer, and deciding which one
-    /// `miku` should print is a behaviour call, not a refactor. So this
-    /// records the gap rather than papering over it, and `diagnostics()`
-    /// stays on the run until it is closed.
+    /// `a_permissive_compilation_does_not_stop_and_so_agrees` is the
+    /// other half: drop the threshold and the two line up again, which is
+    /// what makes this a statement about the abort rather than about
+    /// parse errors in general. It is also why the LSP never saw any of
+    /// it — `lsp_params` is permissive.
     #[test]
-    fn a_failed_parse_stops_the_run_but_not_the_queries() {
+    fn a_failed_parse_stops_the_stream_but_not_the_query() {
         let dir = scratch("failed-parse");
         std::fs::write(
             dir.join("src/main.leek"),
@@ -1444,7 +1361,7 @@ mod tests {
         let session = Session::new(&project, quiet(Target::Resolved)).expect("session");
         let compiled = session.compile_entry().expect("compile");
 
-        let from_run: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
         let (db, files) = session.db();
         let (_, file) = compiled.db_handle().expect("session database");
         let sliced = leek_db::queries::program_diagnostics_upto(
@@ -1459,31 +1376,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert!(
-            !from_run.contains(&"E0202"),
-            "the run gave up before resolution: {from_run:?}"
+            !reported.contains(&"E0202"),
+            "the compilation stopped before resolution: {reported:?}"
         );
         assert!(
             from_query.contains(&"E0202"),
             "the query resolved anyway: {from_query:?}"
         );
         assert!(
-            from_query.len() > from_run.len(),
-            "and so reports strictly more: run={from_run:?} query={from_query:?}"
+            from_query.len() > reported.len(),
+            "and so reports strictly more: reported={reported:?} query={from_query:?}"
         );
     }
 
-    /// With no stop-on-error threshold the run does not abort, and its
-    /// stream matches the query's again — on the same fixture that
-    /// diverges under the default params.
+    /// With no threshold nothing aborts, and the compilation's stream is
+    /// the query's again — on the same fixture that diverges under the
+    /// default params.
     ///
-    /// The discriminating half of `a_failed_parse_stops_the_run_but_not_the_queries`.
-    /// If the divergence were about the parse failing, it would persist
-    /// here; it does not, which places the cause in the `StopOnDiagnostics`
-    /// wrapper and nowhere else. It also explains why the LSP never hit
-    /// this: `lsp_params` is `RecipeParams::permissive`, so its runs have
-    /// always behaved the way the queries do.
+    /// The discriminating half of
+    /// `a_failed_parse_stops_the_stream_but_not_the_query`. If the
+    /// divergence were about the parse failing, it would persist here; it
+    /// does not, which places the cause in the threshold and nowhere
+    /// else. It also explains why the LSP never hit it: `lsp_params` is
+    /// `CompileParams::permissive`.
     #[test]
-    fn a_permissive_run_does_not_stop_and_so_agrees() {
+    fn a_permissive_compilation_does_not_stop_and_so_agrees() {
         let dir = scratch("permissive-parse");
         std::fs::write(
             dir.join("src/main.leek"),
@@ -1495,13 +1412,13 @@ mod tests {
             target: Target::Resolved,
             color: ColorWhen::Never,
             format: MessageFormat::Human,
-            params: leek_pipeline::RecipeParams::permissive(),
+            params: crate::CompileParams::permissive(),
             ..DriverConfig::default()
         };
         let session = Session::new(&project, config).expect("session");
         let compiled = session.compile_entry().expect("compile");
 
-        let from_run: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
         let (db, files) = session.db();
         let (_, file) = compiled.db_handle().expect("session database");
         let sliced = leek_db::queries::program_diagnostics_upto(
@@ -1516,36 +1433,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert!(
-            from_run.contains(&"E0202"),
-            "no threshold, so resolution still ran: {from_run:?}"
+            reported.contains(&"E0202"),
+            "no threshold, so resolution still ran: {reported:?}"
         );
         assert_eq!(
-            from_run, from_query,
+            reported, from_query,
             "and the streams agree again once nothing aborts"
         );
     }
 
-    /// A `Run`'s diagnostics are whatever the steps it *ran* reported, so
-    /// the stream grows with the target. The tracked program stream has no
-    /// such notion: it always reports the whole frontend, and
-    /// `program_diagnostics_with_lints` always appends lints.
+    /// A compilation's diagnostics grow with its target.
     ///
-    /// This is the constraint on replacing [`Compilation::diagnostics`],
-    /// and it is easy to miss because
-    /// `the_program_stream_reports_what_the_pipeline_reported` passes:
-    /// that test compiles at `Target::Linted`, the one target where the
-    /// two agree. Below it they diverge, and in the direction that hurts
-    /// — the query reports *more*. Swapping it in unconditionally would
-    /// make `miku build` (`Target::Hir`) start emitting lint findings it
-    /// has never emitted, and `leekc --emit ast` (`Target::Parsed`) start
-    /// reporting type errors, which is a behaviour change wearing a
-    /// refactor's clothes.
-    ///
-    /// So a replacement needs the stream sliced to the target. Until that
-    /// exists, this test is the reason `diagnostics()` still comes from
-    /// the run.
+    /// `program_diagnostics` has no such notion: it always reports the
+    /// whole frontend, and `program_diagnostics_with_lints` always
+    /// appends lints. Serving `diagnostics()` from either unconditionally
+    /// would make `miku build` (`Target::Hir`) emit lint findings it has
+    /// never emitted, and `leekc --emit cst` (`Target::Parsed`) report
+    /// type errors — a behaviour change wearing a refactor's clothes.
+    /// `Stage` is what keeps them apart, and this is the test that says
+    /// the distinction is real rather than theoretical.
     #[test]
-    fn the_runs_diagnostics_grow_with_the_target() {
+    fn a_compilations_diagnostics_grow_with_its_target() {
         let dir = scratch("target-dependence");
         std::fs::write(
             dir.join("src/main.leek"),
@@ -1580,22 +1488,18 @@ mod tests {
         );
     }
 
-    /// The tracked whole-program lowering answers exactly what the
-    /// planned pipeline put in `HirArtifact`.
+    /// [`Compilation::hir`] is the whole closure's tree, not the entry's.
     ///
-    /// This is the gate on moving [`Compilation::hir`] — and with it
-    /// `check`, `run`, `build`, `test` and `leekc` — off the `Run`. Every
-    /// one of those reads the HIR and nothing else of the pipeline's, so
-    /// once the two agree the switch is mechanical; until they do, it is
-    /// a guess. The same check is what made the LSP's accessor rewrites
-    /// provably behaviour-preserving rather than hopefully so.
+    /// `check`, `run`, `build`, `test` and `leekc` all read it and
+    /// nothing else, so a per-file answer here would silently drop every
+    /// definition an include provides from every backend at once.
     ///
     /// Compared on the lowered tree itself, not a summary of it: two
     /// lowerings that agree about function names and disagree about a
     /// body would pass any count-based assertion and break every
     /// backend.
     #[test]
-    fn the_program_query_lowers_what_the_pipeline_lowered() {
+    fn the_hir_accessor_lowers_the_whole_closure() {
         let dir = scratch("hir-parity");
         std::fs::write(
             dir.join("src/main.leek"),
@@ -1612,7 +1516,7 @@ mod tests {
         let session = Session::new(&project, quiet(Target::Hir)).expect("session");
         let compiled = session.compile_entry().expect("compile");
 
-        let from_pipeline = compiled.hir().expect("the pipeline lowered").clone();
+        let from_accessor = compiled.hir().expect("lowered").clone();
         let (db, files) = session.db();
         let (_, file) = compiled.db_handle().expect("session database");
         let from_query = leek_db::queries::lower_program(
@@ -1620,7 +1524,7 @@ mod tests {
             files,
             file,
             leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
-            leek_pipeline::OptLevel::O0,
+            leek_query::OptLevel::O0,
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1629,48 +1533,38 @@ mod tests {
         // have lowered something, and specifically something from the
         // *include* — that is the part a per-file query would miss.
         assert!(
-            from_pipeline
+            from_accessor
                 .defs
                 .iter()
                 .any(|def| matches!(def, leek_hir::Def::Function(f) if f.name == "helper")),
-            "the closure's function reached the pipeline's HIR: {:?}",
-            from_pipeline.defs.len()
+            "the closure's function reached the HIR: {:?}",
+            from_accessor.defs.len()
         );
         assert_eq!(
-            from_pipeline.defs.len(),
+            from_accessor.defs.len(),
             from_query.hir.defs.len(),
             "same number of definitions"
         );
         assert_eq!(
-            from_pipeline, *from_query.hir,
-            "the query and the pipeline lower the same tree"
+            from_accessor, *from_query.hir,
+            "the accessor is the whole-program query"
         );
     }
 
-    /// The tracked program stream is byte-for-byte what the planned
-    /// pipeline reported, lints included and in the same order.
+    /// At `Target::Linted`, a compilation's stream is the lint-aware
+    /// program stream — lints included, in the same order, across the
+    /// whole closure.
     ///
-    /// The other half of the gate on moving [`Compilation`] off the
-    /// `Run`. `hir` alone is not enough: a `Run` planned for a late
-    /// target has already computed and cloned everything on the way
-    /// there, so serving `hir` from a query while `diagnostics` still
-    /// came from the run would pay for both. A consumer moves wholly or
-    /// not at all, which means both halves have to agree first.
+    /// `Target::Linted` is what `check`, `lint`, `fix` and `test`
+    /// compile with, so this is the stream a user of `miku` actually
+    /// sees. Order is part of the claim, not incidental:
+    /// `leek_lsp::handlers::code_action` matches diagnostics a client
+    /// hands back against the ones the server published.
     ///
-    /// **Only at this target.** The two streams agree at
-    /// `Target::Linted` and nowhere below it — see
-    /// `the_runs_diagnostics_grow_with_the_target`, which is the
-    /// constraint this test does *not* discharge.
-    ///
-    /// Order is part of the claim, not incidental. `leek-db` argues its
-    /// stream is *indistinguishable* from the pipeline's after
-    /// `for_source` filtering rather than identical to it — the include
-    /// failures are one memoized block instead of interleaved per file.
-    /// This fixture is where that argument is checked against the real
-    /// thing rather than reasoned about: an error in the entry, lints in
+    /// The fixture reports across the closure on purpose — an error in
     /// the entry, and a lint that exists only inside the include.
     #[test]
-    fn the_program_stream_reports_what_the_pipeline_reported() {
+    fn a_linted_compilation_reports_the_lint_aware_program_stream() {
         let dir = scratch("diagnostic-parity");
         std::fs::write(
             dir.join("src/main.leek"),
@@ -1687,7 +1581,7 @@ mod tests {
         let session = Session::new(&project, quiet(Target::Linted)).expect("session");
         let compiled = session.compile_entry().expect("compile");
 
-        let from_pipeline: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
         let (db, files) = session.db();
         let (_, file) = compiled.db_handle().expect("session database");
         let from_query = leek_lint::pipeline::program_diagnostics_with_lints(
@@ -1704,13 +1598,10 @@ mod tests {
         // Not vacuous, and not only the entry's: the redeclaration is the
         // entry's, `L0016` exists only inside the include.
         assert!(
-            from_pipeline.contains(&"E0202") && from_pipeline.contains(&"L0016"),
-            "fixture reports across the closure: {from_pipeline:?}"
+            reported.contains(&"E0202") && reported.contains(&"L0016"),
+            "fixture reports across the closure: {reported:?}"
         );
-        assert_eq!(
-            from_pipeline, from_query_codes,
-            "the query and the pipeline report the same stream, in the same order"
-        );
+        assert_eq!(reported, from_query_codes, "same stream, same order");
         assert_eq!(
             compiled.diagnostics().len(),
             from_query.len(),

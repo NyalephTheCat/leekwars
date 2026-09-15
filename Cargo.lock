@@ -1045,9 +1045,9 @@ dependencies = [
  "leek-db",
  "leek-diagnostics",
  "leek-hir",
- "leek-pipeline",
  "leek-prelude",
  "leek-project",
+ "leek-query",
  "leek-session",
  "leek-span",
  "leek-syntax",
@@ -1098,8 +1098,8 @@ dependencies = [
  "leek-hir",
  "leek-lexer",
  "leek-parser",
- "leek-pipeline",
  "leek-project",
+ "leek-query",
  "leek-resolver",
  "leek-runtime",
  "leek-span",
@@ -1156,9 +1156,9 @@ dependencies = [
  "leek-lexer",
  "leek-mir",
  "leek-parser",
- "leek-pipeline",
  "leek-prelude",
  "leek-project",
+ "leek-query",
  "leek-resolver",
  "leek-span",
  "leek-syntax",
@@ -1190,7 +1190,7 @@ dependencies = [
  "leek-lexer",
  "leek-manifest",
  "leek-parser",
- "leek-pipeline",
+ "leek-query",
  "leek-span",
  "leek-syntax",
  "rowan",
@@ -1230,8 +1230,8 @@ dependencies = [
  "leek-diagnostics",
  "leek-environment",
  "leek-parser",
- "leek-pipeline",
  "leek-prelude",
+ "leek-query",
  "leek-resolver",
  "leek-span",
  "leek-syntax",
@@ -1258,7 +1258,7 @@ name = "leek-lexer"
 version = "0.0.1"
 dependencies = [
  "leek-diagnostics",
- "leek-pipeline",
+ "leek-query",
  "leek-span",
  "leek-syntax",
  "salsa",
@@ -1272,8 +1272,8 @@ dependencies = [
  "leek-diagnostics",
  "leek-hir",
  "leek-parser",
- "leek-pipeline",
  "leek-project",
+ "leek-query",
  "leek-resolver",
  "leek-rewrite",
  "leek-span",
@@ -1294,7 +1294,8 @@ dependencies = [
  "leek-lexer",
  "leek-lint",
  "leek-parser",
- "leek-pipeline",
+ "leek-project",
+ "leek-query",
  "leek-resolver",
  "leek-rewrite",
  "leek-session",
@@ -1354,7 +1355,7 @@ dependencies = [
  "leek-hir",
  "leek-lexer",
  "leek-parser",
- "leek-pipeline",
+ "leek-query",
  "leek-span",
  "leek-syntax",
  "leek-types",
@@ -1369,23 +1370,10 @@ dependencies = [
  "insta",
  "leek-diagnostics",
  "leek-lexer",
- "leek-pipeline",
+ "leek-query",
  "leek-span",
  "leek-syntax",
  "rowan",
- "salsa",
-]
-
-[[package]]
-name = "leek-pipeline"
-version = "0.0.1"
-dependencies = [
- "leek-diagnostics",
- "leek-hir",
- "leek-mir",
- "leek-project",
- "leek-session",
- "leek-span",
  "salsa",
 ]
 
@@ -1407,6 +1395,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "leek-query"
+version = "0.0.1"
+dependencies = [
+ "leek-diagnostics",
+ "leek-project",
+ "leek-span",
+ "salsa",
+]
+
+[[package]]
 name = "leek-resolver"
 version = "0.0.1"
 dependencies = [
@@ -1417,8 +1415,8 @@ dependencies = [
  "leek-hir",
  "leek-lexer",
  "leek-parser",
- "leek-pipeline",
  "leek-project",
+ "leek-query",
  "leek-span",
  "leek-syntax",
  "leek-types",
@@ -1473,16 +1471,15 @@ dependencies = [
  "leek-db",
  "leek-diagnostics",
  "leek-environment",
- "leek-fmt",
  "leek-hir",
  "leek-lexer",
  "leek-lint",
  "leek-manifest",
  "leek-mir",
  "leek-parser",
- "leek-pipeline",
  "leek-prelude",
  "leek-project",
+ "leek-query",
  "leek-resolver",
  "leek-span",
  "leek-syntax",
@@ -1501,7 +1498,7 @@ name = "leek-syntax"
 version = "0.0.1"
 dependencies = [
  "leek-diagnostics",
- "leek-pipeline",
+ "leek-query",
  "leek-span",
  "rowan",
  "salsa",
@@ -1573,8 +1570,8 @@ dependencies = [
  "leek-diagnostics",
  "leek-lexer",
  "leek-parser",
- "leek-pipeline",
  "leek-prelude",
+ "leek-query",
  "leek-resolver",
  "leek-span",
  "leek-syntax",
@@ -1619,8 +1616,8 @@ dependencies = [
  "leek-manifest",
  "leek-mir",
  "leek-parser",
- "leek-pipeline",
  "leek-project",
+ "leek-query",
  "leek-resolver",
  "leek-session",
  "leek-span",
@@ -1743,8 +1740,8 @@ dependencies = [
  "leek-migrate",
  "leek-mir",
  "leek-parser",
- "leek-pipeline",
  "leek-project",
+ "leek-query",
  "leek-rewrite",
  "leek-scenario",
  "leek-session",

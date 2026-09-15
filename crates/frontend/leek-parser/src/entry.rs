@@ -1,9 +1,10 @@
 //! Pure parse entry points: text and options in, [`ParsedFile`] out.
 //!
-//! Nothing here reads a pipeline [`Context`](leek_pipeline::Context) or —
-//! given [`parse_file_with`] — the environment, so a driver that already
-//! knows its [`FeatureFlags`](leek_span::FeatureFlags) can parse a file
-//! without standing up a [`Step`](leek_pipeline::Step) first.
+//! Nothing here reads a database or — given [`parse_file_with`] — the
+//! environment, so a driver that already knows its
+//! [`FeatureFlags`](leek_span::FeatureFlags) can parse a file without
+//! standing one up. The memoized door onto the same grammar is
+//! [`parse_query`](crate::pipeline::parse_query).
 //!
 //! # Where lex diagnostics are reported
 //!

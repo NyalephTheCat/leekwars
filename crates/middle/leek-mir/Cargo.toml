@@ -12,7 +12,7 @@ leek-visit       = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-span        = { workspace = true }
 leek-types       = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 salsa            = { workspace = true }
 
 [dev-dependencies]

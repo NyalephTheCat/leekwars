@@ -29,9 +29,7 @@ pub use leek_manifest::{
     BraceStyle, ControlBraces, FormatOptions, IndentStyle, LineEnding, OperatorPosition,
     QuoteStyle, Semicolons, TrailingComma,
 };
-pub use pipeline::{Fmt, FormattedArtifact};
-
-pub use pipeline::{FormatQueryResult, format_query};
+pub use pipeline::{FormatConfig, FormatQueryResult, format_query};
 
 use leek_span::SourceId;
 use leek_syntax::language::GreenNode;

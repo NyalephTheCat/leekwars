@@ -122,7 +122,7 @@ pub(crate) fn workspace_occurrences(
 pub(crate) fn occurrences_in_file(
     ws: &Workspace,
     uri: &lsp::Url,
-    source_file: leek_pipeline::salsa::SourceFile,
+    source_file: leek_query::salsa::SourceFile,
     name: &str,
     kind: SymbolKind,
 ) -> Vec<Occurrence> {

@@ -1,7 +1,7 @@
 //! Backend-agnostic MIR optimization passes.
 //!
-//! These run after lowering, gated on the recipe's
-//! [`OptLevel`](leek_pipeline::OptLevel), and only ever shrink a function's
+//! These run after lowering, gated on the caller's
+//! [`OptLevel`](leek_query::OptLevel), and only ever shrink a function's
 //! CFG — they never change its observable behavior. Two passes, run per
 //! function:
 //!

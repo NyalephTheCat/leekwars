@@ -1,30 +1,29 @@
 //! The query façade: one salsa database, one import path for every
 //! tracked query.
 //!
-//! Today the database lives in [`leek_pipeline::salsa`] and each tracked
-//! query lives in the pass crate that computes it. A caller that wants to
-//! run the memoized frontend has to know all of that — which crate owns
+//! The database lives in [`leek_query::salsa`], down in `core`, because
+//! every pass crate writes its tracked queries against it; each query
+//! lives in the pass crate that computes it. A caller that wanted the
+//! memoized frontend would have to know all of that — which crate owns
 //! which query. This crate is the single place that knows it instead: it
 //! re-exports the database items here at the root and the queries in
 //! [`queries`], so a consumer writes `leek_db::{Db, LeekDb, SourceFile}`
 //! and `leek_db::queries::*` and nothing else.
 //!
-//! ## Target shape
+//! ## The shape
 //!
-//! - **`leek-db` owns the only salsa database.** One `Db` trait, one
-//!   `LeekDb`, one set of inputs. Nothing else in the workspace defines a
-//!   salsa database, so there is exactly one memo table per query.
-//! - **Pass crates export pure functions.** `lex`, `parse`, `resolve`,
-//!   `lower_hir`, … take their inputs by value and return their output;
-//!   they know nothing about caching. The tracked wrappers around them
-//!   move here over the rest of this epic, which is why every re-export
-//!   below is a re-export and not a new query — moving a query later must
-//!   not have to reconcile two memo tables.
-//! - **Tools own their own tracked queries**, written over
-//!   [`Db`] and composed from what [`queries`] exposes. That is where
-//!   `leek-fmt`'s `format_query` stays: `crates/db` may not depend on
-//!   `crates/tools`, so a tool's query belongs in the tool, depending
-//!   *down* on this crate.
+//! - **One salsa database.** One `Db` trait, one `LeekDb`, one set of
+//!   inputs. Nothing else in the workspace defines a salsa database, so
+//!   there is exactly one memo table per query — which is why every
+//!   re-export below is a re-export and never a wrapper.
+//! - **Pass crates export pure functions** (`lex`, `parse`, `resolve`,
+//!   `lower_hir`, …) plus one thin tracked query each, over the inputs
+//!   the database holds.
+//! - **Tools own their own tracked queries**, written over [`Db`] and
+//!   composed from what [`queries`] exposes. That is where
+//!   `leek-fmt`'s `format_query` and `leek-lint`'s `lint_query` stay:
+//!   `crates/db` may not depend on `crates/tools`, so a tool's query
+//!   belongs in the tool, depending *down* on this crate.
 //!
 //! Most of what [`queries`] exposes is a re-export of a query that
 //! already exists somewhere else. The exceptions are [`include`],
@@ -41,7 +40,7 @@ pub mod queries;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use leek_pipeline::salsa::{Db, LeekDb, ProgramClasses, SourceFile, WorkspaceFiles};
+pub use leek_query::salsa::{Db, LeekDb, ProgramClasses, SourceFile, WorkspaceFiles};
 
 /// The salsa input for a text a driver already holds, keyed at `path`.
 ///
@@ -49,8 +48,7 @@ pub use leek_pipeline::salsa::{Db, LeekDb, ProgramClasses, SourceFile, Workspace
 /// compiles under" to "a file the queries can answer about". Every field
 /// of [`SourceFile`] comes from the [`Input`](leek_project::Input) except
 /// `seed_library`, which is read here from the process-global
-/// [`leek_types::seed_library_enabled`] — the same place the pipeline's
-/// type-check step read it, and for the same reason: the entry boundary is
+/// [`leek_types::seed_library_enabled`] — the entry boundary is
 /// where a global belongs, so that every query below it sees it as an
 /// ordinary input it can be invalidated by.
 ///
@@ -74,7 +72,7 @@ pub fn input_file(db: &dyn Db, path: String, input: &leek_project::Input) -> Sou
 
 #[cfg(test)]
 mod tests {
-    use leek_pipeline::OptLevel;
+    use leek_query::OptLevel;
     use leek_syntax::Version;
 
     use super::{LeekDb, ProgramClasses, SourceFile, WorkspaceFiles, queries};

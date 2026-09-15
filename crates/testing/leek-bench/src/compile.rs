@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use leek_hir::HirFile;
-use leek_pipeline::TimingSink;
 use leek_project::Input;
+use leek_query::TimingSink;
 use leek_session::OptLevel;
 
 /// HIR plus per-stage prepare timings.

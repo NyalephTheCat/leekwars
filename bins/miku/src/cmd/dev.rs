@@ -70,9 +70,9 @@ fn run_tool(script: &str, extra_args: &[&str], quiet: bool) -> Result<ExitCode> 
 }
 
 fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
-    use leek_pipeline::TimingSink;
     use leek_project::Project;
-    use leek_session::{DriverConfig, RecipeParams, Session, Target};
+    use leek_query::TimingSink;
+    use leek_session::{CompileParams, DriverConfig, Session, Target};
     use leek_span::SourceId;
 
     let path = cmd.path.unwrap_or_else(|| {
@@ -97,7 +97,7 @@ fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
             // Permissive: this is a stopwatch, so a file that does not
             // parse should still be timed through every stage rather than
             // stopping at the first error.
-            params: RecipeParams::permissive(),
+            params: CompileParams::permissive(),
             timing: Some(sink.clone()),
             ..DriverConfig::default()
         },

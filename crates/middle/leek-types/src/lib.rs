@@ -36,7 +36,7 @@
 //!   `check_*` / `infer_*` methods.
 //! - [`index`] — the LSP-facing outputs: [`TypeTable`] (span → inferred
 //!   type, for hover) and [`InferredSignatures`].
-//! - [`pipeline`] — the [`Step`](leek_pipeline::Step) / salsa integration.
+//! - [`pipeline`] — the tracked [`typecheck_query`](pipeline::typecheck_query).
 //!
 //! Public entry: [`check`].
 
@@ -163,7 +163,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// are assembled: `type_options` on the direct pipeline path, and the
 /// LSP's salsa-input construction on the memoized one. No salsa-tracked
 /// query reads it any more — the tracked path takes the value off the
-/// [`SourceFile`](leek_pipeline::salsa::SourceFile) input — so flipping
+/// [`SourceFile`](leek_query::salsa::SourceFile) input — so flipping
 /// it can no longer leave a memo computed under the old setting alive.
 /// Removing the global entirely (threading the setting through the
 /// pipeline options) is R2's job — see issue #98.

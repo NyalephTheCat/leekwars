@@ -20,14 +20,11 @@
 //!
 //! ### Pure passes, untouched
 //!
-//! Each body assembles `FileUnit`s / `LowerUnit`s and calls the pure
-//! multi-file function the include-aware pipeline already calls —
+//! Each body assembles `FileUnit`s / `LowerUnit`s and calls the same
+//! pure multi-file function the include-aware front end always called —
 //! [`resolve_collecting_files`], [`check_collecting_files`],
-//! [`lower_files`]. Not a line of the passes changes: the point of this
-//! module is that the *memoization* moves here, not the semantics, so a
-//! run through these queries and a run through
-//! [`ResolveIncludes`](leek_resolver::pipeline::ResolveIncludes) must
-//! produce the same answers.
+//! [`lower_files`]. Not a line of the passes changes: what moved here is
+//! the *memoization*, not the semantics.
 //!
 //! ### What is *not* in these values
 //!
@@ -35,15 +32,15 @@
 //! the per-site [`include_parse_failures`](crate::include::include_parse_failures)
 //! reports are not folded in here. They belong to the graph, are
 //! memoized beside it, and a caller assembling a diagnostic stream
-//! concatenates them with these — exactly as the pipeline does today,
-//! where `ResolveIncludes` emits them before `Resolve` runs.
+//! concatenates them ahead of these. [`crate::diagnostics`] is that
+//! caller, and states the whole order.
 
 use std::path::{Path, PathBuf};
 
 use leek_hir::lower::{LowerUnit, PRELUDE_UNIT_PATH, finish, lower_files, prelude_tree};
 use leek_hir::pipeline::LowerHirResult;
 use leek_parser::ast::{AstNode, SourceFile as Ast};
-use leek_pipeline::OptLevel;
+use leek_query::OptLevel;
 use leek_resolver::FileUnit;
 use leek_resolver::pipeline::ResolveArtifact;
 use leek_span::{FeatureFlags, SourceId};
@@ -55,8 +52,7 @@ use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 
 /// Resolve every file `entry` reaches as one program.
 ///
-/// The pure [`resolve_collecting_files`](leek_resolver::resolve_collecting_files)
-/// behind [`ResolveIncludes`](leek_resolver::pipeline::ResolveIncludes),
+/// The pure [`resolve_collecting_files`](leek_resolver::resolve_collecting_files),
 /// over parses this database already has. Re-runs when the closure's
 /// shape, its class set, or any reached file's green tree changes — an
 /// edit that leaves one leaf's tree equal re-resolves nothing.
@@ -245,11 +241,9 @@ fn file_units(parsed: &[ProgramFile]) -> Vec<FileUnit<'_>> {
 ///
 /// The include-aware counterpart of
 /// [`lower_mir_query`](leek_mir::pipeline::lower_mir_query), which is keyed
-/// on one file and so lowers the entry alone. `leek_mir::pipeline`'s
-/// `run_lower_mir` carries a note about exactly that (#428): a memoized
-/// `Target::Mir` pipeline built with includes would lower MIR without them,
-/// dormant only because nothing asks a memoized run for that target. This
-/// is the answer it should have been asking for.
+/// on one file and so lowers the entry alone. Lowering a project through
+/// the per-file query would silently drop every function an include
+/// provides (#428), which is what this exists to prevent.
 ///
 /// Keyed on `opt` for the reason [`lower_program`] is: an optimized program
 /// is a different program, and keying it means a codegen driver reads its

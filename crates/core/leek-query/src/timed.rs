@@ -1,23 +1,18 @@
-//! [`TimedBox`] — wrap a boxed [`Step`] to record its run duration.
+//! [`TimingSink`] — where a driver records how long a stage took.
 //!
-//! Composes orthogonally over the rest of the pipeline. No changes are
-//! required in [`Pipeline`](crate::Pipeline), [`Step`] or [`Context`]: hand a
-//! [`TimingSink`] to [`RecipePlan::build_with`](crate::RecipePlan::build_with)
-//! and every planned step pushes a `(name, duration)` entry into the sink,
-//! which the caller reads after the run.
+//! A driver that wants timings hands one to whatever computes the stages
+//! (`leek_session::DriverConfig::timing`) and reads the entries back
+//! afterwards. Nothing here knows what a stage *is*.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::context::Context;
-use crate::pipeline::{Step, StepError};
-
 /// Recorded duration entry.
 ///
 /// `step` names whatever was measured. It used to be a pipeline step's
-/// `Step::name`; a session now records the *stage* it asked the database
-/// for (`hir`, `diagnostics`, …), because there are no steps to time once
-/// a compilation answers from queries.
+/// name; a session records the *stage* it asked the database for
+/// (`hir`, `diagnostics`, …), because there are no steps to time once a
+/// compilation answers from queries.
 ///
 /// Salsa cannot supply this on its own, which is worth recording since the
 /// epic's plan was to make timing "a salsa event hook". It fires
@@ -44,12 +39,11 @@ impl TimingSink {
     }
 }
 
-/// Collector of step timings, shareable between many [`TimedBox`]
-/// wrappers. Each `TimedBox` holding a clone of the sink appends its
-/// entry on every run.
+/// Collector of stage timings, shareable between the places that record
+/// them.
 ///
-/// `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>` so that timing a pipeline does
-/// not cost its caller `Send`. A poisoned lock is recovered with
+/// `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>` so that timing a
+/// compilation does not cost its caller `Send`. A poisoned lock is recovered with
 /// [`PoisonError::into_inner`]: the entries recorded before the panic are
 /// still a valid list of durations, and refusing to hand them back would turn
 /// a panic elsewhere into a second one here.
@@ -79,38 +73,10 @@ impl TimingSink {
             .clear();
     }
 
-    pub(crate) fn push(&self, entry: StepTiming) {
+    fn push(&self, entry: StepTiming) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(entry);
-    }
-}
-
-/// Wrap a boxed step (e.g. from recipe planning) with timing.
-pub struct TimedBox {
-    inner: Box<dyn Step>,
-    sink: TimingSink,
-}
-
-impl TimedBox {
-    pub fn sink(inner: Box<dyn Step>, sink: TimingSink) -> Box<dyn Step> {
-        Box::new(Self { inner, sink })
-    }
-}
-
-impl Step for TimedBox {
-    fn name(&self) -> &'static str {
-        self.inner.name()
-    }
-    fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
-        let start = Instant::now();
-        let res = self.inner.run(cx);
-        let entry = StepTiming {
-            step: self.inner.name(),
-            duration: start.elapsed(),
-        };
-        self.sink.push(entry);
-        res
     }
 }

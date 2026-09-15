@@ -19,7 +19,7 @@
 //!   you. See the [`entry`] module docs for which path reports them.
 //! * **a salsa database** → [`pipeline::parse_query`], for an open buffer
 //!   and an indexed on-disk file alike — both are one
-//!   [`SourceFile`](leek_pipeline::salsa::SourceFile) input.
+//!   [`SourceFile`](leek_query::salsa::SourceFile) input.
 //!
 //! No entry point reads `LEEK_EXPERIMENTAL_*`: the flags are threaded in
 //! as data, read once at a driver's boundary via

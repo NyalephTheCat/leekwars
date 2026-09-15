@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use leek_pipeline::ProjectIndex;
-use leek_pipeline::salsa::{LeekDb, SourceFile, WorkspaceFiles};
+use leek_project::ProjectIndex;
+use leek_query::salsa::{LeekDb, SourceFile, WorkspaceFiles};
 use leek_resolver::folder::Folder;
 use leek_resolver::interner::{PathInterner, SourceInterner};
 use leek_span::LineTable;
@@ -380,7 +380,7 @@ impl Workspace {
     ///
     /// Leaves the derived caches alone: callers registering a whole tree
     /// rebuild them once at the end.
-    fn register_indexed(&mut self, uri: Url, loaded: leek_pipeline::LoadedProjectFile) {
+    fn register_indexed(&mut self, uri: Url, loaded: leek_project::LoadedProjectFile) {
         let arc_text: Arc<str> = Arc::from(loaded.text);
         let flags_bits = leek_span::FeatureFlags::from_env().to_bits();
         let source_id = self.source_id_for(Some(&loaded.path));

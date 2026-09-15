@@ -44,11 +44,12 @@
 //!
 //! ### Layering
 //!
-//! Every query body calls *down* into `leek-resolver`'s pure
-//! functions. `leek-resolver` gains no call back up into this crate:
-//! [`ResolveIncludes`](leek_resolver::pipeline::ResolveIncludes) still
-//! drives the same pure walk it always did, because middle → db is the
-//! breach `cargo xtask check-layers` exists to reject.
+//! Every query body calls *down* into `leek-resolver`'s pure functions,
+//! and `leek-resolver` gains no call back up into this crate: middle →
+//! db is the breach `cargo xtask check-layers` exists to reject. The
+//! walk itself is the same one the include step drove before these
+//! queries existed; what moved here is the memoization, not the
+//! semantics.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

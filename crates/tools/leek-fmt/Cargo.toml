@@ -12,7 +12,7 @@ leek-diagnostics = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-lexer       = { workspace = true }
 leek-parser      = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 leek-manifest    = { workspace = true }
 rowan            = { workspace = true }
 salsa            = { workspace = true }

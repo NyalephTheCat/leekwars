@@ -3,18 +3,17 @@
 use std::path::PathBuf;
 
 use leek_diagnostics::LintLevelError;
-use leek_pipeline::RecipeError;
 use leek_project::ProjectError;
 
-/// Anything that stops a session before its pipeline has run.
+/// Anything that stops a session before it has compiled anything.
 ///
-/// These four failures used to be folded into one `anyhow::Error` — which
+/// These three failures used to be folded into one `anyhow::Error` — which
 /// is what the `leek-session -> anyhow` line in `xtask/error-allowlist.txt`
 /// paid for, and why removing that line is part of this type existing. They
-/// are four variants because the caller can act on the difference: a recipe
-/// that cannot be planned is a toolchain bug, a `[lint]` entry the catalog
-/// does not know is a `Miku.toml` the author can fix, and an unreadable file
-/// is a path they can correct.
+/// are three variants because the caller can act on the difference: a
+/// `[lint]` entry the catalog does not know is a `Miku.toml` the author can
+/// fix, an unreadable file is a path they can correct, and a broken
+/// manifest is neither.
 ///
 /// Deliberately *not* an [`IntoDiagnostic`](leek_diagnostics::IntoDiagnostic):
 /// none of these carries a span of its own. The one half that has a source
@@ -23,9 +22,6 @@ use leek_project::ProjectError;
 /// caller with a reporter can still reach it.
 #[derive(Debug)]
 pub enum SessionError {
-    /// No pipeline could be planned for the configured
-    /// [`Target`](crate::Target).
-    Recipe(RecipeError),
     /// The project could not be discovered, or could not hand over a file.
     Project(ProjectError),
     /// The manifest's `[lint]` table names a code the catalog does not know,
@@ -41,7 +37,6 @@ pub enum SessionError {
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionError::Recipe(e) => write!(f, "planning the compiler pipeline: {e}"),
             SessionError::Project(e) => e.fmt(f),
             SessionError::LintLevel(e) => write!(f, "[lint] in Miku.toml: {e}"),
             SessionError::Io { path, source } => {
@@ -54,17 +49,10 @@ impl std::fmt::Display for SessionError {
 impl std::error::Error for SessionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SessionError::Recipe(e) => Some(e),
             SessionError::Project(e) => Some(e),
             SessionError::LintLevel(e) => Some(e),
             SessionError::Io { source, .. } => Some(source),
         }
-    }
-}
-
-impl From<RecipeError> for SessionError {
-    fn from(err: RecipeError) -> Self {
-        SessionError::Recipe(err)
     }
 }
 
@@ -87,12 +75,6 @@ mod tests {
     #[test]
     fn every_variant_names_what_went_wrong_and_keeps_its_cause() {
         use std::error::Error as _;
-
-        let recipe = SessionError::from(RecipeError {
-            message: "no step produces MirArtifact".to_string(),
-        });
-        assert!(recipe.to_string().contains("no step produces"), "{recipe}");
-        assert!(recipe.source().is_some());
 
         let lint = SessionError::from(LintLevelError::UnknownCode {
             raw: "NOPE9999".to_string(),

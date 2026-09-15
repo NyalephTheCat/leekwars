@@ -78,7 +78,7 @@ pub use crate::program::{
 /// The optimization level a whole-program lowering is keyed on. Owned by
 /// the database substrate, re-exported here so a caller of
 /// [`lower_program`] needs no other import.
-pub use leek_pipeline::OptLevel;
+pub use leek_query::OptLevel;
 /// The per-file include scan's result type, from the pure scan the
 /// graph and the folder-backed walk share.
 pub use leek_resolver::include_graph::{IncludeCall, IncludeEdges, IncludeSite};

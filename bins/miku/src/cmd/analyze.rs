@@ -1,9 +1,9 @@
 //! `miku analyze` — per-function / per-method complexity table.
 //!
-//! Runs the `leek-session` [`Complexity`](leek_session::Target::Complexity)
-//! pipeline over each source file (which lowers to HIR and runs
-//! `leek-complexity`'s [`Analyze`](leek_complexity::pipeline::Analyze)
-//! step) and prints a per-item summary:
+//! Compiles each source file at
+//! [`Target::Complexity`](leek_session::Target::Complexity) — HIR over
+//! the file's whole include closure, measured by `leek-complexity` — and
+//! prints a per-item summary:
 //!
 //! ```text
 //! src/main.leek

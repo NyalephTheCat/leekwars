@@ -30,7 +30,7 @@ fn compile_errors(text: &str, source_id: SourceId, version: Version) -> Vec<Diag
         strict: false,
         flags: leek_span::FeatureFlags::from_env(),
     };
-    // Best-effort, like the permissive recipe this replaced: a parse error
+    // Best-effort, like the permissive pipeline this replaced: a parse error
     // does not stop the later passes, because a migration that breaks name
     // resolution without breaking syntax is exactly what this is looking
     // for. A database per call — the text is pathless, so there is nothing

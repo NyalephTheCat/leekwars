@@ -56,7 +56,7 @@ otherwise `miku` walks up from the current directory), `--library leekwars`
 (load host function libraries, on top of `[project] libraries`),
 `--message-format {human|json|junit}`, `--color`, `--quiet`, and `--verbose`
 (which names the active `[experimental]` features, and e.g. makes
-`miku build` print per-stage pipeline timings).
+`miku build` print per-stage timings).
 
 ## Output layout
 

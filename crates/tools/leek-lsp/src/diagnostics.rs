@@ -3,7 +3,7 @@
 use leek_diagnostics::{Diagnostic as LeekDiagnostic, Severity};
 use leek_lint::LintGroups;
 use leek_lint::pipeline::program_diagnostics_with_lints;
-use leek_pipeline::salsa::SourceFile;
+use leek_query::salsa::SourceFile;
 use leek_span::SourceId;
 use leek_syntax::pipeline::version_from_byte;
 use tower_lsp::lsp_types as lsp;

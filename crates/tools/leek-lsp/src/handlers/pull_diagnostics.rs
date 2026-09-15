@@ -15,7 +15,7 @@
 //! [`guard`], so a panic in analysis blanks a single document's report
 //! instead of unwinding out of the tower-lsp service future.
 
-use leek_pipeline::salsa::SourceFile;
+use leek_query::salsa::SourceFile;
 use tower_lsp::lsp_types as lsp;
 
 use crate::diagnostics::{file_diagnostics, to_lsp};

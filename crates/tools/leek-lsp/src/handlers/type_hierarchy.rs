@@ -8,7 +8,7 @@
 //! reports its parent; `subtypes` finds every class whose parent is it.
 
 use leek_hir::Def;
-use leek_pipeline::salsa::SourceFile;
+use leek_query::salsa::SourceFile;
 use leek_resolver::SymbolKind;
 use leek_span::{LineTable, Span};
 use tower_lsp::lsp_types as lsp;

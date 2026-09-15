@@ -10,7 +10,7 @@ description = "Leekscript linter — rule engine over HIR."
 leek-span        = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-hir         = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 leek-resolver    = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-parser      = { workspace = true }

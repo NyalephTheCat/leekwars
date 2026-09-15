@@ -53,18 +53,20 @@ two workspace members:
   lower layer.
 - **Dev dependencies** may reach at most one rank higher, peers included, so a
   test can use the next layer up.
-- **`leek-pipeline` may depend only on `core`** (dev dependencies excepted).
-  It is the generic orchestration substrate and must not know about any
-  concrete frontend, middle or backend crate.
+- **`leek-query` may depend only on `core`** (dev dependencies excepted). It
+  is the query database itself and must not know about any concrete frontend,
+  middle or backend crate. It sits *in* `core` for that reason: every pass
+  crate writes its tracked queries against it, and an edge from `frontend` to
+  `db` would be the wrong way up the stack.
 - **Every member must live in a layer directory.** A crate anywhere else fails
   the check.
 
 Existing violations are listed, each with a justification, in
-[`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt). Today that
-includes every frontend and middle stage depending on `leek-pipeline` and
-`leek-session` → `leek-fmt`/`leek-lint`. The
-list may only shrink: an entry whose edge no longer breaks the rule fails the
-check, so remove it in the same change that fixes the edge.
+[`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt). Two are left:
+`leek-session` → `leek-lint`, because a linted compilation's diagnostics
+include the findings, and a dev-dependency in `leek-complexity`. The list may
+only shrink: an entry whose edge no longer breaks the rule fails the check, so
+remove it in the same change that fixes the edge.
 
 If you reach for an upward dependency, the abstraction you want usually belongs
 in a lower layer (or behind a trait that a lower layer defines and a higher one
@@ -128,16 +130,15 @@ inputs, every tracked query, and what an edit invalidates — see
      lowers through.
    - `leek-charge` models LeekWars' per-operation "ops" budget; `leek-complexity`
      derives per-function big-O / cost estimates (`miku analyze`).
-3. **db** (`leek-pipeline`, `leek-db`, `leek-session`) is the orchestration
-   layer — a query/recipe system that wires the stages together, caches
-   artifacts, and is what the binaries call into. `leek-pipeline` is the
-   generic engine (see [`pipeline.md`](pipeline.md)); `leek-db` is the query
-   façade, re-exporting the one salsa database and every tracked query under a
-   single import path so a consumer needs no direct dependency on the pass
-   crates; `leek-session` defines the concrete steps (its `recipes` module),
-   ties them to a project/manifest (its `driver` module), and hands a front-end
-   one `Session` per invocation and one `Compilation` per compiled file (its
-   `session` module).
+3. **db** (`leek-db`, `leek-session`) is what the binaries call into.
+   `leek-db` is the query façade, re-exporting the one salsa database and
+   every tracked query under a single import path so a consumer needs no
+   direct dependency on the pass crates, and owning the whole-program queries
+   that span a file's include closure; `leek-session` ties that to a
+   project/manifest and hands a front-end one `Session` per invocation and one
+   `Compilation` per compiled file. The database itself is `leek-query`, down
+   in `core`, because every pass crate writes its queries against it. See
+   [`pipeline.md`](pipeline.md).
 4. **Backends** each take the highest-level IR they can use — only the native
    one goes all the way down to MIR:
    - `leek-backend-native` is a Cranelift JIT/AOT backend (`miku run`, and

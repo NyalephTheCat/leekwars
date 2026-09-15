@@ -160,64 +160,58 @@ The useful consequences of the shape above:
   re-exports, never wraps. A wrapper would be a second memo table over the same
   work.
 
-## The legacy path, and what is left
+## What the query layer replaced
 
-Two orchestration models still coexist, which is what epic
-[R1](https://github.com/NyalephTheCat/leekwars/issues/345) exists to collapse.
+The workspace ran two orchestration models side by side until epic
+[R1](https://github.com/NyalephTheCat/leekwars/issues/345) collapsed them.
+`leek-pipeline` was the older one: a `Step` trait, a `TypeId`-keyed `Context`
+artifact bag, and a `RecipePlan` that ordered steps by climbing each
+artifact's declared `Requires`. Every pass shipped *both* a step and a tracked
+query, and `Step::run` dispatched into the query when `Context::salsa()`
+returned `Some` — so the cache existed but only the LSP reached it.
 
-`leek-pipeline` is the older one: a `Step` over a `TypeId`-keyed artifact bag,
-with stage ordering in `RecipePlan`. Each pass ships *both* a `Step` and a
-tracked query, and `Step::run` dispatches to the query when
-`Context::salsa()` returns `Some`. `leek-session` (`Session`, `Compilation`)
-is what the binaries call.
+All of that is gone. Each pass crate's `pipeline` module is now its tracked
+query and nothing else; `leek-query` (in `core`, because every pass writes its
+queries against it) is the database, the two query keys and the timing sink;
+`leek-db` is the façade and owns the whole-program queries; `leek-session` is
+what a front-end holds.
 
-**Landed.** `leek-db` owns the façade. The LSP is entirely off the pipeline —
-no handler plans one; diagnostics come from `program_diagnostics_with_lints`
-and formatting from an options-keyed `format_query`. `leek-driver` and
-`leek-recipes` are merged into `leek-session`, which now owns one database per
-invocation rather than one per compiled file, and every `Compilation` it hands
-out answers from queries. The include closure is incremental. salsa is an
-ordinary workspace dependency. `leek-bench`, `leek-test-driver` and `leekc`
-are off the pipeline; `leekc` compiles through a `Session` over the one-file
-project `Project::standalone` builds for a path with no `Miku.toml`, which is
-what let its per-`--emit` pipelines go.
+Three things the deletion settled, worth recording because each was a surprise:
 
-### Reproducing a `Run`'s answers
+- **A `Run`'s diagnostics were target-dependent.** A run reported what the
+  steps it *ran* reported, so its stream grew with the target, while
+  `program_diagnostics` always reported the whole frontend. `Stage` and
+  `program_diagnostics_upto` are that behaviour, restated as a slice.
+- **`leek_parser::pipeline::Parse` was the one step that could abort a run.**
+  It was the single production implementor of `RecipeStepStopOnError`, so with
+  `stop_on_diagnostics` set, a parse error stopped the pipeline before any
+  later step. Tracked passes have no such notion — they work off the green
+  tree, which always exists — so `Compilation::query_diagnostics` applies the
+  rule on top of them. The LSP never saw it: its params are permissive.
+- **An include-aware run parsed a zero-include entry twice**
+  ([#522](https://github.com/NyalephTheCat/leekwars/issues/522)). The
+  `ResolveIncludes` step published a class set unconditionally, which was
+  exactly the gate the `Parse` step used to decide the query could not serve
+  it. Routing the whole program through `resolve_program` /
+  `typecheck_program` / `lower_program` was the fix, and the defect is gone
+  with the step.
 
-Before `Compilation` can move, every answer it serves has to be obtainable
-from queries *identically*. That took longer than it looks, because a `Run`
-carries three behaviours the query layer has no notion of. Each was found by
-a test, and each was invisible until the one before it was fixed:
-
-1. **The target.** A run reports what the steps it ran reported. Handled by
-   `Stage` and `program_diagnostics_upto`.
-2. **The abort.** `leek_parser::pipeline::Parse` is the single production
-   step implementing `RecipeStepStopOnError`, so when the params'
-   `stop_on_diagnostics` is set and the parse itself reports at or above it,
-   `Context::abort` stops `Pipeline::drive` before any later step. The check
-   is on the entry's own parse — the closure's parses happen in
-   `ResolveIncludes`, which runs *before* `Parse` and so is not what the
-   wrapper counts as new. This is also why the LSP never saw any of it:
-   `lsp_params` is `RecipeParams::permissive`, so its runs never abort.
-3. **The stage before parsing.** A `Target::Tokens` run never plans `Parse` at
-   all, so the abort rule must not fire below `Stage::Parsed`.
-
-`leek_session::Compilation::query_diagnostics` implements all three, and
-`query_diagnostics_reproduces_the_run_across_the_matrix` checks it against
-real runs over six targets × both threshold settings × a file that parses and
-one that does not.
+Timing did not survive the move as it was. `miku build --verbose`,
+`miku dev pipeline` and `leek-bench` printed a duration per pass; there are no
+passes, and salsa cannot supply the numbers — it fires `WillExecute` *before* a
+query body runs and nothing on completion, so its event stream says which
+queries recomputed and never how long any took. (That signal is genuinely
+useful, and `leek_db::testing` is built on it; it is simply not this one.) All
+three print per-*stage* timings now: the stages a `Compilation` is asked for.
 
 ### What is left
 
-Tracked on [#99](https://github.com/NyalephTheCat/leekwars/issues/99):
-
-- **The last three `Run` consumers.** `leek-scenario` compiles an AI's source
-  to HIR, `leek-migrate` compiles a migrated text to check it still compiles,
-  and `miku dev pipeline` exists to print per-step timings. The first two
-  compile a string with no path; the third has to become stage timings,
-  because a query layer has no steps to time.
-- **Then the deletions.** `Step`, `Context`, `RecipePlan`, `define_step!` and
-  the step halves of the twelve per-crate `pipeline` modules — the tracked
-  queries live *inside* those modules, so they move rather than vanish. With
-  them goes [`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt), whose
-  every entry today is an edge this migration removes.
+- **`leek-session` → `leek-lint`** is one of the two remaining entries in
+  [`xtask/layer-allowlist.txt`](../xtask/layer-allowlist.txt), because a
+  `Target::Linted` compilation's diagnostics include the lint findings and
+  `crates/db` may not depend on `crates/tools`. The linter is a pass over HIR
+  rather than a tool, so the fix is to move it into `crates/middle` beside the
+  passes it walks — tracked as part of ARCH-03.
+- **`cargo xtask graph`**, the mermaid crate-graph with a drift check
+  recommended by [#204](https://github.com/NyalephTheCat/leekwars/issues/204),
+  is not written.

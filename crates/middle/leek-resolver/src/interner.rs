@@ -15,7 +15,7 @@
 //! §1), and it is a *value* the caller owns, so every file compiled in
 //! one run can share a single id space by sharing one interner.
 //!
-//! [`SourceInterner`] is the interface the pipeline step depends on;
+//! [`SourceInterner`] is the interface the include walk depends on;
 //! [`PathInterner`] is the only implementation the toolchain needs.
 //! Interning takes `&self` so the step can hold the interner behind an
 //! [`Arc`](std::sync::Arc) and stay `Send + Sync` without the caller

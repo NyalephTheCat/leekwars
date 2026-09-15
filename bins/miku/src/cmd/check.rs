@@ -7,7 +7,7 @@ use anyhow::Result;
 use leek_backends::resolve_backend;
 use leek_manifest::BackendKind;
 use leek_project::Project;
-use leek_session::{Compilation, DriverConfig, RecipeParams, Session, Target};
+use leek_session::{Compilation, CompileParams, DriverConfig, Session, Target};
 
 use crate::cli::{Check, ColorWhen, MessageFormat};
 
@@ -25,7 +25,7 @@ pub fn run(
 
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default(),
+        params: CompileParams::default(),
         color: color.into(),
         format: format.into(),
         // `scope` and `timing` stay at their defaults: every `miku`

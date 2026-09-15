@@ -9,7 +9,7 @@ description = "Token kinds, syntax-tree kinds, and Version enum for Leekscript."
 [dependencies]
 leek-span        = { workspace = true }
 leek-diagnostics = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 rowan            = { workspace = true }
 salsa            = { workspace = true }
 

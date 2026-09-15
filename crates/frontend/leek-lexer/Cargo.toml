@@ -10,7 +10,7 @@ description = "Tokenizer for Leekscript."
 leek-span        = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-diagnostics = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 salsa            = { workspace = true }
 
 [lints]

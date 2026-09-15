@@ -89,7 +89,7 @@ pub fn will_rename(ws: &Workspace, renames: &[(String, String)]) -> Option<lsp::
 /// moved — every literal whose relative spelling changes with it.
 fn edits_for_document(
     ws: &Workspace,
-    source_file: leek_pipeline::salsa::SourceFile,
+    source_file: leek_query::salsa::SourceFile,
     includer: &Path,
     known: &HashSet<PathBuf>,
     renamed: &HashMap<PathBuf, PathBuf>,
