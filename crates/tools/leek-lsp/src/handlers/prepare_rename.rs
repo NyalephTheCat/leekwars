@@ -13,7 +13,6 @@
 
 use leek_resolver::SymbolKind;
 use leek_span::Span;
-use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
 use crate::handlers::refusal::Refusable;
@@ -38,10 +37,7 @@ pub fn handle(
         return Ok(None);
     };
     let table = &art.table;
-    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-        return Ok(None);
-    };
-    let root = SyntaxNode::new_root(green.0.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // The same member refusal `rename` applies, raised here so clients
     // that honour `prepareRename` never open the input box. Duplicated

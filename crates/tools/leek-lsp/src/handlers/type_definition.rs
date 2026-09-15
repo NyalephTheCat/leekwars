@@ -30,8 +30,7 @@ pub fn handle(
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
     let type_table = &run.get::<leek_types::pipeline::TypeCheckArtifact>()?.table;
     let hir = run.get::<HirArtifact>()?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Type lookup strategy:
     //  (a) Smallest type entry covering the offset (works for

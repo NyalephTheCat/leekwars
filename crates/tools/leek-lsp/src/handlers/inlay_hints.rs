@@ -20,8 +20,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
 
     let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>()?;
     let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     let from_offset = doc.pos_map().to_offset(range.start);
     let to_offset = doc.pos_map().to_offset(range.end);

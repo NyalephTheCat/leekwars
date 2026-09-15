@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 
 use leek_span::Span;
-use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
 use crate::handlers::refusal::Refusable;
@@ -34,10 +33,7 @@ pub fn handle(
         return Ok(None);
     };
     let table = &art.table;
-    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-        return Ok(None);
-    };
-    let root = SyntaxNode::new_root(green.0.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Rename a top-level symbol everywhere it's used across the program.
     // Top-level functions/classes/globals share one flat namespace

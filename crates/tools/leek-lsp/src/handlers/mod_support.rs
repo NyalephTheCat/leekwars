@@ -135,10 +135,7 @@ pub(crate) fn occurrences_in_file(
         return out;
     };
     let table = &art.table;
-    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-        return out;
-    };
-    let root = SyntaxNode::new_root(green.0.clone());
+    let root = crate::analysis::syntax_root(&ws.db, source_file);
     let text = source_file.text(&ws.db);
     let line_table = leek_span::LineTable::new(text);
     let pm = crate::util::position::PosMap::new(&line_table, text);
@@ -369,10 +366,7 @@ pub(crate) fn find_top_level_decl(
         let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
             continue;
         };
-        let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-            continue;
-        };
-        let root = SyntaxNode::new_root(green.0.clone());
+        let root = crate::analysis::syntax_root(&ws.db, file.source_file);
         if let Some(sym) = art.table.symbols.iter().find(|s| {
             s.name == name
                 && is_workspace_global(s.kind)

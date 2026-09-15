@@ -9,7 +9,6 @@
 
 use leek_resolver::SymbolKind;
 use leek_session::Target;
-use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
 
 use crate::workspace::Workspace;
@@ -27,17 +26,13 @@ pub fn handle(ws: &Workspace, query: &str) -> Option<Vec<lsp::SymbolInformation>
         let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
             continue;
         };
-        let root = run
-            .get::<leek_parser::pipeline::GreenTreeArtifact>()
-            .map(|g| SyntaxNode::new_root(g.0.clone()));
+        let root = crate::analysis::syntax_root(&ws.db, target.source_file);
         for sym in &art.table.symbols {
             if !sym.name.to_ascii_lowercase().contains(&lower) {
                 continue;
             }
             // Methods/fields show their class; top-level symbols don't.
-            let container_name = root
-                .as_ref()
-                .and_then(|r| crate::handlers::enclosing_class_name(r, sym.def_span.start));
+            let container_name = crate::handlers::enclosing_class_name(&root, sym.def_span.start);
             #[allow(deprecated)]
             out.push(lsp::SymbolInformation {
                 name: sym.name.clone(),

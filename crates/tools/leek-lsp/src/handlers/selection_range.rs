@@ -18,9 +18,7 @@ pub fn handle(
     positions: Vec<lsp::Position>,
 ) -> Option<Vec<lsp::SelectionRange>> {
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Parsed)?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     let out: Vec<lsp::SelectionRange> = positions
         .into_iter()

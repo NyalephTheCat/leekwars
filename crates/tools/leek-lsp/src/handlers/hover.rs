@@ -28,8 +28,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
 
     let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>();
     let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Two information sources, in priority order:
     //   1. A symbol whose declaration node covers the cursor — gives
@@ -292,10 +291,7 @@ fn cross_file_sections(
     let Some(type_art) = run.get::<leek_types::pipeline::TypeCheckArtifact>() else {
         return Vec::new();
     };
-    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-        return Vec::new();
-    };
-    let root = SyntaxNode::new_root(green.0.clone());
+    let root = crate::analysis::syntax_root(&ws.db, file.source_file);
     let text = file.source_file.text(&ws.db);
 
     let mut sections: Vec<String> = Vec::new();

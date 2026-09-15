@@ -54,8 +54,7 @@ pub fn handle(
     // and live-editing it would silently desynchronise the member from
     // its uses. Unlike rename there is no channel to explain, so we
     // report "no linked editing here" (leekwars#46).
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = leek_syntax::SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
     if crate::handlers::symbol_is_class_member(&root, sym) {
         return None;
     }

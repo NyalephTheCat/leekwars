@@ -33,8 +33,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     // TypeChecked (not just Resolved): a method callee needs the type
     // table to resolve its receiver's class.
     let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Find the smallest CallExpr whose ArgList covers the cursor.
     let call = enclosing_call_with_cursor_in_args(&root, offset)?;

@@ -17,8 +17,7 @@ pub fn handle(
 
     let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = leek_syntax::SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Program-wide occurrences of a top-level symbol → Locations,
     // honouring the `includeDeclaration` flag.

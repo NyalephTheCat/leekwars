@@ -19,16 +19,14 @@
 //! pick: a `color(r, g, b)` call form and a `0xRRGGBB` literal.
 
 use leek_span::Span;
-use leek_syntax::{SyntaxKind, SyntaxNode};
+use leek_syntax::SyntaxKind;
 use tower_lsp::lsp_types as lsp;
 
 use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::ColorInformation>> {
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Parsed)?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     let mut out: Vec<lsp::ColorInformation> = Vec::new();
 
