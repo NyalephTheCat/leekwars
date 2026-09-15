@@ -354,6 +354,12 @@ fn apply_binop_charged(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
         BinOp::Eq | BinOp::Ne | BinOp::LooseEq => super::state::charge_eq(l, r),
         _ => {}
     }
+    // A `big_integer` operation whose result would be too large is refused
+    // here rather than attempted: the allocation this guards against is the
+    // one the operation itself would make.
+    if !super::state::charge_bigint(op, l, r) {
+        return Value::Null;
+    }
     apply_binop(op, l, r, v)
 }
 

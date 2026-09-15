@@ -725,11 +725,13 @@ fn extract_first_string(s: &str) -> Option<String> {
     None
 }
 
-/// Extract `X` from `Error.X` or just `X`. Returns `None` if neither
-/// shape matches.
+/// Extract `X` from `Error.X`, from the fully-qualified
+/// `leekscript.common.Error.X` some cases write, or from just `X`. Returns
+/// `None` if none of those shapes matches.
 fn extract_error_code(s: &str) -> Option<String> {
     let t = s.trim();
-    if let Some(rest) = t.strip_prefix("Error.") {
+    if let Some(at) = t.rfind("Error.") {
+        let rest = &t[at + "Error.".len()..];
         let end = rest
             .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .unwrap_or(rest.len());

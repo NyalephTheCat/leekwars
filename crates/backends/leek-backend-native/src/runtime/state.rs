@@ -8,6 +8,7 @@ use super::{
     NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELD_OWNER, STATIC_FIELDS, STATIC_INIT,
     STRICT,
 };
+use leek_mir::BinOp;
 use leek_runtime::{Rng, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -164,6 +165,91 @@ pub(super) fn charge_concat(l: &Value, r: &Value) {
 /// first mismatch. An equal 1-entry map pair is therefore 10 ops upstream
 /// (`return [5: 5] == [5: 5]`, reference.tsv) where this charges 8. As
 /// elsewhere in this function, only the top-level operand pair is priced.
+/// Upstream's `BigIntegerValue.MAX_BITLENGTH` — the size past which a
+/// `big_integer` result is refused outright rather than allocated.
+const MAX_BITLENGTH: u64 = 1 << 20;
+
+/// Upstream's `BigIntegerValue.mulCost`: the cost of multiplying (or
+/// dividing) two numbers of these bit lengths, as the product of their sizes
+/// in 64-bit words. An upper bound on the real cost — Java goes sub-quadratic
+/// past a few thousand bits — so it never under-charges, and it is what stops
+/// successive squaring where a linear cost let it run.
+fn mul_cost(bits_a: u64, bits_b: u64) -> i64 {
+    let wa = (bits_a / 64).max(1);
+    let wb = (bits_b / 64).max(1);
+    i64::try_from(1 + wa.saturating_mul(wb) / 8).unwrap_or(i64::MAX)
+}
+
+/// Whether a `big_integer` result of `bits` bits may be produced. Refusing it
+/// *before* the operation is the point: the allocation upstream is guarding
+/// against is the one the operation itself would make.
+fn result_fits(bits: u64) -> bool {
+    if bits > MAX_BITLENGTH {
+        raise_runtime_error("OUT_OF_MEMORY");
+        return false;
+    }
+    true
+}
+
+/// Charge a `big_integer` operation, and answer whether it may run at all.
+///
+/// Two things a plain per-operation charge cannot do: a multiplication's cost
+/// grows with the *product* of its operands' sizes, so successive squaring
+/// pays for what it actually costs; and an operation whose result would
+/// exceed [`MAX_BITLENGTH`] is refused before it allocates, because by the
+/// time a size check on the result could run, the hundreds of megabytes are
+/// already there.
+pub(super) fn charge_bigint(op: BinOp, l: &Value, r: &Value) -> bool {
+    if !matches!(l, Value::BigInt(_)) && !matches!(r, Value::BigInt(_)) {
+        return true;
+    }
+    let bits = |v: &Value| match v {
+        Value::BigInt(b) => b.bits(),
+        _ => 64,
+    };
+    let (a, b) = (bits(l), bits(r));
+    // A shift's *effective* amount: only a left shift grows the number, and a
+    // right shift by a negative amount is a left shift.
+    let shift = |sign: i64| r.to_long().saturating_mul(sign);
+    match op {
+        BinOp::Mul => {
+            if !result_fits(a.saturating_add(b)) {
+                return false;
+            }
+            leek_charge_ops(mul_cost(a, b));
+        }
+        BinOp::Div | BinOp::IntDiv | BinOp::Mod => leek_charge_ops(mul_cost(a, b)),
+        BinOp::Pow => {
+            let exponent = r.to_long();
+            if a > 1 && exponent > 0 {
+                let result_bits = u64::try_from(exponent)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(a);
+                if !result_fits(result_bits) {
+                    return false;
+                }
+                leek_charge_ops(mul_cost(result_bits / 2, result_bits / 2));
+            }
+        }
+        BinOp::ShiftL | BinOp::ShiftR | BinOp::UShiftR => {
+            let amount = shift(if matches!(op, BinOp::ShiftL) { 1 } else { -1 });
+            if amount > 0 {
+                let amount = u64::try_from(amount).unwrap_or(u64::MAX);
+                if !result_fits(a.saturating_add(amount)) {
+                    return false;
+                }
+                leek_charge_ops(if amount < 4000 {
+                    1
+                } else {
+                    i64::try_from(amount / 2000).unwrap_or(i64::MAX)
+                });
+            }
+        }
+        _ => {}
+    }
+    true
+}
+
 pub(super) fn charge_eq(l: &Value, r: &Value) {
     let utf16 = |s: &str| leek_runtime::len_as_int(leek_runtime::jstr::len16(s));
     // `ops(1)` unconditionally, then the per-element part only when the

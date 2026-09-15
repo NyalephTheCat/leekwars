@@ -995,3 +995,36 @@ id = "a_static_method_reference_pads_and_drops_like_a_function"
 version = 4
 source = "class A { public static m1(n) { return n + 1 } public static m4(a, b, c, d) { return [a, d] } } return [arrayMap([1, 2], A.m1), arrayMap([1, 2], A.m4)]"
 expect = { equals = "[[2, 3], [[1, null], [2, null]]]" }
+
+# A `big_integer` operation whose result would exceed the size cap is refused
+# before it runs — the allocation being guarded against is the one the
+# operation itself would make. Reasonable arithmetic is untouched.
+[[tests]]
+id = "a_runaway_big_integer_power_is_refused"
+version = 4
+source = "return 2L ** 100000000"
+expect = { runtime_error = "OUT_OF_MEMORY" }
+
+[[tests]]
+id = "a_runaway_big_integer_shift_is_refused"
+version = 4
+source = "return 1L << 2000000"
+expect = { runtime_error = "OUT_OF_MEMORY" }
+
+[[tests]]
+id = "a_right_shift_by_a_negative_amount_grows_and_is_refused"
+version = 4
+source = "return 1L >> -2000000"
+expect = { runtime_error = "OUT_OF_MEMORY" }
+
+[[tests]]
+id = "successive_squaring_pays_for_what_it_costs"
+version = 4
+source = "big_integer n = 100000L for (var i in [0..100]) { n *= n } return n"
+expect = "error"
+
+[[tests]]
+id = "ordinary_big_integer_arithmetic_is_untouched"
+version = 4
+source = "big_integer n = 2L for (var i = 0; i < 1000; i++) n *= 2 return [bitLength(n), 1L << 8, 3L ** 5]"
+expect = { equals = "[1002, 256, 243]" }

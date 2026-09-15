@@ -1,10 +1,6 @@
 schema_version = 3
 
 [backends.java-emit.outcomes]
-"TestBigInt.java::testDosGuards::0@v4" = "fail_missing_error"
-"TestBigInt.java::testDosGuards::1@v4" = "fail_missing_error"
-"TestBigInt.java::testDosGuards::2@v4" = "fail_missing_error"
-"TestBigInt.java::testDosGuards::5@v4" = "fail_missing_error"
 "TestClass.java::testClass_static_field_uninitialized_errors::0@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::1@v4" = "skipped_unknown"
 "TestConstantFolding.java::testThrowing_conversions_keep_call::0@v4" = "fail_missing_error"
@@ -59,18 +55,14 @@ schema_version = 3
 [backends.java-emit.summary]
 total = 12254
 pass = 11288
-pass_expected_error = 912
+pass_expected_error = 916
 fail_parse_error = 0
-fail_missing_error = 12
+fail_missing_error = 8
 fail_wrong_value = 0
 skipped_disabled = 24
 skipped_unknown = 18
 
 [backends.native.outcomes]
-"TestBigInt.java::testDosGuards::0@v4" = "skipped_unknown"
-"TestBigInt.java::testDosGuards::1@v4" = "skipped_unknown"
-"TestBigInt.java::testDosGuards::2@v4" = "skipped_unknown"
-"TestBigInt.java::testDosGuards::5@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::0@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::1@v4" = "skipped_unknown"
 "TestConstantFolding.java::testElimination_guards::5@v2" = "fail_wrong_value"
@@ -141,18 +133,14 @@ skipped_unknown = 18
 [backends.native.summary]
 total = 12254
 pass = 11272
-pass_expected_error = 912
+pass_expected_error = 916
 fail_parse_error = 0
 fail_missing_error = 0
 fail_wrong_value = 5
 skipped_disabled = 24
-skipped_unknown = 41
+skipped_unknown = 37
 
 [backends.pipeline.outcomes]
-"TestBigInt.java::testDosGuards::0@v4" = "fail_missing_error"
-"TestBigInt.java::testDosGuards::1@v4" = "fail_missing_error"
-"TestBigInt.java::testDosGuards::2@v4" = "fail_missing_error"
-"TestBigInt.java::testDosGuards::5@v4" = "fail_missing_error"
 "TestClass.java::testClass_static_field_uninitialized_errors::0@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::1@v4" = "skipped_unknown"
 "TestConstantFolding.java::testThrowing_conversions_keep_call::0@v4" = "fail_missing_error"
@@ -207,9 +195,9 @@ skipped_unknown = 41
 [backends.pipeline.summary]
 total = 12254
 pass = 11288
-pass_expected_error = 912
+pass_expected_error = 916
 fail_parse_error = 0
-fail_missing_error = 12
+fail_missing_error = 8
 fail_wrong_value = 0
 skipped_disabled = 24
 skipped_unknown = 18
