@@ -72,13 +72,13 @@ pub fn run() -> Result<ExitCode> {
 
     // Opt-in: register the library's constant values for folding so HIR
     // lowering replaces e.g. `WEAPON_PISTOL` with `37` for every backend
-    // (Java, MIR, native) from the one pipeline hook.
+    // (Java, MIR, native) from the one pipeline hook. Through the shared
+    // helper, which `miku`'s `[project] fold_constants` and the
+    // official-parity fight runners already use — this used to repeat its
+    // body inline, so `leekc --fold-constants` could fold a different set
+    // from every other driver (#132).
     if cli.fold_constants {
-        leek_prelude::activate_fold_constants(
-            leek_environment::leekwars_constant_values()
-                .into_iter()
-                .map(|(n, v)| (n.to_string(), v.to_string())),
-        );
+        leek_session::activate_leekwars_constant_folding();
     }
 
     // Build a pipeline tailored to the requested emit. Each Emit
