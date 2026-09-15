@@ -1,7 +1,9 @@
 //! Statement + declaration formatting.
 
+use leek_parser::ast::{self, AstNode};
 use leek_syntax::language::NodeOrToken;
-use leek_syntax::{SyntaxKind as S, SyntaxNode};
+use leek_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
+use rowan::TextSize;
 
 use crate::doc::{Doc, concat, group, hardline, indent, line, softline, space, text};
 
@@ -640,73 +642,129 @@ pub(super) fn format_return_stmt(node: &SyntaxNode) -> Doc {
     concat(parts)
 }
 
+// ---- Control flow, read off the typed AST ----
+
+/// The significant (non-trivia) token children of `node`, in source
+/// order.
+///
+/// The control-flow formatters below rebuild their keywords and
+/// delimiters from these rather than from string literals, so a token
+/// error recovery left out of the tree is never printed back — the
+/// same rule [`super::format_raw_trim_ws`] enforces for an unclosed
+/// delimiter (#415, #417).
+fn sig_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(NodeOrToken::into_token)
+        .filter(|t| !is_trivia(t))
+        .collect()
+}
+
+/// The first `kind` token among `toks`, or `None` when the parser
+/// never saw one. Each control statement holds at most one of every
+/// keyword and delimiter it is built from, so "first" is "the one".
+fn ctrl_token(toks: &[SyntaxToken], kind: S) -> Option<&SyntaxToken> {
+    toks.iter().find(|t| t.kind() == kind)
+}
+
+/// True if one of `toks` is a `;` starting in `from..to` (`to` of
+/// `None` runs to the end of the node).
+///
+/// Two things wear that shape, and the bounds are what tell them
+/// apart: the empty statement `;` filling a body slot — the parser
+/// bumps it straight into the enclosing control node, so it has no
+/// statement node of its own and the typed body accessor returns
+/// `None` for it — and, after a do-while's `)`, the statement's own
+/// terminator.
+fn semi_between(toks: &[SyntaxToken], from: TextSize, to: Option<TextSize>) -> bool {
+    toks.iter().any(|t| {
+        t.kind() == S::Semicolon
+            && t.text_range().start() >= from
+            && to.is_none_or(|end| t.text_range().start() < end)
+    })
+}
+
+/// True if every significant child of `node` is accounted for: its
+/// token children are exactly `shape`, in order, and it holds exactly
+/// `nodes` child nodes — the ones the typed accessors handed back.
+///
+/// Anything else (a stray token, an error node no accessor casts)
+/// means a shape these formatters would silently drop pieces of, so
+/// the caller round-trips the statement instead.
+fn shape_matches(node: &SyntaxNode, toks: &[SyntaxToken], shape: &[S], nodes: usize) -> bool {
+    toks.len() == shape.len()
+        && toks.iter().zip(shape).all(|(t, kind)| t.kind() == *kind)
+        && node.children().count() == nodes
+}
+
 /// `if (cond) then [else other]`. Handles `else if` chains by
 /// recursing into the else branch.
+///
+/// Error recovery can leave any piece of the statement out of the
+/// tree. Rather than print a half-formatted header — which would
+/// manufacture the `(`, `)` or body the source never had — an
+/// unrecognised shape round-trips through
+/// [`super::format_raw_trim_ws`], the answer an unclosed delimiter
+/// already gets.
 pub(super) fn format_if_stmt(node: &SyntaxNode) -> Doc {
-    // Walk in source order so we keep the original cond / then /
-    // else relationship without relying on AST accessors that may
-    // not exist yet for all forms.
-    let mut parts: Vec<Doc> = Vec::new();
-    let mut seen_kw_if = false;
-    let mut seen_lparen = false;
-    let mut seen_rparen = false;
-    let mut seen_else = false;
-    let mut cond_seen = false;
-    let mut then_seen = false;
+    format_if(node).unwrap_or_else(|| super::format_raw_trim_ws(node))
+}
 
-    for el in node.children_with_tokens() {
-        match el {
-            NodeOrToken::Token(t) if is_trivia(&t) => {}
-            NodeOrToken::Token(t) => match t.kind() {
-                S::KwIf => {
-                    if seen_else {
-                        // `else if` continuation
-                        parts.push(space());
-                    }
-                    parts.push(text("if"));
-                    seen_kw_if = true;
-                    seen_else = false;
-                }
-                S::LParen if seen_kw_if && !seen_rparen => {
-                    parts.push(ctrl_paren_lead());
-                    parts.push(text("("));
-                    seen_lparen = true;
-                }
-                S::RParen if seen_lparen && !seen_rparen => {
-                    parts.push(text(")"));
-                    seen_rparen = true;
-                }
-                S::KwElse => {
-                    // Allman puts `else` on its own line after the `}`.
-                    parts.push(block_lead());
-                    parts.push(text("else"));
-                    seen_else = true;
-                }
-                _ => parts.push(token_text(&t)),
-            },
-            NodeOrToken::Node(child) => {
-                if !cond_seen && seen_lparen && !seen_rparen {
-                    parts.push(group(fmt_node(&peel_context_parens(&child))));
-                    cond_seen = true;
-                } else if !then_seen && seen_rparen && !seen_else {
-                    parts.push(format_ctrl_body(&child));
-                    then_seen = true;
-                } else if seen_else {
-                    parts.push(format_else_branch(&child));
-                    seen_else = false;
-                    // Reset for potential subsequent `else if` continuation.
-                    seen_kw_if = false;
-                    seen_lparen = false;
-                    seen_rparen = false;
-                    cond_seen = false;
-                    then_seen = false;
-                } else {
-                    parts.push(fmt_node(&child));
-                }
+fn format_if(node: &SyntaxNode) -> Option<Doc> {
+    let ast = ast::IfStmt::cast(node.clone())?;
+    let toks = sig_tokens(node);
+    ctrl_token(&toks, S::LParen)?;
+    let rparen_end = ctrl_token(&toks, S::RParen)?.text_range().end();
+    let kw_else = ctrl_token(&toks, S::KwElse).cloned();
+    let cond = ast.condition()?;
+
+    // The significant token kinds this rendering accounts for, grown
+    // in source order as the branches are decided.
+    let mut shape = vec![S::KwIf, S::LParen, S::RParen];
+    let mut nodes = 1; // the condition
+    let mut parts = vec![
+        text("if"),
+        ctrl_paren_lead(),
+        text("("),
+        group(fmt_node(&peel_context_parens(cond.syntax()))),
+        text(")"),
+    ];
+
+    match ast.then_branch() {
+        Some(then) => {
+            nodes += 1;
+            parts.push(format_ctrl_body(then.syntax()));
+        }
+        None if semi_between(
+            &toks,
+            rparen_end,
+            kw_else.as_ref().map(|t| t.text_range().start()),
+        ) =>
+        {
+            shape.push(S::Semicolon);
+            parts.push(text(";"));
+        }
+        None => return None,
+    }
+
+    if let Some(kw_else) = &kw_else {
+        shape.push(S::KwElse);
+        // Allman puts `else` on its own line after the `}`.
+        parts.push(block_lead());
+        parts.push(text("else"));
+        match ast.else_branch() {
+            Some(other) => {
+                nodes += 1;
+                parts.push(format_else_branch(other.syntax()));
             }
+            None if semi_between(&toks, kw_else.text_range().end(), None) => {
+                shape.push(S::Semicolon);
+                parts.push(text(";"));
+            }
+            None => return None,
         }
     }
-    concat(parts)
+
+    shape_matches(node, &toks, &shape, nodes).then(|| concat(parts))
 }
 
 /// The body of an `else`. An `else if` continuation stays on the
@@ -727,90 +785,97 @@ fn format_else_branch(child: &SyntaxNode) -> Doc {
     format_ctrl_body(child)
 }
 
-/// `while (cond) body`.
+/// `while (cond) body`. Unrecognised shapes round-trip, as in
+/// [`format_if_stmt`].
 pub(super) fn format_while_stmt(node: &SyntaxNode) -> Doc {
-    let mut parts: Vec<Doc> = Vec::new();
-    let mut seen_lparen = false;
-    let mut seen_rparen = false;
-    let mut cond_seen = false;
-    for el in node.children_with_tokens() {
-        match el {
-            NodeOrToken::Token(t) if is_trivia(&t) => {}
-            NodeOrToken::Token(t) => match t.kind() {
-                S::KwWhile => parts.push(text("while")),
-                S::LParen if !seen_lparen => {
-                    parts.push(ctrl_paren_lead());
-                    parts.push(text("("));
-                    seen_lparen = true;
-                }
-                S::RParen if !seen_rparen => {
-                    parts.push(text(")"));
-                    seen_rparen = true;
-                }
-                _ => parts.push(token_text(&t)),
-            },
-            NodeOrToken::Node(child) => {
-                if !cond_seen && seen_lparen && !seen_rparen {
-                    parts.push(group(fmt_node(&peel_context_parens(&child))));
-                    cond_seen = true;
-                } else {
-                    parts.push(format_ctrl_body(&child));
-                }
-            }
-        }
-    }
-    concat(parts)
+    format_while(node).unwrap_or_else(|| super::format_raw_trim_ws(node))
 }
 
-/// `do body while (cond) [;]`.
-pub(super) fn format_do_while_stmt(node: &SyntaxNode) -> Doc {
-    let mut parts: Vec<Doc> = Vec::new();
-    let mut emitted_do = false;
-    let mut seen_while = false;
-    let mut seen_lparen = false;
-    let mut seen_rparen = false;
-    let mut saw_semi = false;
-    for el in node.children_with_tokens() {
-        match el {
-            NodeOrToken::Token(t) if is_trivia(&t) => {}
-            NodeOrToken::Token(t) => match t.kind() {
-                S::KwDo => {
-                    parts.push(text("do"));
-                    emitted_do = true;
-                }
-                S::KwWhile => {
-                    parts.push(space());
-                    parts.push(text("while"));
-                    seen_while = true;
-                }
-                S::LParen if seen_while && !seen_lparen => {
-                    parts.push(ctrl_paren_lead());
-                    parts.push(text("("));
-                    seen_lparen = true;
-                }
-                S::RParen if !seen_rparen => {
-                    parts.push(text(")"));
-                    seen_rparen = true;
-                }
-                S::Semicolon => {
-                    parts.push(text(";"));
-                    saw_semi = true;
-                }
-                _ => parts.push(token_text(&t)),
-            },
-            NodeOrToken::Node(child) => {
-                if seen_while {
-                    parts.push(group(fmt_node(&peel_context_parens(&child))));
-                } else if emitted_do {
-                    parts.push(format_ctrl_body(&child));
-                } else {
-                    parts.push(fmt_node(&child));
-                }
-            }
+fn format_while(node: &SyntaxNode) -> Option<Doc> {
+    let ast = ast::WhileStmt::cast(node.clone())?;
+    let toks = sig_tokens(node);
+    ctrl_token(&toks, S::LParen)?;
+    let rparen_end = ctrl_token(&toks, S::RParen)?.text_range().end();
+    let cond = ast.condition()?;
+
+    let mut shape = vec![S::KwWhile, S::LParen, S::RParen];
+    let mut nodes = 1; // the condition
+    let mut parts = vec![
+        text("while"),
+        ctrl_paren_lead(),
+        text("("),
+        group(fmt_node(&peel_context_parens(cond.syntax()))),
+        text(")"),
+    ];
+
+    match ast.body() {
+        Some(body) => {
+            nodes += 1;
+            parts.push(format_ctrl_body(body.syntax()));
         }
+        None if semi_between(&toks, rparen_end, None) => {
+            shape.push(S::Semicolon);
+            parts.push(text(";"));
+        }
+        None => return None,
+    }
+
+    shape_matches(node, &toks, &shape, nodes).then(|| concat(parts))
+}
+
+/// `do body while (cond) [;]`. Unrecognised shapes round-trip, as in
+/// [`format_if_stmt`].
+pub(super) fn format_do_while_stmt(node: &SyntaxNode) -> Doc {
+    format_do_while(node).unwrap_or_else(|| super::format_raw_trim_ws(node))
+}
+
+fn format_do_while(node: &SyntaxNode) -> Option<Doc> {
+    let ast = ast::DoWhileStmt::cast(node.clone())?;
+    let toks = sig_tokens(node);
+    let kw_do_end = ctrl_token(&toks, S::KwDo)?.text_range().end();
+    let kw_while_at = ctrl_token(&toks, S::KwWhile)?.text_range().start();
+    ctrl_token(&toks, S::LParen)?;
+    let rparen_end = ctrl_token(&toks, S::RParen)?.text_range().end();
+    let cond = ast.condition()?;
+
+    let mut shape = vec![S::KwDo];
+    let mut nodes = 1; // the condition
+    let mut parts = vec![text("do")];
+
+    match ast.body() {
+        Some(body) => {
+            nodes += 1;
+            parts.push(format_ctrl_body(body.syntax()));
+        }
+        None if semi_between(&toks, kw_do_end, Some(kw_while_at)) => {
+            shape.push(S::Semicolon);
+            parts.push(text(";"));
+        }
+        None => return None,
+    }
+
+    shape.extend([S::KwWhile, S::LParen, S::RParen]);
+    parts.extend([
+        space(),
+        text("while"),
+        ctrl_paren_lead(),
+        text("("),
+        group(fmt_node(&peel_context_parens(cond.syntax()))),
+        text(")"),
+    ]);
+
+    // Only a `;` past the `)` is this statement's terminator; one
+    // standing in for the body belongs to the empty statement, and
+    // leaving it out of `saw_semi` is what lets `maybe_semicolon`
+    // supply the missing terminator under `semicolons = always`.
+    let saw_semi = semi_between(&toks, rparen_end, None);
+    if saw_semi {
+        shape.push(S::Semicolon);
+        parts.push(text(";"));
     }
     parts.push(maybe_semicolon(node, saw_semi));
-    concat(parts)
+
+    shape_matches(node, &toks, &shape, nodes).then(|| concat(parts))
 }
 
 /// `for (init; cond; step) body` — C-style.

@@ -378,9 +378,24 @@ impl IfStmt {
         self.0.children().find_map(Expr::cast)
     }
 
-    /// Then-branch statement.
+    /// Then-branch statement. We stop at the `else` keyword: when the
+    /// then-branch is the empty statement `;` the parser bumps that
+    /// semicolon straight into the `IfStmt`, leaving no statement node
+    /// of its own, and the first statement child is then the *else*
+    /// branch.
     pub fn then_branch(&self) -> Option<Stmt> {
-        self.0.children().find_map(Stmt::cast)
+        for child in self.0.children_with_tokens() {
+            match child {
+                leek_syntax::SyntaxElement::Token(t) if t.kind() == S::KwElse => return None,
+                leek_syntax::SyntaxElement::Node(n) => {
+                    if let Some(s) = Stmt::cast(n) {
+                        return Some(s);
+                    }
+                }
+                leek_syntax::SyntaxElement::Token(_) => {}
+            }
+        }
+        None
     }
 
     /// Else-branch, if present. We walk for an `else` keyword token
@@ -410,6 +425,22 @@ impl WhileStmt {
     }
     pub fn body(&self) -> Option<Stmt> {
         self.0.children().find_map(Stmt::cast)
+    }
+}
+
+impl DoWhileStmt {
+    /// Loop body — the statement between `do` and `while`. It comes
+    /// before the condition in source order, so the first statement
+    /// child is it.
+    pub fn body(&self) -> Option<Stmt> {
+        self.0.children().find_map(Stmt::cast)
+    }
+
+    /// The `while (…)` condition. The body is a statement and the
+    /// condition an expression, so the first expression child is it
+    /// whichever shape the body took.
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
     }
 }
 
