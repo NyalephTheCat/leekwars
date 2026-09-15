@@ -5,7 +5,8 @@
 //! leek-wars *fight* functions (`getCell`, `getLife`, `moveTowardCell`,
 //! `useWeapon`, …) against a [`GameHost`]. This crate holds the **game
 //! model**: the functions ([`builtins`]), the effect/stat model ([`effect`]),
-//! the weapon/chip catalogs ([`weapons`], [`chips`]), the [`GameHost`] seam
+//! the weapon/chip catalogs ([`weapons`], [`chips`], read from upstream's own
+//! vendored `data/*.json`), the [`GameHost`] seam
 //! ([`host`]), and the reference world it operates on ([`Entity`], [`Fight`]).
 //! Fight **orchestration** — compiling and launching AIs, the turn loop —
 //! lives in the generator crate, which drives a [`Fight`] through the native
@@ -18,6 +19,7 @@
 pub mod actions;
 pub mod attack;
 pub mod builtins;
+mod catalog;
 pub mod chips;
 pub mod effect;
 pub mod entity;

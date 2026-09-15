@@ -692,6 +692,11 @@ pub struct WeaponSpec {
     pub area: Area,
     /// The attack's effect lines (`Attack.getEffects()`).
     pub effects: Vec<EffectParams>,
+    /// `Attack.getPassiveEffects()` — lines that never fire on use. They fire
+    /// from the *carrier's* hooks instead (took damage, landed a critical,
+    /// killed, was moved), for as long as the weapon is in its inventory. See
+    /// `State::activate_passive`.
+    pub passive_effects: Vec<EffectParams>,
     /// `Weapon.isForgotten()` — a per-farmer unique "forgotten" weapon, which
     /// `apply_loadout` treats specially (stickiness + teammate reservation).
     /// `false` for ordinary weapons.
@@ -745,6 +750,12 @@ pub struct BulbTemplate {
     /// Chip template ids, in `summons.json` order — `Entity.addChip` caps at
     /// the bulb's RAM (6), so only the first 6 stick.
     pub chips: Vec<i32>,
+    /// `EntityState` ordinals the summon starts with. The 2.50 plants carry
+    /// `ROOTED` (9); a bulb carries none.
+    pub states: Vec<i32>,
+    /// `BulbTemplate.getZone()` — the radius in cells of the summon's
+    /// awakening zone, `0` for one that plays its own turn.
+    pub zone: i32,
 }
 
 /// `BulbTemplate.base(base, bonus, coeff, multiplier)` — the bulb stat
@@ -2418,6 +2429,7 @@ mod tests {
             max_uses: -1,
             area: Area::SingleCell,
             effects: Vec::new(),
+            passive_effects: Vec::new(),
             forgotten: false,
         }
     }

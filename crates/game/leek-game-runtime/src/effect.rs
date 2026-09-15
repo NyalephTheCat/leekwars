@@ -214,7 +214,7 @@ impl Effect {
 
     /// An effect as the upstream catalogs encode it: the generator's
     /// effect-type `id` plus the raw roll/duration/target/modifier fields.
-    /// Used by the generated weapon/chip catalogs.
+    /// Used by [`parse_effects`] and by hand-written test fixtures.
     #[must_use]
     pub const fn from_upstream(
         id: u8,
@@ -233,6 +233,28 @@ impl Effect {
             modifiers,
         }
     }
+}
+
+/// One catalog `effects` / `passive_effects` array, as [`Effect`] rolls.
+///
+/// The entry's `id` is the generator's effect-type id (`Effect.TYPE_*`) —
+/// *not* its `type` field, which is the unrelated damage category.
+#[must_use]
+pub fn parse_effects(entries: &[serde_json::Value]) -> Vec<Effect> {
+    entries
+        .iter()
+        .map(|e| {
+            let byte = |field: &str| u8::try_from(crate::catalog::int(e, field, 0)).unwrap_or(0);
+            Effect::from_upstream(
+                byte("id"),
+                crate::catalog::num(e, "value1"),
+                crate::catalog::num(e, "value2"),
+                crate::catalog::int(e, "turns", 0),
+                byte("targets"),
+                byte("modifiers"),
+            )
+        })
+        .collect()
 }
 
 /// The upstream effect-type ids in `effects` the engine doesn't model

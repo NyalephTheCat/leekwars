@@ -59,6 +59,8 @@ fn harness_pistol() -> WeaponSpec {
             targets: EffectTargets::all(),
             modifiers: EffectModifiers::empty(),
         }],
+        // `Harness.registerPistol` passes no passive effects.
+        passive_effects: Vec::new(),
         forgotten: false,
     }
 }
@@ -1626,6 +1628,9 @@ fn harness_bulb() -> BulbTemplate {
         tp: (4, 8),
         mp: (3, 6),
         chips: vec![1008, 1011],
+        // A synthetic bulb: not rooted, and it plays its own turn.
+        states: Vec::new(),
+        zone: 0,
     }
 }
 

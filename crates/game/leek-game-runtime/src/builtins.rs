@@ -361,7 +361,7 @@ fn use_weapon(host: &mut dyn GameHost, attacker: i64, target: i64) -> Value {
     let Some(weapon) = weapons::lookup(item) else {
         return Value::Int(USE_FAILED); // weapon not modeled
     };
-    use_effects(host, attacker, target, weapon, weapon.effects)
+    use_effects(host, attacker, target, weapon, &weapon.effects)
 }
 
 /// `useChip(chip, target)`: cast one of the caster's own chips onto the
@@ -375,7 +375,7 @@ fn use_chip(host: &mut dyn GameHost, caster: i64, chip_item: i64, target: i64) -
     let Some(chip) = chips::lookup(chip_item) else {
         return Value::Int(USE_FAILED); // chip not modeled
     };
-    use_effects(host, caster, target, chip, chip.effects)
+    use_effects(host, caster, target, chip, &chip.effects)
 }
 
 /// The use-rule stats shared by weapons and chips.

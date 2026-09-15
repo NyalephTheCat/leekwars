@@ -66,12 +66,10 @@ cargo xtask check-artifacts
 step "crate-graph drift (cargo xtask graph --check)"
 cargo xtask graph --check
 
-# Generated weapon/chip/bulb catalogs must match the upstream JSON (skipped
-# when the official-generator submodule isn't checked out).
-if [[ -d official-generator/leek-wars-generator/data ]]; then
-  step "item catalog drift (tools/game-item-extract.sh --check)"
-  tools/game-item-extract.sh --check
-fi
+# The engine's vendored copies of the generator's item data must still match
+# the submodule's (the check skips itself when the submodule is absent).
+step "item data drift (tools/game-item-extract.sh --check)"
+tools/game-item-extract.sh --check
 
 # The fight-constant table and the engine's generated `consts_gen.rs`. The
 # engine half is derived from the committed TSV, so this runs with or without

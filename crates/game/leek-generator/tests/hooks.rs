@@ -45,6 +45,7 @@ fn pistol() -> WeaponSpec {
         max_uses: -1,
         area: Area::SingleCell,
         effects: Vec::new(),
+        passive_effects: Vec::new(),
         forgotten: false,
     }
 }

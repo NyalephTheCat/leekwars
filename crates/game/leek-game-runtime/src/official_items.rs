@@ -1,131 +1,53 @@
 //! Official item catalogs — the weapon, chip and bulb *templates* the
 //! reference generator registers at startup (`Generator.loadWeapons` /
-//! `loadChips` / `loadSummons`), generated from its
-//! `data/{weapons,chips,summons}.json` by `tools/game-item-extract.sh --write`
-//! into [`official_items_gen.rs`](../src/official_items_gen.rs).
+//! `loadChips` / `loadSummons`), read from the same
+//! `data/{weapons,chips,summons}.json` it reads, vendored into this crate by
+//! [`crate::catalog`].
 //!
 //! This is the official-model counterpart of [`crate::weapons`] /
-//! [`crate::chips`]: those feed the legacy [`Fight`](crate::Fight) world with
-//! `&'static` [`Weapon`](crate::weapons::Weapon) rows, while the official
-//! [`State`](crate::state::State) wants owned
+//! [`crate::chips`]: those feed the legacy [`Fight`](crate::Fight) world,
+//! while the official [`State`](crate::state::State) wants
 //! [`WeaponSpec`](crate::state::WeaponSpec) /
 //! [`ChipSpec`](crate::state::ChipSpec) /
 //! [`BulbTemplate`](crate::state::BulbTemplate) values in its template maps.
 //!
-//! The tables are raw rows rather than spec literals because the spec types
-//! own their effect lines in a `Vec`, which no `static` can hold: a row keeps
-//! the JSON's own fields and [`weapon_spec`] / [`chip_spec`] /
-//! [`bulb_template`] build the real type on demand.
+//! Each catalog is built once, on first lookup, and the accessors hand back a
+//! clone — the spec types own their effect lines, and the fight registers
+//! copies into its own maps anyway.
+
+use std::sync::OnceLock;
 
 use crate::attack::{Area, EffectModifiers, EffectParams, EffectTargets, EffectType};
+use crate::catalog;
 use crate::state::{BulbTemplate, ChipSpec, WeaponSpec};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Raw table rows
+// JSON → spec
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// One raw effect line of an item, exactly as `data/*.json` spells it.
-#[derive(Debug, Clone, Copy)]
-pub struct RawEffect {
-    /// The generator's effect-type id (`Effect.TYPE_*` — the entry's `id`
-    /// field, *not* its `type` field).
-    pub id: i32,
-    pub value1: f64,
-    pub value2: f64,
-    pub turns: i32,
-    /// `Effect.TARGET_*` bit mask.
-    pub targets: i32,
-    /// `Effect.MODIFIER_*` bit mask.
-    pub modifiers: i32,
-}
-
-/// One raw weapon row (`data/weapons.json`).
-#[derive(Debug, Clone, Copy)]
-pub struct RawWeapon {
-    /// The public `WEAPON_*` item id (the entry's `item` field).
-    pub item: i32,
-    pub name: &'static str,
-    pub cost: i32,
-    pub min_range: i32,
-    pub max_range: i32,
-    pub launch_type: i32,
-    /// `Area.TYPE_*` id.
-    pub area: i32,
-    pub los: bool,
-    /// `Attack.getMaxUses()` — `-1` is unlimited.
-    pub max_uses: i32,
-    pub forgotten: bool,
-    pub effects: &'static [RawEffect],
-}
-
-/// One raw chip row (`data/chips.json`).
-#[derive(Debug, Clone, Copy)]
-pub struct RawChip {
-    /// The public `CHIP_*` item id (the JSON key).
-    pub item: i32,
-    pub name: &'static str,
-    pub cost: i32,
-    pub min_range: i32,
-    pub max_range: i32,
-    pub launch_type: i32,
-    /// `Area.TYPE_*` id.
-    pub area: i32,
-    pub los: bool,
-    /// `Attack.getMaxUses()` — `-1` is unlimited.
-    pub max_uses: i32,
-    /// `Chip.getCooldown()` — `0` is none, `-1` is "rest of the fight".
-    pub cooldown: i32,
-    pub initial_cooldown: i32,
-    pub team_cooldown: bool,
-    /// `Chip.getLevel()` — the level copied onto bulbs this chip summons.
-    pub level: i32,
-    pub effects: &'static [RawEffect],
-}
-
-/// One raw bulb row (`data/summons.json`) — `(min, max)` stat ranges plus the
-/// granted chip template ids.
-#[derive(Debug, Clone, Copy)]
-pub struct RawBulb {
-    pub id: i32,
-    pub name: &'static str,
-    pub life: (i32, i32),
-    pub strength: (i32, i32),
-    pub wisdom: (i32, i32),
-    pub agility: (i32, i32),
-    pub resistance: (i32, i32),
-    pub science: (i32, i32),
-    pub magic: (i32, i32),
-    pub tp: (i32, i32),
-    pub mp: (i32, i32),
-    pub chips: &'static [i32],
-}
-
-include!("official_items_gen.rs");
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Raw row → spec
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The row's effect lines as [`EffectParams`].
+/// One `effects` / `passive_effects` array as [`EffectParams`].
 ///
-/// Panics on an effect-type id outside `Effect.TYPE_*`: the tables are
-/// generated from the reference data, so an unknown id means the upstream
-/// snapshot grew a type [`EffectType`] doesn't name yet, and silently
-/// dropping the line would make the item quietly weaker than the real one.
-fn effect_params(item: i32, effects: &[RawEffect]) -> Vec<EffectParams> {
-    effects
+/// Panics on an effect-type id outside `Effect.TYPE_*`: the data is upstream's
+/// own, so an unknown id means the snapshot grew a type [`EffectType`] doesn't
+/// name yet, and silently dropping the line would make the item quietly weaker
+/// than the real one.
+fn effect_params(item: i32, entries: &[serde_json::Value]) -> Vec<EffectParams> {
+    entries
         .iter()
-        .map(|e| EffectParams {
-            effect: EffectType::from_id(e.id)
-                .unwrap_or_else(|| panic!("item {item}: unknown effect type id {}", e.id)),
-            value1: e.value1,
-            value2: e.value2,
-            turns: e.turns,
-            // Every mask in the generated tables is inside the known bits —
-            // asserted by the `official_masks_are_known_bits` test, so the
-            // truncation never actually drops one.
-            targets: EffectTargets::from_bits_truncate(e.targets),
-            modifiers: EffectModifiers::from_bits_truncate(e.modifiers),
+        .map(|e| {
+            let id = catalog::int32(e, "id", 0);
+            EffectParams {
+                effect: EffectType::from_id(id)
+                    .unwrap_or_else(|| panic!("item {item}: unknown effect type id {id}")),
+                value1: catalog::num(e, "value1"),
+                value2: catalog::num(e, "value2"),
+                turns: catalog::int32(e, "turns", 0),
+                // Every mask in the upstream data is inside the known bits —
+                // asserted by the `official_masks_are_known_bits` test, so the
+                // truncation never actually drops one.
+                targets: EffectTargets::from_bits_truncate(catalog::int32(e, "targets", 0)),
+                modifiers: EffectModifiers::from_bits_truncate(catalog::int32(e, "modifiers", 0)),
+            }
         })
         .collect()
 }
@@ -135,81 +57,128 @@ fn area_of(item: i32, area: i32) -> Area {
     Area::from_id(area).unwrap_or_else(|| panic!("item {item}: unknown area id {area}"))
 }
 
+/// `Attack.getMaxUses()` when the entry omits the field.
+///
+/// `State.useWeapon`/`useChip` gate on `getMaxUses() != -1`, so a `0` default
+/// would block every use of every item that does not declare a limit.
+const UNLIMITED_USES: i64 = -1;
+
+static WEAPONS: OnceLock<Vec<WeaponSpec>> = OnceLock::new();
+static CHIPS: OnceLock<Vec<ChipSpec>> = OnceLock::new();
+static BULBS: OnceLock<Vec<BulbTemplate>> = OnceLock::new();
+
+fn weapons() -> &'static [WeaponSpec] {
+    WEAPONS.get_or_init(|| {
+        catalog::rows(catalog::WEAPONS_JSON, "weapons")
+            .iter()
+            .map(|w| {
+                let item = catalog::int32(w, "item", 0);
+                WeaponSpec {
+                    id: item,
+                    cost: catalog::int32(w, "cost", 0),
+                    min_range: catalog::int32(w, "min_range", 0),
+                    max_range: catalog::int32(w, "max_range", 0),
+                    launch_type: catalog::int32(w, "launch_type", 0),
+                    needs_los: catalog::flag(w, "los", true),
+                    max_uses: catalog::int32(w, "max_uses", UNLIMITED_USES),
+                    area: area_of(item, catalog::int32(w, "area", 1)),
+                    effects: effect_params(item, catalog::entries(w, "effects")),
+                    passive_effects: effect_params(item, catalog::entries(w, "passive_effects")),
+                    forgotten: catalog::flag(w, "forgotten", false),
+                }
+            })
+            .collect()
+    })
+}
+
+fn chips() -> &'static [ChipSpec] {
+    CHIPS.get_or_init(|| {
+        catalog::rows(catalog::CHIPS_JSON, "chips")
+            .iter()
+            .map(|c| {
+                let item = catalog::int32(c, "id", 0);
+                ChipSpec {
+                    id: item,
+                    cost: catalog::int32(c, "cost", 0),
+                    min_range: catalog::int32(c, "min_range", 0),
+                    max_range: catalog::int32(c, "max_range", 0),
+                    launch_type: catalog::int32(c, "launch_type", 0),
+                    needs_los: catalog::flag(c, "los", true),
+                    max_uses: catalog::int32(c, "max_uses", UNLIMITED_USES),
+                    area: area_of(item, catalog::int32(c, "area", 1)),
+                    effects: effect_params(item, catalog::entries(c, "effects")),
+                    cooldown: catalog::int32(c, "cooldown", 0),
+                    team_cooldown: catalog::flag(c, "team_cooldown", false),
+                    initial_cooldown: catalog::int32(c, "initial_cooldown", 0),
+                    level: catalog::int32(c, "level", 0),
+                }
+            })
+            .collect()
+    })
+}
+
+fn bulbs() -> &'static [BulbTemplate] {
+    BULBS.get_or_init(|| {
+        catalog::rows(catalog::SUMMONS_JSON, "summons")
+            .iter()
+            .map(|b| BulbTemplate {
+                id: catalog::int32(b, "id", 0),
+                name: catalog::text(b, "name"),
+                life: catalog::range(b, "life"),
+                strength: catalog::range(b, "strength"),
+                wisdom: catalog::range(b, "wisdom"),
+                agility: catalog::range(b, "agility"),
+                resistance: catalog::range(b, "resistance"),
+                science: catalog::range(b, "science"),
+                magic: catalog::range(b, "magic"),
+                tp: catalog::range(b, "tp"),
+                mp: catalog::range(b, "mp"),
+                chips: catalog::int_list(b, "chips"),
+                states: catalog::int_list(b, "states"),
+                zone: catalog::int32(b, "zone", 0),
+            })
+            .collect()
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lookups
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// The official [`WeaponSpec`] for a public `WEAPON_*` item id, or `None`
 /// when the catalog has no such weapon.
 #[must_use]
 pub fn weapon_spec(id: i32) -> Option<WeaponSpec> {
-    let w = OFFICIAL_WEAPONS.iter().find(|w| w.item == id)?;
-    Some(WeaponSpec {
-        id: w.item,
-        cost: w.cost,
-        min_range: w.min_range,
-        max_range: w.max_range,
-        launch_type: w.launch_type,
-        needs_los: w.los,
-        max_uses: w.max_uses,
-        area: area_of(w.item, w.area),
-        effects: effect_params(w.item, w.effects),
-        forgotten: w.forgotten,
-    })
+    weapons().iter().find(|w| w.id == id).cloned()
 }
 
 /// The official [`ChipSpec`] for a public `CHIP_*` item id, or `None` when
 /// the catalog has no such chip.
 #[must_use]
 pub fn chip_spec(id: i32) -> Option<ChipSpec> {
-    let c = OFFICIAL_CHIPS.iter().find(|c| c.item == id)?;
-    Some(ChipSpec {
-        id: c.item,
-        cost: c.cost,
-        min_range: c.min_range,
-        max_range: c.max_range,
-        launch_type: c.launch_type,
-        needs_los: c.los,
-        max_uses: c.max_uses,
-        area: area_of(c.item, c.area),
-        effects: effect_params(c.item, c.effects),
-        cooldown: c.cooldown,
-        team_cooldown: c.team_cooldown,
-        initial_cooldown: c.initial_cooldown,
-        level: c.level,
-    })
+    chips().iter().find(|c| c.id == id).cloned()
 }
 
 /// The official [`BulbTemplate`] for a summons template id, or `None` when
 /// the catalog has no such bulb.
 #[must_use]
 pub fn bulb_template(id: i32) -> Option<BulbTemplate> {
-    let b = OFFICIAL_BULBS.iter().find(|b| b.id == id)?;
-    Some(BulbTemplate {
-        id: b.id,
-        name: b.name.to_string(),
-        life: b.life,
-        strength: b.strength,
-        wisdom: b.wisdom,
-        agility: b.agility,
-        resistance: b.resistance,
-        science: b.science,
-        magic: b.magic,
-        tp: b.tp,
-        mp: b.mp,
-        chips: b.chips.to_vec(),
-    })
+    bulbs().iter().find(|b| b.id == id).cloned()
 }
 
 /// Every public weapon item id in the catalog, ascending.
 pub fn weapon_ids() -> impl Iterator<Item = i32> {
-    OFFICIAL_WEAPONS.iter().map(|w| w.item)
+    weapons().iter().map(|w| w.id)
 }
 
 /// Every public chip item id in the catalog, ascending.
 pub fn chip_ids() -> impl Iterator<Item = i32> {
-    OFFICIAL_CHIPS.iter().map(|c| c.item)
+    chips().iter().map(|c| c.id)
 }
 
 /// Every bulb template id in the catalog, ascending.
 pub fn bulb_ids() -> impl Iterator<Item = i32> {
-    OFFICIAL_BULBS.iter().map(|b| b.id)
+    bulbs().iter().map(|b| b.id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -218,53 +187,41 @@ pub fn bulb_ids() -> impl Iterator<Item = i32> {
 
 /// Whether the official attack path models this effect type.
 ///
-/// Coverage grows corpus-first, so this is the inverse list: everything the
-/// dispatch sites handle is ported, and these eight still hit
-/// `State::create_effect`'s `not ported yet` panic arm. Keep it in step with
-/// that `match` (plus the types intercepted before it:
-/// `EffectType::Teleport` / `Propagation` in `State::apply_on_cell`,
-/// `Summon` in `State::summon_entity` and `Resurrect` in `State::resurrect`).
-fn is_ported(effect: EffectType) -> bool {
-    !matches!(
-        effect,
-        EffectType::PoisonToScience
-            | EffectType::DamageToAbsoluteShield
-            | EffectType::DamageToStrength
-            | EffectType::NovaDamageToMagic
-            | EffectType::MovedToMp
-            | EffectType::KillToTp
-            | EffectType::CriticalToHeal
-            | EffectType::DamageToResistance
-    )
+/// Coverage grows corpus-first, so this is the inverse list — and it is empty:
+/// every effect type any catalog item carries, as an active line or as a
+/// passive one, is dispatched. Keep it in step with `State::create_effect`'s
+/// `not ported yet` arm (plus the types intercepted before it:
+/// `EffectType::Teleport` / `Propagation` in `State::apply_on_cell`, `Summon`
+/// in `State::summon_entity` and `Resurrect` in `State::resurrect`) and with
+/// the passive hooks in `State::activate_passive`.
+fn is_ported(_effect: EffectType) -> bool {
+    true
 }
 
 /// The effect types of this weapon the official attack path doesn't model
 /// (empty = fully supported), or `None` when the catalog has no such weapon.
 /// In item order, duplicates kept — the official-catalog counterpart of
 /// [`crate::weapons::unsupported_effects`], for strict-mode validation.
+///
+/// Passive lines count: they are the weapon's too, they fire from the same
+/// `State`, and leaving them out is how their whole family stayed invisible.
 #[must_use]
 pub fn weapon_unsupported_effect_types(id: i32) -> Option<Vec<EffectType>> {
-    let w = OFFICIAL_WEAPONS.iter().find(|w| w.item == id)?;
-    Some(unsupported_of(w.item, w.effects))
+    let w = weapons().iter().find(|w| w.id == id)?;
+    Some(unsupported_of(w.effects.iter().chain(&w.passive_effects)))
 }
 
 /// The effect types of this chip the official attack path doesn't model
 /// (empty = fully supported), or `None` when the catalog has no such chip.
-/// In item order, duplicates kept — the official-catalog counterpart of
-/// [`crate::chips::unsupported_effects`], for strict-mode validation.
 #[must_use]
 pub fn chip_unsupported_effect_types(id: i32) -> Option<Vec<EffectType>> {
-    let c = OFFICIAL_CHIPS.iter().find(|c| c.item == id)?;
-    Some(unsupported_of(c.item, c.effects))
+    let c = chips().iter().find(|c| c.id == id)?;
+    Some(unsupported_of(c.effects.iter()))
 }
 
-fn unsupported_of(item: i32, effects: &[RawEffect]) -> Vec<EffectType> {
+fn unsupported_of<'a>(effects: impl Iterator<Item = &'a EffectParams>) -> Vec<EffectType> {
     effects
-        .iter()
-        .map(|e| {
-            EffectType::from_id(e.id)
-                .unwrap_or_else(|| panic!("item {item}: unknown effect type id {}", e.id))
-        })
+        .map(|e| e.effect)
         .filter(|&t| !is_ported(t))
         .collect()
 }
@@ -276,7 +233,7 @@ mod tests {
     /// `WEAPON_PISTOL`.
     const PISTOL: i32 = 37;
 
-    /// The generated pistol still carries the hand-written harness pistol's
+    /// The catalog pistol still carries the hand-written harness pistol's
     /// geometry and damage line (`harness_pistol` in `leek-scenario`'s
     /// `official-fight` bin — the `Harness.registerPistol` port).
     ///
@@ -328,12 +285,12 @@ mod tests {
     }
 
     /// Every row converts — no unknown effect-type or area id anywhere in the
-    /// three tables.
+    /// three catalogs.
     #[test]
     fn every_official_row_converts() {
-        assert!(!OFFICIAL_WEAPONS.is_empty());
-        assert!(!OFFICIAL_CHIPS.is_empty());
-        assert!(!OFFICIAL_BULBS.is_empty());
+        assert!(!weapons().is_empty());
+        assert!(!chips().is_empty());
+        assert!(!bulbs().is_empty());
         for id in weapon_ids() {
             let spec = weapon_spec(id).expect("listed weapon id resolves");
             assert_eq!(spec.id, id);
@@ -348,28 +305,37 @@ mod tests {
         }
     }
 
-    /// The tables' target/modifier masks all sit inside the known bits, so
+    /// The masks all sit inside the known bits, so
     /// [`EffectTargets::from_bits_truncate`] drops nothing.
+    ///
+    /// Reading them back off the parsed specs would prove nothing — the
+    /// truncation has already happened by then — so this goes to the JSON.
     #[test]
     fn official_masks_are_known_bits() {
-        let rows = OFFICIAL_WEAPONS
-            .iter()
-            .map(|w| (w.item, w.effects))
-            .chain(OFFICIAL_CHIPS.iter().map(|c| (c.item, c.effects)));
-        for (item, effects) in rows {
-            for e in effects {
-                assert_eq!(
-                    EffectTargets::from_bits_truncate(e.targets).bits(),
-                    e.targets,
-                    "item {item}: unknown target bits in {}",
-                    e.targets
-                );
-                assert_eq!(
-                    EffectModifiers::from_bits_truncate(e.modifiers).bits(),
-                    e.modifiers,
-                    "item {item}: unknown modifier bits in {}",
-                    e.modifiers
-                );
+        let files = [
+            (catalog::WEAPONS_JSON, "weapons"),
+            (catalog::CHIPS_JSON, "chips"),
+        ];
+        for (json, what) in files {
+            for row in catalog::rows(json, what) {
+                let item = catalog::int(&row, "item", catalog::int(&row, "id", 0));
+                let lines = catalog::entries(&row, "effects")
+                    .iter()
+                    .chain(catalog::entries(&row, "passive_effects"));
+                for e in lines {
+                    let targets = catalog::int32(e, "targets", 0);
+                    let modifiers = catalog::int32(e, "modifiers", 0);
+                    assert_eq!(
+                        EffectTargets::from_bits_truncate(targets).bits(),
+                        targets,
+                        "item {item}: unknown target bits in {targets}",
+                    );
+                    assert_eq!(
+                        EffectModifiers::from_bits_truncate(modifiers).bits(),
+                        modifiers,
+                        "item {item}: unknown modifier bits in {modifiers}",
+                    );
+                }
             }
         }
     }
@@ -383,6 +349,29 @@ mod tests {
         assert_eq!(puny.tp, (4, 7));
         assert_eq!(puny.mp, (3, 5));
         assert_eq!(puny.chips, vec![21, 19, 3, 8]);
+    }
+
+    /// The 2.50 plants are summons templates like the bulbs, and carry two
+    /// fields no bulb does: the states they start rooted with, and the radius
+    /// of their awakening zone. A transcriber taught only about bulbs dropped
+    /// both, which is the argument for reading upstream's own file.
+    #[test]
+    fn a_plant_template_carries_its_states_and_awakening_zone() {
+        let corn = bulb_template(9).expect("corn is template 9");
+        assert_eq!(corn.name, "corn");
+        assert_eq!(corn.states, vec![9], "ROOTED");
+        assert_eq!(corn.zone, 3);
+
+        let prototaxite = bulb_template(13).expect("prototaxite is template 13");
+        assert_eq!(prototaxite.states, vec![9]);
+        assert_eq!(
+            prototaxite.zone, 0,
+            "the prototaxite is rooted but wakes nobody"
+        );
+
+        let puny = bulb_template(1).expect("puny_bulb is template 1");
+        assert!(puny.states.is_empty(), "a bulb is not rooted");
+        assert_eq!(puny.zone, 0);
     }
 
     /// Unknown ids are `None`, not a panic.
