@@ -11,7 +11,9 @@ use leek_span::{LineTable, SourceId};
 /// `LineTable` we use to translate LSP positions to byte offsets.
 pub struct DocHandle {
     pub source_file: SourceFile,
-    pub line_table: LineTable,
+    /// Shared so an [`AnalysisTarget`](crate::workspace::AnalysisTarget)
+    /// can hold it for the price of a refcount bump.
+    pub line_table: Arc<LineTable>,
     /// In-memory snapshot of the current text. Cheaper than going
     /// through `source_file.text(db)` when the workspace mutex would
     /// otherwise need to be held.

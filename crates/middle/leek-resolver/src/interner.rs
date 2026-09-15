@@ -113,6 +113,17 @@ impl PathInterner {
         self.lock().fresh()
     }
 
+    /// Drop `path`'s binding, so the next [`intern`](SourceInterner::intern)
+    /// of it allocates a fresh id instead of returning the old one.
+    ///
+    /// For a file that moved: the id followed the file to its new path,
+    /// and a *different* file created at the vacated path must not be
+    /// handed the id its predecessor took with it. The counter is not
+    /// rewound, so the released id is still never issued to another path.
+    pub fn forget(&self, path: &Path) {
+        self.lock().ids.remove(&canonical_or_normalized(path));
+    }
+
     /// The lock, recovering from poisoning: nothing under it can panic,
     /// and a source id is not a value a caller can decline to produce.
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -201,6 +212,23 @@ mod tests {
             10,
             "a fresh path must not reuse an assigned id"
         );
+    }
+
+    /// A renamed file keeps its id at the new path, so the old path has
+    /// to stop answering with it — otherwise a file later created there
+    /// shares an id with the file that moved away, and every span from
+    /// one names the other.
+    #[test]
+    fn a_forgotten_path_gets_a_fresh_id_next_time() {
+        let interner = PathInterner::new();
+        let moved = interner.intern(Path::new("/a.leek"));
+        interner.assign(Path::new("/b.leek"), moved);
+        interner.forget(Path::new("/a.leek"));
+        let recreated = interner.intern(Path::new("/a.leek"));
+
+        assert_ne!(recreated, moved, "the id left with the file that moved");
+        assert_eq!(interner.intern(Path::new("/b.leek")), moved);
+        assert_eq!(interner.intern(Path::new("/a.leek")), recreated);
     }
 
     #[test]

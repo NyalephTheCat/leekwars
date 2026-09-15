@@ -101,8 +101,8 @@ impl<'a> LabelSources<'a> {
             // `target.pos_map()`, which would borrow the loop temporary.
             rows.push((
                 target.source_file.source(&ws.db),
-                target.uri,
-                PosMap::new(target.line_table, target.text),
+                &target.uri,
+                PosMap::new(&target.line_table, &target.text),
             ));
         }
         Self { rows }

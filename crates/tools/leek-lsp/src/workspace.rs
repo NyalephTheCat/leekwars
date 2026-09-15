@@ -1,13 +1,14 @@
 //! Per-server workspace: holds the salsa DB, open-document registry,
 //! and one project index per workspace root.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use leek_pipeline::ProjectIndex;
-use leek_pipeline::salsa::{LeekDb, ProjectFile, SourceFile};
-use leek_resolver::interner::PathInterner;
+use leek_pipeline::salsa::{LeekDb, SourceFile, WorkspaceFiles};
+use leek_resolver::folder::Folder;
+use leek_resolver::interner::{PathInterner, SourceInterner};
 use leek_span::LineTable;
 use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
 use salsa::Setter;
@@ -20,11 +21,14 @@ use crate::documents::DocHandle;
 pub struct IndexedFile {
     pub uri: Url,
     pub path: PathBuf,
-    /// Salsa input for open-buffer-style pipeline queries.
+    /// The file's salsa input — the *same* input an open buffer over
+    /// this file uses. An indexed file used to carry a second, path-keyed
+    /// input beside this one; carrying the path on the input itself means
+    /// there is one text to keep current instead of two.
     pub source_file: SourceFile,
-    /// Salsa input keyed by canonical path for project-file queries.
-    pub project_file: ProjectFile,
-    pub line_table: LineTable,
+    /// Shared so an [`AnalysisTarget`] can hold it for the price of a
+    /// refcount bump.
+    pub line_table: Arc<LineTable>,
     pub text: Arc<str>,
 }
 
@@ -37,19 +41,26 @@ impl IndexedFile {
 
 /// One file the LSP can analyze — either an open buffer or an indexed
 /// project file.
-pub struct AnalysisTarget<'a> {
-    pub uri: &'a Url,
-    pub line_table: &'a LineTable,
+///
+/// Every field is either `Copy` or an `Arc`, so the whole list is built
+/// once per workspace mutation (see [`Workspace::resync`]) and handed
+/// out by reference afterwards. It used to be rebuilt per call, which a
+/// single `publishDiagnostics` did three times.
+pub struct AnalysisTarget {
+    pub uri: Url,
+    pub line_table: Arc<LineTable>,
     /// Source text, paired with `line_table` for UTF-16 position conversion.
-    pub text: &'a str,
+    pub text: Arc<str>,
     pub source_file: SourceFile,
-    pub project_file: Option<ProjectFile>,
+    /// The file's canonical path as its salsa input carries it — empty
+    /// for a buffer that has no path (`untitled:`).
+    pub canonical_path: String,
 }
 
-impl AnalysisTarget<'_> {
+impl AnalysisTarget {
     /// UTF-16-aware position map (line table + source text).
     pub fn pos_map(&self) -> crate::util::position::PosMap<'_> {
-        crate::util::position::PosMap::new(self.line_table, self.text)
+        crate::util::position::PosMap::new(&self.line_table, &self.text)
     }
 }
 
@@ -63,13 +74,27 @@ pub struct Workspace {
     roots: Vec<ProjectIndex>,
     /// On-disk `.leek` files from the project index (not open).
     pub indexed: HashMap<PathBuf, IndexedFile>,
+    /// The salsa input naming every file this workspace holds, keyed by
+    /// the canonical path each [`SourceFile`] carries. Rewritten by
+    /// [`Workspace::resync`] from `docs` + `indexed`, so a tracked query
+    /// that wants to resolve a path to a file reads one input instead of
+    /// reaching into the server's private maps.
+    files: WorkspaceFiles,
+    /// Cached [`Workspace::analysis_targets`] output, rebuilt by
+    /// [`Workspace::resync`].
+    targets: Vec<AnalysisTarget>,
+    /// Cached include folder over those targets, rebuilt alongside them:
+    /// open buffers shadow indexed contents, disk is the fallback. One
+    /// per workspace revision rather than one per pipeline run, which for
+    /// a project of N files made a full diagnostics pass build N copies
+    /// of the same map.
+    folder: Arc<dyn Folder>,
     /// The server's one source of [`leek_span::SourceId`]s: the ids
     /// this workspace mints for its salsa inputs, and the ids the
     /// include walker gives files that are neither open nor indexed,
     /// come out of the same counter, so the two can never name two
     /// different files the same (#191). Shared with
-    /// [`crate::pipeline`], which seeds it with the ids already bound
-    /// to analysis targets before each include-aware run.
+    /// [`crate::pipeline`], whose include walker interns into it.
     pub interner: Arc<PathInterner>,
     /// Project roots received during `initialize`, indexed in
     /// `initialized`.
@@ -111,11 +136,16 @@ impl Default for Workspace {
         // the current value into its own `seed_library` field: the
         // tracked queries read the input, never this global.
         leek_types::set_seed_library(true);
+        let db = LeekDb::default();
+        let files = WorkspaceFiles::empty(&db);
         Self {
-            db: LeekDb::default(),
+            db,
             docs: HashMap::new(),
             roots: Vec::new(),
             indexed: HashMap::new(),
+            files,
+            targets: Vec::new(),
+            folder: crate::pipeline::include_folder(&[]),
             interner: Arc::new(PathInterner::new()),
             pending_project_roots: Vec::new(),
             pending_library_log: Vec::new(),
@@ -133,26 +163,26 @@ impl Workspace {
     // across both branches, and all call sites hand over an owned `Url`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn open(&mut self, uri: Url, text: String) {
-        // An indexed file keeps its entry (and salsa inputs) while open:
-        // `analysis_targets` already skips indexed files with an open
-        // buffer, and keeping the entry lets `close` hand the file back to
-        // the project index instead of losing it.
-        if let Some(path) = uri_to_path(&uri)
-            && let Some((source_file, project_file)) = self
-                .indexed
-                .get(&path)
-                .map(|indexed| (indexed.source_file, indexed.project_file))
+        // The buffer's text becomes the shared handle first, and every
+        // read below goes through it: the salsa input, the doc handle and
+        // the analysis target all hold this one allocation.
+        let arc_text: Arc<str> = Arc::from(text);
+        let path = uri_to_path(&uri);
+        // An indexed file keeps its entry (and salsa input) while open:
+        // `resync` already skips indexed files with an open buffer, and
+        // keeping the entry lets `close` hand the file back to the project
+        // index instead of losing it.
+        if let Some(path) = path.as_deref()
+            && let Some(source_file) = self.indexed.get(path).map(|indexed| indexed.source_file)
         {
-            let lang = self.settle(Some(&path), &text);
-            self.apply_language(source_file, Some(project_file), lang);
+            let lang = self.settle(Some(path), &arc_text);
+            self.apply_language(source_file, lang);
             let source = source_file.source(&self.db);
-            let classes = Self::scan_classes(&text, source, lang.version);
-            let line_table = LineTable::new(&text);
-            let arc_text: Arc<str> = Arc::from(text.as_str());
-            source_file.set_text(&mut self.db).to(text.clone());
-            project_file.set_text(&mut self.db).to(text);
-            if let Some(indexed) = self.indexed.get_mut(&path) {
-                indexed.line_table = line_table.clone();
+            let classes = Self::scan_classes(&arc_text, source, lang.version);
+            let line_table = Arc::new(LineTable::new(&arc_text));
+            source_file.set_text(&mut self.db).to(Arc::clone(&arc_text));
+            if let Some(indexed) = self.indexed.get_mut(path) {
+                indexed.line_table = Arc::clone(&line_table);
                 indexed.text = Arc::clone(&arc_text);
             }
             self.docs.insert(
@@ -165,22 +195,23 @@ impl Workspace {
                 },
             );
             self.refresh_classes(&uri, Some(classes));
+            self.resync();
             return;
         }
 
-        let source_id = self.alloc_source_id();
-        let line_table = LineTable::new(&text);
-        let arc_text: Arc<str> = Arc::from(text.as_str());
-        let lang = self.settle(uri_to_path(&uri).as_deref(), &text);
+        let source_id = self.source_id_for(path.as_deref());
+        let line_table = Arc::new(LineTable::new(&arc_text));
+        let lang = self.settle(path.as_deref(), &arc_text);
         let classes = Self::scan_classes(
-            &text,
+            &arc_text,
             leek_span::SourceId::new(source_id).expect("non-zero SourceId"),
             lang.version,
         );
         let source_file = SourceFile::new(
             &self.db,
+            canonical_path_of(path.as_deref()),
             source_id,
-            text,
+            Arc::clone(&arc_text),
             lang.version,
             lang.strict,
             leek_types::seed_library_enabled(),
@@ -197,6 +228,7 @@ impl Workspace {
             },
         );
         self.refresh_classes(&uri, Some(classes));
+        self.resync();
     }
 
     /// Record the client's version number for an open document. Echoed
@@ -215,26 +247,26 @@ impl Workspace {
             return;
         };
         let source_file = doc.source_file;
-        doc.line_table = LineTable::new(&new_text);
-        doc.text = Arc::from(new_text.as_str());
+        let arc_text: Arc<str> = Arc::from(new_text);
+        let line_table = Arc::new(LineTable::new(&arc_text));
+        doc.line_table = Arc::clone(&line_table);
+        doc.text = Arc::clone(&arc_text);
         // The edit may have added, removed or changed `@version`/`@strict`:
         // re-settle so every tracked pass sees the buffer's current settings.
-        let lang = self.settle(uri_to_path(uri).as_deref(), &new_text);
-        let project_file = uri_to_path(uri)
-            .and_then(|path| self.indexed.get(&path))
-            .map(|indexed| indexed.project_file);
-        self.apply_language(source_file, project_file, lang);
+        let path = uri_to_path(uri);
+        let lang = self.settle(path.as_deref(), &arc_text);
+        self.apply_language(source_file, lang);
         let source = source_file.source(&self.db);
-        let classes = Self::scan_classes(&new_text, source, lang.version);
-        source_file.set_text(&mut self.db).to(new_text.clone());
-        if let Some(path) = uri_to_path(uri)
+        let classes = Self::scan_classes(&arc_text, source, lang.version);
+        source_file.set_text(&mut self.db).to(Arc::clone(&arc_text));
+        if let Some(path) = path
             && let Some(indexed) = self.indexed.get_mut(&path)
         {
-            indexed.line_table = LineTable::new(&new_text);
-            indexed.text = Arc::from(new_text.as_str());
-            indexed.project_file.set_text(&mut self.db).to(new_text);
+            indexed.line_table = line_table;
+            indexed.text = arc_text;
         }
         self.refresh_classes(uri, Some(classes));
+        self.resync();
     }
 
     /// Drop every piece of per-URI state the closed buffer owns: the open
@@ -250,6 +282,7 @@ impl Workspace {
         if !self.reload_indexed_from_disk(uri) {
             self.refresh_classes(uri, None);
         }
+        self.resync();
     }
 
     pub fn doc(&self, uri: &Url) -> Option<&DocHandle> {
@@ -317,6 +350,7 @@ impl Workspace {
         // One union rebuild after the whole tree is registered — this
         // pushes every file's classes into every input.
         self.rebuild_class_union();
+        self.resync();
     }
 
     /// Fold a file that just appeared on disk into the root that owns
@@ -328,7 +362,7 @@ impl Workspace {
     ///
     /// No-op for a file outside every indexed root, one we already
     /// index, or one the editor has open (its buffer is authoritative
-    /// and already carries salsa inputs).
+    /// and already carries a salsa input).
     pub fn register_new_file(&mut self, uri: &Url) {
         let Some(path) = uri_to_path(uri) else {
             return;
@@ -349,11 +383,12 @@ impl Workspace {
         let uri = path_to_uri(&loaded.path);
         self.register_indexed(uri, loaded);
         self.rebuild_class_union();
+        self.resync();
     }
 
     /// Register one loaded project file as a salsa-tracked input.
     ///
-    /// The [`leek_span::SourceId`] comes from the workspace counter, not
+    /// The [`leek_span::SourceId`] comes from the workspace interner, not
     /// from the owning [`ProjectIndex`] — each index numbers its own
     /// files from 1, so two roots (or a root and an open buffer) would
     /// otherwise hand the same id to different files, and
@@ -361,34 +396,23 @@ impl Workspace {
     /// to a URI by exactly that id. The index's own numbering is never
     /// read from here, so letting the two diverge costs nothing.
     ///
-    /// Leaves the class union alone: callers registering a whole tree
-    /// rebuild it once at the end.
+    /// Leaves the class union and the derived caches alone: callers
+    /// registering a whole tree rebuild both once at the end.
     fn register_indexed(&mut self, uri: Url, loaded: leek_pipeline::LoadedProjectFile) {
-        let arc_text: Arc<str> = Arc::from(loaded.text.as_str());
+        let arc_text: Arc<str> = Arc::from(loaded.text);
         let flags_bits = leek_span::FeatureFlags::from_env().to_bits();
-        let source_id = self.alloc_source_id();
+        let source_id = self.source_id_for(Some(&loaded.path));
         let source = leek_span::SourceId::new(source_id).expect("non-zero SourceId");
-        let classes = Self::scan_classes(&loaded.text, source, loaded.version_byte);
+        let classes = Self::scan_classes(&arc_text, source, loaded.version_byte);
         self.class_names.insert(uri.clone(), classes);
-        let seed_library = leek_types::seed_library_enabled();
         let source_file = SourceFile::new(
-            &self.db,
-            source_id,
-            loaded.text.clone(),
-            loaded.version_byte,
-            loaded.strict,
-            seed_library,
-            flags_bits,
-            self.class_union.clone(),
-        );
-        let project_file = ProjectFile::new(
             &self.db,
             loaded.path.display().to_string(),
             source_id,
-            loaded.text,
+            arc_text.clone(),
             loaded.version_byte,
             loaded.strict,
-            seed_library,
+            leek_types::seed_library_enabled(),
             flags_bits,
             self.class_union.clone(),
         );
@@ -398,8 +422,7 @@ impl Workspace {
                 uri,
                 path: loaded.path,
                 source_file,
-                project_file,
-                line_table: loaded.line_table,
+                line_table: Arc::new(loaded.line_table),
                 text: arc_text,
             },
         );
@@ -407,20 +430,54 @@ impl Workspace {
 
     /// Every file available for project-wide analysis: open docs plus
     /// indexed project files not currently open.
-    pub fn analysis_targets(&self) -> Vec<AnalysisTarget<'_>> {
-        let mut out: Vec<AnalysisTarget<'_>> = self
-            .docs
-            .iter()
-            .map(|(uri, doc)| AnalysisTarget {
-                uri,
-                line_table: &doc.line_table,
-                text: &doc.text,
+    ///
+    /// Already built — [`Workspace::resync`] rebuilds it at each mutation
+    /// point — so a handler may call this as often as it likes.
+    pub fn analysis_targets(&self) -> &[AnalysisTarget] {
+        &self.targets
+    }
+
+    /// The include folder for this workspace revision: open buffers
+    /// shadow indexed contents, and disk is the fallback for a file that
+    /// is neither. Built alongside [`Workspace::analysis_targets`].
+    pub fn include_folder(&self) -> Arc<dyn Folder> {
+        Arc::clone(&self.folder)
+    }
+
+    /// The salsa input mapping canonical path → [`SourceFile`] for every
+    /// file this workspace holds.
+    pub fn files(&self) -> WorkspaceFiles {
+        self.files
+    }
+
+    /// The file registered at `path`, if the workspace holds one.
+    pub fn source_file_at(&self, path: &Path) -> Option<SourceFile> {
+        self.files.get(&self.db, &path.display().to_string())
+    }
+
+    /// Rebuild everything derived from the current set of files: the
+    /// analysis-target list, the [`WorkspaceFiles`] input, and the
+    /// include folder over them.
+    ///
+    /// Every mutation point ends here. Deriving these once per mutation
+    /// rather than once per use is what keeps a `publishDiagnostics` —
+    /// which reaches the target list from three places and used to
+    /// rebuild it each time — from paying for the workspace three times
+    /// over.
+    fn resync(&mut self) {
+        let mut targets: Vec<AnalysisTarget> =
+            Vec::with_capacity(self.docs.len() + self.indexed.len());
+        for (uri, doc) in &self.docs {
+            targets.push(AnalysisTarget {
+                uri: uri.clone(),
+                line_table: Arc::clone(&doc.line_table),
+                text: Arc::clone(&doc.text),
                 source_file: doc.source_file,
-                project_file: None,
-            })
-            .collect();
+                canonical_path: doc.source_file.canonical_path(&self.db).clone(),
+            });
+        }
         // An indexed file that also has an open buffer is already in
-        // `out`. Match on the salsa `SourceFile` rather than the URI:
+        // `targets`. Match on the salsa `SourceFile` rather than the URI:
         // a client that reached the file through another spelling of
         // its path — a workspace root behind a symlink (#181) — sends
         // a URI that is not `indexed.uri`, but `open` has already
@@ -431,15 +488,23 @@ impl Workspace {
             if self.docs.contains_key(&indexed.uri) || open.contains(&indexed.source_file) {
                 continue;
             }
-            out.push(AnalysisTarget {
-                uri: &indexed.uri,
-                line_table: &indexed.line_table,
-                text: &indexed.text,
+            targets.push(AnalysisTarget {
+                uri: indexed.uri.clone(),
+                line_table: Arc::clone(&indexed.line_table),
+                text: Arc::clone(&indexed.text),
                 source_file: indexed.source_file,
-                project_file: Some(indexed.project_file),
+                canonical_path: indexed.source_file.canonical_path(&self.db).clone(),
             });
         }
-        out
+
+        let files: BTreeMap<String, SourceFile> = targets
+            .iter()
+            .filter(|target| !target.canonical_path.is_empty())
+            .map(|target| (target.canonical_path.clone(), target.source_file))
+            .collect();
+        self.files.set_all(&mut self.db, files);
+        self.folder = crate::pipeline::include_folder(&targets);
+        self.targets = targets;
     }
 
     /// Settle one buffer's language settings from its text: the file's
@@ -476,38 +541,35 @@ impl Workspace {
             .map(|(_, at)| at)
     }
 
-    /// Push settled language settings into a file's salsa inputs, writing
+    /// Push settled language settings into a file's salsa input, writing
     /// only the fields that changed so an ordinary edit doesn't needlessly
     /// invalidate on them.
-    fn apply_language(
-        &mut self,
-        source_file: SourceFile,
-        project_file: Option<ProjectFile>,
-        lang: LanguageSettings,
-    ) {
+    fn apply_language(&mut self, source_file: SourceFile, lang: LanguageSettings) {
         if source_file.version_byte(&self.db) != lang.version {
             source_file.set_version_byte(&mut self.db).to(lang.version);
         }
         if source_file.strict(&self.db) != lang.strict {
             source_file.set_strict(&mut self.db).to(lang.strict);
         }
-        if let Some(project_file) = project_file {
-            if project_file.version_byte(&self.db) != lang.version {
-                project_file.set_version_byte(&mut self.db).to(lang.version);
-            }
-            if project_file.strict(&self.db) != lang.strict {
-                project_file.set_strict(&mut self.db).to(lang.strict);
-            }
-        }
     }
 
     /// A [`leek_span::SourceId`] for a new salsa input.
     ///
-    /// Reserved rather than interned by path: a buffer may have no path
-    /// at all (`untitled:`), and the ids this hands out are what
-    /// [`crate::pipeline`] later binds to the paths that do have one.
-    fn alloc_source_id(&mut self) -> u32 {
-        self.interner.reserve().get()
+    /// Interned by canonical path (#464), so an id belongs to the *file*
+    /// rather than to the moment its input happened to be created: close
+    /// and reopen a buffer, or delete and re-index a file on disk, and
+    /// every span already cached against it still names the same source.
+    /// Minting a fresh id each time invalidated every downstream memo
+    /// that had recorded one.
+    ///
+    /// A buffer with no path at all (`untitled:`) has nothing to key on
+    /// and gets a reserved id instead, from the same counter, so it
+    /// cannot collide with an interned one.
+    fn source_id_for(&self, path: Option<&Path>) -> u32 {
+        match path {
+            Some(path) => self.interner.intern(path).get(),
+            None => self.interner.reserve().get(),
+        }
     }
 
     /// Scan one file's `class IDENT` declarations (version-aware:
@@ -558,10 +620,6 @@ impl Workspace {
                 .source_file
                 .set_extra_classes(&mut self.db)
                 .to(self.class_union.clone());
-            indexed
-                .project_file
-                .set_extra_classes(&mut self.db)
-                .to(self.class_union.clone());
         }
     }
 
@@ -605,23 +663,32 @@ impl Workspace {
             self.class_names.insert(new.clone(), classes);
         }
         self.semantic_tokens_cache.remove(old);
-        if let (Some(old_path), Some(new_path)) = (uri_to_path(old), uri_to_path(new))
-            && let Some(mut indexed) = self.indexed.remove(&old_path)
-        {
-            indexed.uri = new.clone();
-            indexed.path.clone_from(&new_path);
-            // The salsa input is keyed by canonical path; leaving the old
-            // one would point every path-keyed query at a file that is no
-            // longer there.
-            indexed
-                .project_file
-                .set_canonical_path(&mut self.db)
-                .to(new_path.display().to_string());
-            self.indexed.insert(new_path, indexed);
+        if let (Some(old_path), Some(new_path)) = (uri_to_path(old), uri_to_path(new)) {
+            if let Some(mut indexed) = self.indexed.remove(&old_path) {
+                indexed.uri = new.clone();
+                indexed.path.clone_from(&new_path);
+                self.indexed.insert(new_path.clone(), indexed);
+            }
+            // At most one input can sit at a path, so this moves the
+            // file's input whether it was open, indexed or both. Leaving
+            // the old path on it would point every path-keyed lookup at a
+            // file that is no longer there.
+            if let Some(file) = self.files.get(&self.db, &old_path.display().to_string()) {
+                file.set_canonical_path(&mut self.db)
+                    .to(new_path.display().to_string());
+                // The file keeps its `SourceId` across the move, so the
+                // interner has to learn the new spelling — and forget the
+                // old one, or a file later created there would be handed
+                // the id that left with this one.
+                let source = file.source(&self.db);
+                self.interner.forget(&old_path);
+                self.interner.assign(&new_path, source);
+            }
         }
+        self.resync();
     }
 
-    /// Reload a file's text from disk into its salsa inputs. Used for a
+    /// Reload a file's text from disk into its salsa input. Used for a
     /// `workspace/didChangeWatchedFiles` change to a file the editor
     /// does not have open (open buffers are authoritative via
     /// `didChange`, so those are left alone). No-op if the file is open
@@ -630,13 +697,18 @@ impl Workspace {
         if self.docs.contains_key(uri) {
             return; // open buffer wins
         }
-        self.reload_indexed_from_disk(uri);
+        if self.reload_indexed_from_disk(uri) {
+            self.resync();
+        }
     }
 
     /// Re-read `uri`'s indexed entry from disk and refresh its classes.
     /// Returns `false` — leaving the workspace untouched — when `uri` is
     /// not an indexed file or its text can't be read, so the caller can
     /// fall back to dropping the file's state.
+    ///
+    /// Leaves the derived caches to the caller: `close` resyncs once for
+    /// the whole close, reload or not.
     fn reload_indexed_from_disk(&mut self, uri: &Url) -> bool {
         let Some(path) = uri_to_path(uri) else {
             return false;
@@ -647,16 +719,15 @@ impl Workspace {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return false;
         };
-        indexed.line_table = LineTable::new(&text);
-        indexed.text = Arc::from(text.as_str());
+        let arc_text: Arc<str> = Arc::from(text);
+        indexed.line_table = Arc::new(LineTable::new(&arc_text));
+        indexed.text = Arc::clone(&arc_text);
         let source_file = indexed.source_file;
-        let project_file = indexed.project_file;
-        let lang = self.settle(Some(&path), &text);
-        self.apply_language(source_file, Some(project_file), lang);
+        let lang = self.settle(Some(&path), &arc_text);
+        self.apply_language(source_file, lang);
         let source = source_file.source(&self.db);
-        let classes = Self::scan_classes(&text, source, lang.version);
-        source_file.set_text(&mut self.db).to(text.clone());
-        project_file.set_text(&mut self.db).to(text);
+        let classes = Self::scan_classes(&arc_text, source, lang.version);
+        source_file.set_text(&mut self.db).to(arc_text);
         self.refresh_classes(uri, Some(classes));
         true
     }
@@ -693,7 +764,15 @@ impl Workspace {
             self.semantic_tokens_cache.remove(uri);
             self.refresh_classes(uri, None);
         }
+        self.resync();
     }
+}
+
+/// The canonical-path string a [`SourceFile`] carries: the path itself,
+/// or empty for a source that has none.
+fn canonical_path_of(path: Option<&Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_default()
 }
 
 pub fn path_to_uri(path: &Path) -> Url {
@@ -843,13 +922,13 @@ mod tests {
         // Not open yet: an on-disk change is picked up by reload.
         fs::write(&main, "// @version:2\nreturn 1\n").expect("rewrite entry");
         ws.reload_from_disk(&uri);
-        let project_file = ws.indexed[&path].project_file;
-        assert_eq!(project_file.version_byte(&ws.db), 2);
+        let indexed_file = ws.indexed[&path].source_file;
+        assert_eq!(indexed_file.version_byte(&ws.db), 2);
 
-        // Opening with a different pragma re-settles both inputs, and later
-        // edits re-settle the open buffer.
+        // Opening re-settles the one input the buffer shares with the
+        // indexed file, and later edits re-settle it again.
         ws.open(uri.clone(), "// @version:1\nreturn 1\n".into());
-        assert_eq!(project_file.version_byte(&ws.db), 1);
+        assert_eq!(indexed_file.version_byte(&ws.db), 1);
         ws.update(&uri, "// @version:3\n// @strict\nreturn 1\n".into());
         fs::remove_dir_all(&root).expect("remove project");
 
@@ -1097,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_updates_the_project_file_path() {
+    fn rename_updates_the_canonical_path() {
         let root = temp_root();
         fs::create_dir_all(&root).expect("create project");
         let old = root.join("main.leek");
@@ -1118,10 +1197,96 @@ mod tests {
         let stored = ws
             .indexed
             .get(&new_path)
-            .map(|file| file.project_file.canonical_path(&ws.db).clone());
+            .map(|file| file.source_file.canonical_path(&ws.db).clone());
+        let at_new = ws.source_file_at(&new_path);
+        let at_old = ws.source_file_at(&old_path);
         fs::remove_dir_all(&root).expect("remove project");
 
         assert_eq!(stored, Some(new_path.display().to_string()));
+        assert!(
+            at_new.is_some(),
+            "the renamed file must be reachable at its new path"
+        );
+        assert!(
+            at_old.is_none(),
+            "nothing may still answer at the path the file left"
+        );
+    }
+
+    /// The path → input map is the workspace's own file set, no more and
+    /// no less: a pathless buffer has no key, and a file that is both
+    /// open and indexed is one entry because it is one input.
+    #[test]
+    fn the_workspace_files_input_tracks_the_file_set() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        let main = root.join("main.leek");
+        fs::write(&main, "return 1\n").expect("write entry");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = main.canonicalize().expect("canonical entry");
+        let uri = path_to_uri(&path);
+
+        let indexed_only = ws.files().len(&ws.db);
+        let indexed_file = ws.source_file_at(&path);
+
+        // A scratch buffer has no path, so it adds no entry.
+        ws.open(
+            Url::parse("untitled:scratch.leek").expect("uri"),
+            "return 2\n".into(),
+        );
+        let with_scratch = ws.files().len(&ws.db);
+
+        // Opening the indexed file reuses its input, so still one entry.
+        ws.open(uri.clone(), "return 3\n".into());
+        let with_buffer = ws.files().len(&ws.db);
+        let opened_file = ws.source_file_at(&path);
+
+        ws.remove_from_disk(&uri);
+        ws.close(&uri);
+        let after_removal = ws.files().len(&ws.db);
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert_eq!(indexed_only, 1);
+        assert!(
+            indexed_file.is_some(),
+            "the indexed file is a workspace file"
+        );
+        assert_eq!(with_scratch, 1, "a pathless buffer has no canonical path");
+        assert_eq!(with_buffer, 1, "one file, one input, one entry");
+        assert!(
+            opened_file == indexed_file,
+            "the buffer must reuse the indexed file's input"
+        );
+        assert_eq!(
+            after_removal, 0,
+            "a file that is gone is not a workspace file"
+        );
+    }
+
+    /// #464: a `SourceId` belongs to a path, not to the moment an input
+    /// was created. Reopening a closed buffer used to mint a fresh id,
+    /// which invalidated every span and memo downstream had cached
+    /// against the old one.
+    #[test]
+    fn reopening_a_file_keeps_its_source_id() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create scratch dir");
+        let file = root.join("loose.leek");
+        fs::write(&file, "var x = 1\n").expect("write file");
+        let path = file.canonicalize().expect("canonical file");
+        let uri = path_to_uri(&path);
+
+        let mut ws = Workspace::default();
+        ws.open(uri.clone(), "var x = 1\n".into());
+        let first = ws.doc(&uri).expect("open doc").source_file.source(&ws.db);
+        ws.close(&uri);
+        ws.open(uri.clone(), "var x = 2\n".into());
+        let second = ws.doc(&uri).expect("open doc").source_file.source(&ws.db);
+        fs::remove_dir_all(&root).expect("remove scratch dir");
+
+        assert_eq!(first, second, "the id belongs to the path, not the buffer");
     }
 
     /// #181: `indexed` is keyed by `ProjectIndex::canonicalize` output,

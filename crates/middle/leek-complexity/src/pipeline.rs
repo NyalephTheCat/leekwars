@@ -124,7 +124,17 @@ mod salsa_tests {
     use super::salsa_probe::{COMPLEXITY_QUERY_CALLS, SERIAL};
 
     fn source(db: &mut LeekDb, text: &str) -> SourceFile {
-        SourceFile::new(db, 1, text.to_string(), 4, false, false, 0, Vec::new())
+        SourceFile::new(
+            db,
+            String::new(),
+            1,
+            text.into(),
+            4,
+            false,
+            false,
+            0,
+            Vec::new(),
+        )
     }
 
     fn pipeline() -> Pipeline {
@@ -177,7 +187,7 @@ mod salsa_tests {
         let after_first = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);
 
         file.set_text(&mut db)
-            .to("function f(n) { for (var i = 0; i < n; i++) { } return 1 }\n".to_string());
+            .to("function f(n) { for (var i = 0; i < n; i++) { } return 1 }\n".into());
 
         let _ = pipeline.run_memoized(&db, file);
         let after_second = COMPLEXITY_QUERY_CALLS.load(Ordering::Relaxed);

@@ -57,15 +57,15 @@ pub fn will_rename(ws: &Workspace, renames: &[(String, String)]) -> Option<lsp::
     // plus the renamed originals (which need not be open or indexed).
     let targets = ws.analysis_targets();
     let mut known: HashSet<PathBuf> = renamed.keys().cloned().collect();
-    for target in &targets {
-        if let Some(path) = uri_to_path(target.uri) {
+    for target in targets {
+        if let Some(path) = uri_to_path(&target.uri) {
             known.insert(normalize_lexical(&path));
         }
     }
 
     let mut changes: HashMap<lsp::Url, Vec<lsp::TextEdit>> = HashMap::new();
-    for target in &targets {
-        let Some(path) = uri_to_path(target.uri).map(|p| normalize_lexical(&p)) else {
+    for target in targets {
+        let Some(path) = uri_to_path(&target.uri).map(|p| normalize_lexical(&p)) else {
             continue;
         };
         let edits = edits_for_document(ws, target.source_file, &path, &known, &renamed);

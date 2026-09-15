@@ -1,13 +1,13 @@
 //! Pipeline integration: parser as a [`Step`].
 //!
-//! Three parse paths live here — the direct [`Parse`] step, [`parse_query`]
-//! and [`parse_project_file_query`] — and they differ only in *who lexed
-//! the text*, never in how the resulting diagnostics are ordered. A path
-//! that lexes its own text goes through [`crate::parse_file_with`] and
-//! reports the lexer's diagnostics ahead of the parser's; a path handed
-//! tokens somebody else lexed reports the parser's only, because that
-//! somebody already emitted the lexer's. The [entry module
-//! docs](crate::entry) state the convention in full.
+//! Two parse paths live here — the direct [`Parse`] step and
+//! [`parse_query`] — and they differ only in *who lexed the text*, never
+//! in how the resulting diagnostics are ordered. A path that lexes its
+//! own text goes through [`crate::parse_file_with`] and reports the
+//! lexer's diagnostics ahead of the parser's; a path handed tokens
+//! somebody else lexed reports the parser's only, because that somebody
+//! already emitted the lexer's. The [entry module docs](crate::entry)
+//! state the convention in full.
 
 use leek_diagnostics::Diagnostic;
 use leek_pipeline::{Artifact, Context, Step, StepError};
@@ -188,8 +188,7 @@ pub struct ParseQueryResult {
 /// `version_byte`, `flags_bits` or `extra_classes`. (`strict` is *not*
 /// read here — it only reaches the type checker.)
 ///
-/// Deliberately *not* [`crate::parse_file_with`], and deliberately
-/// asymmetric with [`parse_project_file_query`] below:
+/// Deliberately *not* [`crate::parse_file_with`]:
 ///
 /// * it lexes through [`leek_lexer::pipeline::lex_query`] so the memoized
 ///   lex is shared with the [`Lex`](leek_lexer::pipeline::Lex) step
@@ -197,8 +196,13 @@ pub struct ParseQueryResult {
 /// * it returns the parser's diagnostics *only*, because on this path the
 ///   `Lex` step already emitted the lexer's. `parse_file_with` prepends
 ///   them, so routing this query through it would double-report every lex
-///   diagnostic. `parse_project_file_query` *does* merge them because
-///   nothing else emits them for an on-disk project file.
+///   diagnostic.
+///
+/// This is the only salsa parse entry point, and it serves an indexed
+/// on-disk file exactly as it serves an editor buffer: both are one
+/// [`SourceFile`](leek_pipeline::salsa::SourceFile), and both reach the
+/// parser through a pipeline whose `Lex` step emitted the lex
+/// diagnostics once.
 #[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn parse_query(
@@ -224,33 +228,6 @@ pub fn parse_query(
     ParseQueryResult {
         green: result.green,
         diagnostics: result.diagnostics,
-    }
-}
-
-/// Salsa-tracked parse for an on-disk project file. Re-runs when
-/// [`ProjectFile`](leek_pipeline::salsa::ProjectFile)'s text changes.
-///
-/// Unlike [`parse_query`] this goes through [`crate::parse_file_with`],
-/// so its diagnostics are the lexer's followed by the parser's: an
-/// indexed on-disk file has no [`Lex`](leek_lexer::pipeline::Lex) step
-/// running over it, so nothing else would report the lexer's. Each lex
-/// diagnostic therefore appears exactly once here, not twice.
-#[cfg(feature = "salsa")]
-#[salsa::tracked]
-pub fn parse_project_file_query(
-    db: &dyn leek_pipeline::salsa::Db,
-    file: leek_pipeline::salsa::ProjectFile,
-) -> ParseQueryResult {
-    let parsed = crate::parse_file_with(
-        file.text(db),
-        file.source(db),
-        &crate::ParseOptions::new(version_from_byte(file.version_byte(db)))
-            .with_flags(leek_span::FeatureFlags::from_bits(file.flags_bits(db)))
-            .with_extra_classes(file.extra_classes(db)),
-    );
-    ParseQueryResult {
-        green: parsed.green,
-        diagnostics: parsed.diagnostics,
     }
 }
 
@@ -289,7 +266,17 @@ mod salsa_invalidation_tests {
 
     fn fixture() -> (LeekDb, SourceFile) {
         let db = LeekDb::default();
-        let file = SourceFile::new(&db, 1, SRC.to_string(), 4, false, false, 0, Vec::new());
+        let file = SourceFile::new(
+            &db,
+            String::new(),
+            1,
+            SRC.into(),
+            4,
+            false,
+            false,
+            0,
+            Vec::new(),
+        );
         (db, file)
     }
 
@@ -385,17 +372,18 @@ mod salsa_invalidation_tests {
     }
 }
 
-/// The three parse paths agree on the tree, and disagree about lex
+/// The two parse paths agree on the tree, and disagree about lex
 /// diagnostics only where the [entry module docs](crate::entry) say they
 /// should.
 #[cfg(all(test, feature = "salsa"))]
 mod parse_path_agreement_tests {
     use leek_diagnostics::codes;
-    use leek_pipeline::salsa::{LeekDb, ProjectFile, SourceFile};
+    use leek_pipeline::Pipeline;
+    use leek_pipeline::salsa::{LeekDb, SourceFile};
     use leek_syntax::version::version_from_byte;
 
     use super::salsa_probe::SERIAL;
-    use super::{parse_project_file_query, parse_query};
+    use super::{Parse, parse_query};
 
     /// A clean file, and one that needs `extra_classes` to parse its
     /// declaration *and* trips the parser on a second statement — so the
@@ -422,8 +410,9 @@ mod parse_path_agreement_tests {
             let db = LeekDb::default();
             let file = SourceFile::new(
                 &db,
+                String::new(),
                 1,
-                text.to_string(),
+                text.into(),
                 4,
                 false,
                 false,
@@ -449,20 +438,26 @@ mod parse_path_agreement_tests {
         }
     }
 
-    /// Nothing lexes an indexed on-disk file but
-    /// `parse_project_file_query` itself, so it is the one salsa path that
-    /// merges the lexer's diagnostics in — and it must merge them *once*.
-    /// Two copies of the lex+merge glue on one path is how a file ends up
-    /// with two identical "string literal not closed" squiggles.
+    /// An indexed on-disk file used to have a parse query of its own that
+    /// re-lexed and merged the lexer's diagnostics in, because nothing
+    /// else reported them for a file with no editor buffer. It is gone,
+    /// and this is the guard on what replaced it: the indexed file is an
+    /// ordinary [`SourceFile`] driven through the ordinary pipeline, and
+    /// the [`Lex`](leek_lexer::pipeline::Lex) step in front of [`Parse`]
+    /// emits each lex diagnostic — exactly once, since `parse_query`
+    /// still reports none of them itself.
     #[test]
-    fn the_project_file_query_reports_each_lex_diagnostic_once() {
+    fn the_indexed_path_still_reports_each_lex_diagnostic_once() {
+        let _guard = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = "var s = \"unclosed;\n";
         let db = LeekDb::default();
-        let file = ProjectFile::new(
+        let file = SourceFile::new(
             &db,
             "/project/a.leek".to_string(),
             1,
-            text.to_string(),
+            text.into(),
             4,
             false,
             false,
@@ -480,19 +475,17 @@ mod parse_path_agreement_tests {
             "fixture must raise exactly one lex diagnostic to count"
         );
 
-        let out = parse_project_file_query(&db, file);
+        let run = Pipeline::new()
+            .with(leek_lexer::pipeline::Lex)
+            .with(Parse)
+            .run_memoized(&db, file);
         assert_eq!(
-            out.diagnostics
+            run.diagnostics()
                 .iter()
                 .filter(|d| d.code == codes::STRING_NOT_CLOSED)
                 .count(),
             1,
-            "the lexer's diagnostic is merged in once, not once per path"
-        );
-        assert_eq!(
-            out.diagnostics.first().map(|d| d.code),
-            Some(codes::STRING_NOT_CLOSED),
-            "lex diagnostics come before the parser's"
+            "the Lex step reports it once, and the parse query not at all"
         );
     }
 
@@ -506,7 +499,17 @@ mod parse_path_agreement_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = "var s = \"unclosed;\n";
         let db = LeekDb::default();
-        let file = SourceFile::new(&db, 1, text.to_string(), 4, false, false, 0, Vec::new());
+        let file = SourceFile::new(
+            &db,
+            String::new(),
+            1,
+            text.into(),
+            4,
+            false,
+            false,
+            0,
+            Vec::new(),
+        );
         let out = parse_query(&db, file);
         assert!(
             !out.diagnostics
