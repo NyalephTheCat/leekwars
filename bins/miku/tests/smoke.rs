@@ -2422,3 +2422,62 @@ repository  = "https://example.invalid/documented"
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// An `include(...)` that reaches *outside* the project root still
+/// resolves, and the included file's contents are really part of the
+/// program.
+///
+/// The coverage gap that let two regressions through this branch with CI
+/// green. Every other fixture here is self-contained and the upstream
+/// corpus is single-file, so nothing exercised an include the project
+/// index never walked — which is exactly the case that broke when
+/// compilation moved from a disk-backed include folder to a salsa file
+/// set.
+///
+/// Asserted two ways on purpose. `check` passing says the include
+/// resolved at all (a missing one is `E0272 IncludeNotFound`); the run's
+/// output says its *definition* reached the program, which a resolved-but-
+/// empty closure would not give.
+#[test]
+fn an_include_reaching_outside_the_project_resolves() {
+    let base = scratch_dir("escaping_include");
+    let project = base.join("app");
+    write(
+        &project,
+        "Miku.toml",
+        "[project]\nname    = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    // One level above the project root, so no index walk reaches it.
+    write(
+        &base,
+        "shared/lib.leek",
+        "// @version:4\nfunction twice(x) { return x * 2; }\n",
+    );
+    write(
+        &project,
+        "src/main.leek",
+        "// @version:4\ninclude(\"../../shared/lib\");\nreturn twice(21);\n",
+    );
+
+    let check = miku(&["check"], &project);
+    assert_eq!(
+        check.status, 0,
+        "the include is on disk and must resolve.\nstdout: {}\nstderr: {}",
+        check.stdout, check.stderr
+    );
+    assert!(!check.stderr.contains("E0272"), "stderr: {}", check.stderr);
+
+    let run = miku(&["run"], &project);
+    assert_eq!(
+        run.status, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert!(
+        run.stdout.contains("42"),
+        "the escaping file's definition reached the program.\nstdout: {}",
+        run.stdout
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
