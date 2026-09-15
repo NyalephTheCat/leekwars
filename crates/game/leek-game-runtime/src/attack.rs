@@ -91,6 +91,8 @@ pub enum EffectType {
     TotalDebuff = 60,
     StealLife = 61,
     MultiplyStats = 62,
+    DamageToResistance = 63,
+    Superinfection = 64,
 }
 
 impl EffectType {
@@ -103,7 +105,7 @@ impl EffectType {
     /// Parse an official effect id (scenario / item data).
     #[must_use]
     pub fn from_id(id: i32) -> Option<Self> {
-        // The discriminants are exactly 1..=62 with no gaps — round-tripped
+        // The discriminants are exactly 1..=64 with no gaps — round-tripped
         // by the `effect_type_ids` test.
         Some(match id {
             1 => Self::Damage,
@@ -168,6 +170,8 @@ impl EffectType {
             60 => Self::TotalDebuff,
             61 => Self::StealLife,
             62 => Self::MultiplyStats,
+            63 => Self::DamageToResistance,
+            64 => Self::Superinfection,
             _ => return None,
         })
     }
@@ -190,6 +194,8 @@ pub enum EntityState {
     Rooted = 9,
     Petrified = 10,
     Static = 11,
+    /// `STERILE` — the entity may no longer summon.
+    Sterile = 12,
 }
 
 impl EntityState {
@@ -209,6 +215,7 @@ impl EntityState {
             9 => Self::Rooted,
             10 => Self::Petrified,
             11 => Self::Static,
+            12 => Self::Sterile,
             other => panic!("EntityState ordinal {other} out of range"),
         }
     }
@@ -1678,6 +1685,69 @@ impl State {
                     }
                 }
             }
+            // `EffectSuperinfection.apply` — converts part of every timed
+            // poison on the target into damage dealt right now. Each poison
+            // is reduced by `ratio` and the amount taken off it, times its
+            // remaining turns, is the damage: a conversion, not a
+            // duplication — the total poison the target will suffer is
+            // unchanged, only brought forward. The reduction goes through
+            // `Effect.reduce` directly, so IRREDUCTIBLE poisons convert too
+            // (this is the poison firing early, not the poison being
+            // weakened), and infinite poisons (`turns <= 0`) have no
+            // remaining total to convert and are skipped.
+            EffectType::Superinfection => {
+                let ratio =
+                    (((params.value1 + jet * params.value2) / 100.0) * critical_power).min(1.0);
+                let mut converted = 0;
+                let mut i = 0;
+                while i < self.fighters[target].effects.len() {
+                    let ei = self.fighters[target].effects[i];
+                    if self.effects[ei].effect != EffectType::Poison || self.effects[ei].turns <= 0
+                    {
+                        i += 1;
+                        continue;
+                    }
+                    let before = self.effects[ei].value;
+                    self.reduce_effect(ei, ratio);
+                    converted += (before - self.effects[ei].value) * self.effects[ei].turns;
+                    if self.effects[ei].value <= 0 {
+                        let poison_caster = self.effects[ei].caster;
+                        self.fighters[poison_caster]
+                            .launched_effects
+                            .retain(|&x| x != ei);
+                        self.remove_effect(target, ei); // i stays — the list shrank
+                    } else {
+                        let (log_id, value) = (self.effects[ei].log_id, self.effects[ei].value);
+                        self.actions.log(Action::UpdateEffect { log_id, value });
+                        i += 1;
+                    }
+                }
+                self.update_buff_stats(target);
+
+                inst.value = converted.min(self.fighters[target].life);
+                if self.fighters[target].has_state(EntityState::Invincible) {
+                    inst.value = 0;
+                }
+                if inst.value > 0 {
+                    // Poison erosion with the usual critical bonus — the
+                    // effect line itself is not a poison, so the shared
+                    // `erosion_rate` above is the direct-damage one.
+                    let rate = EROSION_POISON
+                        + if critical {
+                            EROSION_CRITICAL_BONUS
+                        } else {
+                            0.0
+                        };
+                    let erosion = java_round(f64::from(inst.value) * rate);
+                    self.actions.log(Action::Damage {
+                        damage_type: DamageType::Poison,
+                        target_id: target as i64,
+                        pv: inst.value,
+                        erosion,
+                    });
+                    self.remove_life(target, inst.value, erosion, Some(caster));
+                }
+            }
             other => panic!("effect type {other:?} not ported yet (corpus-first)"),
         }
 
@@ -2050,7 +2120,10 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::{Area, EffectType, java_round};
+    use super::{
+        Area, AttackType, EffectModifiers, EffectParams, EffectTargets, EffectType, java_round,
+    };
+    use crate::state::{STAT_LIFE, State};
 
     #[test]
     fn java_round_matches_math_round() {
@@ -2067,12 +2140,105 @@ mod tests {
     #[test]
     fn effect_type_ids() {
         // from_id must be the inverse of id() over the whole official range.
-        for id in 1..=62 {
-            let e = EffectType::from_id(id).expect("ids 1..=62 are all defined");
+        for id in 1..=64 {
+            let e = EffectType::from_id(id).expect("ids 1..=64 are all defined");
             assert_eq!(e.id(), id);
         }
         assert_eq!(EffectType::from_id(0), None);
-        assert_eq!(EffectType::from_id(63), None);
+        assert_eq!(EffectType::from_id(65), None);
+    }
+
+    /// `EffectSuperinfection` converts a slice of every timed poison into
+    /// damage right now: the poison's per-turn value drops by the ratio and
+    /// what it lost, times its remaining turns, lands as poison damage.
+    ///
+    /// Fixture: one 20/turn poison with 3 turns left, converted at 50 %.
+    /// The poison drops to 10 and 10 × 3 = 30 damage is dealt, eroding
+    /// `EROSION_POISON` (10 %) = 3 max life.
+    #[test]
+    fn superinfection_brings_a_poison_forward_as_damage() {
+        let mut stats = crate::state::Stats::default();
+        stats.set(STAT_LIFE, 100);
+        let mut state = State::new(1);
+        let caster = state.add_entity(
+            0,
+            crate::state::Fighter::new(0, 1, "caster".into(), 0, stats.clone()),
+        );
+        let target = state.add_entity(
+            1,
+            crate::state::Fighter::new(1, 2, "target".into(), 1, stats),
+        );
+
+        let line = |effect: EffectType, value1: f64, turns: i32| EffectParams {
+            effect,
+            value1,
+            value2: 0.0,
+            turns,
+            targets: EffectTargets::all(),
+            modifiers: EffectModifiers::empty(),
+        };
+        // Magic and power are 0, so the poison's per-turn value is `value1`.
+        let poison = state.create_effect(
+            &line(EffectType::Poison, 20.0, 3),
+            1.0,
+            false,
+            target,
+            caster,
+            1,
+            AttackType::Chip,
+            0.0,
+            false,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(poison, 20, "the poison ticks for 20 a turn");
+
+        let damage = state.create_effect(
+            &line(EffectType::Superinfection, 50.0, 0),
+            1.0,
+            false,
+            target,
+            caster,
+            2,
+            AttackType::Chip,
+            0.0,
+            false,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(damage, 30, "half of 20, over the 3 remaining turns");
+        assert_eq!(state.fighters[target].life, 70);
+        assert_eq!(state.fighters[target].total_life, 97, "10 % poison erosion");
+
+        // The poison is still there, halved — the total it will deal is
+        // conserved, only part of it was brought forward.
+        let remaining: Vec<(i32, i32)> = state.fighters[target]
+            .effects
+            .iter()
+            .map(|&ei| (state.effects[ei].value, state.effects[ei].turns))
+            .collect();
+        assert_eq!(remaining, vec![(10, 3)]);
+
+        // Converting the rest removes the poison outright.
+        let rest = state.create_effect(
+            &line(EffectType::Superinfection, 100.0, 0),
+            1.0,
+            false,
+            target,
+            caster,
+            2,
+            AttackType::Chip,
+            0.0,
+            false,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(rest, 30, "the remaining 10 a turn, over 3 turns");
+        assert!(state.fighters[target].effects.is_empty());
+        assert_eq!(state.fighters[target].life, 40);
     }
 
     #[test]

@@ -18,9 +18,10 @@ use crate::state::{
     FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
     FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED, FARMER_LOG_LOADOUT_NOT_FOUND,
     FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, Fighter,
-    LOG_SSTANDARD, LOG_SWARNING, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_DAMAGE_RETURN,
-    STAT_MAGIC, STAT_POWER, STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE, STAT_STRENGTH,
-    STAT_WISDOM, State, USE_RESURRECT_INVALID_ENTITY,
+    LOG_SSTANDARD, LOG_SWARNING, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_CORES,
+    STAT_DAMAGE_RETURN, STAT_FREQUENCY, STAT_LIFE, STAT_MAGIC, STAT_MP, STAT_POWER, STAT_RAM,
+    STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM,
+    State, USE_RESURRECT_INVALID_ENTITY,
 };
 
 /// Dispatch one official fight function for the entity `current` (the fid
@@ -151,6 +152,11 @@ pub fn call_official_builtin(
             Value::Int(state.move_away_from_cell(current, int_arg(0), pm))
         }
         "getWinner" => Value::Int(i64::from(state.win_team)),
+        // `FightClass.isBatchFight` — `State.isBatch()`, true only for a
+        // fight the *server* runs as part of a batch (a tournament round,
+        // a garden batch). Nothing drives this engine that way, so it is
+        // the constant an offline fight is.
+        "isBatchFight" => Value::Bool(false),
         "setLoadout" => Value::Bool(set_loadout(state, current, args)),
 
         // ---- FieldClass ----
@@ -317,6 +323,15 @@ pub fn call_official_builtin(
         "getAbsoluteShield" => stat_of(state, current, args.first(), STAT_ABSOLUTE_SHIELD),
         "getRelativeShield" => stat_of(state, current, args.first(), STAT_RELATIVE_SHIELD),
         "getDamageReturn" => stat_of(state, current, args.first(), STAT_DAMAGE_RETURN),
+        // `EntityClass.getStats` — every characteristic at once, as a
+        // `STAT_* => value` map in `EntityClass.ALL_STATS` order (a
+        // `MapLeekValue` is insertion-ordered, so the order is observable).
+        // Masked like the single-stat getters: a `beforeFight()` peek at
+        // another entity is `null`, not a map.
+        "getStats" => match resolve_stat_target(state, current, args.first()) {
+            Some(fid) => stats_map(&state.fighters[fid]),
+            None => Value::Null,
+        },
         // The *equipped* weapon (`Entity.weapon`) — `null` when the entity
         // carries none, which is every entity until its first `setWeapon`.
         "getWeapon" => match resolve_stat_target(state, current, args.first()) {
@@ -446,6 +461,31 @@ pub fn call_official_builtin(
             Some(fid) => Value::Int(i64::from(state.fighters[fid].birth_turn)),
             None => Value::Null,
         },
+
+        // ---- EntityClass (plants) ----
+        // The 2.50 rooted summons. This engine has no entity *types* at all
+        // — every fighter is a leek or a bulb — so no entity is a plant and
+        // none carries an awakening zone. Both getters keep the shape that
+        // matters to an AI: the sentinel for an entity that resolves, and
+        // `null` for an argument that doesn't.
+        //
+        // `getPlantType` answers `-1` for a non-plant, exactly as
+        // `getMobType`/`getBulbType` do for a non-mob/non-bulb.
+        "getPlantType" => match resolve_entity(state, current, args.first()) {
+            Some(_) => Value::Int(-1),
+            None => Value::Null,
+        },
+        // `getAwakeningZone` is the radius in cells of the entity's
+        // awakening zone, and `0` means "this entity plays its own turn
+        // like everyone else" — which is every entity here.
+        "getAwakeningZone" => match resolve_entity(state, current, args.first()) {
+            Some(_) => Value::Int(0),
+            None => Value::Null,
+        },
+        // `getPlantTrigger` is the entity whose move into the zone woke the
+        // plant up, and `-1` outside an awakening. No entity ever wakes a
+        // plant here, so it is always `-1`. Takes no argument upstream.
+        "getPlantTrigger" => Value::Int(-1),
 
         // ---- EntityClass (communication) ----
         // `say(message)` — 1 TP, at most `SAY_LIMIT_TURN` logged per turn.
@@ -863,6 +903,46 @@ fn masked_int(
 /// One masked characteristic (`Entity.getStat` — `mBaseStats + mBuffStats`).
 fn stat_of(state: &State, current: usize, arg: Option<&Value>, stat: usize) -> Value {
     masked_int(state, current, arg, |f| i64::from(f.stat(stat)))
+}
+
+/// `EntityClass.ALL_STATS` — the characteristics `getStats` reports, in the
+/// order it fills its map (`MapLeekValue` keeps insertion order, so this is
+/// the order an AI iterating the result sees).
+const ALL_STATS: [usize; 16] = [
+    STAT_LIFE,
+    STAT_TP,
+    STAT_MP,
+    STAT_STRENGTH,
+    STAT_AGILITY,
+    STAT_FREQUENCY,
+    STAT_WISDOM,
+    STAT_ABSOLUTE_SHIELD,
+    STAT_RELATIVE_SHIELD,
+    STAT_RESISTANCE,
+    STAT_SCIENCE,
+    STAT_MAGIC,
+    STAT_DAMAGE_RETURN,
+    STAT_POWER,
+    STAT_CORES,
+    STAT_RAM,
+];
+
+/// `EntityClass.statsMap` — every [`ALL_STATS`] characteristic of `fighter`
+/// as a `STAT_* => value` map.
+///
+/// The values are `Entity.getStat(id)` (base + buff), so `STAT_LIFE` is the
+/// entity's *maximum* life and `STAT_TP`/`STAT_MP` its totals — not the
+/// remaining life/TP/MP `getLife`/`getTP`/`getMP` answer with.
+fn stats_map(fighter: &Fighter) -> Value {
+    let mut map = leek_runtime::MapData::new();
+    for stat in ALL_STATS {
+        // Every `STAT_*` is a small index into `Stats` (`STAT_COUNT` is 18),
+        // so the key never reaches the sign bit.
+        #[allow(clippy::cast_possible_wrap)]
+        let key = stat as i64;
+        map.insert(Value::Int(key), Value::Int(i64::from(fighter.stat(stat))));
+    }
+    Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map)))
 }
 
 /// A LeekScript array of ids — the shape every array-returning getter here
@@ -1518,6 +1598,110 @@ mod tests {
             int_vec(&call(&mut state, "getWeapons", &[Value::Int(1)])),
             Vec::<i64>::new(),
             "getWeapons(1)"
+        );
+    }
+
+    /// `getStats` answers with every characteristic at once, in
+    /// `EntityClass.ALL_STATS` order, reading the same buffed numbers the
+    /// single-stat getters do.
+    #[test]
+    fn get_stats_returns_every_characteristic_in_order() {
+        let mut state = two_leeks();
+        let got = call(&mut state, "getStats", &[]);
+        let Value::Map(map) = &got else {
+            panic!("expected a map, got {got:?}");
+        };
+        let pairs: Vec<(i64, i64)> = map
+            .borrow()
+            .entries
+            .iter()
+            .map(|(k, v)| (k.to_long(), v.to_long()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (0, 100), // STAT_LIFE — the characteristic, not `getLife`
+                (1, 10),  // STAT_TP — the total, not the remaining 7
+                (2, 5),   // STAT_MP — likewise, not the remaining 3
+                (3, 111), // STAT_STRENGTH — base 11 + the 100 buff
+                (4, 12),  // STAT_AGILITY
+                (5, 0),   // STAT_FREQUENCY
+                (6, 13),  // STAT_WISDOM
+                (9, 18),  // STAT_ABSOLUTE_SHIELD
+                (10, 19), // STAT_RELATIVE_SHIELD
+                (11, 14), // STAT_RESISTANCE
+                (12, 15), // STAT_SCIENCE
+                (13, 16), // STAT_MAGIC
+                (14, 20), // STAT_DAMAGE_RETURN
+                (15, 17), // STAT_POWER
+                (16, 0),  // STAT_CORES
+                (17, 0),  // STAT_RAM
+            ],
+        );
+
+        // Each entry agrees with the getter for that characteristic.
+        let by_key = |k: i64| {
+            map.borrow()
+                .get(&Value::Int(k))
+                .map(Value::to_long)
+                .expect("key present")
+        };
+        assert_eq!(by_key(3), call(&mut state, "getStrength", &[]).to_long());
+        assert_eq!(by_key(12), call(&mut state, "getScience", &[]).to_long());
+
+        // An entity that doesn't resolve is `null`, like every other
+        // masked getter — and so is another entity during `beforeFight()`.
+        assert_value(
+            &call(&mut state, "getStats", &[Value::Int(99)]),
+            &Value::Null,
+            "getStats(99)",
+        );
+        assert!(
+            !matches!(call(&mut state, "getStats", &[Value::Int(1)]), Value::Null),
+            "getStats(1) outside a hook is readable",
+        );
+        state.hook_phase = HookPhase::BeforeFight;
+        assert_value(
+            &call(&mut state, "getStats", &[Value::Int(1)]),
+            &Value::Null,
+            "getStats(1) in beforeFight",
+        );
+    }
+
+    /// The 2.50 plant getters. No entity here is a plant, so each answers
+    /// its "not one" sentinel — but an argument that doesn't resolve is
+    /// still `null`, and `getPlantTrigger` still takes no argument.
+    #[test]
+    fn the_plant_getters_answer_for_an_engine_without_plants() {
+        let mut state = two_leeks();
+        for (name, want) in [("getPlantType", -1), ("getAwakeningZone", 0)] {
+            assert_value(&call(&mut state, name, &[]), &Value::Int(want), name);
+            assert_value(
+                &call(&mut state, name, &[Value::Int(1)]),
+                &Value::Int(want),
+                &format!("{name}(1)"),
+            );
+            assert_value(
+                &call(&mut state, name, &[Value::Int(99)]),
+                &Value::Null,
+                &format!("{name}(99)"),
+            );
+        }
+        assert_value(
+            &call(&mut state, "getPlantTrigger", &[]),
+            &Value::Int(-1),
+            "getPlantTrigger()",
+        );
+    }
+
+    /// A fight this engine runs is never one of the server's batch runs.
+    #[test]
+    fn is_batch_fight_is_false_offline() {
+        let mut state = two_leeks();
+        assert_value(
+            &call(&mut state, "isBatchFight", &[]),
+            &Value::Bool(false),
+            "isBatchFight()",
         );
     }
 

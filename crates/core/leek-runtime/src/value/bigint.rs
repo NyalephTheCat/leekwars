@@ -23,6 +23,41 @@ pub fn java_bit_length(b: &BigInt) -> u64 {
     }
 }
 
+/// Java `BigInteger.bitCount()` — how many bits of the two's-complement
+/// representation differ from the sign bit.
+///
+/// For a non-negative value that is the magnitude's popcount; for a
+/// negative one it is the popcount of `|n| - 1`, which is what counting the
+/// zeros of the two's-complement form comes to (`bitCount(-1) == 0`).
+pub fn java_bit_count(b: &BigInt) -> u64 {
+    if b.is_negative() {
+        (b.magnitude() - 1u32).count_ones()
+    } else {
+        b.magnitude().count_ones()
+    }
+}
+
+/// Java `BigInteger.getLowestSetBit()` — index of the rightmost one bit of
+/// the two's-complement representation, or `-1` for zero.
+///
+/// Two's complement and sign-magnitude agree on the trailing zeros (negating
+/// leaves the lowest set bit where it is), so the magnitude answers it.
+pub fn java_lowest_set_bit(b: &BigInt) -> i64 {
+    b.trailing_zeros()
+        .and_then(|z| i64::try_from(z).ok())
+        .unwrap_or(-1)
+}
+
+/// Java `BigInteger.setBit(pos, value)` / `testBit(pos)`'s bit index: the
+/// argument narrowed by Java's `(int)` cast. A negative index is
+/// `ArithmeticException("Negative bit address")` upstream, and `None` here.
+pub fn java_bit_index(pos: i64) -> Option<u64> {
+    // `as i32` is the `(int)` cast; a negative result is the rejected case.
+    #[allow(clippy::cast_possible_truncation)]
+    let narrowed = pos as i32;
+    u64::try_from(narrowed).ok()
+}
+
 /// Java `BigInteger.longValue()` — the low 64 bits, two's complement
 /// (wrapping, not saturating). Used by upstream `longint()` coercion.
 pub fn big_to_i64_wrapping(b: &BigInt) -> i64 {

@@ -89,6 +89,16 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         "getCooldown" => Value::Int(host.cooldown(entity_arg(1), int_arg(0))),
         "isAlive" => Value::Bool(host.life(entity_arg(0)).is_some_and(|l| l > 0)),
         "isDead" => Value::Bool(host.life(entity_arg(0)).is_none_or(|l| l <= 0)),
+        // ---- 2.50 plants / batch fights ----
+        // A [`GameHost`] has no entity *types* and no batch scheduling, so
+        // every one of these is the constant its sentinel describes: no
+        // entity is a plant (`-1`), none has an awakening zone (`0` — it
+        // plays its own turn), nothing ever wakes one (`-1`), and a fight
+        // driven through this runtime is never part of a server batch.
+        "getPlantType" => opt_int(host.life(entity_arg(0)).map(|_| -1)),
+        "getAwakeningZone" => opt_int(host.life(entity_arg(0)).map(|_| 0)),
+        "getPlantTrigger" => Value::Int(-1),
+        "isBatchFight" => Value::Bool(false),
 
         // ---- Map / geometry ----
         "getCellX" => opt_int(host.cell_x(int_arg(0))),
@@ -208,6 +218,10 @@ pub fn is_game_builtin(name: &str) -> bool {
             | "getCooldown"
             | "isAlive"
             | "isDead"
+            | "getPlantType"
+            | "getAwakeningZone"
+            | "getPlantTrigger"
+            | "isBatchFight"
             | "getCellX"
             | "getCellY"
             | "getCellFromXY"

@@ -73,25 +73,48 @@ about values. Read them accordingly:
   and `leek-backend-java`'s parity tests — neither of which is wired into this
   corpus yet (#70).
 
-## Why all three columns look the same
+## Why `pipeline` and `java-emit` read the same
 
-Every column currently reads `total = 11005, pass = 10153,
-pass_expected_error = 828`, with zero failures and zero unknown skips. That is
-a real result, not a baseline saved while the backends shared a code path — a
-run on today's HEAD reproduces the numbers recorded three months ago exactly,
-column for column.
-
-It is also the *expected* shape while `native` is at 100%: a case native
-compiles, runs and value-checks necessarily compiles for `pipeline` and emits
-for `java-emit`, so the three columns can only diverge once something fails.
-Do not read identical columns as "the baseline is broken", and do not add a
+`pipeline` and `java-emit` currently read `total = 12254, pass = 12071,
+fail = 141, skipped = 18` — the same numbers, and that is the *expected*
+shape rather than a baseline saved while the two shared a code path: a case
+that compiles for `pipeline` emits for `java-emit`, so the two columns can
+only diverge once the emitter itself breaks on HIR the frontend accepted. Do
+not read identical columns as "the baseline is broken", and do not add a
 check that requires them to differ — that is a check that requires the
 compiler to be broken. What separates the columns is their check *logic*,
 pinned in `leek-test-driver/tests/safety_net_honesty.rs`.
 
-The corollary is that these summaries carry no per-backend signal today. The
-numbers that would carry it — a real JVM value check for the Java backend —
-live outside this corpus (see `java-emit` above, and #70).
+`native` carries the value check, so it is the column that moves on its own:
+`fail = 152, skipped = 170` today, the extra failures being cases that
+compile and emit but compute the wrong value or count the wrong operations.
+
+The corollary is that the `pipeline` / `java-emit` summaries carry no
+per-backend signal. The numbers that would carry it — a real JVM value check
+for the Java backend — live outside this corpus (see `java-emit` above, and #70).
+
+### Where the failures come from
+
+They arrived whole, with the `official-generator` bump to `v3.00`: it moves
+the nested `leekscript` submodule with it, and the JUnit suite `build.rs`
+extracts grew from 11005 cases to 12254. Every one of the 141/152 is a case
+this toolchain has never run, not a case it used to pass:
+
+- **`a?[b]`, the optional array/map/string/object access operator** (`v3.00`,
+  `TestArray::testOptional_array_access` and its ternary-disambiguation
+  sibling — `c?[1]:[2]` must stay a ternary). Not in this grammar, so the 19
+  cases are `fail_parse_error`.
+- **new upstream *diagnostics*** this frontend does not raise yet — function
+  redefinition, duplicate globals, a foreach iterator shadowing a class
+  field, duplicate `switch` defaults, dead code after a returning `switch`,
+  `big_integer` DoS guards, `final` static-field assignment, incompatible
+  default-parameter types. These compile cleanly here, so they land as
+  `fail_missing_error`: the program is accepted where upstream rejects it.
+- **`native`-only value and op-count gaps**, mostly around constant folding
+  and the `switch` optimizer.
+
+Each is a feature to implement, not accepted behaviour — the baseline holds
+them so the *next* change cannot add to the list unnoticed.
 
 ## Formatter ratchet
 

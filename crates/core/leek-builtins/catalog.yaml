@@ -56,6 +56,10 @@ builtins:
   java_class: NumberClass
   return: long
   op_cost: 1
+- name: bitLength
+  java_class: NumberClass
+  return: long
+  op_cost: 1
 - name: bitReverse
   java_class: NumberClass
   return: long
@@ -355,6 +359,10 @@ builtins:
   java_class: NumberClass
   return: long
   op_cost: 2
+- name: setBit
+  java_class: NumberClass
+  return: long
+  op_cost: 1
 - name: setClear
   op_cost: 1
 - name: setContains
@@ -367,6 +375,12 @@ builtins:
   op_cost: 2
 - name: setSize
   op_cost: 1
+# `signum` stays `double` on purpose. Upstream's `NumberClass` grew a
+# `signum(AI, long)` overload, so the extracted `builtins.tsv` row now reads
+# `long` — but that column only records that *an* overload takes a long,
+# while this one picks the single coercion every emitted call uses. Java
+# resolves `signum(0.5)` to its double overload; coercing to long here would
+# truncate first and answer 0 for every value in (-1, 1).
 - name: signum
   java_class: NumberClass
   return: double
@@ -399,6 +413,10 @@ builtins:
   java_class: NumberClass
   return: double
   op_cost: 30
+- name: testBit
+  java_class: NumberClass
+  return: long
+  op_cost: 1
 - name: toDegrees
   java_class: NumberClass
   return: double

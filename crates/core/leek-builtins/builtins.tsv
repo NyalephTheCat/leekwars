@@ -5,6 +5,7 @@ atan	NumberClass	double
 atan2	NumberClass	double
 binString	NumberClass	long
 bitCount	NumberClass	long
+bitLength	NumberClass	long
 bitReverse	NumberClass	long
 bitsToReal	NumberClass	long
 byteReverse	NumberClass	long
@@ -63,7 +64,8 @@ replace	StringClass	double
 rotateLeft	NumberClass	long
 rotateRight	NumberClass	long
 round	NumberClass	long
-signum	NumberClass	double
+setBit	NumberClass	long
+signum	NumberClass	long
 sin	NumberClass	double
 split	StringClass	double
 split_v1_3	StringClass	double
@@ -72,6 +74,7 @@ startsWith	StringClass	double
 string	ValueClass	double
 substring	StringClass	double
 tan	NumberClass	double
+testBit	NumberClass	long
 toDegrees	NumberClass	double
 toLower	StringClass	double
 toRadians	NumberClass	double

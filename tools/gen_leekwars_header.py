@@ -39,6 +39,7 @@ TYPE_MAP = {
     "FUNCTION": "Function",
     "ARRAY": "Array",
     "MAP": "Map",
+    "BIG_INT": "big_integer",
     "INT_OR_NULL": "integer?",
     "BOOL_OR_NULL": "boolean?",
     "STRING_OR_NULL": "string?",

@@ -424,6 +424,57 @@ pub(crate) fn dispatch_array(
             (Some(a), Some(b)) => Value::Int(a.rotate_right(u32::try_from(b & 63).unwrap_or(0))),
             _ => Value::Null,
         },
+        // `NumberClass.setBit(x, pos[, val])` — set bit `pos` of `x` when
+        // `val`, clear it otherwise.
+        ("setBit", 2 | 3) => {
+            // `val` defaults to `true`. Upstream overloads the three-arg
+            // form on `boolean` and on `long` ("non-zero sets"), and the
+            // Java backend writes this position through `AI.bool` for
+            // both, so read it the same way here — one answer across the
+            // backends.
+            let on = args.get(2).is_none_or(Value::is_truthy);
+            match (&args[0], args[1].as_int()) {
+                // The `big_integer` overload: unbounded two's complement,
+                // and the result stays a `big_integer` even when it would
+                // fit in a long (upstream returns a `BigIntegerValue`).
+                (Value::BigInt(b), Some(pos)) => match crate::value::java_bit_index(pos) {
+                    Some(bit) => {
+                        let mut out = (**b).clone();
+                        out.set_bit(bit, on);
+                        Value::BigInt(Rc::new(out))
+                    }
+                    None => Value::Null,
+                },
+                (v, Some(pos)) => match v.as_int() {
+                    Some(x) => {
+                        // `pos as u32` keeps the low 32 bits and
+                        // `wrapping_shl` then the low 6 — exactly Java's
+                        // `1L << pos`, which masks the distance to `pos & 63`.
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let bit = 1i64.wrapping_shl(pos as u32);
+                        Value::Int(if on { x | bit } else { x & !bit })
+                    }
+                    None => Value::Null,
+                },
+                _ => Value::Null,
+            }
+        }
+        // `NumberClass.testBit(x, pos)` — same two overloads as `setBit`.
+        ("testBit", 2) => match (&args[0], args[1].as_int()) {
+            (Value::BigInt(b), Some(pos)) => match crate::value::java_bit_index(pos) {
+                Some(bit) => Value::Bool(b.bit(bit)),
+                None => Value::Null,
+            },
+            (v, Some(pos)) => match v.as_int() {
+                Some(x) => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let bit = 1i64.wrapping_shl(pos as u32);
+                    Value::Bool(x & bit != 0)
+                }
+                None => Value::Null,
+            },
+            _ => Value::Null,
+        },
         ("isPermutation", 2) => match (args[0].as_int(), args[1].as_int()) {
             (Some(a), Some(b)) => {
                 // Same digit multiset → permutation. Matches

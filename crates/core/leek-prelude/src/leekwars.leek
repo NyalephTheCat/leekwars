@@ -89,6 +89,16 @@ function getStat(integer? entity, integer stat) -> integer?;
 function getStat(integer entity) -> integer;
 
 /**
+ * Returns every characteristic of the given entity at once, as a map keyed by
+ * the STAT_* constants.
+ * @param entity The id of the entity whose characteristics will be returned. (optional)
+ * @return A STAT_* => value map of the entity's characteristics, or null if the entity does not exist.
+ * @java-dispatch: com.leekwars.generator.classes.EntityClass
+ */
+function getStats(integer? entity) -> Map?;
+function getStats() -> Map;
+
+/**
  * Returns given entity's position, as a cell id.
  * @param entity Leek whose position is determined. (optional)
  * @return Cell id of given entity's position.
@@ -1100,6 +1110,31 @@ function getBulbType(integer? entity) -> integer?;
 function getBulbType() -> integer;
 
 /**
+ * Returns the plant type of the entity entity. Returns -1 if the entity is not a plant. Use the PLANT_* constants to compare the result.
+ * @param entity The id of the entity whose plant type will be returned. (optional)
+ * @return The plant type of the entity entity, or -1 if it is not a plant.
+ * @java-dispatch: com.leekwars.generator.classes.EntityClass
+ */
+function getPlantType(integer? entity) -> integer?;
+function getPlantType() -> integer;
+
+/**
+ * Returns the entity that woke your plant up by stepping into its awakening zone, the same value the function given to summon() receives as its first argument. Returns -1 outside an awakening.
+ * @return The id of the entity that triggered the awakening, or -1 outside one.
+ * @java-dispatch: com.leekwars.generator.classes.EntityClass
+ */
+function getPlantTrigger() -> integer;
+
+/**
+ * Returns the radius, in cells, of the entity's awakening zone. Returns 0 for an entity that plays its turn like everybody else. The zone is a circle in the Leek Wars sense, measured with the cell distance getCellDistance() returns, so an entity is inside it when getCellDistance(cell, getCell(plant)) <= getAwakeningZone(plant).
+ * @param entity The id of the entity whose awakening zone will be returned. (optional)
+ * @return The radius of the entity's awakening zone, in cells, or 0 if it has none.
+ * @java-dispatch: com.leekwars.generator.classes.EntityClass
+ */
+function getAwakeningZone(integer? entity) -> integer?;
+function getAwakeningZone() -> integer;
+
+/**
  * Returns the mob type of the entity entity. Returns -1 if the entity is not a mob. Use the MOB_* constants to compare the result.
  * @param entity The id of the entity whose mob type will be returned. (optional)
  * @return The mob type of the entity entity, or -1 if it is not a mob.
@@ -1480,6 +1515,13 @@ function getFightType() -> integer;
 function getFightContext() -> integer;
 
 /**
+ * Returns whether the current fight is part of a batch run by the server, such as a tournament round or a garden batch.
+ * @return true if the fight comes from a batch, false otherwise.
+ * @java-dispatch: com.leekwars.generator.classes.FightClass
+ */
+function isBatchFight() -> boolean;
+
+/**
  * @return
  * @java-dispatch: com.leekwars.generator.classes.FightClass
  */
@@ -1677,9 +1719,10 @@ function getRegister(string key) -> string?;
  * Stores given value in your entity's register, associated with given key. Given key and value are strings, respectively with maximum lengths of 100 and 5000\ncharacters. A leek can have at most 100 distinct keys in its register, any additionnal (key:value) pair will not be stored if your entity's register is full.
  * @param key Register key to index given value.
  * @param value Value to be stored.
+ * @return true if the pair was stored, false if the register is full.
  * @java-dispatch: com.leekwars.generator.classes.UtilClass
  */
-function setRegister(string key, any value) -> void;
+function setRegister(string key, any value) -> boolean;
 
 /**
  * Removes given key (and associated value) from your entity's register.

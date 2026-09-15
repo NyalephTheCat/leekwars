@@ -16,7 +16,7 @@ use leek_syntax::{SyntaxNode, Version};
 const WEAPON_PISTOL: i64 = 37; // 15–20 dmg, 3 TP, range 1–7
 const WEAPON_M_LASER: i64 = 47; // 90–100 dmg, 8 TP, range 5–12
 const CHIP_SPARK: i64 = 18; // 8–16 dmg, 3 TP, range 0–10
-const CHIP_CURE: i64 = 4; // heal 35–43, 4 TP, range 0–5
+const CHIP_CURE: i64 = 4; // heal 38–46, 4 TP, range 0–5
 const CHIP_ARMOR: i64 = 22; // +25 absolute shield (×resistance), 4 turns
 const CHIP_PROTEIN: i64 = 8; // +80–100 raw strength buff (unscaled), 2 turns
 
@@ -208,7 +208,7 @@ fn chip_damage_and_heal() {
         "spark left {life}, expected 84..=92"
     );
 
-    // cure heals self (wisdom 100 → ×2 on a 35–43 roll = 70–86).
+    // cure heals self (wisdom 100 → ×2 on a 38–46 roll = 76–92).
     let f = arena(
         Entity::new(1, "Bot", 0, 0)
             .with_life(150)
@@ -219,8 +219,8 @@ fn chip_damage_and_heal() {
     run(&f, &format!("useChip({CHIP_CURE}, getEntity())"));
     let life = f.borrow().life(1).unwrap();
     assert!(
-        (120..=136).contains(&life),
-        "cure left {life}, expected 120..=136"
+        (126..=142).contains(&life),
+        "cure left {life}, expected 126..=142"
     );
 }
 
@@ -340,7 +340,7 @@ const CHIP_SHURIKEN: i64 = 411; // 50–60 dmg + relative vulnerability 30, 2 tu
 const CHIP_ANTIDOTE: i64 = 110;
 const CHIP_RESURRECTION: i64 = 84;
 const CHIP_LEATHER_BOOTS: i64 = 14; // raw +2 MP buff, 2 turns, 3 TP
-const CHIP_MOTIVATION: i64 = 15; // raw +3 TP buff, 2 turns, 4 TP
+const CHIP_MOTIVATION: i64 = 15; // raw +2 TP buff, 3 turns, 4 TP
 const CHIP_TRANQUILIZER: i64 = 94; // TP shackle 0.3–0.4 (×magic), 1 turn
 
 #[test]
@@ -426,13 +426,13 @@ fn mp_tp_buffs_grant_points_immediately() {
     run(&f, &format!("useChip({CHIP_LEATHER_BOOTS}, getEntity())"));
     assert_eq!(f.borrow().mp(1), Some(7), "MP 5 + 2 from the buff");
 
-    // motivation: raw +3 TP buff, costs 4 TP → net 10 − 4 + 3 = 9.
+    // motivation: raw +2 TP buff, costs 4 TP → net 10 − 4 + 2 = 8.
     let f = arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
     run(&f, &format!("useChip({CHIP_MOTIVATION}, getEntity())"));
     assert_eq!(
         f.borrow().tp(1),
-        Some(9),
-        "TP 10 − 4 cost + 3 from the buff"
+        Some(8),
+        "TP 10 − 4 cost + 2 from the buff"
     );
 }
 
@@ -507,13 +507,13 @@ fn vitality_raises_max_and_heals() {
     assert_eq!(f.borrow().life(1), Some(150));
 }
 
-const CHIP_LIBERATION: i64 = 34; // debuff: reduce all effects by 60%
+const CHIP_LIBERATION: i64 = 34; // debuff: reduce all effects by 40%
 const CHIP_PUNISHMENT: i64 = 114; // life damage: 25% of caster life (+75% to self)
-const CHIP_MUTATION: i64 = 159; // nova vitality: +20–25 max life (×science)
+const CHIP_MUTATION: i64 = 159; // nova vitality: +15–20 max life (×science)
 const CHIP_BRAMBLE: i64 = 172; // damage-return buff: +25 (×agility), 1 turn
 const CHIP_MANUMISSION: i64 = 174; // remove shackles
 const CHIP_KILL: i64 = 417; // set life to 0, 1 TP, range 1–50
-const WEAPON_J_LASER: i64 = 115; // abs vulnerability 20 + steal-shield (on caster)
+const WEAPON_J_LASER: i64 = 115; // abs vulnerability 25 + steal-shield (on caster)
 
 #[test]
 fn life_damage_via_punishment() {
@@ -550,20 +550,20 @@ fn damage_return_buff_via_bramble() {
 
 #[test]
 fn nova_vitality_raises_max_only() {
-    // mutation: +20–25 max life (science 0), without healing.
+    // mutation: +15–20 max life (science 0), without healing.
     let f = arena(Entity::new(1, "Bot", 0, 0), Entity::new(2, "Foe", 33, 1));
     run(&f, &format!("useChip({CHIP_MUTATION}, getEntity())"));
     let max = f.borrow().max_life(1).unwrap();
     assert!(
-        (120..=125).contains(&max),
-        "mutation max life {max}, expected 120..=125"
+        (115..=120).contains(&max),
+        "mutation max life {max}, expected 115..=120"
     );
     assert_eq!(f.borrow().life(1), Some(100), "nova vitality must not heal");
 }
 
 #[test]
 fn debuff_via_liberation() {
-    // liberation reduces every active effect by 60% (buffs AND shields).
+    // liberation reduces every active effect by 40% (buffs AND shields).
     let mut bot = Entity::new(1, "Bot", 0, 0);
     bot.effects.push(ActiveEffect::injected(
         EffectKind::Buff(leek_game_runtime::Stat::Strength),
@@ -574,8 +574,8 @@ fn debuff_via_liberation() {
         .push(ActiveEffect::injected(EffectKind::AbsoluteShield, 50, 5));
     let f = arena(bot, Entity::new(2, "Foe", 33, 1));
     run(&f, &format!("useChip({CHIP_LIBERATION}, getEntity())"));
-    assert_eq!(f.borrow().strength(1), Some(40), "100 × (1 − 0.6)");
-    assert_eq!(f.borrow().absolute_shield(1), 20, "50 × (1 − 0.6)");
+    assert_eq!(f.borrow().strength(1), Some(60), "100 × (1 − 0.4)");
+    assert_eq!(f.borrow().absolute_shield(1), 30, "50 × (1 − 0.4)");
 }
 
 #[test]
@@ -600,15 +600,15 @@ fn remove_shackles_via_manumission() {
 
 #[test]
 fn steal_shield_via_j_laser() {
-    // j_laser: 20 absolute vulnerability on the target, then an ON_CASTER
+    // j_laser: 25 absolute vulnerability on the target, then an ON_CASTER
     // steal-shield effect granting the caster the previous effect's total.
     let f = arena(
         Entity::new(1, "Bot", 0, 0).with_weapon(WEAPON_J_LASER),
         Entity::new(2, "Foe", 33, 1), // distance 6, within range 5–11
     );
     assert_eq!(run(&f, "return useWeapon(2)"), "1");
-    assert_eq!(f.borrow().absolute_shield(2), -20, "foe made vulnerable");
-    assert_eq!(f.borrow().absolute_shield(1), 20, "caster stole the shield");
+    assert_eq!(f.borrow().absolute_shield(2), -25, "foe made vulnerable");
+    assert_eq!(f.borrow().absolute_shield(1), 25, "caster stole the shield");
 }
 
 #[test]

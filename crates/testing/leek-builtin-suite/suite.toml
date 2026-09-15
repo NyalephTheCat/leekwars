@@ -457,3 +457,81 @@ builtin = "indexOf"
 version = 4
 source = "return [indexOf('héllo', 'z'), indexOf('héllo', 'z', 0), indexOf('héllo', 'l', 9)]"
 expect = { equals = "[null, -1, -1]" }
+
+# --- 2.50 bit builtins (`NumberClass.bitLength` / `setBit` / `testBit`). ---
+
+# `64 - Long.numberOfLeadingZeros(x)`: 0 for 0, and 64 for any negative
+# number (its sign bit is set) — NOT BigInteger's sign-excluding reading.
+[[tests]]
+id = "bit_length_counts_significant_bits"
+builtin = "bitLength"
+version = 4
+source = "return [bitLength(0), bitLength(1), bitLength(255), bitLength(256), bitLength(-1)]"
+expect = { equals = "[0, 1, 8, 9, 64]" }
+
+# `1L << pos`, so bit 63 is reachable and lands on the sign bit.
+[[tests]]
+id = "set_bit_sets_and_clears"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0, 3), setBit(255, 0, false), setBit(0, 63), setBit(8, 3, true)]"
+expect = { equals = "[8, 254, -9223372036854775808, 8]" }
+
+# The three-arg form is overloaded on `boolean` and on "non-zero sets".
+[[tests]]
+id = "set_bit_takes_a_number_as_its_flag"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0, 5, 1), setBit(1, 0, 0), setBit(0, 5, 7)]"
+expect = { equals = "[32, 0, 32]" }
+
+# Java's long shift masks the distance to its low six bits, so `pos` 64
+# addresses bit 0 again and a negative `pos` wraps the same way.
+[[tests]]
+id = "set_bit_shift_distance_wraps_at_64"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0, 64), setBit(0, 65), testBit(1, 64)]"
+expect = { equals = "[1, 2, true]" }
+
+[[tests]]
+id = "test_bit_reads_one_bit"
+builtin = "testBit"
+version = 4
+source = "return [testBit(5, 0), testBit(5, 1), testBit(5, 2), testBit(-1, 63)]"
+expect = { equals = "[true, false, true, true]" }
+
+# The same three functions on `big_integer`, where the answers diverge from
+# the fixed-width `long` ones the moment a value needs more than 64 bits.
+# `bitLength` becomes Java's minimal two's-complement length, and `setBit`
+# hands back a `big_integer` even when the result would fit in a long.
+[[tests]]
+id = "bit_length_of_a_big_integer_is_unbounded"
+builtin = "bitLength"
+version = 4
+source = "return [bitLength(255L), bitLength(5L), bitLength(1L << 100)]"
+expect = { equals = "[8, 3, 101]" }
+
+[[tests]]
+id = "set_bit_on_a_big_integer_stays_a_big_integer"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0L, 100) == 1L << 100, setBit(0L, 100) instanceof BigInteger, setBit(5L, 0, false), setBit(0L, 1, true)]"
+expect = { equals = "[true, true, 4, 2]" }
+
+[[tests]]
+id = "test_bit_reads_past_the_64th_bit_of_a_big_integer"
+builtin = "testBit"
+version = 4
+source = "return [testBit(5L, 0), testBit(5L, 1), testBit(1L << 100, 100), testBit(1L << 100, 99)]"
+expect = { equals = "[true, false, true, false]" }
+
+# `bitCount` and `trailingZeros` gained the same `big_integer` overload.
+# `trailingZeros` is `getLowestSetBit` there, so zero answers -1 rather than
+# the long form's 64.
+[[tests]]
+id = "bit_count_and_trailing_zeros_of_a_big_integer"
+builtin = "bitCount"
+version = 4
+source = "return [bitCount(255L), bitCount((1L << 100) - 1L), trailingZeros(8L), trailingZeros(1L << 100), trailingZeros(0L)]"
+expect = { equals = "[8, 100, 3, 100, -1]" }

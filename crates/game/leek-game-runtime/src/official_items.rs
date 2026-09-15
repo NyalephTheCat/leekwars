@@ -219,7 +219,7 @@ pub fn bulb_ids() -> impl Iterator<Item = i32> {
 /// Whether the official attack path models this effect type.
 ///
 /// Coverage grows corpus-first, so this is the inverse list: everything the
-/// dispatch sites handle is ported, and these seven still hit
+/// dispatch sites handle is ported, and these eight still hit
 /// `State::create_effect`'s `not ported yet` panic arm. Keep it in step with
 /// that `match` (plus the types intercepted before it:
 /// `EffectType::Teleport` / `Propagation` in `State::apply_on_cell`,
@@ -234,6 +234,7 @@ fn is_ported(effect: EffectType) -> bool {
             | EffectType::MovedToMp
             | EffectType::KillToTp
             | EffectType::CriticalToHeal
+            | EffectType::DamageToResistance
     )
 }
 
@@ -275,9 +276,14 @@ mod tests {
     /// `WEAPON_PISTOL`.
     const PISTOL: i32 = 37;
 
-    /// The generated pistol is exactly the hand-written harness pistol
-    /// (`harness_pistol` in `leek-scenario`'s `official-fight` bin — the
-    /// `Harness.registerPistol` port), field for field.
+    /// The generated pistol still carries the hand-written harness pistol's
+    /// geometry and damage line (`harness_pistol` in `leek-scenario`'s
+    /// `official-fight` bin — the `Harness.registerPistol` port).
+    ///
+    /// Two fields deliberately differ, and are asserted separately below:
+    /// the harness registers a *synthetic* pistol whose `launchType` is the
+    /// pre-2.50 legacy encoding and whose `maxUses` is unlimited, so the
+    /// oracle goldens it produced stay valid as the real catalog moves.
     #[test]
     fn the_official_pistol_matches_the_hand_written_harness_spec() {
         let spec = weapon_spec(PISTOL).expect("the pistol is in the official catalog");
@@ -285,9 +291,7 @@ mod tests {
         assert_eq!(spec.cost, 3);
         assert_eq!(spec.min_range, 1);
         assert_eq!(spec.max_range, 7);
-        assert_eq!(spec.launch_type, 1);
         assert!(spec.needs_los);
-        assert_eq!(spec.max_uses, -1);
         assert_eq!(spec.area, Area::SingleCell);
         assert!(!spec.forgotten);
         assert_eq!(
@@ -301,6 +305,26 @@ mod tests {
                 modifiers: EffectModifiers::empty(),
             }]
         );
+    }
+
+    /// `launch_type` is a bitmask — 1 = line, 2 = diagonal, 4 = anything
+    /// else (`Map::verify_range`) — and the upstream data now ships it that
+    /// way instead of the legacy `0 = line / 1 = circle` pair. The pistol
+    /// fires in every direction, so its mask is the full `1 | 2 | 4`; the
+    /// value the harness fixture keeps (`1`) would restrict it to a line.
+    #[test]
+    fn the_official_pistol_launches_in_every_direction() {
+        let spec = weapon_spec(PISTOL).expect("the pistol is in the official catalog");
+        assert_eq!(spec.launch_type, 7);
+    }
+
+    /// Per-turn use limits are real in the upstream data (`max_uses`), so the
+    /// pistol is capped at four shots a turn rather than the harness
+    /// fixture's unlimited `-1`.
+    #[test]
+    fn the_official_pistol_is_capped_at_four_uses_a_turn() {
+        let spec = weapon_spec(PISTOL).expect("the pistol is in the official catalog");
+        assert_eq!(spec.max_uses, 4);
     }
 
     /// Every row converts — no unknown effect-type or area id anywhere in the
