@@ -11,6 +11,7 @@
 //! — and three of them re-read the entry file off disk a second time to do
 //! it, because the driver returned a run and kept the text.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -48,6 +49,24 @@ pub struct Session<'p> {
     config: DriverConfig,
     reporter: Reporter,
     interner: Arc<dyn SourceInterner>,
+    /// The one database every file of this invocation is compiled
+    /// through.
+    ///
+    /// It lived on [`Compilation`] before, which meant a `miku test` over
+    /// N files built N databases and shared nothing between them: the
+    /// stdlib headers were re-parsed per file, and two test files that
+    /// include the same helper each lowered it. A database per
+    /// *invocation* is what makes a tracked query worth calling from a
+    /// CLI at all (#129).
+    db: leek_db::LeekDb,
+    /// Which files an `include("…")` can resolve against, for the
+    /// whole-program queries. Every file the project index knows, plus
+    /// whatever their includes reach.
+    files: leek_db::WorkspaceFiles,
+    /// The input for each registered file, by canonical path, so
+    /// compiling a file the session already knows reuses its input
+    /// rather than minting a second one for the same bytes.
+    inputs: BTreeMap<String, leek_db::SourceFile>,
 }
 
 impl<'p> Session<'p> {
@@ -58,12 +77,27 @@ impl<'p> Session<'p> {
     /// every command would otherwise discover that separately.
     pub fn new(project: &'p Project, config: DriverConfig) -> Result<Self, SessionError> {
         let reporter = reporter_for(project, config.color, config.format)?;
+        let interner: Arc<dyn SourceInterner> = Arc::new(PathInterner::new());
+        let mut db = leek_db::LeekDb::default();
+        let inputs = register_project_files(&mut db, project, interner.as_ref());
+        let files = leek_db::WorkspaceFiles::empty(&db);
+        files.set_all(&mut db, inputs.clone().into_iter().collect());
         Ok(Self {
             project,
             config,
             reporter,
-            interner: Arc::new(PathInterner::new()),
+            interner,
+            db,
+            files,
+            inputs,
         })
+    }
+
+    /// The session's database, and the file set its whole-program queries
+    /// resolve includes against.
+    #[must_use]
+    pub fn db(&self) -> (&leek_db::LeekDb, leek_db::WorkspaceFiles) {
+        (&self.db, self.files)
     }
 
     #[must_use]
@@ -145,12 +179,107 @@ impl<'p> Session<'p> {
             // project and has to reach the pipeline (leekwars#206).
             flags: self.project.feature_flags(),
         };
-        Ok(Compilation::adopt(
+        let file = self.input_for(path, &input);
+        Ok(Compilation::adopt_in_session(
             pipeline.run(input),
             path.display().to_string(),
             &self.reporter,
+            &self.db,
+            file,
         ))
     }
+
+    /// This file's salsa input: the one
+    /// [`register_project_files`] made when the index knows the file,
+    /// otherwise a fresh one for a file outside the project.
+    ///
+    /// The fresh case deliberately does not join
+    /// [`files`](Self::files): a file the index never saw is not part of
+    /// the project, and adding it to the set every include resolves
+    /// against would let a stray file outside the tree satisfy an
+    /// `include`. It still gets an input, so the per-file queries answer
+    /// about it.
+    fn input_for(&self, path: &Path, input: &Input) -> leek_db::SourceFile {
+        let canonical = leek_span::paths::canonical_or_normalized(path)
+            .display()
+            .to_string();
+        if let Some(known) = self.inputs.get(&canonical) {
+            return *known;
+        }
+        leek_db::SourceFile::new(
+            &self.db,
+            canonical,
+            input.source.get(),
+            Arc::clone(&input.text),
+            input.version_byte,
+            input.strict,
+            leek_types::seed_library_enabled(),
+            input.flags.to_bits(),
+        )
+    }
+}
+
+/// Register every file the project index knows as a salsa input, keyed by
+/// canonical path.
+///
+/// Version and strict mode are settled the same way
+/// [`Session::compile`] settles the entry's — the index's
+/// `language_settings` over the file's own text — so a query and the
+/// pipeline agree about what language a file is written in.
+///
+/// A file the index cannot read is skipped rather than failing the
+/// session: an unreadable file in the tree is the compile's problem to
+/// report when something includes it, not a reason for every command to
+/// refuse to start.
+///
+/// # Cost
+///
+/// This reads every project file up front, which `ProjectIndex` does not
+/// — it carries paths, not text. So `Session::new` does I/O it did not do
+/// before, and a command that compiles one file of a large project pays
+/// for the whole tree.
+///
+/// Deliberate, and worth revisiting if a project ever gets big: a
+/// LeekWars project is tens of files, every command that matters
+/// (`check`, `test`, `build`) compiles all of them anyway, and the
+/// alternative — building this lazily behind a `OnceLock` so only a
+/// caller that asks a query pays — costs a second lifetime parameter on
+/// [`Compilation`] and every signature that names it. That churn is
+/// easier to justify once a front-end actually reads a query; until then
+/// the simple shape is the honest one.
+fn register_project_files(
+    db: &mut leek_db::LeekDb,
+    project: &Project,
+    interner: &dyn SourceInterner,
+) -> BTreeMap<String, leek_db::SourceFile> {
+    let index = project.index();
+    let flags = project.feature_flags().to_bits();
+    let seed = leek_types::seed_library_enabled();
+    let mut out = BTreeMap::new();
+    for path in index.files() {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let canonical = leek_span::paths::canonical_or_normalized(path)
+            .display()
+            .to_string();
+        if out.contains_key(&canonical) {
+            continue;
+        }
+        let lang = index.language_settings(&text);
+        let file = leek_db::SourceFile::new(
+            db,
+            canonical.clone(),
+            interner.intern(Path::new(&canonical)).get(),
+            Arc::from(text),
+            lang.version,
+            lang.strict,
+            seed,
+            flags,
+        );
+        out.insert(canonical, file);
+    }
+    out
 }
 
 /// One file compiled: the run, plus everything needed to say something
@@ -167,10 +296,10 @@ pub struct Compilation<'a> {
     /// `migrate` compile a whole tree and render nothing, and a source map
     /// costs a copy of every file's text plus a line table over it.
     sources: OnceLock<Sources>,
-    /// Built on demand by [`db_handle`](Self::db_handle) — a front-end that
-    /// never calls a tracked query never pays for a database.
-    db: OnceLock<leek_db::LeekDb>,
-    file: OnceLock<leek_db::SourceFile>,
+    /// The session's database and this file's input in it, when the
+    /// compilation came from a [`Session`]. `None` for an adopted run
+    /// (`leekc`, which plans its own pipeline and has no session).
+    db: Option<(&'a leek_db::LeekDb, leek_db::SourceFile)>,
 }
 
 impl<'a> Compilation<'a> {
@@ -188,8 +317,24 @@ impl<'a> Compilation<'a> {
             label: file_label,
             reporter,
             sources: OnceLock::new(),
-            db: OnceLock::new(),
-            file: OnceLock::new(),
+            db: None,
+        }
+    }
+
+    /// [`adopt`](Self::adopt), for a run a [`Session`] drove: the
+    /// compilation also carries the session's database and this file's
+    /// input in it.
+    #[must_use]
+    fn adopt_in_session(
+        run: Run<'a>,
+        file_label: String,
+        reporter: &'a Reporter,
+        db: &'a leek_db::LeekDb,
+        file: leek_db::SourceFile,
+    ) -> Self {
+        Self {
+            db: Some((db, file)),
+            ..Self::adopt(run, file_label, reporter)
         }
     }
 
@@ -300,24 +445,8 @@ impl<'a> Compilation<'a> {
     /// The file is a faithful copy of the run's own `Input`, under the same
     /// canonical-path key the include graph uses (#181), so a query answers
     /// about the bytes the pipeline actually compiled.
-    pub fn db_handle(&self) -> (&dyn leek_db::Db, leek_db::SourceFile) {
-        let db = self.db.get_or_init(leek_db::LeekDb::default);
-        let file = *self.file.get_or_init(|| {
-            let input = self.run.input();
-            leek_db::SourceFile::new(
-                db,
-                leek_span::paths::canonical_or_normalized(Path::new(&self.label))
-                    .display()
-                    .to_string(),
-                input.source.get(),
-                Arc::clone(&input.text),
-                input.version_byte,
-                input.strict,
-                leek_types::seed_library_enabled(),
-                input.flags.to_bits(),
-            )
-        });
-        (db, file)
+    pub fn db_handle(&self) -> Option<(&dyn leek_db::Db, leek_db::SourceFile)> {
+        self.db.map(|(db, file)| (db as &dyn leek_db::Db, file))
     }
 }
 
@@ -507,18 +636,62 @@ mod tests {
         let session = Session::new(&project, quiet(Target::Linted)).expect("session");
         let compiled = session.compile_entry().expect("compile");
 
-        let (db, file) = compiled.db_handle();
+        let (db, file) = compiled
+            .db_handle()
+            .expect("a session compilation has a database");
         assert_eq!(&**file.text(db), "return 1 + 1;\n");
-        assert_eq!(file.source(db), ENTRY_SOURCE);
         assert_eq!(file.version_byte(db), compiled.input().version_byte);
         assert!(
-            file.path(db).is_some_and(|p| p.ends_with("main.leek")),
+            file.path(db)
+                .is_some_and(|p: &str| p.ends_with("main.leek")),
             "{:?}",
             file.path(db)
         );
 
-        let (_, again) = compiled.db_handle();
+        let (_, again) = compiled.db_handle().expect("still there");
         assert!(file == again, "the input is created once and kept");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two files compiled in one session share one database, and a file
+    /// the project index already knows keeps the input registered for it
+    /// rather than getting a second one for the same bytes.
+    ///
+    /// This is the whole point of hanging the database off the session:
+    /// per-`Compilation` databases meant a `miku test` over N files built
+    /// N of them and shared no memo between any two, so every file
+    /// re-parsed the stdlib headers from scratch.
+    #[test]
+    fn one_database_is_shared_by_every_file_of_a_session() {
+        let dir = scratch("shared-db");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        std::fs::write(dir.join("src/other.leek"), "return 2;\n").expect("other");
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+
+        let first = session.compile_entry().expect("compile entry");
+        let second = session
+            .compile_file(&dir.join("src/other.leek"), SourceId::new(9).expect("id"))
+            .expect("compile other");
+
+        let (db_a, file_a) = first.db_handle().expect("entry database");
+        let (db_b, file_b) = second.db_handle().expect("other database");
+
+        assert!(
+            std::ptr::eq(db_a, db_b),
+            "both compilations answer out of the session's one database"
+        );
+        assert!(file_a != file_b, "each file is its own input");
+        assert_eq!(&**file_b.text(db_b), "return 2;\n");
+
+        // The index walked both files, so compiling one reuses the input
+        // registered for it instead of minting a second.
+        let again = session.compile_entry().expect("recompile entry");
+        assert!(
+            again.db_handle().expect("database").1 == file_a,
+            "a project file keeps one input across compilations"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
