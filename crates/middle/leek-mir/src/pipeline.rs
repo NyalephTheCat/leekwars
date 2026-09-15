@@ -74,6 +74,15 @@ fn run_lower_mir(cx: &mut Context<'_>, opt: OptLevel) -> Option<Arc<MirProgram>>
     // built by `pipeline_with_includes` would lower MIR from the entry
     // file alone. Dormant: the only `run_memoized` caller is the LSP, which
     // never asks for this target.
+    //
+    // The answer this *should* be asking for is
+    // `leek_db::queries::lower_program_mir`, which lowers the closure's
+    // merged HIR. It cannot be called from here: a tracked whole-program
+    // query needs `WorkspaceFiles`, and a `Context` carries only a
+    // `SourceFile`. Guarding on `IncludeGraphArtifact` the way `LowerHir`
+    // does would fix it within this model, at the cost of a `leek-resolver`
+    // dependency added to code epic #345 deletes. So it stays dormant, and
+    // goes when this step does.
     if let Some((db, file)) = cx.salsa() {
         // The MIR query is keyed only on the source file, so it caches
         // *unoptimized* MIR: a codegen driver's program would have to be
