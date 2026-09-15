@@ -25,8 +25,12 @@
 //!   depend on each other.
 //! - **dev** dependencies may reach at most one rank higher than their crate,
 //!   peers included, so tests can use the next layer up.
-//! - a **substrate** crate (`leek-pipeline`) may only depend on its ceiling
-//!   layer (`core`) or lower, apart from dev dependencies.
+//!
+//! There used to be a third rule, for a *substrate* crate allowed to sit in a
+//! layer but hold itself to a lower ceiling: `leek-pipeline` lived in `db` and
+//! could depend only on `core`. `leek-query` — what is left of that crate —
+//! lives in `core`, so the ordinary rule says exactly the same thing and the
+//! special case is gone. A crate's location is the whole rule.
 //!
 //! Exceptions are listed, with a reason, in `xtask/layer-allowlist.txt`. An
 //! entry that no longer matches a violation is itself an error, so the list
@@ -41,13 +45,6 @@ use serde::Deserialize;
 
 /// Allowlist location, relative to the workspace root.
 const ALLOWLIST_PATH: &str = "xtask/layer-allowlist.txt";
-
-/// Crates that may depend on nothing above the given layer (dev dependencies
-/// excepted), whatever layer they live in themselves.
-const SUBSTRATES: &[(&str, Layer)] = &[
-    // The generic orchestration engine must not know any concrete stage.
-    ("leek-pipeline", Layer::Core),
-];
 
 /// A workspace layer, derived from a crate's directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -261,8 +258,6 @@ pub enum Breach {
     Peer,
     /// Dev dependency more than one rank up.
     DevTooHigh,
-    /// Substrate crate depending above its ceiling layer.
-    Substrate(Layer),
 }
 
 impl fmt::Display for Breach {
@@ -271,20 +266,12 @@ impl fmt::Display for Breach {
             Self::Upward => f.write_str("depends on a higher layer"),
             Self::Peer => f.write_str("depends on a peer layer"),
             Self::DevTooHigh => f.write_str("dev-dependency reaches more than one layer up"),
-            Self::Substrate(ceiling) => write!(f, "substrate crate may only depend on {ceiling}"),
         }
     }
 }
 
-/// Decide whether `from_crate` (in `from`) may depend on a crate in `to`.
-pub fn breach(from_crate: &str, from: Layer, to: Layer, kind: DepKind) -> Option<Breach> {
-    if kind != DepKind::Dev
-        && let Some(&(_, ceiling)) = SUBSTRATES.iter().find(|(name, _)| *name == from_crate)
-        && to != ceiling
-        && to.rank() >= ceiling.rank()
-    {
-        return Some(Breach::Substrate(ceiling));
-    }
+/// Decide whether a crate in `from` may depend on a crate in `to`.
+pub fn breach(from: Layer, to: Layer, kind: DepKind) -> Option<Breach> {
     if from == to {
         return None;
     }
@@ -410,7 +397,7 @@ pub fn check(ws: &Workspace, allow: &Allowlist) -> Report {
         else {
             continue;
         };
-        let Some(breach) = breach(&edge.from, from_layer, to_layer, edge.kind) else {
+        let Some(breach) = breach(from_layer, to_layer, edge.kind) else {
             continue;
         };
         let violation = Violation {
@@ -436,11 +423,16 @@ pub fn check(ws: &Workspace, allow: &Allowlist) -> Report {
     report
 }
 
-/// Run `cargo metadata` for this workspace and check it against the allowlist.
-fn check_workspace() -> Result<(Workspace, Report), Vec<String>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+/// The workspace root, one level above this crate.
+pub fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask lives one level below the workspace root");
+        .expect("xtask lives one level below the workspace root")
+}
+
+/// The workspace graph, from `cargo metadata --no-deps`.
+pub fn load_workspace() -> Result<Workspace, Vec<String>> {
+    let root = workspace_root();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .args([
@@ -461,7 +453,13 @@ fn check_workspace() -> Result<(Workspace, Report), Vec<String>> {
     }
     let json = String::from_utf8(output.stdout)
         .map_err(|e| vec![format!("cargo metadata printed invalid UTF-8: {e}")])?;
-    let ws = Workspace::from_metadata_json(&json)?;
+    Workspace::from_metadata_json(&json)
+}
+
+/// Run `cargo metadata` for this workspace and check it against the allowlist.
+fn check_workspace() -> Result<(Workspace, Report), Vec<String>> {
+    let root = workspace_root();
+    let ws = load_workspace()?;
     let allow_text = std::fs::read_to_string(root.join(ALLOWLIST_PATH))
         .map_err(|e| vec![format!("cannot read {ALLOWLIST_PATH}: {e}")])?;
     let allow = Allowlist::parse(&allow_text)?;
@@ -698,50 +696,40 @@ mod tests {
         assert!(r.is_ok(), "{:?}", violations(&r));
     }
 
-    // The old script skipped every edge into leek-pipeline.
+    /// `leek-query` holds the salsa database every pass crate writes its
+    /// queries against, which is why it lives in `core`: were it a layer up,
+    /// every one of those edges would point the wrong way.
     #[test]
-    fn edges_into_the_substrate_are_not_exempt() {
+    fn a_frontend_crate_may_not_reach_up_to_the_database() {
         let r = report(
             &[
                 (
                     "leek-lexer",
                     "crates/frontend/leek-lexer",
-                    &[("leek-pipeline", None)],
+                    &[("leek-query", None)],
                 ),
-                ("leek-pipeline", "crates/db/leek-pipeline", &[]),
+                ("leek-query", "crates/db/leek-query", &[]),
             ],
             "",
         );
         assert_eq!(
             violations(&r),
-            ["leek-lexer (frontend) -> leek-pipeline (db) [normal]: depends on a higher layer"]
+            ["leek-lexer (frontend) -> leek-query (db) [normal]: depends on a higher layer"]
         );
-    }
 
-    #[test]
-    fn substrate_depends_only_on_core() {
+        // Where it actually lives, the same edge is fine.
         let r = report(
             &[
                 (
-                    "leek-pipeline",
-                    "crates/db/leek-pipeline",
-                    &[
-                        ("leek-span", None),
-                        ("leek-parser", None),
-                        ("leek-hir", Some("dev")),
-                    ],
+                    "leek-lexer",
+                    "crates/frontend/leek-lexer",
+                    &[("leek-query", None)],
                 ),
-                ("leek-span", "crates/core/leek-span", &[]),
-                ("leek-parser", "crates/frontend/leek-parser", &[]),
-                ("leek-hir", "crates/middle/leek-hir", &[]),
+                ("leek-query", "crates/core/leek-query", &[]),
             ],
             "",
         );
-        assert_eq!(
-            violations(&r),
-            ["leek-pipeline (db) -> leek-parser (frontend) [normal]: \
-                 substrate crate may only depend on core"]
-        );
+        assert!(r.is_ok(), "{:?}", violations(&r));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 mod artifacts;
 mod errors;
 mod fmt_idiom;
+mod graph;
 mod layers;
 mod toolchain;
 
@@ -16,7 +17,9 @@ tasks:
   check-errors     keep `anyhow` out of the library layers (see docs/architecture.md)
   check-fmt-idiom  keep `write!` into a `String` on one spelling: `let _ = write!(…)`
   check-layers     enforce the crate layering rule (see docs/architecture.md)
-  check-toolchain  check the Rust pin and the advertised MSRV agree";
+  check-toolchain  check the Rust pin and the advertised MSRV agree
+  graph            regenerate docs/crate-graph.md from cargo metadata
+                   (--check fails instead, when it is out of date)";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -26,6 +29,7 @@ fn main() -> ExitCode {
         Some("check-fmt-idiom") => fmt_idiom::run(),
         Some("check-layers") => layers::run(),
         Some("check-toolchain") => toolchain::run(),
+        Some("graph") => graph::run(args.next().as_deref() == Some("--check")),
         Some("-h" | "--help") => {
             println!("{USAGE}");
             ExitCode::SUCCESS

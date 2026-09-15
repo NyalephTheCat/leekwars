@@ -212,6 +212,3 @@ three print per-*stage* timings now: the stages a `Compilation` is asked for.
   `crates/db` may not depend on `crates/tools`. The linter is a pass over HIR
   rather than a tool, so the fix is to move it into `crates/middle` beside the
   passes it walks — tracked as part of ARCH-03.
-- **`cargo xtask graph`**, the mermaid crate-graph with a drift check
-  recommended by [#204](https://github.com/NyalephTheCat/leekwars/issues/204),
-  is not written.

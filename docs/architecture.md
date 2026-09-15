@@ -45,9 +45,12 @@ Layers joined by `·` are peers: they share a rank, and neither may depend on
 the other. `game` sits above `backends` (the generator runs AIs on the native
 backend) and below `tools` (the debug adapter drives fights).
 
-`cargo xtask check-layers` enforces the rule over the graph reported by
-`cargo metadata`, and it is part of the CI gate. For each dependency between
-two workspace members:
+[`crate-graph.md`](crate-graph.md) is that stack drawn, generated from
+`cargo metadata` by `cargo xtask graph` and drift-checked in CI — so a crate
+moved between layers cannot leave this page describing the old shape.
+
+`cargo xtask check-layers` enforces the rule over the same graph, and it is
+part of the CI gate too. For each dependency between two workspace members:
 
 - **Normal and build dependencies** stay inside their layer or point at a
   lower layer.
