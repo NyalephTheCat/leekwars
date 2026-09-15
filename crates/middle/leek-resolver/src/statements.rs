@@ -49,9 +49,12 @@ fn terminates(stmt: &Stmt, break_escapes: bool) -> bool {
             _ => false,
         },
         // A `do` body runs at least once, so a body that always returns
-        // ends the enclosing block too. Its own `break`/`continue` land
-        // after the loop, hence `break_escapes`.
-        Stmt::DoWhile(d) => d.body().is_some_and(|b| terminates(&b, true)),
+        // ends the enclosing block too — unless it can leave the loop
+        // early, because a `break` lands after the loop and a `continue`
+        // goes to the condition, from which the loop may exit.
+        Stmt::DoWhile(d) => d
+            .body()
+            .is_some_and(|b| terminates(&b, true) && !can_escape(&b, Escapes::Loop)),
         // A `switch` terminates when it cannot be skipped (it has a
         // `default`) and no arm falls out of it. A `break` inside is the
         // switch's own, so it escapes.
@@ -61,8 +64,9 @@ fn terminates(stmt: &Stmt, break_escapes: bool) -> bool {
     }
 }
 
-/// [`terminates`] for a `switch`: every case group ends the switch, and a
-/// `default` is there so the switch cannot be skipped altogether.
+/// [`terminates`] for a `switch`: it cannot be skipped (there is a
+/// `default`), every case group ends it, and no arm breaks out — a `break`
+/// lands right after the switch, which is exactly the statement in question.
 fn switch_terminates(sw: &leek_parser::ast::SwitchStmt) -> bool {
     let mut has_default = false;
     let mut groups = 0;
@@ -85,12 +89,55 @@ fn switch_terminates(sw: &leek_parser::ast::SwitchStmt) -> bool {
         if stmts.is_empty() {
             continue;
         }
+        if stmts.iter().any(|s| can_escape(s, Escapes::Switch)) {
+            return false;
+        }
         groups += 1;
         if stmts.iter().any(|s| terminates(s, true)) {
             terminating += 1;
         }
     }
     has_default && groups > 0 && groups == terminating
+}
+
+/// Which construct a jump would leave.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Escapes {
+    /// A loop: both `break` and `continue` get out of the straight-line
+    /// body, and a nested switch claims a `break` but never a `continue`.
+    Loop,
+    /// A switch: only `break`, and a nested switch claims it too.
+    Switch,
+}
+
+/// Whether `stmt` can hand control to just after the enclosing loop or
+/// switch, by a jump that construct owns.
+///
+/// The walk stops at anything that claims the jump for itself, which is what
+/// keeps a nested loop's `break` from reading as its parent's.
+fn can_escape(stmt: &Stmt, from: Escapes) -> bool {
+    match stmt {
+        Stmt::Break(_) => true,
+        Stmt::Continue(_) => from == Escapes::Loop,
+        Stmt::Block(b) => b.stmts().any(|s| can_escape(&s, from)),
+        Stmt::If(i) => {
+            i.then_branch().is_some_and(|s| can_escape(&s, from))
+                || i.else_branch().is_some_and(|s| can_escape(&s, from))
+        }
+        // A nested switch captures `break`; a `continue` inside it is still
+        // the enclosing loop's.
+        Stmt::Switch(sw) => {
+            from == Escapes::Loop
+                && sw
+                    .syntax()
+                    .children()
+                    .filter(|c| c.kind() == SyntaxKind::SwitchCase)
+                    .flat_map(|c| c.children().filter_map(Stmt::cast).collect::<Vec<_>>())
+                    .any(|s| can_escape(&s, Escapes::Loop) && !matches!(s, Stmt::Break(_)))
+        }
+        // A nested loop owns both of its jumps.
+        _ => false,
+    }
 }
 
 impl Resolver {

@@ -599,3 +599,48 @@ id = "a_nested_loops_break_does_not_escape_the_switch_arm"
 version = 3
 source = "function f(x) { switch (x) { case 1: for (var i = 0; i < 3; i++) { if (x == 1) break } return 1 default: return 2 } return 3 } return f(1)"
 expect = "error"
+
+# --- The `a?[i]` optional access operator (v3.00). ---
+
+# At run time it is `a[i]`; what it adds is that a null base answers null
+# instead of erroring, and it reads through arrays, maps, strings, objects
+# and slices alike.
+[[tests]]
+id = "optional_index_reads_every_container"
+version = 4
+source = """
+var a = [10, 20, 30]
+var m = ["x": 5]
+var s = "abc"
+return [a?[1], m?["x"], s?[1], a?[0:1], a?[0] + a?[2]]
+"""
+expect = { equals = '[20, 5, "b", [10], 40]' }
+
+[[tests]]
+id = "optional_index_short_circuits_on_null"
+version = 4
+source = "var a = null return [a?[1], a?[0]?[1]]"
+expect = { equals = "[null, null]" }
+
+# The `?` must be glued to the `[`, and must not already own a ternary `:`.
+# Both of these were valid programs before the operator existed and have to
+# stay the ternaries they were.
+[[tests]]
+id = "a_compact_ternary_with_array_branches_stays_a_ternary"
+version = 4
+source = "var c = true var d = false return [c?[1]:[2], d?[1]:[2], c?[1, 2]:[3, 4], c?[1]:9]"
+expect = { equals = "[[1], [2], [1, 2], [1]]" }
+
+# The `:` of a slice sits inside the brackets, so it is not the ternary's.
+[[tests]]
+id = "a_slice_colon_is_not_the_ternarys_colon"
+version = 4
+source = "var c = true var a = [10, 20, 30] return [c?[a[0]]:[a[1]], a?[0:2]]"
+expect = { equals = "[[10], [10, 20]]" }
+
+# Writing through a base that may be null has nowhere to put the value.
+[[tests]]
+id = "an_optional_access_is_not_assignable"
+version = 4
+source = "var a = [1] a?[0] = 5 return a"
+expect = "error"

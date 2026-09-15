@@ -143,6 +143,29 @@ fn expr_bp_inner(p: &mut Parser, min_bp: u8) {
             continue;
         }
 
+        // Postfix `?[index]`: optional indexed access. At run time it is
+        // `a[index]`; what it adds is that a null base short-circuits
+        // instead of erroring, and that the result types as nullable.
+        //
+        // Two guards keep it out of a compact ternary whose branches are
+        // array literals. The `?` must be glued to the `[` (so `c ? [1] :
+        // [2]` is never touched), and there must be no ternary `:` waiting
+        // for this `?` (so `c?[1]:[2]` — which was valid before this
+        // operator existed — stays the ternary it always was). Between
+        // them, `?[` is only claimed for sequences that would otherwise
+        // have been errors.
+        if kind == S::Question
+            && CALL_BP >= min_bp
+            && p.nth(1) == S::LBracket
+            && p.nth_adjacent(0)
+            && has_matching_rbracket_at(p, 1)
+            && !ternary_colon_ahead(p)
+        {
+            p.bump(); // '?'
+            postfix_bracket(p, cp);
+            continue;
+        }
+
         // Postfix `?.field`: optional member access (#2272). Only taken
         // when an identifier-shaped name follows the `.` — otherwise the
         // `?` is a ternary opener (`a ? .5 : b` keeps parsing as ternary,
@@ -319,6 +342,83 @@ fn postfix_bracket(p: &mut Parser, cp: rowan::Checkpoint) {
         p.expect(S::RBracket);
         p.finish_node();
     }
+}
+
+/// Does the `?` at the cursor own a ternary `:`?
+///
+/// Scans forward at bracket depth 0: the first `:` not claimed by a nested
+/// `?` belongs to this one, which makes the whole thing a ternary rather
+/// than an optional index. A `?.` or an adjacent `?[` is not a ternary
+/// opener, so it claims nothing — counting those would hand this `?`'s
+/// colon to a chained access. Slice colons (`a?[0:1]`) and the `:` of a map
+/// literal sit at depth > 0 and are skipped.
+///
+/// Ported from upstream `WordCompiler.ternaryColonAhead`.
+fn ternary_colon_ahead(p: &Parser) -> bool {
+    let mut depth = 0i32;
+    let mut pending_question = 0i32;
+    let mut i = 1usize;
+    // The same bound the sibling lookaheads use: past it, treat the `?` as
+    // a ternary opener, which is what it was before this operator existed.
+    let cap = 512;
+    while i < cap {
+        match p.nth(i) {
+            S::Eof => return false,
+            S::LBracket | S::LParen | S::LBrace => depth += 1,
+            S::RBracket | S::RParen | S::RBrace => {
+                if depth == 0 {
+                    // The enclosing context closed — the expression ended.
+                    return false;
+                }
+                depth -= 1;
+            }
+            k if depth == 0 => match k {
+                S::Semicolon | S::Comma => return false,
+                S::Question => {
+                    let chained = p.nth(i + 1) == S::Dot
+                        || (p.nth(i + 1) == S::LBracket && p.nth_adjacent(i));
+                    if !chained {
+                        pending_question += 1;
+                    }
+                }
+                S::Colon => {
+                    if pending_question == 0 {
+                        return true;
+                    }
+                    pending_question -= 1;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        i += 1;
+    }
+    true
+}
+
+/// [`has_matching_rbracket`] for a `[` that is `n` tokens ahead.
+fn has_matching_rbracket_at(p: &Parser, n: usize) -> bool {
+    let mut depth = 0i32;
+    let mut i = n;
+    let cap = 512;
+    while i < n + cap {
+        match p.nth(i) {
+            S::Eof | S::Semicolon => return false,
+            S::LBracket => depth += 1,
+            S::RBracket => {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// True if the tokens between `[` and the matching `]` contain a
