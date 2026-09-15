@@ -48,7 +48,15 @@ impl OptLevel {
 /// Which opt-in lint groups the lint step should run, on top of the
 /// always-on defaults. Populated from CLI flags (`--pedantic`,
 /// `--nursery`) and the project manifest's `[lints]` table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// `Hash` (and `salsa::Update`) so it can key a tracked query:
+/// `leek_lint::lint_query` is memoized per requested group set. The
+/// language version is deliberately *not* a field here — it is a
+/// property of the file such a query is already keyed on, which is what
+/// makes this the right key and `leek_lint::LintOptions`, which does
+/// carry a version, the wrong one.
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct LintGroups {
     /// Strictness lints — verbose-but-fine code worth tightening.
     pub pedantic: bool,

@@ -9,6 +9,13 @@
 use std::fmt;
 use std::str::FromStr;
 
+/// The opt-in groups as a request, re-exported from the recipe
+/// substrate that already defines them rather than declared a second
+/// time here — a recipe's [`RecipeParams::lints`](leek_pipeline::RecipeParams)
+/// and `pipeline::lint_query`'s key have to be the same type or the two
+/// paths can disagree about what was asked for.
+pub use leek_pipeline::LintGroups;
+
 /// Category a lint belongs to. Mirrors clippy's grouping, adapted to
 /// Leekscript's teaching focus:
 ///
@@ -131,6 +138,38 @@ impl LintOptions {
             LintGroup::Pedantic => self.pedantic,
             LintGroup::Nursery => self.nursery,
             _ => true,
+        }
+    }
+
+    /// These options' opt-in groups, dropping the version — the request
+    /// half, which is what a recipe carries in
+    /// [`RecipeParams::lints`](leek_pipeline::RecipeParams) and what
+    /// `pipeline::lint_query` keys on.
+    #[must_use]
+    pub fn groups(&self) -> LintGroups {
+        LintGroups {
+            pedantic: self.pedantic,
+            nursery: self.nursery,
+        }
+    }
+
+    /// `groups`, applied to a file written in `version`.
+    ///
+    /// The direction a query goes: [`LintGroups`] is deliberately
+    /// narrower than these options, because two of the three fields are
+    /// a request ("also run pedantic") while `version` is a property of
+    /// the file a per-file query is already keyed on. Keying such a
+    /// query on the whole struct would let a caller ask for one file's
+    /// lints at a version the file is not written in — HIR lowered at
+    /// the file's version, judged by another version's rules — and
+    /// cache that answer beside the right one. Taking the groups and
+    /// reading the version off the input makes the mismatch unsayable.
+    #[must_use]
+    pub fn from_groups(groups: LintGroups, version: u8) -> Self {
+        Self {
+            pedantic: groups.pedantic,
+            nursery: groups.nursery,
+            version,
         }
     }
 }
