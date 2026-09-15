@@ -107,8 +107,14 @@ graph BT
   leek_backend_native --> leek_runtime
   leek_backend_native --> leek_span
   leek_backend_native --> leek_types
+  leek_backends --> leek_backend_java
+  leek_backends --> leek_backend_leekscript
+  leek_backends --> leek_environment
   leek_backends --> leek_manifest
   leek_backends --> leek_project
+  leek_backends --> leek_query
+  leek_backends --> leek_span
+  leek_backends --> leek_syntax
   leek_bench --> leek_backend_java
   leek_bench --> leek_backend_native
   leek_bench --> leek_db
@@ -327,6 +333,7 @@ graph BT
   leekc --> leek_backend_java
   leekc --> leek_backend_leekscript
   leekc --> leek_backend_native
+  leekc --> leek_backends
   leekc --> leek_diagnostics
   leekc --> leek_environment
   leekc --> leek_fmt

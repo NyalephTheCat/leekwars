@@ -8,7 +8,6 @@ use leek_backends::{java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_ba
 use leek_manifest::BackendKind;
 use leek_project::Project;
 use leek_session::{Compilation, CompileParams, DriverConfig, Session, Target};
-use leek_syntax::version::version_from_byte;
 
 use crate::cli::{Build, ColorWhen, MessageFormat};
 
@@ -28,24 +27,15 @@ pub fn run(
 
     let backend = resolve_backend(&project.manifest, args.backend.as_deref())?;
 
-    // Java *exact* mode must mirror the upstream reference compiler's emission
-    // shape, so it keeps the IR source-faithful (O0). Every other build path —
-    // Java clean, native — folds constants to shrink the program's op budget.
+    // The one opt-level policy, shared with `leekc` — see
+    // `leek_backends::opt_level` for the rule and for what disagreeing
+    // about it cost.
     let clean_java = matches!(backend, BackendKind::Java)
         && java_clean_mode(
             args.clean,
             &project.manifest.backend.java.clone().unwrap_or_default(),
         );
-    // Java *exact* and the LeekScript source backend keep the IR
-    // source-faithful (O0); the LeekScript backend runs its own opt passes
-    // under `--optimize` instead. Everything else folds constants (O1).
-    let opt = if (matches!(backend, BackendKind::Java) && !clean_java)
-        || matches!(backend, BackendKind::LeekScript)
-    {
-        leek_session::OptLevel::O0
-    } else {
-        leek_session::OptLevel::O1
-    };
+    let opt = leek_backends::opt_level(backend, clean_java);
 
     // `--verbose` times the very compilation the plain build runs: the
     // sink rides along on the config rather than selecting a separate
@@ -77,12 +67,10 @@ pub fn run(
         return Ok(ExitCode::from(1));
     }
 
-    let version = version_from_byte(compiled.input().version_byte);
-
     match backend {
-        BackendKind::Java => emit_java(&project, &compiled, version, args, quiet, environment),
+        BackendKind::Java => emit_java(&project, &compiled, args, quiet, environment),
         BackendKind::Native => emit_native(&project, &compiled, args, quiet),
-        BackendKind::LeekScript => emit_leekscript(&project, &compiled, version, args, quiet),
+        BackendKind::LeekScript => emit_leekscript(&project, &compiled, args, quiet),
         BackendKind::Jar => {
             bail!("jar backend not yet supported in this toolchain");
         }
@@ -147,23 +135,14 @@ fn native_out_path(
 fn emit_leekscript(
     project: &Project,
     compiled: &Compilation<'_>,
-    version: leek_syntax::Version,
     args: &Build,
     quiet: bool,
 ) -> Result<ExitCode> {
     let hir = compiled
         .hir()
         .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
-    let input = compiled.input();
 
-    let mut opts = if args.compact {
-        leek_backend_leekscript::Options::compact(version)
-    } else {
-        leek_backend_leekscript::Options::pretty(version).with_source_text(input.text.clone())
-    };
-    opts = opts
-        .with_optimize(args.optimize)
-        .with_user_source(input.source);
+    let opts = leek_backends::leekscript_options(compiled.input(), args.compact, args.optimize);
 
     let out = leek_backend_leekscript::emit(hir, &opts);
     // A semantic this backend cannot carry across is a warning: the emitted
@@ -202,7 +181,6 @@ fn emit_leekscript(
 fn emit_java(
     project: &Project,
     compiled: &Compilation<'_>,
-    version: leek_syntax::Version,
     args: &Build,
     quiet: bool,
     environment: Option<&std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
@@ -213,16 +191,13 @@ fn emit_java(
 
     let settings = project.manifest.backend.java.clone().unwrap_or_default();
 
-    let clean = java_clean_mode(args.clean, &settings);
-    let mut opts = if clean {
-        leek_backend_java::Options::clean(version, 0)
-    } else {
-        leek_backend_java::Options::exact(version, 0)
-    }
-    .with_source_path(project.entry_path().display().to_string());
-    if let Some(env) = environment {
-        opts = opts.with_environment(env.clone());
-    }
+    let opts = leek_backends::java_options(
+        compiled.input(),
+        0,
+        java_clean_mode(args.clean, &settings),
+        project.entry_path().display().to_string(),
+        environment,
+    );
 
     let out = leek_backend_java::emit(hir, &opts);
     // A construct the emitter has no shape for produces Java that javac

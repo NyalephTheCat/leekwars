@@ -12,7 +12,7 @@ use leek_span::SourceId;
 use leek_syntax::{SyntaxNode, Version, build_flat_tree};
 
 use crate::cli::{Cli, Emit};
-use crate::pipeline::{ENTRY_SOURCE, resolve_code, shape_for};
+use crate::pipeline::{ENTRY_SOURCE, opt_for, resolve_code, shape_for};
 use crate::print::{print_cst, print_hir, print_mir, print_tokens};
 
 pub fn run() -> Result<ExitCode> {
@@ -82,10 +82,12 @@ pub fn run() -> Result<ExitCode> {
         DriverConfig {
             target,
             scope,
-            params: leek_session::driver_params().with_lints(leek_query::LintGroups {
-                pedantic: cli.pedantic,
-                nursery: cli.nursery,
-            }),
+            params: leek_session::driver_params()
+                .with_opt(opt_for(cli.emit, cli.clean))
+                .with_lints(leek_query::LintGroups {
+                    pedantic: cli.pedantic,
+                    nursery: cli.nursery,
+                }),
             color: if cli.no_color {
                 ColorWhen::Never
             } else {
@@ -103,7 +105,6 @@ pub fn run() -> Result<ExitCode> {
     let compiled: Compilation<'_> =
         session.compile_file(&cli.input, SourceId::new(ENTRY_SOURCE).unwrap())?;
     let text = compiled.text().to_string();
-    let source = compiled.input().source;
     let version = Version::from_byte(compiled.input().version_byte);
     let had_error = compiled.report();
 
@@ -143,15 +144,15 @@ pub fn run() -> Result<ExitCode> {
         }
         Emit::Java => {
             if let Some(hir) = compiled.hir() {
-                let mut opts = if cli.clean {
-                    leek_backend_java::Options::clean(version, cli.ai_id)
-                } else {
-                    leek_backend_java::Options::exact(version, cli.ai_id)
-                }
-                .with_source_path(cli.input.display().to_string());
-                if let Some(env) = &environment {
-                    opts = opts.with_environment(env.clone());
-                }
+                let mut opts = leek_backends::java_options(
+                    compiled.input(),
+                    cli.ai_id,
+                    cli.clean,
+                    cli.input.display().to_string(),
+                    environment.as_ref(),
+                );
+                // `--base-class` has no `miku` counterpart, so it stays
+                // here rather than in the shared builder.
                 if let Some(base) = &cli.base_class {
                     opts = opts.with_base_class(base);
                 }
@@ -185,12 +186,8 @@ pub fn run() -> Result<ExitCode> {
         }
         Emit::LeekScript => {
             if let Some(hir) = compiled.hir() {
-                let mut opts = if cli.compact {
-                    leek_backend_leekscript::Options::compact(version)
-                } else {
-                    leek_backend_leekscript::Options::pretty(version).with_source_text(text.clone())
-                };
-                opts = opts.with_optimize(cli.optimize).with_user_source(source);
+                let opts =
+                    leek_backends::leekscript_options(compiled.input(), cli.compact, cli.optimize);
                 let out = leek_backend_leekscript::emit(hir, &opts);
                 // Semantics this backend could not carry across (#154). These
                 // are warnings — the emitted program is valid LeekScript — so

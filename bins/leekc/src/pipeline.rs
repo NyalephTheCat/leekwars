@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 use leek_diagnostics::Code;
+use leek_manifest::BackendKind;
+use leek_query::OptLevel;
 use leek_session::{Scope, Target};
 
 use crate::cli::Emit;
@@ -32,6 +34,39 @@ pub fn shape_for(emit: Emit) -> (Target, Scope) {
         // `fmt` needs the green tree and nothing past it; the formatting
         // itself is a query off the same database, not a later pass.
         Emit::Cst | Emit::Fmt => (Target::Parsed, Scope::File),
+    }
+}
+
+/// The [`OptLevel`] this emit lowers at.
+///
+/// An emit that feeds a backend asks [`leek_backends::opt_level`] for the
+/// backend it feeds, so `leekc` and `miku` cannot emit different programs
+/// from one source. They did: `leekc --emit java --clean` compiled with
+/// the default parameters and never consulted the rule, so it emitted
+/// unfolded Java — a different program, with a different `ops(…)` count —
+/// where `miku build --backend java` with `mode = "clean"` folded
+/// (ARCH-13).
+///
+/// The emits that feed nothing are dumps, and a dump is of the code as
+/// written: `--emit hir` and `--emit mir` show the tree the author's
+/// source lowers to, not the one an optimizer rewrote. `--emit check` and
+/// the textual views produce no tree at all, so the level is moot and
+/// [`OptLevel::O0`] is the cheapest answer.
+#[must_use]
+pub fn opt_for(emit: Emit, java_clean: bool) -> OptLevel {
+    match emit {
+        Emit::Java => leek_backends::opt_level(BackendKind::Java, java_clean),
+        Emit::LeekScript => leek_backends::opt_level(BackendKind::LeekScript, false),
+        // `--emit run` is the native JIT, the same backend `--emit native`
+        // compiles through and the one `miku run` executes.
+        Emit::Run | Emit::Native => leek_backends::opt_level(BackendKind::Native, false),
+        Emit::Check
+        | Emit::Hir
+        | Emit::Mir
+        | Emit::Tokens
+        | Emit::FlatCst
+        | Emit::Cst
+        | Emit::Fmt => OptLevel::O0,
     }
 }
 
@@ -101,6 +136,57 @@ mod tests {
                 textual,
                 "--emit {emit:?} has the wrong scope"
             );
+        }
+    }
+
+    /// `leekc` must not hold a second opinion about the optimization
+    /// level: for every emit that feeds a backend, its answer *is*
+    /// `leek_backends::opt_level`'s.
+    ///
+    /// This is the shape of the bug it closes. `leekc --emit java
+    /// --clean` did not consult the policy at all — it compiled with the
+    /// default parameters — so it emitted unfolded Java where
+    /// `miku build --backend java` with `mode = "clean"` folded: a
+    /// different program, with a different `ops(…)` count, from one
+    /// source file (ARCH-13). Asserting the two *functions* agree catches
+    /// that, where asserting a level catches only the level I happened to
+    /// write down.
+    #[test]
+    fn every_backend_emit_takes_its_opt_level_from_the_shared_policy() {
+        for (emit, backend, clean) in [
+            (Emit::Java, BackendKind::Java, false),
+            (Emit::Java, BackendKind::Java, true),
+            (Emit::LeekScript, BackendKind::LeekScript, false),
+            (Emit::Run, BackendKind::Native, false),
+            (Emit::Native, BackendKind::Native, false),
+        ] {
+            assert_eq!(
+                opt_for(emit, clean),
+                leek_backends::opt_level(backend, clean),
+                "--emit {emit:?} (clean={clean}) disagrees with the {backend:?} backend"
+            );
+        }
+        // Non-vacuous: the pairs above do not all fold the same way.
+        assert_ne!(opt_for(Emit::Java, false), opt_for(Emit::Java, true));
+    }
+
+    /// The dumps show the code as written. `--emit hir` and `--emit mir`
+    /// exist to be read against the source, so an optimizer's tree would
+    /// be the wrong answer however much faster it runs.
+    #[test]
+    fn the_dumps_and_the_textual_views_stay_source_faithful() {
+        for emit in Emit::value_variants() {
+            let feeds_a_backend = matches!(
+                emit,
+                Emit::Java | Emit::LeekScript | Emit::Run | Emit::Native
+            );
+            if !feeds_a_backend {
+                assert_eq!(
+                    opt_for(*emit, false),
+                    OptLevel::O0,
+                    "--emit {emit:?} produces no backend output and must not fold"
+                );
+            }
         }
     }
 

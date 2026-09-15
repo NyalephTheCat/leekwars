@@ -1031,8 +1031,14 @@ name = "leek-backends"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "leek-backend-java",
+ "leek-backend-leekscript",
+ "leek-environment",
  "leek-manifest",
  "leek-project",
+ "leek-query",
+ "leek-span",
+ "leek-syntax",
 ]
 
 [[package]]
@@ -1607,6 +1613,7 @@ dependencies = [
  "leek-backend-java",
  "leek-backend-leekscript",
  "leek-backend-native",
+ "leek-backends",
  "leek-diagnostics",
  "leek-environment",
  "leek-fmt",

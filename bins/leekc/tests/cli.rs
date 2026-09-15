@@ -117,6 +117,43 @@ fn emit_java_with_out_dir_writes_the_class_and_its_line_map() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Clean Java emission folds constants, exact emission does not.
+///
+/// The level is computed by `leek_backends::opt_level` and has to *reach*
+/// the emitter, not merely be computed: `leekc --emit java --clean` used
+/// to compile with the default parameters, so it emitted unfolded Java —
+/// and a different `ops(…)` count — where `miku build --backend java`
+/// with `mode = "clean"` folded the same source (ARCH-13). The unit test
+/// beside `opt_for` pins that the two functions agree; this pins that the
+/// answer is threaded through.
+#[test]
+fn clean_java_folds_constants_and_exact_java_keeps_them() {
+    let dir = scratch_dir("java-opt-level");
+    std::fs::write(
+        dir.join("main.leek"),
+        "// @version:4\nfunction f() {\n\tvar a = 2 * 3 + 4\n\treturn a\n}\nreturn f()\n",
+    )
+    .expect("write");
+
+    let clean = leekc(&["main.leek", "--emit", "java", "--clean"], &dir);
+    assert_eq!(clean.status, 0, "stderr: {}", clean.stderr);
+    assert!(
+        clean.stdout.contains("return 10l;"),
+        "clean mode must fold `2 * 3 + 4`:\n{}",
+        clean.stdout
+    );
+
+    let exact = leekc(&["main.leek", "--emit", "java"], &dir);
+    assert_eq!(exact.status, 0, "stderr: {}", exact.stderr);
+    assert!(
+        !exact.stdout.contains("return 10l;"),
+        "exact mode mirrors the reference compiler, so it must not fold:\n{}",
+        exact.stdout
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn ai_id_names_the_emitted_java_class() {
     let (dir, _) = fixture("ai-id");

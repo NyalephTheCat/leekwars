@@ -7,8 +7,17 @@ license.workspace = true
 description = "Backend selection and output paths for Leekscript toolchains."
 
 [dependencies]
+# The two source backends whose option assembly both drivers share.
+leek-backend-java       = { workspace = true }
+leek-backend-leekscript = { workspace = true }
+leek-environment = { workspace = true }
 leek-manifest = { workspace = true }
 leek-project  = { workspace = true }
+# `opt_level` is stated in terms of `OptLevel`, the key a lowering is
+# memoized on.
+leek-query    = { workspace = true }
+leek-span     = { workspace = true }
+leek-syntax   = { workspace = true }
 anyhow        = { workspace = true }
 
 [lints]
