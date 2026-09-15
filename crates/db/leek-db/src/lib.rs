@@ -27,9 +27,13 @@
 //!   `crates/tools`, so a tool's query belongs in the tool, depending
 //!   *down* on this crate.
 //!
-//! Nothing here changes behaviour. Every item is a re-export of an item
-//! that already exists somewhere else.
+//! Most of what [`queries`] exposes is a re-export of a query that
+//! already exists somewhere else. The exception is [`include`], the
+//! first set of queries this crate *owns*: an include graph spans
+//! several files, so it cannot be a per-file query in a pass crate,
+//! and it needs [`WorkspaceFiles`] — an input, which lives here.
 
+pub mod include;
 pub mod queries;
 
 pub use leek_pipeline::salsa::{Db, LeekDb, SourceFile, WorkspaceFiles};

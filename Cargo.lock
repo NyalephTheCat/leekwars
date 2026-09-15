@@ -1148,14 +1148,17 @@ name = "leek-db"
 version = "0.0.1"
 dependencies = [
  "leek-complexity",
+ "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
  "leek-mir",
  "leek-parser",
  "leek-pipeline",
  "leek-resolver",
+ "leek-span",
  "leek-syntax",
  "leek-types",
+ "salsa",
 ]
 
 [[package]]
@@ -1277,6 +1280,7 @@ name = "leek-lsp"
 version = "0.0.1"
 dependencies = [
  "leek-complexity",
+ "leek-db",
  "leek-diagnostics",
  "leek-fmt",
  "leek-hir",

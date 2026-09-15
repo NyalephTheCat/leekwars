@@ -101,6 +101,28 @@ impl leek_diagnostics::IntoDiagnostic for IncludeError<'_> {
     }
 }
 
+/// The paths `include("name")`, written in `includer`, may name — in
+/// the order every include resolver in the workspace consults them.
+///
+/// Upstream's `Folder.resolve` accepts a name with or without its
+/// `.leek` extension, so the sibling `<dir>/<name>.leek` comes first
+/// and the bare `<dir>/<name>` second. This is the one spelling of
+/// that order: [`DiskFolder`] takes the first candidate that is a
+/// file, [`MemFolder`] the first that is a known key, and
+/// `leek_db::queries::resolve_include` the first the workspace holds a
+/// `SourceFile` for. A fourth copy used to live in the LSP's
+/// program-scope handler; it calls the query now.
+///
+/// The results are paths to *open*, not yet map keys — run one through
+/// [`canonical_or_normalized`] before keying anything by it.
+#[must_use]
+pub fn include_candidates(includer: &Path, name: &str) -> [PathBuf; 2] {
+    let base = includer
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    [base.join(format!("{name}.leek")), base.join(name)]
+}
+
 /// The Folder abstraction.
 ///
 /// Implementors map a `(includer_path, include_name)` pair to a
@@ -124,14 +146,8 @@ pub struct DiskFolder;
 
 impl Folder for DiskFolder {
     fn load(&self, includer: &Path, name: &str) -> Result<LoadedFile, LoadError> {
-        let base = includer
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        // `include("util")` looks for `util.leek` first, then
-        // `util` (matching upstream's `Folder.resolve` behaviour
-        // — names may or may not carry the extension).
-        let with_ext = base.join(format!("{name}.leek"));
-        let bare = base.join(name);
+        // `include("util")` looks for `util.leek` first, then `util`.
+        let [with_ext, bare] = include_candidates(includer, name);
         let candidate = if with_ext.is_file() {
             with_ext
         } else if bare.is_file() {
@@ -188,12 +204,16 @@ impl Default for MemFolder {
 
 impl Folder for MemFolder {
     fn load(&self, includer: &Path, name: &str) -> Result<LoadedFile, LoadError> {
-        let parent = includer.parent().map(Path::to_path_buf).unwrap_or_default();
-        // Candidate paths in priority order — matches DiskFolder's
-        // policy (sibling `.leek`, sibling bare, raw name).
+        let [with_ext, bare] = include_candidates(includer, name);
+        // The two shared candidates, plus one only this folder has: the
+        // raw name, keyed as written. Virtual fixtures are inserted
+        // under whatever path the test spelled, so `include("/proj/util")`
+        // from a file in another directory still finds them. Neither the
+        // disk folder nor the workspace-map query has that third lookup,
+        // which is why it stays here rather than in `include_candidates`.
         let candidates = [
-            normalize_lexical(&parent.join(format!("{name}.leek"))),
-            normalize_lexical(&parent.join(name)),
+            normalize_lexical(&with_ext),
+            normalize_lexical(&bare),
             normalize_lexical(Path::new(name)),
         ];
         for c in &candidates {
