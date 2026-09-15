@@ -169,6 +169,8 @@ impl Lowerer {
         // - For lambda initializers (`var f = function() {...}`),
         //   declare `f` *before* lowering the body so the lambda's
         //   resolver can see its own binding (recursive closures).
+        //   `global f = function() {...}` pre-declares a *global*
+        //   — same order, other namespace (#443).
         // - For non-lambda inits (`var count = count([1,2,3])`),
         //   declare AFTER lowering so the RHS still sees the outer
         //   scope (the local doesn't shadow itself in its own init).
@@ -205,7 +207,7 @@ impl Lowerer {
                             if let Some(tok) = pending_ident.take() {
                                 let name = tok.text().to_string();
                                 let ident_span = self.span_of_token(&tok);
-                                let def = self.declare_local(&name, ident_span, None);
+                                let def = self.declare_var(&name, ident_span, is_global);
                                 let init = Some(self.lower_expr(&e));
                                 decls.push(Self::var_decl_from(&tok, def, init, is_global, span));
                             }
@@ -245,10 +247,30 @@ impl Lowerer {
         decls
     }
 
-    /// Declare a local from `ident` (allocating its `DefId`) and
-    /// return a `VarDecl` bound to it. This is the "declare AFTER
-    /// init" path — the local isn't visible while the init is
-    /// being lowered, so `var x = x + 1` reads the outer `x`.
+    /// Declare `name` in the namespace the declaration flavour asks
+    /// for: a `global` declarator gets a [`Def::Global`], anything
+    /// else a fresh [`Def::Local`]. Both declarator paths of
+    /// [`Self::lower_var_decls`] — declare-after-init and the
+    /// pre-declaring lambda path — route through here so they can't
+    /// drift apart again (#443): the lambda path used to declare a
+    /// local even for `global f = function() {...}`, which left the
+    /// global looking singly-declared to the const-propagation pass.
+    ///
+    /// [`Self::declare_global`] is idempotent, so a name already
+    /// registered by [`Self::predeclare_globals`] (or by an earlier
+    /// declaration of the same global) reuses its `DefId`.
+    fn declare_var(&mut self, name: &str, ident_span: Span, is_global: bool) -> DefId {
+        if is_global {
+            self.declare_global(name, ident_span, None)
+        } else {
+            self.declare_local(name, ident_span, None)
+        }
+    }
+
+    /// Declare `ident` (allocating its `DefId`) and return a
+    /// `VarDecl` bound to it. This is the "declare AFTER init" path
+    /// — the name isn't visible while the init is being lowered, so
+    /// `var x = x + 1` reads the outer `x`.
     pub(crate) fn declare_then_make(
         &mut self,
         ident: &SyntaxToken,
@@ -258,11 +280,7 @@ impl Lowerer {
     ) -> VarDecl {
         let name = ident.text().to_string();
         let ident_span = self.span_of_token(ident);
-        let def = if is_global {
-            self.declare_global(&name, ident_span, None)
-        } else {
-            self.declare_local(&name, ident_span, None)
-        };
+        let def = self.declare_var(&name, ident_span, is_global);
         VarDecl {
             def,
             name,

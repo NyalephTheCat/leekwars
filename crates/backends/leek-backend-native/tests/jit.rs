@@ -511,6 +511,21 @@ fn o1_never_folds_a_global_a_body_writes() {
     }
 }
 
+/// Re-declaring a global with a lambda initializer must still declare the
+/// *global*, so O1's const-global propagation sees two declarations and never
+/// folds the first one's literal into a read (#443). Before the fix the lambda
+/// declarator bound a `Def::Local`, the global still looked singly-declared,
+/// and O1 folded `G` to `1` inside `f` — making the call `1()`.
+#[test]
+fn o1_never_folds_a_global_a_lambda_redeclares() {
+    let src = "global G = 1 \
+               global G = function() { return 2 } \
+               function f() { return G } \
+               return f()()";
+    assert_eq!(jit(src), "2", "O0: {src}");
+    assert_eq!(jit_o1(src), "2", "O1: {src}");
+}
+
 /// `instanceof`'s right operand resolves to a `global` of that name (#53).
 /// Two things must hold at both O0 and O1: the operand reads the global's
 /// real value, and the O1 const-global propagation never folds a literal into
