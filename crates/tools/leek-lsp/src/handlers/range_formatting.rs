@@ -2,9 +2,13 @@
 //!
 //! Delegates to [`leek_fmt::format_range`] to pick the smallest CST
 //! subtree containing the requested range and format just that
-//! subtree. If no usable subtree exists (the range spans multiple
-//! top-level items, for example), returns an empty edit list — the
-//! client can fall back to full-document formatting.
+//! subtree. A range spanning several top-level items has no subtree
+//! below the root: `format_range` formats the document and narrows
+//! the result to the lines that change (#200), so the edit still
+//! lands inside the buffer rather than replacing it.
+//!
+//! An empty edit list means there was nothing to do — no line of the
+//! range would change — or that the edit failed `edit_is_safe`.
 
 use leek_span::Span;
 use tower_lsp::lsp_types as lsp;

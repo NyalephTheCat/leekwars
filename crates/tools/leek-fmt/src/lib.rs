@@ -422,9 +422,18 @@ pub fn format_source_checked(
 
 /// Format the smallest CST subtree that fully contains `range`.
 ///
-/// Returns `Some((target_range, replacement))` if a suitable subtree
-/// exists, or `None` if `range` doesn't match any node (e.g. it
-/// extends past EOF).
+/// Returns `Some((target_range, replacement))` — the byte range to
+/// replace and the text to put there — or `None` when there is
+/// nothing to do: `range` extends past EOF, or no line the selection
+/// touches would change.
+///
+/// A selection spanning several top-level items — or the whole file
+/// — has no enclosing subtree below the `SourceFile` root. That is
+/// not a "no edit" case (#200): the answer is the document format,
+/// handed to [`narrow_to_changed_lines`] so the edit covers only the
+/// lines that actually change. Returning the document as one edit
+/// instead would replace the whole buffer and throw away the
+/// client's cursor and selection.
 ///
 /// The replacement is printed at the target's *logical* indent level
 /// ([`logical_indent_level`]): the subtree's doc is wrapped in that
@@ -460,7 +469,14 @@ pub fn format_range(
     if range.end > leek_span::offset(source.len()) {
         return None;
     }
-    let target = smallest_enclosing_node(&root, range)?;
+    let target = smallest_enclosing_node(&root, range.clone());
+    if target.kind() == SyntaxKind::SourceFile {
+        // The subtree to format *is* the document, so run the
+        // document format — same walk, same trailing newline, same
+        // `// fmt:` pragmas, and no replay needed because nothing
+        // sits in front of the root — then narrow the result.
+        return narrow_to_changed_lines(&source, &format(green, version, opts), &range);
+    }
     let target_start = u32::from(target.text_range().start());
     let target_end = u32::from(target.text_range().end());
 
@@ -584,7 +600,15 @@ fn is_switch_case_body(case: &SyntaxNode, child: &SyntaxNode) -> bool {
 /// fully contains `range`. Skips the trivia-only edges of nodes —
 /// if the range falls inside a token's whitespace, we still return
 /// the enclosing significant node.
-fn smallest_enclosing_node(root: &SyntaxNode, range: std::ops::Range<u32>) -> Option<SyntaxNode> {
+///
+/// A range no single item contains — several top-level items, or the
+/// whole file — stops the descent at the `SourceFile` root, and the
+/// root is what comes back. It used to come back as `None`, which
+/// both LSP handlers turn into an empty edit list: range-formatting a
+/// two-statement selection silently did nothing (#200). The one range
+/// this tree genuinely cannot answer for is a range past EOF, and
+/// [`format_range`] rejects that one before it gets here.
+fn smallest_enclosing_node(root: &SyntaxNode, range: std::ops::Range<u32>) -> SyntaxNode {
     let mut current = root.clone();
     'outer: loop {
         for child in current.children() {
@@ -598,11 +622,111 @@ fn smallest_enclosing_node(root: &SyntaxNode, range: std::ops::Range<u32>) -> Op
         }
         break;
     }
-    // Whole-file range or a range spanning multiple top-level
-    // items lands on `SourceFile`. Either way, callers should fall
-    // back to `format()` for whole-document formatting.
-    if current.kind() == leek_syntax::SyntaxKind::SourceFile {
+    current
+}
+
+/// The smallest edit that turns `original` into `formatted`, or
+/// `None` when no line the selection touches changes.
+///
+/// `original` and `formatted` are compared line by line; the common
+/// prefix and the common suffix of whole lines drop out, and what is
+/// left — the first differing line through the last — is the edit.
+/// Identical lines hold identical bytes, so both texts' prefix lines
+/// end at the same offset and both texts' suffix lines start the same
+/// number of bytes from the end: that arithmetic is the whole
+/// alignment, and it makes the replacement precisely the formatted
+/// counterpart of the original lines it replaces.
+///
+/// `range` then decides whether the edit is wanted at all. One that
+/// touches none of the lines `range` covers is dropped, so formatting
+/// a tidy selection inside an untidy file leaves the file alone.
+/// Beyond that yes-or-no the edit is *not* clipped back to the
+/// selection: dropping a differing line off the front would mean
+/// splicing from somewhere in the middle of the formatted text, and
+/// nothing here can say which formatted line a changed original line
+/// became — matching lines is exactly what failed on it. So the
+/// guarantee is the weaker, honest one: every line in the edit is a
+/// line the document format rewrites (never the whole buffer for a
+/// one-line fix), and the selection decides whether to send it.
+fn narrow_to_changed_lines(
+    original: &str,
+    formatted: &str,
+    range: &std::ops::Range<u32>,
+) -> Option<(std::ops::Range<u32>, String)> {
+    // Nothing differs: `None`, the "no edits" both LSP handlers
+    // already understand — each turns it into an empty edit list, and
+    // `rangeFormatting` would have dropped an empty edit on its own
+    // anyway by comparing the replacement against the original slice.
+    if original == formatted {
         return None;
     }
-    Some(current)
+    let orig: Vec<&str> = original.split_inclusive('\n').collect();
+    let new: Vec<&str> = formatted.split_inclusive('\n').collect();
+    let common = orig.len().min(new.len());
+
+    let mut prefix = 0;
+    while prefix < common && orig[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    // Bounded by the lines the prefix has not already claimed, so the
+    // two runs never overlap in either text.
+    let mut suffix = 0;
+    while suffix < common - prefix && orig[orig.len() - 1 - suffix] == new[new.len() - 1 - suffix] {
+        suffix += 1;
+    }
+
+    let start: usize = orig[..prefix].iter().map(|l| l.len()).sum();
+    let tail: usize = orig[orig.len() - suffix..].iter().map(|l| l.len()).sum();
+    let end = original.len() - tail;
+    let replacement = &formatted[start..formatted.len() - tail];
+
+    let window = whole_lines(original, range);
+    // Half-open ranges touch only where they overlap, but an empty
+    // one — an insertion, or a caret selection — has to count as
+    // touching the position it sits at, or typing at a line boundary
+    // would never format.
+    let touches = if start == end || window.start == window.end {
+        start <= window.end && window.start <= end
+    } else {
+        start < window.end && window.start < end
+    };
+    if !touches {
+        return None;
+    }
+    Some((
+        leek_span::offset(start)..leek_span::offset(end),
+        replacement.to_owned(),
+    ))
+}
+
+/// `range` grown to whole lines of `text`: back to the start of the
+/// line it starts on, forward past the end of the line it ends on.
+///
+/// An end already sitting at a line start is left where it is — an
+/// editor's full-line selection ends at column 0 of the line *after*
+/// the last highlighted one, and pulling that line in would let the
+/// selection claim a line the user never highlighted.
+///
+/// Scans bytes rather than slicing: a `\n` cannot occur inside a
+/// multi-byte UTF-8 sequence, so every offset this walks to is a char
+/// boundary even when the one it was handed is not. An out-of-bounds
+/// offset clamps instead of panicking — this runs inside a language
+/// server, where the tree and the buffer can disagree mid-edit.
+fn whole_lines(text: &str, range: &std::ops::Range<u32>) -> std::ops::Range<usize> {
+    let bytes = text.as_bytes();
+    let mut start = (range.start as usize).min(bytes.len());
+    let mut end = (range.end as usize).min(bytes.len());
+    while start > 0 && bytes[start - 1] != b'\n' {
+        start -= 1;
+    }
+    if end > 0 && bytes[end - 1] != b'\n' {
+        while end < bytes.len() && bytes[end] != b'\n' {
+            end += 1;
+        }
+        // Past the terminator, so a line and its line break move together.
+        if end < bytes.len() {
+            end += 1;
+        }
+    }
+    start..end.max(start)
 }

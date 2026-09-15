@@ -1,6 +1,8 @@
 //! Tests for `format_range` — partial-document formatting used by
 //! the LSP's `textDocument/rangeFormatting`.
 
+use std::fmt::Write as _;
+
 use leek_fmt::{FormatOptions, IndentStyle, format_range, format_source};
 use leek_span::SourceId;
 use leek_syntax::Version;
@@ -43,6 +45,11 @@ fn splice(src: &str, range: &std::ops::Range<u32>, replacement: &str) -> String 
     let start = usize::try_from(range.start).unwrap();
     let end = usize::try_from(range.end).unwrap();
     format!("{}{replacement}{}", &src[..start], &src[end..])
+}
+
+/// The text `format_range`'s edit replaces.
+fn slice<'a>(src: &'a str, range: &std::ops::Range<u32>) -> &'a str {
+    &src[usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap()]
 }
 
 /// The leading whitespace run of `line`.
@@ -241,14 +248,94 @@ fn returns_none_for_range_past_eof() {
     assert!(out.is_none());
 }
 
+// ---- a selection several top-level items wide (#200) ----
+//
+// Nothing below the `SourceFile` root contains such a range, so
+// `smallest_enclosing_node` used to answer `None` — "degenerate,
+// callers should use `format` instead". Neither LSP caller falls
+// back: both turn `None` into an empty edit list, so "Format
+// Selection" over two statements silently did nothing. The target is
+// now the document, and the edit is narrowed to the lines the
+// document format actually rewrites.
+
 #[test]
-fn returns_none_if_range_covers_whole_source_file() {
-    // SourceFile-level "range formatting" is degenerate; callers
-    // should use `format` instead. We return None so the caller can
-    // detect and fall back.
-    let src = "var x = 1;\n";
-    let out = fmt_range(src, 0, u32::try_from(src.len()).unwrap());
-    assert!(out.is_none());
+fn formats_a_selection_spanning_two_statements() {
+    let src = "var x   =1;\nvar y=2   ;\nvar z = 3;\n";
+    let (s, _) = span_of(src, "var x   =1;");
+    let (_, e) = span_of(src, "var y=2   ;");
+    let (range, out) = fmt_range(src, s, e).expect("an edit for a two-statement selection");
+
+    assert_eq!(out, "var x = 1;\nvar y = 2;\n");
+    // Narrowed to the selected lines: `var z` is already formatted,
+    // so it stays out of the edit.
+    assert_eq!(slice(src, &range), "var x   =1;\nvar y=2   ;\n");
+    assert_eq!(splice(src, &range, &out), fmt_all(src));
+}
+
+#[test]
+fn a_whole_file_range_formats_the_document() {
+    let src = "var x   =1;\nfunction f() {\nreturn 2;\n}\nvar last = 3;\n";
+    let (range, out) = fmt_range(src, 0, u32::try_from(src.len()).unwrap()).expect("an edit");
+
+    assert_eq!(splice(src, &range, &out), fmt_all(src));
+    // Still not one edit spanning the buffer: the trailing lines the
+    // format leaves alone are left out of it.
+    assert_eq!(
+        slice(src, &range),
+        "var x   =1;\nfunction f() {\nreturn 2;\n"
+    );
+    assert_eq!(out, "var x = 1;\nfunction f() {\n    return 2;\n");
+}
+
+#[test]
+fn returns_none_when_no_line_of_the_range_changes() {
+    // The differing span is empty, and `None` is the answer — both
+    // LSP handlers read it as "no edits", and `rangeFormatting` would
+    // have dropped an edit whose replacement equals the original
+    // slice on its own anyway.
+    let src = "var x = 1;\nvar y = 2;\n";
+    assert!(fmt_range(src, 0, u32::try_from(src.len()).unwrap()).is_none());
+}
+
+#[test]
+fn a_formatted_selection_does_not_pick_up_a_malformed_line_outside_it() {
+    // What keeps a range format a *range* format: `var x` above is
+    // malformed, the selection does not cover it, so there is no edit
+    // to send — not the whole-document format.
+    let src = "var x   =1;\nvar y = 2;\nvar z = 3;\n";
+    let (s, _) = span_of(src, "var y = 2;");
+    assert!(fmt_range(src, s, u32::try_from(src.len()).unwrap()).is_none());
+}
+
+#[test]
+fn the_edit_is_narrowed_to_the_changed_lines_of_a_long_file() {
+    // Returning the whole file as one edit would destroy the client's
+    // cursor and selection, so the edit has to stop at the lines that
+    // change: forty formatted lines around three malformed ones.
+    let mut src = String::new();
+    for i in 0..20 {
+        let _ = writeln!(src, "var a{i} = {i};");
+    }
+    let selected = "var b   =1;\nfunction g( ) {\nreturn 2;\n}\n";
+    src.push_str(selected);
+    for i in 0..20 {
+        let _ = writeln!(src, "var c{i} = {i};");
+    }
+    let (s, e) = span_of(&src, selected);
+    let (range, out) = fmt_range(&src, s, e).expect("an edit");
+
+    // Inside the selection, and stopping at its last *changed* line:
+    // the `}` already sits where the formatter wants it.
+    assert!(
+        range.start >= s && range.end <= e,
+        "{range:?} outside {s}..{e}"
+    );
+    assert_eq!(
+        slice(&src, &range),
+        "var b   =1;\nfunction g( ) {\nreturn 2;\n"
+    );
+    assert_eq!(out, "var b = 1;\nfunction g() {\n    return 2;\n");
+    assert_eq!(splice(&src, &range, &out), fmt_all(&src));
 }
 
 #[test]
