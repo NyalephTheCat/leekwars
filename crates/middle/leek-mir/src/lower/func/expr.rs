@@ -371,12 +371,20 @@ impl FnLowerer<'_> {
                     span,
                 )
             }
+            // `class` is late-bound in an instance method: it names the
+            // *runtime* class of the receiver, so an inherited method reports
+            // the subclass (#2619). Only a static method, which has no
+            // receiver, falls back to the class it is written in.
             NameRef::Class_ => match self.method_ctx.as_ref() {
-                Some(ctx) => self.materialize(
-                    Rvalue::ClassRef(ctx.class_def_id, ctx.class_name.clone()),
-                    ty.clone(),
-                    span,
-                ),
+                Some(ctx) => {
+                    let rvalue = match ctx.this_local {
+                        Some(this_local) if !ctx.is_constructor => {
+                            Rvalue::Field(this_local, "class".to_string())
+                        }
+                        _ => Rvalue::ClassRef(ctx.class_def_id, ctx.class_name.clone()),
+                    };
+                    self.materialize(rvalue, ty.clone(), span)
+                }
                 None => Operand::Const(Const::Null),
             },
         }

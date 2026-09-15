@@ -136,6 +136,9 @@ impl<'a> ProgramCtx<'a> {
             if let Some(ctx) = &task.method_ctx {
                 fl.method_ctx = Some(MethodCtx {
                     this_local: Some(id),
+                    // A lambda body is not the constructor itself even when
+                    // one encloses it: by the time it runs, `this` is made.
+                    is_constructor: false,
                     class_def_id: ctx.class_def_id,
                     class_name: ctx.class_name.clone(),
                     parent_class: ctx.parent_class.clone(),
@@ -396,7 +399,7 @@ impl<'a> ProgramCtx<'a> {
         class_def_id: DefId,
         class_name: String,
         parent_class: Option<String>,
-        _is_constructor: bool,
+        is_constructor: bool,
     ) -> usize {
         let function_idx = self.program.functions.len();
         // Reserve the slot so any nested lambdas push to later
@@ -435,6 +438,7 @@ impl<'a> ProgramCtx<'a> {
 
         fl.method_ctx = Some(MethodCtx {
             this_local,
+            is_constructor,
             class_def_id,
             class_name,
             parent_class,
@@ -524,6 +528,10 @@ impl<'a> ProgramCtx<'a> {
         };
         fl.method_ctx = Some(MethodCtx {
             this_local,
+            // A field initializer runs while the object is still being
+            // built, so `class` there is the declaring class, like in a
+            // constructor.
+            is_constructor: true,
             class_def_id,
             class_name,
             parent_class,

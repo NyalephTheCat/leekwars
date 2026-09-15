@@ -644,3 +644,41 @@ id = "an_optional_access_is_not_assignable"
 version = 4
 source = "var a = [1] a?[0] = 5 return a"
 expect = "error"
+
+# --- A primitive parameter whose default is `null`. ---
+
+# Upstream emitted `long u_to = null`, which javac rejects, and now treats
+# such a parameter as untyped: the default really is null, and an explicit
+# real argument keeps its fraction instead of truncating (prod #11872155).
+[[tests]]
+id = "a_null_default_widens_a_primitive_parameter"
+version = 4
+source = """
+function f(integer from, integer to = null) { return [from, to] }
+function g(real r = null) { return r }
+function h(boolean b = null) { return b }
+return [f(1), f(1, 2), f(1, 2.5), g(), h()]
+"""
+expect = { equals = "[[1, null], [1, 2], [1, 2.5], null, null]" }
+
+# A non-null default keeps the primitive type.
+[[tests]]
+id = "a_non_null_default_keeps_the_primitive_type"
+version = 4
+source = "function f(integer to = 3) { return to } return [f(), f(9)]"
+expect = { equals = "[3, 9]" }
+
+# --- `class` is late-bound in an instance method. ---
+
+# An inherited method reports the runtime class of the receiver, not the
+# class the method is written in (#2619). A static method has no receiver,
+# so there it is the declaring class.
+[[tests]]
+id = "class_names_the_runtime_class_in_an_instance_method"
+version = 2
+source = """
+class A { public m() { return class.name } public static s() { return class.name } }
+class B extends A {}
+return [new A().m(), new B().m(), A.s(), B.s()]
+"""
+expect = { equals = '["A", "B", "A", "A"]' }
