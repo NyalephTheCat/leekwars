@@ -7,63 +7,13 @@ use leek_fmt::FormatOptions;
 use leek_pipeline::Run;
 use leek_pipeline::salsa::SourceFile;
 use leek_resolver::folder::{Folder, LoadError, LoadedFile, MemFolder};
-use leek_resolver::interner::SourceInterner;
 use leek_session::{self, Target};
-use leek_span::paths::canonical_or_normalized;
 use tower_lsp::lsp_types as lsp;
 
 use crate::workspace::{AnalysisTarget, Workspace};
 
 pub fn run_on_file(ws: &Workspace, source_file: SourceFile, target: Target) -> Option<Run<'_>> {
     let pipeline = leek_session::pipeline(target, &leek_session::lsp_params()).ok()?;
-    Some(pipeline.run_memoized(&ws.db, source_file))
-}
-
-/// Run the include-aware pipeline for a workspace-owned source file.
-///
-/// Navigation handlers still use [`run_on_file`] because they deliberately
-/// analyze one document and bridge cross-file results themselves. Diagnostics
-/// need the compiler's shared program scope, so they opt into this path.
-pub fn run_on_file_with_includes(
-    ws: &Workspace,
-    source_file: SourceFile,
-    target: Target,
-) -> Option<Run<'_>> {
-    let source = source_file.source(&ws.db);
-    let uri = ws
-        .analysis_targets()
-        .iter()
-        .find(|t| t.source_file.source(&ws.db) == source)
-        .map(|t| t.uri.clone());
-    match uri {
-        Some(uri) => run_on_uri(ws, &uri, source_file, target),
-        None => run_on_file(ws, source_file, target),
-    }
-}
-
-/// Run an include-aware LSP pipeline for one URI.
-fn run_on_uri<'db>(
-    ws: &'db Workspace,
-    uri: &lsp::Url,
-    source_file: SourceFile,
-    target: Target,
-) -> Option<Run<'db>> {
-    let Some(entry_path) = crate::workspace::uri_to_path(uri) else {
-        let pipeline = leek_session::pipeline(target, &leek_session::lsp_params()).ok()?;
-        return Some(pipeline.run_memoized(&ws.db, source_file));
-    };
-
-    let includes = leek_resolver::pipeline::ResolveIncludes::new(
-        ws.include_folder(),
-        canonical_or_normalized(&entry_path),
-        Arc::clone(&ws.interner) as Arc<dyn SourceInterner>,
-    );
-    let pipeline = leek_session::pipeline_with_includes(
-        target,
-        Box::new(includes),
-        &leek_session::lsp_params(),
-    )
-    .ok()?;
     Some(pipeline.run_memoized(&ws.db, source_file))
 }
 
