@@ -54,19 +54,33 @@
 //! so.
 //!
 //! **What is deliberately missing.** There is no `lints` accessor and no
-//! `formatted` accessor, and neither is an oversight. `leek-lint` ships
-//! no tracked query at all, so there is nothing to wrap. `leek-fmt`'s
-//! [`format_query`](leek_fmt::format_query) does exist, but it is keyed
-//! on the source file alone and formats with `FormatOptions::default()`,
-//! where [`crate::pipeline::run_formatted`] formats with the options the
-//! editor pushed — an accessor over it would quietly ignore the user's
-//! settings. Formatting and linting therefore stay on the pipeline until
-//! an options-keyed `format_query` and a `lint_query` exist.
+//! `formatted` accessor, and neither is an oversight — but the two are
+//! blocked on different things.
 //!
-//! Those two survivors are the whole of the pipeline's remaining
-//! surface: `handlers::formatting` (options-keyed) and
-//! [`crate::diagnostics`] (include-aware). Every other reader of a
-//! frontend artifact in this crate is below.
+//! `leek-fmt`'s [`format_query`](leek_fmt::format_query) is keyed on the
+//! source file alone and formats with `FormatOptions::default()`, where
+//! [`crate::pipeline::run_formatted`] formats with the options the editor
+//! pushed — an accessor over it would quietly ignore the user's settings.
+//! Formatting stays on the pipeline until an options-keyed `format_query`
+//! exists.
+//!
+//! Linting is no longer blocked on a missing query: `leek_lint::lint_query`
+//! and `leek_lint::diagnostics_with_lints` both exist. It is blocked on the
+//! *file set*. [`crate::diagnostics`] needs the whole include closure, and
+//! the two paths disagree about what is in one. The pipeline resolves
+//! includes through [`Workspace::include_folder`](crate::workspace::Workspace),
+//! which falls back to **disk**, so it reaches a file that is neither open
+//! nor indexed. `leek_db::queries::program_diagnostics` walks
+//! [`WorkspaceFiles`](leek_db::WorkspaceFiles), which holds exactly the open
+//! and indexed files. Moving diagnostics across as-is would silently drop
+//! every diagnostic from an include outside the index, so the switch needs
+//! the walker's finds registered as inputs first — the same `#191` interner
+//! sharing that already keeps their `SourceId`s consistent.
+//!
+//! Those two are the whole of the pipeline's remaining surface:
+//! `handlers::formatting` (options-keyed) and [`crate::diagnostics`]
+//! (include-aware). Every other reader of a frontend artifact in this crate
+//! is below.
 //!
 //! # Includes
 //!
