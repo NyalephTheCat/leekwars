@@ -920,3 +920,45 @@ switch (s) { case 'a': r += 'p' break case 'b': r += 'q' break }
 return r
 """
 expect = { equals = "\"bxq\"" }
+
+# A typed slot converts what is written to it, whatever path the write takes —
+# a compound assignment and a value only boxed at run time included.
+[[tests]]
+id = "a_typed_field_converts_what_is_written_to_it"
+version = 4
+source = """
+class A { integer i real r boolean b integer | null n }
+var a = new A()
+a.i = null a.r = null a.b = 1 a.n = 2.5
+var d = [1, 40.5]
+a.i = d[1]
+return [a.i, a.r, a.b, a.n]
+"""
+expect = { equals = "[40, 0.0, true, 2]" }
+
+[[tests]]
+id = "a_compound_assignment_converts_through_the_field_type"
+version = 4
+source = "class A { integer i = 3 real r = 10.0 } var a = new A() a.i += 0.5 a.r \\= 3 return [a.i, a.r]"
+expect = { equals = "[3, 3.0]" }
+
+# A conversion that cannot be done leaves the slot with what it had: upstream
+# compiles the write to a Java cast, which fails, logs, and stores nothing.
+[[tests]]
+id = "an_impossible_conversion_leaves_the_slot_alone"
+version = 4
+source = """
+class A {}
+class B { string s = 'a'  A? a }
+var b = new B()
+b.s = 12
+b.a = 5
+return [b.s, b.a]
+"""
+expect = { equals = "[\"a\", null]" }
+
+[[tests]]
+id = "a_static_field_and_a_global_convert_the_same_way"
+version = 4
+source = "class Z { public static BigInteger b = 10L } global integer g = 10 Z.b /= 4 g *= (false ? 1 : 0.5) return [Z.b, g]"
+expect = { equals = "[2, 5]" }

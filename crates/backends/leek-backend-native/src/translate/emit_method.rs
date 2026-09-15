@@ -202,6 +202,21 @@ impl Tx<'_, '_> {
 
     /// The scalar kind a write to field `name` on `base` (a known class
     /// instance) coerces to (`real? x = 5` stores `5.0`), if any.
+    /// The declared-slot tag for `base.name`, when `base`'s class is known
+    /// and declares a typed field of that name — what a write to it converts
+    /// through.
+    pub(super) fn field_slot_tag(&self, base: LocalId, name: &str) -> Option<i64> {
+        receiver_class(
+            self.mir_locals,
+            self.new_classes,
+            self.aliased_classes,
+            base,
+        )
+        .and_then(|cls| self.program.class_by_name(cls))
+        .and_then(|c| c.field_slot(name))
+        .and_then(|fs| super::slot_tag(&fs.ty))
+    }
+
     pub(super) fn field_coerce_ty(&self, base: LocalId, name: &str) -> Option<ValTy> {
         receiver_class(
             self.mir_locals,

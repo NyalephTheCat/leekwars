@@ -2245,6 +2245,22 @@ fn scalar_valty(t: &Type) -> Option<ValTy> {
 /// *non-null* value to — looks through `Nullable` (`real? x = 5` stores
 /// `5.0`). Distinct from [`scalar_valty`], which makes nullable types
 /// `Ref` for representation.
+/// The declared-slot tag a typed write converts through, or `None` for a slot
+/// that takes anything. See [`crate::runtime::slot`] for what each tag means.
+fn slot_tag(t: &Type) -> Option<i64> {
+    use crate::runtime::slot;
+    Some(match t {
+        Type::Integer => slot::INTEGER,
+        Type::Real => slot::REAL,
+        Type::Boolean => slot::BOOLEAN,
+        Type::String => slot::STRING,
+        Type::BigInteger => slot::BIG_INTEGER,
+        Type::ClassInstance(..) => slot::INSTANCE,
+        Type::Nullable(inner) => slot_tag(inner)? | slot::NULLABLE,
+        _ => return None,
+    })
+}
+
 fn coerce_target_ty(t: &Type) -> Option<ValTy> {
     match t {
         Type::Integer => Some(ValTy::Int),

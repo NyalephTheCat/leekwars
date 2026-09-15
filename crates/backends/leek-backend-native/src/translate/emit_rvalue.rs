@@ -215,6 +215,28 @@ impl Tx<'_, '_> {
         Ok(v)
     }
 
+    /// Convert `val` to a static field's declared type before it is stored,
+    /// the way [`Self::set_field`](super::FnTranslator::set_field) does for an
+    /// instance field: a conversion that cannot be done leaves the field with
+    /// what it had.
+    pub(super) fn static_convert(
+        &mut self,
+        owner: DefId,
+        name: &str,
+        ty: &leek_types::Type,
+        val: Value,
+    ) -> Result<Value, NativeError> {
+        let Some(tag) = super::slot_tag(ty) else {
+            return Ok(val);
+        };
+        let convert = self.imports.rt("leek_static_convert")?;
+        let cd = self.b.ins().iconst(types::I64, owner.0 as i64);
+        let (ptr, lenv) = self.const_str_bytes(name);
+        let tagv = self.b.ins().iconst(types::I64, tag);
+        let inst = self.b.ins().call(convert, &[cd, ptr, lenv, val, tagv]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
     /// Emit a `leek_static_set(owner_def, name, val)`.
     pub(super) fn static_field_set(
         &mut self,

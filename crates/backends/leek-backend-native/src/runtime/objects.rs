@@ -91,6 +91,155 @@ shim! {
     }
 }
 
+/// A declared slot type, as the tag the typed-write shims take.
+///
+/// A typed slot converts what is written to it, and *refuses* what cannot be
+/// converted — upstream compiles `a.x = 12` on a `string x` to a Java cast
+/// that fails, logs, and leaves the field alone. Conversion is between
+/// numbers, booleans and null; everything else keeps its old value.
+pub mod slot {
+    pub const INTEGER: i64 = 1;
+    pub const REAL: i64 = 2;
+    pub const BOOLEAN: i64 = 3;
+    pub const STRING: i64 = 4;
+    pub const BIG_INTEGER: i64 = 5;
+    /// A class instance: only an instance (or null) may be stored.
+    pub const INSTANCE: i64 = 6;
+    /// Added to any of the above for a `T?` slot, where `null` stays `null`
+    /// instead of becoming the type's own value.
+    pub const NULLABLE: i64 = 8;
+}
+
+/// What `value` becomes when stored in a slot declared with `tag`, or `None`
+/// when the conversion is impossible and the slot must keep what it has.
+pub(super) fn convert_for_slot(value: &Value, tag: i64) -> Option<Value> {
+    let nullable = tag & slot::NULLABLE != 0;
+    if nullable && matches!(value, Value::Null) {
+        return Some(Value::Null);
+    }
+    let converted = match tag & 7 {
+        slot::INTEGER => match value {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Real(_) | Value::BigInt(_) => {
+                Value::Int(value.to_long())
+            }
+            _ => return None,
+        },
+        slot::REAL => match value {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Real(_) | Value::BigInt(_) => {
+                Value::Real(value.to_real())
+            }
+            _ => return None,
+        },
+        slot::BOOLEAN => match value {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Real(_) => {
+                Value::Bool(value.is_truthy())
+            }
+            _ => return None,
+        },
+        // A `string` slot holds a string or null — a Java `String` field, so
+        // a number is a cast that fails rather than a conversion.
+        slot::STRING => match value {
+            Value::Null | Value::String(_) => value.clone(),
+            _ => return None,
+        },
+        slot::BIG_INTEGER => match value {
+            Value::BigInt(_) => value.clone(),
+            Value::Null => leek_runtime::coerce_value_to_bigint(&Value::Int(0)),
+            Value::Bool(_) | Value::Int(_) | Value::Real(_) => {
+                leek_runtime::coerce_value_to_bigint(value)
+            }
+            _ => return None,
+        },
+        // A class-typed slot takes an instance or null. A scalar is the
+        // invalid cast upstream logs and drops.
+        slot::INSTANCE => match value {
+            Value::Bool(_)
+            | Value::Int(_)
+            | Value::Real(_)
+            | Value::BigInt(_)
+            | Value::String(_) => return None,
+            _ => value.clone(),
+        },
+        _ => value.clone(),
+    };
+    Some(converted)
+}
+
+shim! {
+    /// The value to store into `base.<name>`, converted to the field's
+    /// declared type — or the field's current value when the conversion is
+    /// impossible, so the write lands as a no-op.
+    ///
+    /// # Safety
+    /// `base` and `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_field_convert(
+        base: *mut Value,
+        name_ptr: *const u8,
+        name_len: i64,
+        value: *mut Value,
+        tag: i64,
+    ) -> *mut Value {
+        let name = unsafe { member_name(name_ptr, name_len) };
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            // SAFETY: handle contract on `base`.
+            None => handle(read_member(unsafe { val(&base) }, name, 4)),
+        }
+    }
+}
+
+shim! {
+    /// [`leek_field_convert`] for a static field, whose current value lives in
+    /// the owning class's storage rather than an instance.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_static_convert(
+        owner: i64,
+        name_ptr: *const u8,
+        name_len: i64,
+        value: *mut Value,
+        tag: i64,
+    ) -> *mut Value {
+        let name = unsafe { member_name(name_ptr, name_len) };
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => static_get(owner as u32, name.to_owned()),
+        }
+    }
+}
+
+shim! {
+    /// [`leek_field_convert`] for a file-level global, whose current value
+    /// lives in the globals table.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_global_convert(
+        name_ptr: *const u8,
+        name_len: i64,
+        value: *mut Value,
+        tag: i64,
+    ) -> *mut Value {
+        let name = unsafe { member_name(name_ptr, name_len) };
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => GLOBALS
+                .with(|g| g.borrow().get(name).copied())
+                .unwrap_or_else(|| handle(Value::Null)),
+        }
+    }
+}
+
 /// The native string-/index-keyed member read shared by `leek_value_index`
 /// (boxed key) and [`read_member`] (`&str` key). Returns the value; the caller
 /// boxes or coerces it. Mirrors upstream: a runtime class-ref's
