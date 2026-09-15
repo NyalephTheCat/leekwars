@@ -654,6 +654,130 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Every target's `Run` stream is exactly its stage's query stream.
+    ///
+    /// The claim `the_program_stream_reports_what_the_pipeline_reported`
+    /// makes at `Target::Linted`, made at every target below it — which is
+    /// what `the_runs_diagnostics_grow_with_the_target` showed was
+    /// missing, and what `diagnostics()` needs before it can move off the
+    /// run.
+    ///
+    /// The fixture parses cleanly and earns its complaints after parsing,
+    /// which is the case the slicing is for. A file that fails to parse is
+    /// a different story — see
+    /// `a_failed_parse_stops_the_run_but_not_the_queries`.
+    #[test]
+    fn every_targets_run_matches_its_stage() {
+        let dir = scratch("stage-parity");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar z = 1 / 0;\nreturn a;\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let cases = [
+            (Target::Tokens, leek_db::queries::Stage::Tokens),
+            (Target::Parsed, leek_db::queries::Stage::Parsed),
+            (Target::Resolved, leek_db::queries::Stage::Resolved),
+            (Target::TypeChecked, leek_db::queries::Stage::TypeChecked),
+            (Target::Hir, leek_db::queries::Stage::Hir),
+        ];
+
+        let mut widths = Vec::new();
+        for (target, stage) in cases {
+            let session = Session::new(&project, quiet(target)).expect("session");
+            let compiled = session.compile_entry().expect("compile");
+            let from_run: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+
+            let (db, files) = session.db();
+            let (_, file) = compiled.db_handle().expect("session database");
+            let sliced = leek_db::queries::program_diagnostics_upto(
+                db,
+                files,
+                file,
+                leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+                stage,
+            );
+            let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
+
+            assert_eq!(
+                from_run, from_query,
+                "{target:?} and {stage:?} must report the same stream"
+            );
+            widths.push((target, from_run.len()));
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Non-trivial: a later stage reports strictly more than an
+        // earlier one. Without this the assertions above would hold just
+        // as well for five empty lists.
+        let at = |t: Target| widths.iter().find(|(x, _)| *x == t).expect("case").1;
+        assert_eq!(at(Target::Parsed), 0, "this fixture parses: {widths:?}");
+        assert!(
+            at(Target::Resolved) > at(Target::Parsed),
+            "resolution adds the redeclaration: {widths:?}"
+        );
+    }
+
+    /// A file that fails to parse stops the run's later steps, and does
+    /// not stop the queries.
+    ///
+    /// The second divergence between a `Run`'s stream and a query's, and
+    /// the one still open. Slicing to a stage handles the first —
+    /// `every_targets_run_matches_its_stage` — but not this: when the
+    /// parse produces no `AstArtifact`, the resolver, checker and HIR
+    /// steps quietly no-op, so a `Target::Hir` run reports only what lexing
+    /// and parsing found. The tracked passes have no such notion. They work
+    /// off the green tree, which always exists, so they carry on and
+    /// report against a tree the parser has already given up on.
+    ///
+    /// Not obviously the wrong answer — more is arguably better than
+    /// silence — but it is a *different* answer, and deciding which one
+    /// `miku` should print is a behaviour call, not a refactor. So this
+    /// records the gap rather than papering over it, and `diagnostics()`
+    /// stays on the run until it is closed.
+    #[test]
+    fn a_failed_parse_stops_the_run_but_not_the_queries() {
+        let dir = scratch("failed-parse");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar bad = \u{a3};\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Resolved)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let from_run: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let sliced = leek_db::queries::program_diagnostics_upto(
+            db,
+            files,
+            file,
+            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_db::queries::Stage::Resolved,
+        );
+        let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            !from_run.contains(&"E0202"),
+            "the run gave up before resolution: {from_run:?}"
+        );
+        assert!(
+            from_query.contains(&"E0202"),
+            "the query resolved anyway: {from_query:?}"
+        );
+        assert!(
+            from_query.len() > from_run.len(),
+            "and so reports strictly more: run={from_run:?} query={from_query:?}"
+        );
+    }
+
     /// A `Run`'s diagnostics are whatever the steps it *ran* reported, so
     /// the stream grows with the target. The tracked program stream has no
     /// such notion: it always reports the whole frontend, and

@@ -142,15 +142,71 @@ pub fn program_diagnostics(
     entry: SourceFile,
     entry_version: Version,
 ) -> Arc<Vec<Diagnostic>> {
+    program_diagnostics_upto(db, files, entry, entry_version, Stage::Hir)
+}
+
+/// How far down the frontend a diagnostic stream reaches.
+///
+/// A `Run`'s diagnostics are whatever the steps it *ran* reported, so the
+/// stream a `leek_session::Target` produces grows with the target: a
+/// `Target::Parsed` run says nothing about types, and a `Target::Hir` one
+/// says nothing about lints. [`program_diagnostics`] has no such notion —
+/// it reports the whole frontend — which makes it a drop-in replacement
+/// for a `Run`'s stream at exactly one target and a behaviour change at
+/// every other.
+///
+/// This is the key that closes that gap. The variants are the stages that
+/// actually contribute diagnostics, in the order they contribute them;
+/// `leek_session` maps its `Target` onto one.
+///
+/// Lints are deliberately absent, and so is MIR. Lints live in
+/// `leek_lint::program_diagnostics_with_lints`, because `crates/db` may
+/// not depend on `crates/tools`. MIR is absent because there is no
+/// *program-level* MIR lowering to ask — `lower_mir_query` answers for one
+/// file — so a `Target::Mir` stream cannot be assembled here yet.
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Stage {
+    /// The entry's pragmas and tokens. No include is read: resolving one
+    /// means lexing it, which is already past this stage.
+    Tokens,
+    /// Adds the include graph, the closure's lexes and parses, and the
+    /// entry's own parse.
+    Parsed,
+    /// Adds whole-program name resolution.
+    Resolved,
+    /// Adds whole-program type checking.
+    TypeChecked,
+    /// Adds whole-program HIR lowering. The widest stream assembled here,
+    /// and what [`program_diagnostics`] reports.
+    Hir,
+}
+
+/// [`program_diagnostics`], stopped after `stage`.
+///
+/// The order is [`program_diagnostics`]'s, and each stage is a prefix of
+/// the next, so a consumer that widens its target only ever *gains*
+/// diagnostics — which is the property that makes swapping a `Run`'s
+/// stream for this one safe at a given target.
+#[salsa::tracked]
+pub fn program_diagnostics_upto(
+    db: &dyn Db,
+    files: WorkspaceFiles,
+    entry: SourceFile,
+    entry_version: Version,
+    stage: Stage,
+) -> Arc<Vec<Diagnostic>> {
+    let mut out = Vec::new();
+    out.extend(leek_syntax::pipeline::pragma_query(db, entry).diagnostics);
+    out.extend(leek_lexer::pipeline::lex_query(db, entry).diagnostics);
+    if stage == Stage::Tokens {
+        return Arc::new(out);
+    }
+
     let graph = include_graph(db, files, entry, entry_version);
     // The program's own parse key, so every parse read below is the memo
     // the whole-program passes filled rather than a second parse under
     // an empty class set.
     let classes = program_classes(db, files, entry, entry_version);
-
-    let mut out = Vec::new();
-    out.extend(leek_syntax::pipeline::pragma_query(db, entry).diagnostics);
-    out.extend(leek_lexer::pipeline::lex_query(db, entry).diagnostics);
     out.extend(graph.diagnostics.iter().cloned());
     out.extend(include_parse_failures(db, files, entry, entry_version));
     for file in graph.includes() {
@@ -158,8 +214,20 @@ pub fn program_diagnostics(
         out.extend(leek_parser::pipeline::parse_query(db, file.file, classes).diagnostics);
     }
     out.extend(leek_parser::pipeline::parse_query(db, entry, classes).diagnostics);
+    if stage == Stage::Parsed {
+        return Arc::new(out);
+    }
+
     out.extend(resolve_program(db, files, entry, entry_version).diagnostics);
+    if stage == Stage::Resolved {
+        return Arc::new(out);
+    }
+
     out.extend(typecheck_program(db, files, entry, entry_version).diagnostics);
+    if stage == Stage::TypeChecked {
+        return Arc::new(out);
+    }
+
     out.extend(lower_program(db, files, entry, entry_version, OptLevel::O0).diagnostics);
     Arc::new(out)
 }

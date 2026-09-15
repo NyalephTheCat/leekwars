@@ -59,7 +59,9 @@ pub use leek_complexity::pipeline::{ComplexityReport, complexity_query};
 /// — see [`crate::diagnostics`]. Lint findings are deliberately absent:
 /// they are appended by `leek_lint::diagnostics_with_lints`, in the
 /// tool, because db may not depend on tools.
-pub use crate::diagnostics::{diagnostics_without_lints, for_source, program_diagnostics};
+pub use crate::diagnostics::{
+    Stage, diagnostics_without_lints, for_source, program_diagnostics, program_diagnostics_upto,
+};
 /// The include closure: one file's include sites, one include name
 /// resolved against the workspace, the whole graph an entry file
 /// reaches, and the program-wide class set every parse in it is keyed
