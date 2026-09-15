@@ -428,6 +428,14 @@ pub(crate) struct PendingSignature {
 
 #[derive(Default)]
 pub(crate) struct ClassCtx {
+    /// The class being lowered. Names the class *lexically*, which is what a
+    /// static member resolves against: static storage and static dispatch are
+    /// not virtual, so `class.x` inside an instance method reaches the same
+    /// box `A.x` does, while a bare `class` stays the runtime class.
+    pub(crate) class_def: Option<DefId>,
+    /// The immediate parent class, for the same reason — `super.x` on a
+    /// static member names the class that inherits it, not the receiver.
+    pub(crate) parent_def: Option<DefId>,
     pub(crate) field_names: std::collections::HashSet<String>,
     pub(crate) static_field_names: std::collections::HashSet<String>,
     pub(crate) method_names: std::collections::HashSet<String>,

@@ -5,7 +5,8 @@
 
 use super::{
     CLASS_CTOR_THUNK, CLASS_PARENT, CLASS_REFLECT, CLASS_STRING_METHOD, DISPATCH, GLOBALS,
-    NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELDS, STATIC_INIT, STRICT,
+    NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELD_OWNER, STATIC_FIELDS, STATIC_INIT,
+    STRICT,
 };
 use leek_runtime::{Rng, Value};
 use std::collections::{HashMap, HashSet};
@@ -305,6 +306,16 @@ pub fn set_method_resolve(map: HashMap<u32, HashMap<String, usize>>) {
 /// Install the static-field initialiser table for this run.
 pub fn set_static_init(map: HashMap<(u32, String), usize>) {
     STATIC_INIT.with(|c| *c.borrow_mut() = map);
+}
+
+/// Install the static-method-resolution table for this run.
+pub fn set_static_method_resolve(map: HashMap<u32, HashMap<String, usize>>) {
+    DISPATCH.with(|c| c.borrow_mut().static_method_resolve = map);
+}
+
+/// Install the static-field ownership table for this run.
+pub fn set_static_field_owner(map: HashMap<u32, HashMap<String, u32>>) {
+    STATIC_FIELD_OWNER.with(|c| *c.borrow_mut() = map);
 }
 
 /// Reset the global + static-field stores. Called before every JIT run so a

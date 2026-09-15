@@ -130,29 +130,12 @@ skipped_unknown = 18
 "TestLoops.java::testNormal_containers::8@v3" = "skipped_unknown"
 "TestLoops.java::testNormal_containers::8@v4" = "skipped_unknown"
 "TestMap.java::testMap_operator::40@v1" = "skipped_disabled"
-"TestNarrowing.java::testClass_field_narrowing::4@v4" = "fail_wrong_value"
-"TestNarrowing.java::testInstanceof_narrowing_with_property_access::8@v4" = "fail_wrong_value"
-"TestObject.java::run::223@v2" = "fail_wrong_value"
-"TestObject.java::run::223@v3" = "fail_wrong_value"
-"TestObject.java::run::223@v4" = "fail_wrong_value"
-"TestObject.java::run::343@v2" = "skipped_unknown"
-"TestObject.java::run::343@v3" = "skipped_unknown"
-"TestObject.java::run::343@v4" = "skipped_unknown"
-"TestObject.java::run::344@v2" = "fail_wrong_value"
-"TestObject.java::run::344@v3" = "fail_wrong_value"
-"TestObject.java::run::344@v4" = "fail_wrong_value"
-"TestObject.java::run::345@v2" = "fail_wrong_value"
-"TestObject.java::run::345@v3" = "fail_wrong_value"
-"TestObject.java::run::345@v4" = "fail_wrong_value"
 "TestObject.java::run::346@v2" = "skipped_unknown"
 "TestObject.java::run::346@v3" = "skipped_unknown"
 "TestObject.java::run::346@v4" = "skipped_unknown"
 "TestObject.java::run::432@v2" = "skipped_unknown"
 "TestObject.java::run::432@v3" = "skipped_unknown"
 "TestObject.java::run::432@v4" = "skipped_unknown"
-"TestObject.java::run::62@v2" = "fail_wrong_value"
-"TestObject.java::run::62@v3" = "fail_wrong_value"
-"TestObject.java::run::62@v4" = "fail_wrong_value"
 "TestObject.java::testFieldConversion::2@v2" = "fail_wrong_value"
 "TestObject.java::testFieldConversion::2@v3" = "fail_wrong_value"
 "TestObject.java::testFieldConversion::2@v4" = "fail_wrong_value"
@@ -183,13 +166,13 @@ skipped_unknown = 18
 
 [backends.native.summary]
 total = 12254
-pass = 11229
+pass = 11246
 pass_expected_error = 912
 fail_parse_error = 0
 fail_missing_error = 0
-fail_wrong_value = 45
+fail_wrong_value = 31
 skipped_disabled = 24
-skipped_unknown = 44
+skipped_unknown = 41
 
 [backends.pipeline.outcomes]
 "TestBigInt.java::testDosGuards::0@v4" = "fail_missing_error"

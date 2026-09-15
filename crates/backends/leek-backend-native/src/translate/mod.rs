@@ -845,6 +845,52 @@ pub fn reflect_name_tables(program: &MirProgram) -> HashMap<u32, HashMap<String,
     out
 }
 
+/// Where each class's reachable static members live, for a `ClassRef` value
+/// met at runtime: `class DefId raw → { name → owning class DefId raw }` for
+/// fields, and `→ { name → program.functions index }` for methods.
+///
+/// Both are flattened over inheritance, most-derived first, because that is
+/// what the lookup needs to be a single map read. Static *storage* belongs to
+/// the class that declares the field, so the field table answers with the
+/// owner rather than the class asked — `B.x` and `A.x` name one box.
+///
+/// The compile-time forms (`A.x`, `A.m()`) resolve in the translator; these
+/// serve `class.x` and `class.m()` inside an instance method, where `class` is
+/// the *receiver's* class and so is only known at run time.
+pub fn static_member_tables(
+    program: &MirProgram,
+) -> (
+    HashMap<u32, HashMap<String, u32>>,
+    HashMap<u32, HashMap<String, usize>>,
+) {
+    let mut fields: HashMap<u32, HashMap<String, u32>> = HashMap::new();
+    let mut methods: HashMap<u32, HashMap<String, usize>> = HashMap::new();
+    for c in &program.classes {
+        let mut f = HashMap::new();
+        let mut m = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut cursor = Some(c.name.clone());
+        while let Some(name) = cursor {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            let Some(owner) = program.class_by_name(&name) else {
+                break;
+            };
+            for fld in &owner.static_fields {
+                f.entry(fld.name.clone()).or_insert(owner.def_id.0);
+            }
+            for meth in owner.methods.iter().filter(|m| m.is_static) {
+                m.entry(meth.name.clone()).or_insert(meth.function_idx);
+            }
+            cursor = owner.parent.clone();
+        }
+        fields.insert(c.def_id.0, f);
+        methods.insert(c.def_id.0, m);
+    }
+    (fields, methods)
+}
+
 /// Classes that are *constructed* anywhere reachable (a `new C(…)` in a
 /// reachable body, or a class-ref constructor thunk) AND declare a 0-arg
 /// `string()` method — returned as `(class DefId raw, string() function idx)`.

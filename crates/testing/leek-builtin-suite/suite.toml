@@ -849,3 +849,28 @@ id = "a_switch_label_compares_loosely_even_at_v4"
 version = 4
 source = "var r = '' switch ('1') { case 1: r += 'a' } switch (true) { case 1: r += 'b' } switch ('') { case 0: r += 'c' } return [r, '1' == 1]"
 expect = { equals = "[\"abc\", false]" }
+
+# `class` is late-bound — in an inherited method it names the runtime class —
+# but a *static* member is not virtual, so `class.x`, a bare static name and
+# `super.x` all resolve against the class that declares them.
+[[tests]]
+id = "a_static_member_resolves_against_its_declaring_class"
+version = 4
+source = """
+class A { static integer x = 12 static who() { return 'A' } m() { return [x, class.x, class.who(), class.name] } }
+class B extends A {}
+return new B().m()
+"""
+expect = { equals = "[12, 12, \"A\", \"B\"]" }
+
+[[tests]]
+id = "super_reaches_a_static_field_of_the_parent"
+version = 4
+source = "class A { static integer s = 5 } class B extends A { m() { super.s = 9 return [super.s, A.s] } } return new B().m()"
+expect = { equals = "[9, 9]" }
+
+[[tests]]
+id = "a_bare_static_name_reads_the_class_storage_from_an_instance_method"
+version = 4
+source = "class A { static integer x = 12 m() { integer i = x return i } } return new A().m()"
+expect = { equals = "12" }

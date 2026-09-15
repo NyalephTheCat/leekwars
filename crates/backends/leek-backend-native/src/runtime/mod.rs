@@ -99,6 +99,10 @@ struct DispatchTables {
     lambda_byref: HashMap<usize, Vec<bool>>,
     /// class `DefId` raw → method name → method's `program.functions` index.
     method_resolve: HashMap<u32, HashMap<String, usize>>,
+    /// The same for *static* methods, flattened over inheritance, so a
+    /// `ClassRef` reached at runtime (`class.m()` in an instance method, where
+    /// `class` is the receiver's class) can dispatch one.
+    static_method_resolve: HashMap<u32, HashMap<String, usize>>,
     /// named-function-ref `DefId` raw → `program.functions` index.
     user_fn_idx: HashMap<u32, usize>,
     /// `DefId`s of method-valued user fns needing exact arity on an indirect call.
@@ -147,6 +151,14 @@ thread_local! {
     /// nullary init function's `program.functions` index (uniform-ABI,
     /// registered in `LAMBDA_FNS`). Only fields with an initialiser appear.
     static STATIC_INIT: RefCell<HashMap<(u32, String), usize>> = RefCell::new(HashMap::new());
+
+    /// Which class *declares* each static field reachable from a class:
+    /// class `DefId` raw → field name → owning class `DefId` raw. Flattened
+    /// over inheritance, since a subclass reads and writes its parent's
+    /// storage. Lets a `ClassRef` reached at runtime — `class.x` inside an
+    /// instance method — find the same box the compile-time `C.x` path uses.
+    static STATIC_FIELD_OWNER: RefCell<HashMap<u32, HashMap<String, u32>>> =
+        RefCell::new(HashMap::new());
 
     /// Each user class's parent for runtime `.super` navigation: class `DefId`
     /// raw → `Some((parent def, parent name))` for an explicit user parent, or

@@ -440,6 +440,8 @@ struct RuntimeTables {
     class_ctor_thunk: HashMap<u32, usize>,
     class_string_method: HashMap<u32, usize>,
     class_reflect: HashMap<u32, HashMap<String, Vec<String>>>,
+    static_field_owner: HashMap<u32, HashMap<String, u32>>,
+    static_method_resolve: HashMap<u32, HashMap<String, usize>>,
 }
 
 impl RuntimeTables {
@@ -454,6 +456,8 @@ impl RuntimeTables {
         runtime::set_class_ctor_thunk(self.class_ctor_thunk.clone());
         runtime::set_class_string_method(self.class_string_method.clone());
         runtime::set_class_reflect(self.class_reflect.clone());
+        runtime::set_static_field_owner(self.static_field_owner.clone());
+        runtime::set_static_method_resolve(self.static_method_resolve.clone());
     }
 }
 
@@ -785,6 +789,7 @@ fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProg
             (c.def_id.0, parent)
         })
         .collect();
+    let (static_fields, static_methods) = translate::static_member_tables(&lw.program);
     let tables = RuntimeTables {
         lambda_fns,
         lambda_byref,
@@ -802,6 +807,10 @@ fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProg
         class_string_method,
         // Per-class reflection name tables for runtime `x.class.fields` etc.
         class_reflect: translate::reflect_name_tables(&lw.program),
+        // Where each class's static members live, for a `ClassRef` value met
+        // at runtime (`class.x` / `class.m()` inside an instance method).
+        static_field_owner: static_fields,
+        static_method_resolve: static_methods,
     };
     JIT_COMPILES.with(|c| c.set(c.get().saturating_add(1)));
     Ok(CompiledProgram {

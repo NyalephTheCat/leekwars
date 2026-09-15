@@ -244,7 +244,10 @@ impl Lowerer {
         // First sweep: collect field and method names so method
         // bodies can resolve bare references back to `this.field`
         // or static calls on `class`.
-        let mut ctx = ClassCtx::default();
+        let mut ctx = ClassCtx {
+            class_def: Some(id),
+            ..ClassCtx::default()
+        };
         // Seed with inherited members from the parent chain so a
         // bare `m()` inside a subclass method resolves through the
         // chain (e.g. `class B extends A { r() { return m() } }`
@@ -259,6 +262,7 @@ impl Lowerer {
                 let Some(NameKind::Class(pid)) = self.file_decls.get(&pname).copied() else {
                     break;
                 };
+                ctx.parent_def.get_or_insert(pid);
                 let Some(Def::Class(pclass)) = self.out.defs.get(pid.0 as usize) else {
                     break;
                 };

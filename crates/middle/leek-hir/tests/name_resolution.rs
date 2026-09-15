@@ -172,8 +172,11 @@ fn a_bare_method_call_still_rewrites_to_a_method_call_on_this() {
     );
 }
 
+/// The receiver is the class named *lexically*, not the late-bound `class`:
+/// static dispatch is not virtual, so the call resolves to the same body
+/// `A.g()` does — and the backend can find it at compile time.
 #[test]
-fn a_bare_static_method_call_still_rewrites_to_a_method_call_on_class() {
+fn a_bare_static_method_call_rewrites_to_a_method_call_on_the_lexical_class() {
     let hir = lower("class A { static g() { return 1 } m() { return g() } }\nreturn 0\n");
     let Callee::Method {
         receiver, method, ..
@@ -186,7 +189,7 @@ fn a_bare_static_method_call_still_rewrites_to_a_method_call_on_class() {
     };
     assert_eq!(method, "g");
     assert!(
-        matches!(name_of(receiver), NameRef::Class_),
+        matches!(name_of(receiver), NameRef::Class(_)),
         "got {:?}",
         receiver.kind
     );

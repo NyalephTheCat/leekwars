@@ -319,6 +319,23 @@ shim! {
                 return unsafe { f(handles.as_ptr(), handles.len() as i64) };
             }
         }
+        // Static method on a runtime class-reference: `class.m(args)` inside an
+        // instance method, where `class` is the receiver's class. A static
+        // method takes no `this`, so the receiver is not prepended.
+        if let Value::ClassRef(def, _) = unsafe { val(&receiver) } {
+            let class_def = def.0;
+            if let Some((addr, nparams)) = super::objects::static_method_idx(class_def, method)
+                .and_then(|idx| DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied()))
+            {
+                let mut handles: Vec<*mut Value> = Vec::with_capacity(nparams.max(argc as usize));
+                for i in 0..argc as isize {
+                    handles.push(unsafe { *argv.offset(i) });
+                }
+                handles.resize_with(nparams, || handle(Value::Null));
+                let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
+                return unsafe { f(handles.as_ptr(), handles.len() as i64) };
+            }
+        }
         // Builtin method fallback (an unknown name / non-number receiver yields null,
         // exactly as upstream's builtin dispatch does) — needs owned `Value`s.
         // Skipped once the run has errored, like every other builtin dispatch.

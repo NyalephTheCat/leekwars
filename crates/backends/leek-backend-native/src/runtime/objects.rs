@@ -9,8 +9,9 @@
 )]
 
 use super::{
-    CLASS_PARENT, CLASS_REFLECT, DISPATCH, GLOBALS, LambdaFn, STATIC_FIELDS, STATIC_INIT, STRICT,
-    aborting, builtin_name, builtin_name_ref, handle, raise_runtime_error, val,
+    CLASS_PARENT, CLASS_REFLECT, DISPATCH, GLOBALS, LambdaFn, STATIC_FIELD_OWNER, STATIC_FIELDS,
+    STATIC_INIT, STRICT, aborting, builtin_name, builtin_name_ref, handle, raise_runtime_error,
+    val,
 };
 use leek_runtime::{ClassId, Function, Instance, ObjectData, Value};
 use std::cell::RefCell;
@@ -25,28 +26,59 @@ shim! {
         let Some(field) = (unsafe { builtin_name(name) }) else {
             return handle(Value::Null);
         };
-        let key = (class_def as u32, field);
-        if let Some(h) = STATIC_FIELDS.with(|c| c.borrow().get(&key).copied()) {
-            return h;
-        }
-        // Reserve a null sentinel so a recursive init reads null, not garbage.
-        let sentinel = handle(Value::Null);
-        STATIC_FIELDS.with(|c| c.borrow_mut().insert(key.clone(), sentinel));
-        let init = STATIC_INIT.with(|c| c.borrow().get(&key).copied());
-        if let Some(idx) = init
-            && let Some((addr, _)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied())
-        {
-            // SAFETY: `addr` is a finalized body address from the running
-            // module's `lambda_fns` table, so it has the `LambdaFn` ABI; a
-            // static initialiser takes no captures and no arguments, so an
-            // empty `argv` with `argc == 0` is the whole contract.
-            let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
-            let v = unsafe { f(std::ptr::null(), 0) };
-            STATIC_FIELDS.with(|c| c.borrow_mut().insert(key, v));
-            return v;
-        }
-        sentinel
+        static_get(class_def as u32, field)
     }
+}
+
+/// The storage behind `C.staticField`, lazily initialised. `owner` is the
+/// class that *declares* the field, which is not always the one written: a
+/// subclass shares its parent's box.
+pub(super) fn static_get(owner: u32, field: String) -> *mut Value {
+    let key = (owner, field);
+    if let Some(h) = STATIC_FIELDS.with(|c| c.borrow().get(&key).copied()) {
+        return h;
+    }
+    // Reserve a null sentinel so a recursive init reads null, not garbage.
+    let sentinel = handle(Value::Null);
+    STATIC_FIELDS.with(|c| c.borrow_mut().insert(key.clone(), sentinel));
+    let init = STATIC_INIT.with(|c| c.borrow().get(&key).copied());
+    if let Some(idx) = init
+        && let Some((addr, _)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied())
+    {
+        // SAFETY: `addr` is a finalized body address from the running
+        // module's `lambda_fns` table, so it has the `LambdaFn` ABI; a
+        // static initialiser takes no captures and no arguments, so an
+        // empty `argv` with `argc == 0` is the whole contract.
+        let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
+        let v = unsafe { f(std::ptr::null(), 0) };
+        STATIC_FIELDS.with(|c| c.borrow_mut().insert(key, v));
+        return v;
+    }
+    sentinel
+}
+
+/// Which class declares the static field `name` reachable from `class_def`,
+/// if any. The owner is what [`static_get`] and `leek_static_set` are keyed
+/// on, so a subclass and its parent name one box.
+pub(super) fn static_field_owner(class_def: u32, name: &str) -> Option<u32> {
+    STATIC_FIELD_OWNER.with(|c| {
+        c.borrow()
+            .get(&class_def)
+            .and_then(|m| m.get(name))
+            .copied()
+    })
+}
+
+/// The static method `name` reachable from `class_def`, as its
+/// `program.functions` index.
+pub(super) fn static_method_idx(class_def: u32, name: &str) -> Option<usize> {
+    DISPATCH.with(|c| {
+        c.borrow()
+            .static_method_resolve
+            .get(&class_def)
+            .and_then(|m| m.get(name))
+            .copied()
+    })
 }
 
 shim! {
@@ -82,6 +114,24 @@ pub(super) fn member_by_value(base: &Value, idx: &Value, version: u8) -> Value {
                 .map(|n| Value::String(std::rc::Rc::new(n)))
                 .collect(),
         )));
+    }
+    // A static member on a runtime class-reference: `class.x` / `class.m`
+    // inside an instance method, where `class` is the *receiver's* class and
+    // so is only known here. The compile-time `C.x` form is handled in the
+    // translator; this reaches the same storage through the owning class.
+    if let (Value::ClassRef(def, _), Value::String(member)) = (base, idx) {
+        if let Some(owner) = static_field_owner(def.0, member.as_str()) {
+            let h = static_get(owner, member.as_ref().clone());
+            // SAFETY: `static_get` returns a live handle from the static-field
+            // store, which outlives this read.
+            return unsafe { val(&h) }.clone();
+        }
+        if let Some(idx) = static_method_idx(def.0, member.as_str()) {
+            return Value::Function(Function::Lambda(Rc::new(leek_runtime::LambdaCapture {
+                function_idx: idx,
+                captured: RefCell::new(Vec::new()),
+            })));
+        }
     }
     // `instance['name']` resolves to a stored field first, then (like
     // upstream's indexed member read) to a bound method.
@@ -332,6 +382,15 @@ shim! {
         let name = unsafe { member_name(name_ptr, name_len) };
         let v = unsafe { val(&value) }.clone();
         match unsafe { val(&base) } {
+            // `class.x = v` on a runtime class-reference writes the owning
+            // class's static box, like the compile-time `C.x = v` form.
+            Value::ClassRef(def, _)
+                if static_field_owner(def.0, name).is_some() =>
+            {
+                let owner = static_field_owner(def.0, name).unwrap_or(def.0);
+                STATIC_FIELDS
+                    .with(|c| c.borrow_mut().insert((owner, name.to_owned()), handle(v)));
+            }
             Value::Instance(_) | Value::Object(_) => {
                 leek_runtime::set_field(unsafe { val(&base) }, name, v);
             }
