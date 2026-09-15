@@ -73,9 +73,6 @@ skipped_unknown = 18
 "TestBigInt.java::testDosGuards::5@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::0@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::1@v4" = "skipped_unknown"
-"TestClass.java::testStaticMethodReference_higherOrder::4@v2" = "fail_wrong_value"
-"TestClass.java::testStaticMethodReference_higherOrder::4@v3" = "fail_wrong_value"
-"TestClass.java::testStaticMethodReference_higherOrder::5@v4" = "fail_wrong_value"
 "TestConstantFolding.java::testElimination_guards::5@v2" = "fail_wrong_value"
 "TestConstantFolding.java::testElimination_guards::5@v3" = "fail_wrong_value"
 "TestConstantFolding.java::testThrowing_conversions_keep_call::0@v4" = "skipped_unknown"
@@ -143,11 +140,11 @@ skipped_unknown = 18
 
 [backends.native.summary]
 total = 12254
-pass = 11269
+pass = 11272
 pass_expected_error = 912
 fail_parse_error = 0
 fail_missing_error = 0
-fail_wrong_value = 8
+fail_wrong_value = 5
 skipped_disabled = 24
 skipped_unknown = 41
 

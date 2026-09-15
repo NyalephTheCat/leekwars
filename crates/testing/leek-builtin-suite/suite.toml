@@ -985,3 +985,13 @@ id = "an_impossible_return_conversion_answers_null"
 version = 4
 source = "class T { public boolean b = true } class C { public T build() { return new T() } } class S { public T foo(C c) { return c.build().b } } return new S().foo(new C())"
 expect = { equals = "null" }
+
+# A static method reference behaves like a plain function in a higher-order
+# call: surplus arguments are dropped and missing ones padded with null. An
+# *instance* method read the same way keeps its exact arity — its first
+# parameter is the receiver (#11714).
+[[tests]]
+id = "a_static_method_reference_pads_and_drops_like_a_function"
+version = 4
+source = "class A { public static m1(n) { return n + 1 } public static m4(a, b, c, d) { return [a, d] } } return [arrayMap([1, 2], A.m1), arrayMap([1, 2], A.m4)]"
+expect = { equals = "[[2, 3], [[1, null], [2, null]]]" }

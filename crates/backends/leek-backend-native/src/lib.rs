@@ -1352,11 +1352,24 @@ fn define_program<M: Module>(
     // uniform-ABI functions invoked dynamically (via `dispatch_call_value`
     // or `leek_static_get`).
     lambda_funcs.extend(method_funcs);
-    // User-fn values whose target is a method (has an owning class) require
-    // exact arity when invoked indirectly (see `dispatch_call_value`).
+    // A user-fn value whose target is an *instance* method requires exact
+    // arity when invoked indirectly (see `dispatch_call_value`): its first
+    // parameter is the receiver, so binding a missing one to null would
+    // silently call the method on nothing. A *static* method has no receiver
+    // and behaves like a plain function — a higher-order call pads what it
+    // does not supply and drops what it does not need (#11714).
+    let static_method_fns: std::collections::HashSet<usize> = program
+        .classes
+        .iter()
+        .flat_map(|c| c.methods.iter())
+        .filter(|m| m.is_static)
+        .map(|m| m.function_idx)
+        .collect();
     let exact_arity: std::collections::HashSet<u32> = user_fn_idx
         .iter()
-        .filter(|(_, idx)| program.functions[**idx].owning_class.is_some())
+        .filter(|(_, idx)| {
+            program.functions[**idx].owning_class.is_some() && !static_method_fns.contains(idx)
+        })
         .map(|(def, _)| *def)
         .collect();
     Ok((
