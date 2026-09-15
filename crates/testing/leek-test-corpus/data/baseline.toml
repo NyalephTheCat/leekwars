@@ -57,8 +57,6 @@ skipped_unknown = 18
 [backends.native.outcomes]
 "TestClass.java::testClass_static_field_uninitialized_errors::0@v4" = "skipped_unknown"
 "TestClass.java::testClass_static_field_uninitialized_errors::1@v4" = "skipped_unknown"
-"TestConstantFolding.java::testElimination_guards::5@v2" = "fail_wrong_value"
-"TestConstantFolding.java::testElimination_guards::5@v3" = "fail_wrong_value"
 "TestFunction.java::testDefault_parameter_incompatible_type::10@v4" = "skipped_unknown"
 "TestFunction.java::testDefault_parameter_incompatible_type::8@v4" = "skipped_unknown"
 "TestFunction.java::testTypes::21@v1" = "skipped_disabled"
@@ -117,11 +115,11 @@ skipped_unknown = 18
 
 [backends.native.summary]
 total = 12254
-pass = 11271
+pass = 11273
 pass_expected_error = 924
 fail_parse_error = 0
 fail_missing_error = 0
-fail_wrong_value = 5
+fail_wrong_value = 3
 skipped_disabled = 24
 skipped_unknown = 30
 

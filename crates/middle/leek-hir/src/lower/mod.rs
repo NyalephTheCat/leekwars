@@ -217,6 +217,7 @@ pub fn finish(
     // operations is part of what it *is*. They run in order — inlining the
     // constants is what lets a debug guard's body reduce to nothing, which
     // is what lets its calls go.
+    crate::transform::rebind_assigned_functions(&mut hir, version.as_u32());
     crate::transform::inline_static_final_literals(&mut hir);
     crate::transform::mark_constant_conditions(&mut hir);
     crate::transform::eliminate_constant_calls(&mut hir, version.as_u32());

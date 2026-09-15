@@ -1102,3 +1102,18 @@ id = "a_bound_method_value_fills_its_parameter_defaults"
 version = 4
 source = "class A { m(a, b = 7) { return b } } var o = new A() var h = o.m return [o.m(1), h(1)]"
 expect = { equals = "[7, 7]" }
+
+# Below v4 a function name is a mutable binding: assigning to it takes, and
+# later calls through the name see what was assigned. A reference taken
+# before the assignment keeps the function it named.
+[[tests]]
+id = "a_function_name_is_mutable_below_v4"
+version = 2
+source = "function f() { return 1 } function g() { return 2 } var k = f f = g return [k(), f()]"
+expect = { equals = "[1, 2]" }
+
+[[tests]]
+id = "a_function_can_be_redefined_from_inside_another"
+version = 3
+source = "function f(x) { return x + 1 } function h() { f = function(x) { return x * 2 } } h() return f(5)"
+expect = { equals = "10" }

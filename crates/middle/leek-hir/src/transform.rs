@@ -337,6 +337,137 @@ impl VisitMut<Expr> for StaticFinalInliner {
 impl VisitMut<Block> for StaticFinalInliner {}
 impl VisitMut<Stmt> for StaticFinalInliner {}
 
+/// Rebind every function whose *name* is assigned somewhere in the file to a
+/// global slot, so the assignment takes and later calls see it. Returns the
+/// number of functions rebound.
+///
+/// Below v4 a function name is a mutable binding: `function f() { return 1 }
+/// function g() { return 2 } f = g return f()` answers 2. Name resolution
+/// binds `f` to the function it declares, which is right for the common case
+/// and wrong the moment the name is written to — the assignment had nowhere
+/// to land and the call went straight to the original body.
+///
+/// A file-level global is exactly the storage that binding needs: it is
+/// initialised with the function's own value before the main block runs, a
+/// write to the name writes the slot, and a call through the name becomes the
+/// indirect call it always was below v4. Only names actually assigned are
+/// moved, so every other program compiles calls directly as before.
+///
+/// v4 rejects the assignment outright, so there is nothing to rebind there.
+pub fn rebind_assigned_functions(hir: &mut HirFile, version: u32) -> usize {
+    if version >= 4 {
+        return 0;
+    }
+    let assigned = assigned_function_defs(hir);
+    if assigned.is_empty() {
+        return 0;
+    }
+    // One global per assigned function, named after it. Declared first so the
+    // rewrite below can see every one of them.
+    let mut slots: HashMap<DefId, (DefId, String)> = HashMap::new();
+    for def in &assigned {
+        let Some(Def::Function(f)) = hir.defs.get(def.0 as usize) else {
+            continue;
+        };
+        let (name, span) = (f.name.clone(), f.span);
+        let id = DefId(u32::try_from(hir.defs.len()).expect("def index fits a DefId"));
+        hir.defs.push(Def::Global(crate::ir::Global {
+            name: name.clone(),
+            ty: None,
+            init: None,
+            span,
+        }));
+        slots.insert(*def, (id, name));
+    }
+    if slots.is_empty() {
+        return 0;
+    }
+
+    let mut rewriter = FunctionRebinder { slots, count: 0 };
+    for i in 0..hir.defs.len() {
+        match &mut hir.defs[i] {
+            Def::Function(f) => {
+                if let Some(b) = &mut f.body {
+                    let _ = b.walk_mut(&mut rewriter);
+                }
+            }
+            Def::Class(c) => {
+                for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
+                    if let Some(b) = &mut m.body {
+                        let _ = b.walk_mut(&mut rewriter);
+                    }
+                }
+            }
+            Def::Global(_) | Def::Local(_) => {}
+        }
+    }
+    for st in &mut hir.main {
+        let _ = st.walk_mut(&mut rewriter);
+    }
+
+    // Seed each slot with its function, ahead of everything the main block
+    // does — the function values themselves are registered before it runs.
+    let seeds: Vec<Stmt> = rewriter
+        .slots
+        .iter()
+        .map(|(def, (global, name))| {
+            let span = hir.defs[global.0 as usize].span();
+            Stmt::VarDecl(crate::ir::VarDecl {
+                def: *global,
+                name: name.clone(),
+                ty: None,
+                init: Some(Expr {
+                    kind: ExprKind::Name(NameRef::Function(*def)),
+                    ty: Type::Function,
+                    span,
+                }),
+                is_global: true,
+                span,
+            })
+        })
+        .collect();
+    let count = seeds.len();
+    hir.main.splice(0..0, seeds);
+    count
+}
+
+struct FunctionRebinder {
+    slots: HashMap<DefId, (DefId, String)>,
+    count: usize,
+}
+
+impl VisitMut<Expr> for FunctionRebinder {
+    fn visit_mut(&mut self, e: &mut Expr) -> Flow {
+        match &mut e.kind {
+            ExprKind::Name(NameRef::Function(def)) => {
+                if let Some((global, _)) = self.slots.get(def) {
+                    e.kind = ExprKind::Name(NameRef::Global(*global));
+                    self.count += 1;
+                }
+            }
+            // A direct call becomes an indirect one through the slot, which
+            // is what a mutable name means.
+            ExprKind::Call(call) => {
+                if let Callee::Function(NameRef::Function(def)) = &call.callee
+                    && let Some((global, _)) = self.slots.get(def)
+                {
+                    call.callee = Callee::Expr(Expr {
+                        kind: ExprKind::Name(NameRef::Global(*global)),
+                        ty: Type::Function,
+                        span: call.callee_span,
+                    });
+                    self.count += 1;
+                }
+            }
+            _ => {}
+        }
+        Flow::Walk
+    }
+}
+
+impl VisitMut<Block> for FunctionRebinder {}
+impl VisitMut<Stmt> for FunctionRebinder {}
+
 /// Record, on every `if` whose condition is decidable at compile time, the
 /// branch it takes. Returns the number of `if`s marked.
 ///
