@@ -1,0 +1,88 @@
+//! Test-only scaffolding: a database that says which queries ran.
+//!
+//! Behind the `testing` feature (and always on for this crate's own
+//! `cfg(test)` builds), so nothing here ships in a release binary.
+//!
+//! Every incremental claim in this epic — "editing a leaf re-parses
+//! only that leaf", "a second hover runs zero queries" — is a claim
+//! about *what executed*, and without something that can observe that,
+//! every one of them is unfalsifiable. [`EventDb`] is that observer.
+//!
+//! It watches salsa's own event stream rather than a counter inside one
+//! query body, which matters for two reasons. A counter can only see
+//! the crate it lives in, and these tests need to say "that leaf's lex
+//! re-ran and the entry's parse did not" about queries owned by three
+//! different crates. And a counter moves when its query moves, so the
+//! assertions would have to be rewritten every time this epic relocates
+//! a query — which it does, repeatedly.
+//!
+//! This started as `EventDb` in `tests/support/mod.rs` (R1-17) and was
+//! promoted here rather than copied, so there is still exactly one
+//! mechanism: that support module now re-exports these items, and a
+//! consumer outside this crate (the LSP's incremental tests) reaches
+//! them with `leek-db = { features = ["testing"] }`.
+
+use std::sync::{Arc, Mutex};
+
+use crate::Db;
+
+/// A [`Db`] that logs every query execution.
+///
+/// Salsa fires `WillExecute` when a query body is about to run — on a
+/// miss or an invalidation, never on a hit — so the log is exactly the
+/// set of queries a revision made the engine recompute.
+#[salsa::db]
+#[derive(Clone)]
+pub struct EventDb {
+    storage: salsa::Storage<Self>,
+    executed: Arc<Mutex<Vec<String>>>,
+}
+
+#[salsa::db]
+impl salsa::Database for EventDb {}
+
+#[salsa::db]
+impl Db for EventDb {}
+
+impl EventDb {
+    #[must_use]
+    pub fn new() -> Self {
+        let executed: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = Arc::clone(&executed);
+        Self {
+            storage: salsa::Storage::new(Some(Box::new(move |event: salsa::Event| {
+                if let salsa::EventKind::WillExecute { database_key } = event.kind {
+                    sink.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(format!("{database_key:?}"));
+                }
+            }))),
+            executed,
+        }
+    }
+
+    /// Everything that executed since the last call, emptying the log.
+    pub fn drain(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .executed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+impl Default for EventDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// How many times `query` executed in the recorded event log.
+///
+/// Salsa renders a tracked function's database key as `name(Id(n))`, so
+/// the query's name is the prefix of the event.
+#[must_use]
+pub fn ran(events: &[String], query: &str) -> usize {
+    events.iter().filter(|e| e.starts_with(query)).count()
+}
