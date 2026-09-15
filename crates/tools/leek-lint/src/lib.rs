@@ -29,7 +29,7 @@
 pub mod allow;
 pub mod group;
 pub mod pass;
-pub mod pipeline;
+pub mod query;
 pub mod registry;
 pub mod rules;
 
@@ -39,8 +39,8 @@ pub use pass::{Body, BodyKind, LintCx, LintMeta, LintPass, run_passes};
 /// The tracked queries: one file's lint findings, and the complete
 /// diagnostic stream that appends them to `leek-db`'s. See [`pipeline`]
 /// for why the second one lives here and not in `leek-db`.
-pub use pipeline::{diagnostics_with_lints, lint_query};
-pub use pipeline::{program_diagnostics_with_lints, program_lint_query};
+pub use query::{diagnostics_with_lints, lint_query};
+pub use query::{program_diagnostics_with_lints, program_lint_query};
 
 use leek_diagnostics::Diagnostic;
 use leek_hir::HirFile;
@@ -72,8 +72,8 @@ pub fn lint_with(file: &HirFile, opts: &LintOptions) -> Vec<Diagnostic> {
 /// `@allow(...)` annotations suppress.
 ///
 /// The pure entry point behind
-/// [`lint_query`](crate::pipeline::lint_query) and
-/// [`program_lint_query`](crate::pipeline::program_lint_query).
+/// [`lint_query`](crate::query::lint_query) and
+/// [`program_lint_query`](crate::query::program_lint_query).
 ///
 /// `root` is the file's CST, which the annotations need — they live in
 /// comment trivia the HIR doesn't carry. Pass `None` when the caller has

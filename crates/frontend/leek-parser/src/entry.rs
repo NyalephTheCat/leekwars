@@ -4,7 +4,7 @@
 //! environment, so a driver that already knows its
 //! [`FeatureFlags`](leek_span::FeatureFlags) can parse a file without
 //! standing one up. The memoized door onto the same grammar is
-//! [`parse_query`](crate::pipeline::parse_query).
+//! [`parse_query`](crate::query::parse_query).
 //!
 //! # Where lex diagnostics are reported
 //!
@@ -18,8 +18,8 @@
 //! * A caller that hands in tokens it lexed itself
 //!   ([`parse_tokens_with_classes`](crate::parse_tokens_with_classes) and
 //!   friends) already owns the lex diagnostics, and gets the parser's only.
-//! * On the salsa path, [`parse_query`](crate::pipeline::parse_query)
-//!   follows the second rule — the [`Lex`](leek_lexer::pipeline::Lex) step
+//! * On the salsa path, [`parse_query`](crate::query::parse_query)
+//!   follows the second rule — the [`Lex`](leek_lexer::query::Lex) step
 //!   already emitted the lexer's. Every salsa-driven file, indexed on disk
 //!   or open in an editor, runs through that step, so there is no path on
 //!   which the query itself has to merge them.
@@ -70,7 +70,7 @@ pub struct ParseOptions<'a> {
     /// include closure), so `testClass tc = …` parses as a typed
     /// declaration. Classes declared in this file are found by the
     /// parser's own token pre-scan and need not be listed. See
-    /// [`KnownClassesArtifact`](crate::pipeline::KnownClassesArtifact).
+    /// [`KnownClassesArtifact`](crate::query::KnownClassesArtifact).
     pub extra_classes: &'a [String],
 }
 
@@ -128,7 +128,7 @@ pub fn parse_file(text: &str, source: leek_span::SourceId, version: Version) -> 
 
 /// Like [`parse_file`] but with extra known class names from the rest
 /// of the program (see
-/// [`KnownClassesArtifact`](crate::pipeline::KnownClassesArtifact)).
+/// [`KnownClassesArtifact`](crate::query::KnownClassesArtifact)).
 #[deprecated(note = "reads LEEK_EXPERIMENTAL_* from the process environment; call \
             parse_file_with with ParseOptions::with_extra_classes and pass the \
             flags your entry boundary already read")]

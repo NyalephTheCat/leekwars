@@ -19,7 +19,7 @@ pub struct LowerMirQueryResult {
 pub struct LoweredMir(pub Arc<MirProgram>);
 
 /// Salsa-tracked entry point. Re-runs only when
-/// [`lower_hir_query`](leek_hir::pipeline::lower_hir_query)'s HIR
+/// [`lower_hir_query`](leek_hir::query::lower_hir_query)'s HIR
 /// changes.
 ///
 /// Answers for **one file** at [`OptLevel::O0`]: the cached program is
@@ -34,7 +34,7 @@ pub fn lower_mir_query(
 ) -> LowerMirQueryResult {
     #[cfg(test)]
     salsa_probe::LOWER_MIR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let hir = leek_hir::pipeline::lower_hir_query(db, file);
+    let hir = leek_hir::query::lower_hir_query(db, file);
     let (program, diagnostics) = lower_and_optimize(hir.hir.as_ref(), OptLevel::O0);
     LowerMirQueryResult {
         program: Arc::new(program),

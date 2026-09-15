@@ -4,7 +4,7 @@
 //! front-end asks for a multi-file project, and it is the only stream
 //! that runs `resolve_program` and `typecheck_program` over the whole
 //! include closure. Nothing executed that path before (#194):
-//! `multi_file_pipeline.rs` only lowers, and the per-query tests in the
+//! `multi_file_lowering.rs` only lowers, and the per-query tests in the
 //! pass crates each answer for one file.
 //!
 //! The stage is the guarantee an earlier version of this file spent a

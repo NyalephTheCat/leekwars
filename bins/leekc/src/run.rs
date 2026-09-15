@@ -225,10 +225,10 @@ pub fn run() -> Result<ExitCode> {
             // is the seam that lets a front-end ask a tool's query about
             // a session's file anyway.
             if let Some(formatted) = compiled.db_handle().map(|(db, file)| {
-                leek_fmt::pipeline::format_query(
+                leek_fmt::query::format_query(
                     db,
                     file,
-                    leek_fmt::pipeline::FormatConfig::new(db, fmt_opts.clone()),
+                    leek_fmt::query::FormatConfig::new(db, fmt_opts.clone()),
                 )
                 .text
             }) {

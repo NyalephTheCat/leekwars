@@ -104,7 +104,7 @@ pub struct Workspace {
     /// include walker gives files that are neither open nor indexed,
     /// come out of the same counter, so the two can never name two
     /// different files the same (#191). Shared with
-    /// [`crate::pipeline`], whose include walker interns into it.
+    /// [`crate::folder`], whose include walker interns into it.
     pub interner: Arc<PathInterner>,
     /// Project roots received during `initialize`, indexed in
     /// `initialized`.
@@ -148,7 +148,7 @@ impl Default for Workspace {
             walked: HashMap::new(),
             files,
             targets: Vec::new(),
-            folder: crate::pipeline::include_folder(&[]),
+            folder: crate::folder::include_folder(&[]),
             interner: Arc::new(PathInterner::new()),
             pending_project_roots: Vec::new(),
             pending_library_log: Vec::new(),
@@ -500,7 +500,7 @@ impl Workspace {
             .collect();
         self.close_under_includes(&mut files);
         self.files.set_all(&mut self.db, files);
-        self.folder = crate::pipeline::include_folder(&targets);
+        self.folder = crate::folder::include_folder(&targets);
         self.targets = targets;
     }
 

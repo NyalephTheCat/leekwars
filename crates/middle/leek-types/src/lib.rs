@@ -48,7 +48,7 @@ use leek_syntax::Version;
 mod builtins;
 mod checker;
 pub mod generic;
-pub mod pipeline;
+pub mod query;
 mod ty;
 
 pub use ty::{Type, type_from_node};

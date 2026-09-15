@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use leek_db::{LeekDb, SourceFile, WorkspaceFiles};
 use leek_diagnostics::Diagnostic;
 use leek_lint::LintGroups;
-use leek_lint::pipeline::{program_diagnostics_with_lints, program_lint_query};
+use leek_lint::query::{program_diagnostics_with_lints, program_lint_query};
 use leek_span::SourceId;
 use leek_syntax::Version;
 

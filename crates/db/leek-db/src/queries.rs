@@ -6,7 +6,7 @@
 //! and read the [`WorkspaceFiles`](crate::WorkspaceFiles) input this
 //! crate owns. Each query still lives in the pass crate that computes
 //! it and keeps its single memo table there — calling
-//! `leek_db::queries::parse_query` and `leek_parser::pipeline::parse_query`
+//! `leek_db::queries::parse_query` and `leek_parser::query::parse_query`
 //! hits the same cache entry, because they are the same function. Nothing
 //! here wraps, forwards or re-declares a query; a wrapper would be a second
 //! memo table over the same work.
@@ -31,29 +31,29 @@
 //! `leek-fmt`, which depends down on this crate.
 
 /// Pragma preprocessing (`// @version:`, experimental opt-ins).
-pub use leek_syntax::pipeline::{PragmaResult, pragma_query};
+pub use leek_syntax::query::{PragmaResult, pragma_query};
 
 /// Lexing.
 pub use leek_lexer::LexResult;
-pub use leek_lexer::pipeline::lex_query;
+pub use leek_lexer::query::lex_query;
 
 /// Parsing — one query for every file, buffer or on-disk alike.
-pub use leek_parser::pipeline::{ParseQueryResult, parse_query};
+pub use leek_parser::query::{ParseQueryResult, parse_query};
 
 /// Name resolution.
-pub use leek_resolver::pipeline::{ResolveArtifact, resolve_query};
+pub use leek_resolver::query::{ResolveArtifact, resolve_query};
 
 /// Type checking.
-pub use leek_types::pipeline::{TypeCheckArtifact, typecheck_query};
+pub use leek_types::query::{TypeCheckArtifact, typecheck_query};
 
 /// HIR lowering.
-pub use leek_hir::pipeline::{LowerHirResult, lower_hir_query};
+pub use leek_hir::query::{LowerHirResult, lower_hir_query};
 
 /// MIR lowering (at `O0` — a codegen driver optimizes its own copy).
-pub use leek_mir::pipeline::{LowerMirQueryResult, lower_mir_query};
+pub use leek_mir::query::{LowerMirQueryResult, lower_mir_query};
 
 /// Complexity / big-O analysis.
-pub use leek_complexity::pipeline::{ComplexityReport, complexity_query};
+pub use leek_complexity::query::{ComplexityReport, complexity_query};
 
 /// The assembled diagnostic streams, and the per-file filter over them
 /// — see [`crate::diagnostics`]. Lint findings are deliberately absent:

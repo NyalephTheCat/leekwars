@@ -40,7 +40,7 @@ pub struct FormatConfig<'db> {
 }
 
 /// Salsa-tracked formatter entry point. Re-runs when
-/// [`leek_parser::pipeline::parse_query`]'s result changes — which
+/// [`leek_parser::query::parse_query`]'s result changes — which
 /// itself only re-runs when the input file's text changes — or when
 /// `config` names different settings.
 #[salsa::tracked]
@@ -51,7 +51,7 @@ pub fn format_query<'db>(
 ) -> FormatQueryResult {
     use leek_query::salsa::ProgramClasses;
 
-    let parsed = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
+    let parsed = leek_parser::query::parse_query(db, file, ProgramClasses::none(db));
     let version = version_from_byte(file.version_byte(db));
     let text = crate::format(&parsed.green, version, config.options(db));
     FormatQueryResult {

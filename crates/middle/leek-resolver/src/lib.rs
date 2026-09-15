@@ -45,7 +45,7 @@ mod expressions;
 pub mod folder;
 pub mod include_graph;
 pub mod interner;
-pub mod pipeline;
+pub mod query;
 mod scope;
 mod statements;
 mod util;

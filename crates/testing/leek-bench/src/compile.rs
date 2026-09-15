@@ -43,7 +43,7 @@ pub fn compile_hir(input: &Input) -> Result<(CompiledHir, Vec<leek_diagnostics::
     // `O1` like the real codegen drivers (`miku run`, native), so this
     // measures the tree users execute rather than an unoptimized one.
     let hir = sink.time("lower-hir", || {
-        let lowered = leek_hir::pipeline::lower_hir_query(&db, file);
+        let lowered = leek_hir::query::lower_hir_query(&db, file);
         // The query caches unoptimized HIR (it is keyed on the file, not on
         // an opt level), so the codegen drivers' `O1` is applied here —
         // exactly as `leek_hir::pipeline`'s own `run_lower` does.

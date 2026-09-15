@@ -33,7 +33,7 @@ pub struct LowerHirResult {
 }
 
 /// Salsa-tracked entry point for HIR lowering. Re-runs only when the
-/// upstream [`parse_query`](leek_parser::pipeline::parse_query)'s
+/// upstream [`parse_query`](leek_parser::query::parse_query)'s
 /// green tree changes.
 ///
 /// Answers for **one file**, at [`OptLevel::O0`]. The include-aware
@@ -57,7 +57,7 @@ pub fn lower_hir_query(
     let libraries = leek_prelude::active_library_set();
     let fold = leek_prelude::active_fold_set();
 
-    let parse = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
+    let parse = leek_parser::query::parse_query(db, file, ProgramClasses::none(db));
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return LowerHirResult {
             hir: Arc::new(HirFile::default()),

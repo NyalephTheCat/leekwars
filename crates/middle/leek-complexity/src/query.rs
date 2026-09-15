@@ -16,7 +16,7 @@ use crate::analyze::analyze_file;
 pub struct ComplexityReport(pub Arc<Vec<Complexity>>);
 
 /// Salsa-tracked entry point. Re-runs only when
-/// [`lower_hir_query`](leek_hir::pipeline::lower_hir_query)'s HIR
+/// [`lower_hir_query`](leek_hir::query::lower_hir_query)'s HIR
 /// changes.
 ///
 /// Answers for **one file**. A driver that wants a row per function the
@@ -30,7 +30,7 @@ pub fn complexity_query(
 ) -> ComplexityReport {
     #[cfg(test)]
     salsa_probe::COMPLEXITY_QUERY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let hir = leek_hir::pipeline::lower_hir_query(db, file);
+    let hir = leek_hir::query::lower_hir_query(db, file);
     ComplexityReport(Arc::new(analyze_file(hir.hir.as_ref())))
 }
 

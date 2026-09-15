@@ -18,7 +18,7 @@ pub struct ResolveArtifact {
 }
 
 /// Salsa-tracked entry point for name resolution. Re-runs only when
-/// the upstream [`parse_query`](leek_parser::pipeline::parse_query)'s
+/// the upstream [`parse_query`](leek_parser::query::parse_query)'s
 /// green tree changes or the `strict` flag flips.
 #[salsa::tracked]
 pub fn resolve_query(
@@ -29,14 +29,14 @@ pub fn resolve_query(
     use leek_query::salsa::ProgramClasses;
     use leek_syntax::SyntaxNode;
 
-    let parse = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
+    let parse = leek_parser::query::parse_query(db, file, ProgramClasses::none(db));
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return ResolveArtifact::default();
     };
     // Pragmas only contribute experimental opt-ins here; the version and
     // strict mode come from the salsa input (the settled `Input`). Reuse the
     // memoized pragma query instead of re-scanning the text.
-    let pragmas = leek_syntax::pipeline::pragma_query(db, file).pragmas;
+    let pragmas = leek_syntax::query::pragma_query(db, file).pragmas;
     // The dynamically-registered builtins are still a process-global, and
     // this reads it — untracked — from inside a tracked query. What changed
     // is the *frequency*: one read here, at the top of the query body,

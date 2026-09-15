@@ -80,7 +80,7 @@ pub fn lower_file(hir: &HirFile) -> (MirProgram, Vec<Diagnostic>) {
 /// asks for them, and check the result's structural invariants.
 ///
 /// The pure entry point behind
-/// [`lower_mir_query`](crate::pipeline::lower_mir_query) and
+/// [`lower_mir_query`](crate::query::lower_mir_query) and
 /// `leek_db::queries::lower_program_mir`. The returned diagnostics are
 /// [`lower_file`]'s own, plus an `E0302` if the program came out
 /// malformed.

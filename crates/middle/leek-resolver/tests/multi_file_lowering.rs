@@ -27,7 +27,7 @@ fn lower_closure_at(
         (default_version, false),
         leek_span::FeatureFlags::from_env().to_bits(),
     );
-    let version = leek_syntax::pipeline::version_from_byte(default_version);
+    let version = leek_syntax::query::version_from_byte(default_version);
     lower_program(&db, set, entry, version, OptLevel::O0).hir
 }
 

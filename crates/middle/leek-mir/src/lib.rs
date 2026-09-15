@@ -23,7 +23,7 @@ pub mod cfg;
 pub mod ir;
 pub mod lower;
 pub mod opt;
-pub mod pipeline;
+pub mod query;
 pub mod verify;
 
 pub use ir::*;

@@ -61,9 +61,9 @@
 pub mod analysis;
 pub mod diagnostics;
 pub mod documents;
+pub mod folder;
 pub mod handlers;
 pub mod log;
-pub mod pipeline;
 pub mod server;
 pub mod settings;
 pub mod util;

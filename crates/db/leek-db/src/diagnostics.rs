@@ -55,13 +55,13 @@ use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 
 /// Every diagnostic one file earns, from its pragmas down to its MIR.
 ///
-/// The concatenation of [`pragma_query`](leek_syntax::pipeline::pragma_query),
-/// [`lex_query`](leek_lexer::pipeline::lex_query),
-/// [`parse_query`](leek_parser::pipeline::parse_query),
-/// [`resolve_query`](leek_resolver::pipeline::resolve_query),
-/// [`typecheck_query`](leek_types::pipeline::typecheck_query),
-/// [`lower_hir_query`](leek_hir::pipeline::lower_hir_query) and
-/// [`lower_mir_query`](leek_mir::pipeline::lower_mir_query), **in that
+/// The concatenation of [`pragma_query`](leek_syntax::query::pragma_query),
+/// [`lex_query`](leek_lexer::query::lex_query),
+/// [`parse_query`](leek_parser::query::parse_query),
+/// [`resolve_query`](leek_resolver::query::resolve_query),
+/// [`typecheck_query`](leek_types::query::typecheck_query),
+/// [`lower_hir_query`](leek_hir::query::lower_hir_query) and
+/// [`lower_mir_query`](leek_mir::query::lower_mir_query), **in that
 /// order** — which is the order the passes ran in when a planner
 /// sequenced them, and the order a consumer still depends on.
 /// `tests/diagnostics.rs` spells the sequence out as a list of codes.
@@ -78,7 +78,7 @@ use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 #[salsa::tracked]
 pub fn diagnostics_without_lints(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagnostic>> {
     let mut out = file_diagnostics_upto(db, file, Stage::Hir).as_ref().clone();
-    out.extend(leek_mir::pipeline::lower_mir_query(db, file).diagnostics);
+    out.extend(leek_mir::query::lower_mir_query(db, file).diagnostics);
     Arc::new(out)
 }
 
@@ -102,28 +102,28 @@ pub fn diagnostics_without_lints(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagn
 #[salsa::tracked]
 pub fn file_diagnostics_upto(db: &dyn Db, file: SourceFile, stage: Stage) -> Arc<Vec<Diagnostic>> {
     let mut out = Vec::new();
-    out.extend(leek_syntax::pipeline::pragma_query(db, file).diagnostics);
-    out.extend(leek_lexer::pipeline::lex_query(db, file).diagnostics);
+    out.extend(leek_syntax::query::pragma_query(db, file).diagnostics);
+    out.extend(leek_lexer::query::lex_query(db, file).diagnostics);
     if stage == Stage::Tokens {
         return Arc::new(out);
     }
 
-    out.extend(leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db)).diagnostics);
+    out.extend(leek_parser::query::parse_query(db, file, ProgramClasses::none(db)).diagnostics);
     if stage == Stage::Parsed {
         return Arc::new(out);
     }
 
-    out.extend(leek_resolver::pipeline::resolve_query(db, file).diagnostics);
+    out.extend(leek_resolver::query::resolve_query(db, file).diagnostics);
     if stage == Stage::Resolved {
         return Arc::new(out);
     }
 
-    out.extend(leek_types::pipeline::typecheck_query(db, file).diagnostics);
+    out.extend(leek_types::query::typecheck_query(db, file).diagnostics);
     if stage == Stage::TypeChecked {
         return Arc::new(out);
     }
 
-    out.extend(leek_hir::pipeline::lower_hir_query(db, file).diagnostics);
+    out.extend(leek_hir::query::lower_hir_query(db, file).diagnostics);
     Arc::new(out)
 }
 
@@ -231,8 +231,8 @@ pub fn program_diagnostics_upto(
     stage: Stage,
 ) -> Arc<Vec<Diagnostic>> {
     let mut out = Vec::new();
-    out.extend(leek_syntax::pipeline::pragma_query(db, entry).diagnostics);
-    out.extend(leek_lexer::pipeline::lex_query(db, entry).diagnostics);
+    out.extend(leek_syntax::query::pragma_query(db, entry).diagnostics);
+    out.extend(leek_lexer::query::lex_query(db, entry).diagnostics);
     if stage == Stage::Tokens {
         return Arc::new(out);
     }
@@ -245,10 +245,10 @@ pub fn program_diagnostics_upto(
     out.extend(graph.diagnostics.iter().cloned());
     out.extend(include_parse_failures(db, files, entry, entry_version));
     for file in graph.includes() {
-        out.extend(leek_lexer::pipeline::lex_query(db, file.file).diagnostics);
-        out.extend(leek_parser::pipeline::parse_query(db, file.file, classes).diagnostics);
+        out.extend(leek_lexer::query::lex_query(db, file.file).diagnostics);
+        out.extend(leek_parser::query::parse_query(db, file.file, classes).diagnostics);
     }
-    out.extend(leek_parser::pipeline::parse_query(db, entry, classes).diagnostics);
+    out.extend(leek_parser::query::parse_query(db, entry, classes).diagnostics);
     if stage == Stage::Parsed {
         return Arc::new(out);
     }

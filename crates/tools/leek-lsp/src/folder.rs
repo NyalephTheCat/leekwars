@@ -1,10 +1,10 @@
 //! The include folder the workspace resolves names through.
 //!
-//! No handler drives a pipeline: every frontend artifact one reads is a
-//! [`crate::analysis`] accessor, and the diagnostic stream is a
-//! whole-program query. What is left here is the folder behind
-//! `Workspace::resync`'s include walker, which still has to see open
-//! buffers shadow what is on disk.
+//! Every frontend answer a handler reads is a [`crate::analysis`]
+//! accessor and the diagnostic stream is a whole-program query, so this
+//! is all the include machinery the server owns: the folder behind
+//! `Workspace::resync`'s walker, which has to see open buffers shadow
+//! what is on disk.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ struct WorkspaceFolder {
 ///
 /// Built once per workspace revision by
 /// [`Workspace::resync`](crate::workspace::Workspace) rather than once
-/// per pipeline run: a diagnostics pass over a project of N files used
+/// per include walk: a diagnostics pass over a project of N files used
 /// to build N copies of this map, each one a full copy of every file's
 /// text. Each entry now costs a refcount bump, and the canonical path
 /// comes off the file's own salsa input instead of being re-derived

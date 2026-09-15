@@ -32,11 +32,11 @@ pub fn lint_query(
 ) -> std::sync::Arc<Vec<Diagnostic>> {
     use leek_query::salsa::ProgramClasses;
 
-    let hir = leek_hir::pipeline::lower_hir_query(db, file);
+    let hir = leek_hir::query::lower_hir_query(db, file);
     // The same empty class set every other single-file query parses
     // under, so this reads the memo they filled rather than opening a
     // second one. `@allow` scanning does not depend on the class set.
-    let green = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db)).green;
+    let green = leek_parser::query::parse_query(db, file, ProgramClasses::none(db)).green;
     let root = SyntaxNode::new_root(green);
     let opts = crate::LintOptions::from_groups(groups, file.version_byte(db));
     std::sync::Arc::new(crate::lint_file(&hir.hir, Some(&root), &opts))
@@ -57,10 +57,8 @@ pub fn lint_query(
 /// function ever does the appending, so the order still lives in one
 /// place.
 ///
-/// Lints last, which is where the pipeline put them: its `LintFindings`
-/// requires `HirArtifact`, so the `Lint` step is planned after every
-/// stage above and emits into the run's diagnostic stream after all of
-/// them.
+/// Lints last: they are read off the lowered HIR, so nothing in the
+/// sequence above can come after them.
 #[salsa::tracked]
 pub fn diagnostics_with_lints(
     db: &dyn leek_db::Db,
@@ -77,23 +75,20 @@ pub fn diagnostics_with_lints(
 /// One *program*'s lint findings: the whole include closure's merged HIR,
 /// linted once.
 ///
-/// Deliberately not [`lint_query`] per file of the closure, because that
-/// is not what the pipeline does and this has to match it. The `Lint`
-/// step reads whatever `HirArtifact` the run produced, which on the
-/// include-aware path is the *merged* program HIR — every included file's
-/// functions, classes and globals folded into the entry's tree — and it
-/// reads `GreenTreeArtifact`, which is the **entry's** tree alone. So a
-/// lint fires once for the program, and an `// @allow(LXXXX)` comment
-/// suppresses it only when it sits in the entry file. Linting each file
-/// separately would report a finding per file that declares the
-/// construct, and would honour an `@allow` inside an include; both are
-/// behaviour changes wearing a refactor's clothes.
+/// Deliberately not [`lint_query`] per file of the closure. The lints
+/// walk the *merged* program HIR — every included file's functions,
+/// classes and globals folded into the entry's tree — while `@allow`
+/// suppression reads the **entry's** green tree alone. So a lint fires
+/// once for the program, and an `// @allow(LXXXX)` comment suppresses it
+/// only when it sits in the entry file. Linting each file separately
+/// would report a finding per file that declares the construct, and
+/// would honour an `@allow` inside an include; both are behaviour
+/// changes wearing a refactor's clothes.
 ///
 /// The version comes off the entry's own input rather than out of
-/// `entry_version`, matching `Context::version_byte` — drivers settle the
-/// language version onto the input before anything runs, so the two agree,
-/// and following the input is what keeps this identical to the step if
-/// they ever stop agreeing.
+/// `entry_version`: a driver settles the language version onto the input
+/// before anything reads it, so the two agree today, and following the
+/// input is what keeps this right if they ever stop agreeing.
 #[salsa::tracked]
 pub fn program_lint_query(
     db: &dyn leek_db::Db,

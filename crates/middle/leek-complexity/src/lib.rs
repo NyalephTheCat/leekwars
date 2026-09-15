@@ -63,11 +63,11 @@ pub mod call_graph;
 pub mod cost_expr;
 pub mod loop_bound;
 pub mod native;
-pub mod pipeline;
+pub mod query;
 
 pub use analyze::{Complexity, ParamInfo, analyze_file, analyze_function};
 pub use big_o::BigO;
 pub use cost_expr::{CostExpr, SizeRoot, SizeSource, SizeVar};
 pub use loop_bound::LoopBound;
 pub use native::{native_big_o, native_call_cost, native_growth};
-pub use pipeline::{ComplexityReport, complexity_query};
+pub use query::{ComplexityReport, complexity_query};

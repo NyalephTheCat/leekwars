@@ -21,7 +21,7 @@ pub struct TypeCheckArtifact {
 }
 
 /// Salsa-tracked entry point for type checking. Re-runs when the upstream
-/// [`parse_query`](leek_parser::pipeline::parse_query)'s green tree
+/// [`parse_query`](leek_parser::query::parse_query)'s green tree
 /// changes, or when an input field this body reads off the
 /// [`SourceFile`](leek_query::salsa::SourceFile) changes: `strict`,
 /// `seed_library`, `flags_bits`, `source_id` or `version_byte`.
@@ -41,7 +41,7 @@ pub fn typecheck_query(
     #[cfg(test)]
     crate::salsa_probe::TYPECHECK_QUERY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let parse = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
+    let parse = leek_parser::query::parse_query(db, file, ProgramClasses::none(db));
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return TypeCheckArtifact::default();
     };

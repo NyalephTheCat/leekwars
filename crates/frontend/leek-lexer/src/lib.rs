@@ -34,7 +34,7 @@ mod numbers;
 mod operators;
 mod strings;
 
-pub mod pipeline;
+pub mod query;
 
 /// Test-only probe: counts how many times `lex_query` actually executed
 /// (vs being served from the salsa cache). The mutex serializes the

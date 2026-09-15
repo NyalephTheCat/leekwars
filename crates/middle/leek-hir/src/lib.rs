@@ -13,7 +13,7 @@ pub mod captures;
 pub mod fold;
 pub mod ir;
 pub mod lower;
-pub mod pipeline;
+pub mod query;
 pub mod transform;
 pub mod visit;
 

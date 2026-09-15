@@ -718,7 +718,7 @@ impl<'a> Compilation<'a> {
     ) -> Option<T> {
         let (db, file) = self.db?;
         let files = self.files?;
-        let version = leek_syntax::pipeline::version_from_byte(file.version_byte(db));
+        let version = leek_syntax::query::version_from_byte(file.version_byte(db));
         Some(f(db, files, file, version))
     }
 
@@ -799,7 +799,7 @@ impl<'a> Compilation<'a> {
         let (db, file) = self.db?;
         let files = self.files?;
         let shape = self.shape?;
-        let version = leek_syntax::pipeline::version_from_byte(file.version_byte(db));
+        let version = leek_syntax::query::version_from_byte(file.version_byte(db));
 
         // Only once the target actually reaches parsing. A `Target::Tokens`
         // run never plans `Parse`, so there is nothing to abort and no
@@ -823,9 +823,9 @@ impl<'a> Compilation<'a> {
         }
 
         Some(match shape.lints {
-            Some(groups) => leek_lint::pipeline::program_diagnostics_with_lints(
-                db, files, file, version, groups,
-            ),
+            Some(groups) => {
+                leek_lint::query::program_diagnostics_with_lints(db, files, file, version, groups)
+            }
             None => upto(shape.stage),
         })
     }
@@ -1082,7 +1082,7 @@ mod tests {
                 db,
                 files,
                 file,
-                leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+                leek_syntax::query::version_from_byte(file.version_byte(db)),
                 stage,
             );
             let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
@@ -1135,7 +1135,7 @@ mod tests {
         let from_accessor = mir_compiled.mir().expect("MIR was lowered").clone();
         let (db, files) = mir_session.db();
         let (_, file) = mir_compiled.db_handle().expect("session database");
-        let version = leek_syntax::pipeline::version_from_byte(file.version_byte(db));
+        let version = leek_syntax::query::version_from_byte(file.version_byte(db));
         let query_mir =
             leek_db::queries::lower_program_mir(db, files, file, version, leek_query::OptLevel::O0);
 
@@ -1153,7 +1153,7 @@ mod tests {
             cx_db,
             cx_files,
             cx_file,
-            leek_syntax::pipeline::version_from_byte(cx_file.version_byte(cx_db)),
+            leek_syntax::query::version_from_byte(cx_file.version_byte(cx_db)),
         );
         let query_cx_names: Vec<String> = query_cx.0.iter().map(|c| c.name.clone()).collect();
 
@@ -1329,7 +1329,7 @@ mod tests {
     /// query it is sliced from carries on regardless.
     ///
     /// The rule `query_diagnostics` implements, and where it came from:
-    /// `leek_parser::pipeline::Parse` was the single production step
+    /// `leek_parser::query::Parse` was the single production step
     /// implementing `RecipeStepStopOnError`, so with
     /// `CompileParams::stop_on_diagnostics` set it was wrapped in a
     /// `StopOnDiagnostics::abort` that stopped the pipeline before any
@@ -1368,7 +1368,7 @@ mod tests {
             db,
             files,
             file,
-            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
             leek_db::queries::Stage::Resolved,
         );
         let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
@@ -1425,7 +1425,7 @@ mod tests {
             db,
             files,
             file,
-            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
             leek_db::queries::Stage::Resolved,
         );
         let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
@@ -1523,7 +1523,7 @@ mod tests {
             db,
             files,
             file,
-            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
             leek_query::OptLevel::O0,
         );
 
@@ -1584,11 +1584,11 @@ mod tests {
         let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
         let (db, files) = session.db();
         let (_, file) = compiled.db_handle().expect("session database");
-        let from_query = leek_lint::pipeline::program_diagnostics_with_lints(
+        let from_query = leek_lint::query::program_diagnostics_with_lints(
             db,
             files,
             file,
-            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
             leek_lint::LintGroups::default(),
         );
         let from_query_codes: Vec<&str> = from_query.iter().map(|d| d.code.id()).collect();

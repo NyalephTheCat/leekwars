@@ -16,7 +16,7 @@ use leek_syntax::version::version_from_byte;
 use crate::parse_tokens_with_classes;
 
 /// The parse entry points live in the crate's `entry` module and are
-/// re-exported here so importers of `leek_parser::pipeline::parse_file*`
+/// re-exported here so importers of `leek_parser::query::parse_file*`
 /// keep compiling. New callers should use [`parse_file_with`], which takes
 /// its version, [`ParseFeatures`](crate::ParseFeatures) and class names in
 /// a [`ParseOptions`] instead of defaulting them off the environment; the
@@ -31,7 +31,7 @@ pub use crate::entry::{parse_file, parse_file_with_classes};
 /// Tracked return value for [`parse_query`]: the green tree plus the
 /// parser's own diagnostics. Lex diagnostics are not in here — a caller
 /// assembling a stream reports
-/// [`lex_query`](leek_lexer::pipeline::lex_query)'s first, which is what
+/// [`lex_query`](leek_lexer::query::lex_query)'s first, which is what
 /// `leek_db::queries::file_diagnostics_upto` does.
 #[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct ParseQueryResult {
@@ -42,7 +42,7 @@ pub struct ParseQueryResult {
 /// The one parse entry point every driver reaches the tree through.
 ///
 /// Re-runs when the upstream
-/// [`lex_query`](leek_lexer::pipeline::lex_query) result changes, when
+/// [`lex_query`](leek_lexer::query::lex_query) result changes, when
 /// any input field this body reads off the
 /// [`SourceFile`](leek_query::salsa::SourceFile) changes (`text`,
 /// `version_byte`, `flags_bits`; `strict` is *not* read here — it only
@@ -63,7 +63,7 @@ pub struct ParseQueryResult {
 ///
 /// Deliberately *not* [`crate::parse_file_with`]:
 ///
-/// * it lexes through [`leek_lexer::pipeline::lex_query`], so the
+/// * it lexes through [`leek_lexer::query::lex_query`], so the
 ///   memoized lex is shared with every other query over the same file
 ///   rather than repeated here;
 /// * it returns the parser's diagnostics *only*, because a caller
@@ -80,7 +80,7 @@ pub fn parse_query<'db>(
     file: leek_query::salsa::SourceFile,
     classes: ProgramClasses<'db>,
 ) -> ParseQueryResult {
-    let lex = leek_lexer::pipeline::lex_query(db, file);
+    let lex = leek_lexer::query::lex_query(db, file);
     let text = file.text(db);
     let source = file.source(db);
     let version = version_from_byte(file.version_byte(db));
@@ -170,7 +170,7 @@ mod parse_path_agreement_tests {
             false,
             0,
         );
-        let lexed = leek_lexer::pipeline::lex_query(&db, file);
+        let lexed = leek_lexer::query::lex_query(&db, file);
         let parsed = parse_query(&db, file, ProgramClasses::none(&db));
         let stream: Vec<_> = lexed
             .diagnostics

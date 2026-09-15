@@ -13,7 +13,7 @@ fn lint_with_allows(src: &str) -> Vec<leek_diagnostics::Diagnostic> {
     };
     let db = leek_db::LeekDb::default();
     let file = leek_db::input_file(&db, String::new(), &input);
-    leek_lint::pipeline::lint_query(&db, file, leek_lint::LintGroups::default())
+    leek_lint::query::lint_query(&db, file, leek_lint::LintGroups::default())
         .as_ref()
         .clone()
 }

@@ -21,15 +21,15 @@ mod comments;
 pub mod doc;
 pub mod equivalence;
 pub mod format;
-pub mod pipeline;
 pub mod printer;
+pub mod query;
 
 pub use equivalence::{EquivalenceError, check_edit_equivalence, check_equivalence};
 pub use leek_manifest::{
     BraceStyle, ControlBraces, FormatOptions, IndentStyle, LineEnding, OperatorPosition,
     QuoteStyle, Semicolons, TrailingComma,
 };
-pub use pipeline::{FormatConfig, FormatQueryResult, format_query};
+pub use query::{FormatConfig, FormatQueryResult, format_query};
 
 use leek_span::SourceId;
 use leek_syntax::language::GreenNode;

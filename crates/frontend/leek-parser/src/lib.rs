@@ -49,7 +49,7 @@ mod parser;
 
 pub mod ast;
 pub mod entry;
-pub mod pipeline;
+pub mod query;
 
 pub use entry::{ParseOptions, ParsedFile, parse_file_with};
 pub use header::parse_signature_header;

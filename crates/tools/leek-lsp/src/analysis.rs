@@ -148,10 +148,10 @@ pub fn complexity(db: &dyn Db, file: SourceFile) -> queries::ComplexityReport {
 /// **Unverified**: the caller must run
 /// [`leek_fmt::check_equivalence`] before putting this in a buffer.
 pub fn formatted(db: &dyn Db, file: SourceFile, opts: &leek_fmt::FormatOptions) -> Arc<String> {
-    leek_fmt::pipeline::format_query(
+    leek_fmt::query::format_query(
         db,
         file,
-        leek_fmt::pipeline::FormatConfig::new(db, opts.clone()),
+        leek_fmt::query::FormatConfig::new(db, opts.clone()),
     )
     .text
 }

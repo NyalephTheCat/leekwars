@@ -19,7 +19,7 @@
 use leek_db::queries::diagnostics_without_lints;
 use leek_db::{LeekDb, SourceFile};
 use leek_diagnostics::Diagnostic;
-use leek_lint::pipeline::{diagnostics_with_lints, lint_query};
+use leek_lint::query::{diagnostics_with_lints, lint_query};
 use leek_lint::{LintGroups, LintOptions};
 
 /// Everything the one-file stream can carry: an unknown pragma

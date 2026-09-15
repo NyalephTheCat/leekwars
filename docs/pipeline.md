@@ -106,9 +106,9 @@ closure's own `program_classes`.
 `lower_program_mir(files, entry, version, opt)` and
 `program_complexity(files, entry, version)` are the include-aware
 counterparts of `lower_mir_query` and `complexity_query`, which are keyed on
-one file and so answer for the entry alone. The pipeline computes both from
-the *merged* program HIR, so the per-file queries would drop every function
-an include provides.
+one file and so answer for the entry alone. A driver wants both over the
+*merged* program HIR, because the per-file queries drop every function an
+include provides.
 
 ### Diagnostics
 
@@ -156,7 +156,7 @@ The useful consequences of the shape above:
   and no further up than that, because they are input fields rather than
   process globals.
 - **One memo table per query.** `leek_db::queries::parse_query` and
-  `leek_parser::pipeline::parse_query` are the same function — the façade
+  `leek_parser::query::parse_query` are the same function — the façade
   re-exports, never wraps. A wrapper would be a second memo table over the same
   work.
 
@@ -170,9 +170,10 @@ artifact's declared `Requires`. Every pass shipped *both* a step and a tracked
 query, and `Step::run` dispatched into the query when `Context::salsa()`
 returned `Some` — so the cache existed but only the LSP reached it.
 
-All of that is gone. Each pass crate's `pipeline` module is now its tracked
-query and nothing else; `leek-query` (in `core`, because every pass writes its
-queries against it) is the database, the two query keys and the timing sink;
+All of that is gone. Each pass crate's module is now its tracked query and
+nothing else, and is named `query` for it; `leek-query` (in `core`, because
+every pass writes its queries against it) is the database, the two query keys
+and the timing sink;
 `leek-db` is the façade and owns the whole-program queries; `leek-session` is
 what a front-end holds.
 
@@ -182,7 +183,7 @@ Three things the deletion settled, worth recording because each was a surprise:
   steps it *ran* reported, so its stream grew with the target, while
   `program_diagnostics` always reported the whole frontend. `Stage` and
   `program_diagnostics_upto` are that behaviour, restated as a slice.
-- **`leek_parser::pipeline::Parse` was the one step that could abort a run.**
+- **The parse step was the one step that could abort a run.**
   It was the single production implementor of `RecipeStepStopOnError`, so with
   `stop_on_diagnostics` set, a parse error stopped the pipeline before any
   later step. Tracked passes have no such notion — they work off the green

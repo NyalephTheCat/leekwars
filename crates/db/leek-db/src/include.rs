@@ -5,14 +5,14 @@
 //!
 //! 1. [`include_edges`] — the `include("…")` sites and `class IDENT`
 //!    names in one file, over
-//!    [`lex_query`](leek_lexer::pipeline::lex_query). Re-runs when that
+//!    [`lex_query`](leek_lexer::query::lex_query). Re-runs when that
 //!    file's tokens change and nothing else.
 //! 2. [`resolve_include`] — one `include("name")` written in one file,
 //!    resolved against [`WorkspaceFiles`]. Re-runs when the set of
 //!    files in the workspace changes, not when any file's *text*
 //!    changes.
 //! 3. [`include_graph`] — the DFS over the two above plus
-//!    [`pragma_query`](leek_syntax::pipeline::pragma_query), settling
+//!    [`pragma_query`](leek_syntax::query::pragma_query), settling
 //!    each reached file's version and recording the edges, the
 //!    dependency order and the include sites.
 //!
@@ -68,7 +68,7 @@ use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 /// Deliberately no tree. A rowan red tree is a per-thread cursor with
 /// interior mutability, so it may never enter a query result; even the
 /// green tree stays out, because the graph's whole job is to tell a
-/// caller *which* files to ask [`parse_query`](leek_parser::pipeline::parse_query)
+/// caller *which* files to ask [`parse_query`](leek_parser::query::parse_query)
 /// about. Adding a tree here would make the graph re-run on every edit
 /// to any file it reaches.
 #[derive(Clone, PartialEq, Eq, salsa::Update)]
@@ -162,12 +162,12 @@ impl IncludeGraph {
 
 /// The `include("…")` sites and `class IDENT` names in one file.
 ///
-/// Over [`lex_query`](leek_lexer::pipeline::lex_query), so editing a
+/// Over [`lex_query`](leek_lexer::query::lex_query), so editing a
 /// file re-lexes and re-scans that file and leaves every other file's
 /// edges cached.
 #[salsa::tracked]
 pub fn include_edges(db: &dyn Db, file: SourceFile) -> IncludeEdges {
-    let lexed = leek_lexer::pipeline::lex_query(db, file);
+    let lexed = leek_lexer::query::lex_query(db, file);
     leek_resolver::include_graph::scan_include_edges(file.text(db), &lexed.tokens)
 }
 
@@ -179,18 +179,18 @@ pub fn include_edges(db: &dyn Db, file: SourceFile) -> IncludeEdges {
 /// salsa backdates it, and [`program_classes`] — and therefore every
 /// parse in the program — is left alone.
 ///
-/// Over [`lex_query`](leek_lexer::pipeline::lex_query) for the same
+/// Over [`lex_query`](leek_lexer::query::lex_query) for the same
 /// reason [`include_edges`] is: a program's class set decides how its
 /// files parse, so deriving it from a parse would be a cycle.
 #[salsa::tracked]
 pub fn class_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
-    let lexed = leek_lexer::pipeline::lex_query(db, file);
+    let lexed = leek_lexer::query::lex_query(db, file);
     leek_parser::scan_class_names(file.text(db), &lexed.tokens)
 }
 
 /// Every `class IDENT` name declared anywhere in `entry`'s include
 /// closure, sorted and deduplicated, interned as the key each file's
-/// [`parse_query`](leek_parser::pipeline::parse_query) is asked for.
+/// [`parse_query`](leek_parser::query::parse_query) is asked for.
 ///
 /// Upstream resolves a potential type word against the program-wide
 /// defined-class set, so a class declared in any file of the closure is
@@ -336,7 +336,7 @@ pub fn include_graph(
 /// produces them in.
 ///
 /// They are re-derived from each leaf's memoized
-/// [`parse_query`](leek_parser::pipeline::parse_query) and returned in
+/// [`parse_query`](leek_parser::query::parse_query) and returned in
 /// the value, so a run that hits every cache still reports them. That
 /// is the whole point of this query existing separately from
 /// [`include_graph`]: the graph must *not* depend on any leaf's parse
@@ -358,7 +358,7 @@ pub fn include_parse_failures(
     graph
         .includes()
         .flat_map(|file| {
-            let parse = leek_parser::pipeline::parse_query(db, file.file, classes);
+            let parse = leek_parser::query::parse_query(db, file.file, classes);
             leek_resolver::closure::include_parse_failures(
                 &file.path,
                 file.source,
@@ -437,7 +437,7 @@ impl Walk<'_> {
             if !self.known.contains_key(&path) {
                 // Its own `@version` pragma if it has one, else the
                 // entry's settled version.
-                let version = leek_syntax::pipeline::pragma_query(self.db, target)
+                let version = leek_syntax::query::pragma_query(self.db, target)
                     .pragmas
                     .effective_version(self.entry_version);
                 self.known.insert(
