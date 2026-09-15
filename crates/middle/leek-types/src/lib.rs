@@ -200,7 +200,7 @@ pub fn check_with_options(
 /// Type-checker outcome carrying both diagnostics and the LSP-facing
 /// [`TypeTable`]. Prefer this entry point over
 /// [`check_with_options`] when downstream consumers (the LSP,
-/// `miku watch`) need per-expression type data.
+/// `miku analyze`) need per-expression type data.
 #[derive(Debug, Clone, Default)]
 pub struct TypeCheckResult {
     pub diagnostics: Vec<Diagnostic>,

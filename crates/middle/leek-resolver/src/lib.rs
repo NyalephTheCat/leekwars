@@ -168,8 +168,8 @@ pub fn resolve_with_options(
 
 /// Resolver outcome carrying both diagnostics and the LSP-facing
 /// [`ResolveTable`]. Prefer this entry point over
-/// [`resolve_with_options`] when downstream consumers (the LSP,
-/// `miku watch`) need symbol/reference data.
+/// [`resolve_with_options`] when downstream consumers such as the LSP
+/// need symbol/reference data.
 #[derive(Debug, Clone, Default)]
 pub struct ResolveResult {
     pub diagnostics: Vec<Diagnostic>,

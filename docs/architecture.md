@@ -16,11 +16,12 @@ stable build.
 ```
 bins/        leekc, miku, leek-lsp, leek-dap, leekbench   (executables)
 crates/
-  core/      spans, diagnostics, manifest, runtime, prelude, environment, builtins
+  core/      spans, diagnostics, manifest, config, project, text, visit,
+             workpool, runtime, prelude, environment, builtins
   frontend/  lexer, parser, syntax (the CST)
   middle/    resolver, types, HIR, MIR, charge, complexity
-  db/        pipeline, recipes, driver  (compilation orchestration)
-  backends/  java, native (Cranelift), aot-runtime, backend registry
+  db/        pipeline, db, session   (compilation orchestration)
+  backends/  java, leekscript, native (Cranelift), aot-runtime, selection
   game/      game-runtime, generator, scenario   (the fight simulator)
   tools/     lsp, dap, fmt, lint, migrate, rewrite, ide
   testing/   builtin-suite, test-driver, test-corpus, bench
@@ -109,7 +110,10 @@ with a single `message: String` field is the same error, wearing a hat.
 
 ## The compilation pipeline
 
-A `.leek` program flows down the layers:
+A `.leek` program flows down the layers. This section is the shape of it; for
+the query layer that actually caches and re-runs these stages — the database
+inputs, every tracked query, and what an edit invalidates — see
+[`pipeline.md`](pipeline.md).
 
 1. **Frontend** (`leek-lexer`, `leek-parser`, `leek-syntax`) turns source text
    into tokens and then a lossless concrete syntax tree (CST, built on
@@ -119,28 +123,38 @@ A `.leek` program flows down the layers:
    - `leek-resolver` binds names and scopes.
    - `leek-types` runs type inference / checking (LeekScript keeps dynamic,
      boxed values but the type info drives unboxing in the native backend).
-   - `leek-hir` is the high-level IR; `leek-mir` is the lower control-flow IR
-     the backends consume.
+   - `leek-hir` is the high-level IR that the Java and LeekScript backends
+     emit from; `leek-mir` is the lower control-flow IR the native backend
+     lowers through.
    - `leek-charge` models LeekWars' per-operation "ops" budget; `leek-complexity`
      derives per-function big-O / cost estimates (`miku analyze`).
 3. **db** (`leek-pipeline`, `leek-db`, `leek-session`) is the orchestration
    layer — a query/recipe system that wires the stages together, caches
    artifacts, and is what the binaries call into. `leek-pipeline` is the
-   generic engine; `leek-db` is the query façade, re-exporting the one salsa
-   database and every tracked query under a single import path so a consumer
-   needs no direct dependency on the pass crates; `leek-session`
-   defines the concrete steps (its `recipes` module), ties them to a
-   project/manifest (its `driver` module), and hands a front-end one
-   `Session` per invocation and one `Compilation` per compiled file (its
+   generic engine (see [`pipeline.md`](pipeline.md)); `leek-db` is the query
+   façade, re-exporting the one salsa database and every tracked query under a
+   single import path so a consumer needs no direct dependency on the pass
+   crates; `leek-session` defines the concrete steps (its `recipes` module),
+   ties them to a project/manifest (its `driver` module), and hands a front-end
+   one `Session` per invocation and one `Compilation` per compiled file (its
    `session` module).
-4. **Backends** consume MIR:
+4. **Backends** each take the highest-level IR they can use — only the native
+   one goes all the way down to MIR:
    - `leek-backend-native` is a Cranelift JIT/AOT backend (`miku run`, and
-     `leekc --emit` for a standalone executable, linked via `cc`). Scalars
-     whose type is known are unboxed; everything else stays a boxed dynamic
-     value. `leek-aot-runtime` is the runtime support linked into AOT binaries.
-   - `leek-backend-java` transpiles to Java source for the upstream runtime
-     classes.
-   - `leek-backends` is the registry that selects between them.
+     `leekc --emit` for a standalone executable, linked via `cc`). It consumes
+     MIR, and reads HIR alongside it for the type information that drives
+     unboxing: scalars whose type is known are unboxed, everything else stays a
+     boxed dynamic value. `leek-aot-runtime` is the runtime support linked into
+     AOT binaries.
+   - `leek-backend-java` transpiles **HIR** to Java source for the upstream
+     runtime classes — see [`java-backend.md`](java-backend.md).
+   - `leek-backend-leekscript` emits **HIR** back out as one self-contained
+     LeekScript file — see
+     [`leekscript-backend.md`](leekscript-backend.md).
+   - `leek-backends` is not a registry: it holds the backend *selection*
+     helpers `miku` and the other drivers share (resolving the manifest's
+     `[backend.*]` against a `--backend` override, the linked-backend set,
+     output-directory choice).
 
 `core` underpins all of it: `leek-span` (source positions, and `leek_span::paths`
 — the one rule for collapsing two spellings of a path to one map key),

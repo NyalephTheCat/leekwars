@@ -5,6 +5,7 @@ Project documentation for the Rust LeekScript toolchain.
 | Document | What it covers |
 |----------|----------------|
 | [`architecture.md`](architecture.md) | Crate layers, the compilation pipeline, the fight simulator, and how the pieces fit together. Start here to find your way around the codebase. |
+| [`pipeline.md`](pipeline.md) | The query layer: the salsa inputs, every tracked query, what an edit invalidates, and what is left of the two-orchestration-models migration. |
 | [`grammar.md`](grammar.md) | The formal LeekScript grammar (ECMA-262-inspired notation). |
 | [`semantics.md`](semantics.md) | Front-end semantics: file identity, `include` expansion, version resolution, scope and boundary rules, and the type lattice. |
 | [`lsp.md`](lsp.md) | The language server's design: the workspace and its salsa DB, per-program symbol scoping, threading and panic containment, the diagnostic set, and the logging seam. |
