@@ -566,6 +566,55 @@ impl FnLowerer<'_> {
         self.push_stmt(Statement::Assign(place, read));
     }
 
+    /// A fresh temp holding `rv`, in the block being built.
+    fn materialize_here(&mut self, rv: Rvalue, span: leek_span::Span) -> LocalId {
+        let t = self.fresh_temp(Type::Any, span);
+        self.push_stmt(Statement::Assign(Place::Local(t), rv));
+        t
+    }
+
+    /// The chain that decides which arm a `switch` takes: one loose
+    /// comparison per label, branching to that label's body on a hit and to
+    /// the next test on a miss. Leaves the builder on the block after the
+    /// last test, for the caller to send at the default.
+    ///
+    /// `dispatched` says the selection is upstream's O(1) one, already
+    /// charged in full: the comparisons then compute the same answer for
+    /// nothing, rather than charging an operation each — and, for strings,
+    /// a character-by-character comparison each.
+    fn lower_switch_tests(
+        &mut self,
+        sw: &SwitchStmt,
+        disc_local: LocalId,
+        bodies: &[BlockId],
+        dispatched: bool,
+    ) {
+        for (arm, &body_bb) in sw.arms.iter().zip(bodies) {
+            let Some(case_expr) = &arm.case else { continue };
+            let case = self.lower_expr_to_operand(case_expr);
+            let cmp = self.fresh_temp(Type::Boolean, sw.span);
+            // `eq()`, not `==`: a switch's loose comparison is the same in
+            // every version, so `switch ('1') { case 1: … }` matches at v4 as
+            // it does at v1.
+            let test = Rvalue::Binary(BinOp::LooseEq, Operand::Local(disc_local), case);
+            self.push_stmt(Statement::Assign(
+                Place::Local(cmp),
+                if dispatched {
+                    Rvalue::Synthetic(Box::new(test))
+                } else {
+                    test
+                },
+            ));
+            let next_bb = self.new_block();
+            self.set_terminator(Terminator::Branch {
+                cond: Operand::Local(cmp),
+                then_block: body_bb,
+                else_block: next_bb,
+            });
+            self.resume(next_bb);
+        }
+    }
+
     pub(crate) fn lower_switch(&mut self, sw: &SwitchStmt) {
         // Switch with fall-through. Each case has two blocks:
         //   test_bb: compare discriminant; on hit → body_bb; on
@@ -612,47 +661,51 @@ impl FnLowerer<'_> {
 
         // Upstream emits a real Java `switch` — one O(1) dispatch, charged a
         // single operation however many cases there are — when every label is
-        // a constant of one kind and the subject is already that kind, because
+        // a constant of one kind and the subject is that kind too, because
         // `eq()` then reduces to strict equality. The comparisons below are
         // that same selection, so only the charging changes.
-        let dispatched = constant_dispatch(sw, &self.locals[disc_local.0 as usize].ty);
-        if dispatched {
-            self.push_stmt(Statement::Charge(1));
-        }
-
-        // First pass: emit the test chain.
         let default_target = default_body.unwrap_or(exit);
-        for (arm, &body_bb) in sw.arms.iter().zip(&bodies) {
-            let Some(case_expr) = &arm.case else { continue };
-            let case = self.lower_expr_to_operand(case_expr);
-            let cmp = self.fresh_temp(Type::Boolean, sw.span);
-            // `eq()`, not `==`: a switch's loose comparison is the same in
-            // every version, so `switch ('1') { case 1: … }` matches at v4 as
-            // it does at v1.
-            let test = Rvalue::Binary(BinOp::LooseEq, Operand::Local(disc_local), case);
-            // A tested case charges the one operation upstream's `ops(eq(…))`
-            // wrapper does, plus whatever comparing those two values costs —
-            // for strings, per character. A *dispatched* switch calls `eq()`
-            // for no case at all, so its comparisons are synthetic: they
-            // compute the same answer and charge nothing, the single dispatch
-            // operation above covering the lot.
-            self.push_stmt(Statement::Assign(
-                Place::Local(cmp),
-                if dispatched {
-                    Rvalue::Synthetic(Box::new(test))
-                } else {
-                    test
-                },
-            ));
-            let next_bb = self.new_block();
-            self.set_terminator(Terminator::Branch {
-                cond: Operand::Local(cmp),
-                then_block: body_bb,
-                else_block: next_bb,
-            });
-            self.resume(next_bb);
+        match constant_dispatch(sw, &self.locals[disc_local.0 as usize].ty) {
+            Dispatch::Chain => {
+                self.lower_switch_tests(sw, disc_local, &bodies, false);
+                self.goto(default_target);
+            }
+            Dispatch::Direct => {
+                self.push_stmt(Statement::Charge(1));
+                self.lower_switch_tests(sw, disc_local, &bodies, true);
+                self.goto(default_target);
+            }
+            // A subject only known at run time gets upstream's *guarded*
+            // form: when the value turns out to be of the labels' kind the
+            // dispatch is the same O(1) one, and when it is not the loose
+            // `eq()` chain is the only thing that can compare across kinds.
+            // Both select the same arm; what differs is what they cost.
+            Dispatch::Guarded(class) => {
+                let cls = self.materialize_here(Rvalue::BuiltinRef(class.to_string()), sw.span);
+                let ok = self.materialize_here(
+                    Rvalue::Synthetic(Box::new(Rvalue::Binary(
+                        BinOp::Instanceof,
+                        Operand::Local(disc_local),
+                        Operand::Local(cls),
+                    ))),
+                    sw.span,
+                );
+                let fast = self.new_block();
+                let slow = self.new_block();
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(ok),
+                    then_block: fast,
+                    else_block: slow,
+                });
+                self.resume(fast);
+                self.push_stmt(Statement::Charge(1));
+                self.lower_switch_tests(sw, disc_local, &bodies, true);
+                self.goto(default_target);
+                self.resume(slow);
+                self.lower_switch_tests(sw, disc_local, &bodies, false);
+                self.goto(default_target);
+            }
         }
-        self.goto(default_target);
 
         // Second pass: emit each body, each falling through to the next arm
         // in source order and the last one to `exit`.
@@ -676,25 +729,35 @@ impl FnLowerer<'_> {
     }
 }
 
-/// Whether a `switch` selects its arm through upstream's O(1) dispatch, which
-/// costs one operation however many cases it has, rather than testing each
-/// case in turn.
+/// How a `switch` selects its arm — which is a question about what it costs,
+/// not about what it answers: every form below compares the same way.
+enum Dispatch {
+    /// One loose comparison per label, charged an operation each.
+    Chain,
+    /// Upstream's O(1) Java `switch`, charged one operation however many
+    /// cases there are: every label is a constant of one kind and the subject
+    /// is declared that kind, so `eq()` reduces to strict equality.
+    Direct,
+    /// The same dispatch behind a run-time kind test, for a subject whose
+    /// type is only known then — the named builtin class is the labels' kind.
+    /// A value of another kind falls back to the chain, which is the only
+    /// thing that can compare across kinds.
+    Guarded(&'static str),
+}
+
+/// Which form a `switch` takes.
 ///
 /// Upstream's conditions, and its reasons: every label must be a constant of
 /// one kind — all `integer`s in Java's `int` range, or all strings — with no
 /// duplicate (a Java `switch` would not compile with one, so upstream keeps
 /// the chain, where the first case wins), at most one `default`, and at least
-/// one label. The subject must *already* be that kind: only then does the
-/// loose `eq()` a switch compares with reduce to strict equality.
-///
-/// A dynamically-typed subject gets upstream's guarded form, which dispatches
-/// in one operation when the value turns out to be of the label kind and
-/// falls back to the chain otherwise. That is a run-time distinction this
-/// lowering does not draw, so such a switch keeps charging per case here.
-fn constant_dispatch(sw: &SwitchStmt, subject: &Type) -> bool {
+/// one label. A subject declared that kind dispatches directly; one of
+/// *another* scalar kind cannot match a label strictly at all, so it keeps
+/// the chain; anything else — a `var` — gets the guarded form.
+fn constant_dispatch(sw: &SwitchStmt, subject: &Type) -> Dispatch {
     let labels: Vec<&Expr> = sw.arms.iter().filter_map(|a| a.case.as_ref()).collect();
     if labels.is_empty() || sw.arms.iter().filter(|a| a.case.is_none()).count() > 1 {
-        return false;
+        return Dispatch::Chain;
     }
     let strings = matches!(labels[0].kind, ExprKind::Literal(Literal::String(_)));
     let mut seen: HashSet<String> = HashSet::new();
@@ -702,13 +765,25 @@ fn constant_dispatch(sw: &SwitchStmt, subject: &Type) -> bool {
         let key = match (strings, constant_label(label)) {
             (true, Some(Label::Str(s))) => s,
             (false, Some(Label::Int(n))) => n.to_string(),
-            _ => return false,
+            _ => return Dispatch::Chain,
         };
         if !seen.insert(key) {
-            return false;
+            return Dispatch::Chain;
         }
     }
-    *subject == if strings { Type::String } else { Type::Integer }
+    let want = if strings { Type::String } else { Type::Integer };
+    if *subject == want {
+        return Dispatch::Direct;
+    }
+    // A subject of another scalar kind can never match a constant label
+    // strictly, so the guard would be dead and the chain is all there is.
+    if matches!(
+        subject,
+        Type::Integer | Type::String | Type::Real | Type::Boolean | Type::Null
+    ) {
+        return Dispatch::Chain;
+    }
+    Dispatch::Guarded(if strings { "String" } else { "Integer" })
 }
 
 enum Label {

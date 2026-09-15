@@ -151,11 +151,19 @@ fn switch_charges_one_op_per_case_test() {
             6,
         ),
     ];
+    // Every row below has a `var` subject, so each takes upstream's *guarded*
+    // dispatch: when the value turns out to be of the labels' kind — and a
+    // literal-initialised `var` always is — the whole selection costs one
+    // operation however many cases it has, and no `eq()` runs, so a string
+    // label costs nothing to skip. `reference.tsv` was captured before that
+    // optimizer existed and still records one operation per case tested (and,
+    // for strings, a character-by-character comparison each); the counts here
+    // are what v3.00 charges.
     for v in [3, 4] {
         rows.extend([
             (v, "var x = 1 switch (x) { case 1: return 'one' } return 'none'", 3),
-            (v, "var x = 2 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 4),
-            (v, "var x = 3 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 3),
+            (v, "var x = 2 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 3),
+            (v, "var x = 3 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'", 2),
             // 7, the count `reference.tsv` records for the *unfolded*
             // program: `ops_v` lowers with `lower_file_versioned`, which
             // hands back raw HIR, while upstream's `ConstantFolder` — which
@@ -164,26 +172,26 @@ fn switch_charges_one_op_per_case_test() {
             // rows want: one construct's charge at a time, with the folded
             // end-to-end counts checked by leek-test-corpus instead.
             (v, "var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r", 7),
-            (v, "var x = 2 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 7),
-            (v, "var x = 3 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 4),
-            (v, "var x = 3 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 5),
-            (v, "var x = 1 var y = 2 var r = '' switch (x) { case 1: switch (y) { case 1: r = 'x1y1' break case 2: r = 'x1y2' break } break case 2: r = 'x2' break } return r", 11),
-            (v, "function f(x) { switch (x) { case 1: return 'one' case 2: return 'two' default: return 'other' } } return f(5)", 4),
+            (v, "var x = 2 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 6),
+            (v, "var x = 3 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r", 3),
+            (v, "var x = 3 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 3),
+            (v, "var x = 1 var y = 2 var r = '' switch (x) { case 1: switch (y) { case 1: r = 'x1y1' break case 2: r = 'x1y2' break } break case 2: r = 'x2' break } return r", 10),
+            (v, "function f(x) { switch (x) { case 1: return 'one' case 2: return 'two' default: return 'other' } } return f(5)", 3),
             (v, "var x = 5 switch (x) { case 2 + 3: return 'five' default: return 'other' }", 4),
             (v, "var x = null switch (x) { case null: return 'null' default: return 'other' }", 3),
             (v, "var x = 1 switch (x) {} return 'ok'", 1),
             (v, "var x = 1 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 4),
-            (v, "var x = 2 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 4),
+            (v, "var x = 2 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'", 3),
             (v, "var x = 5 switch (x) { case 1: return 'one' default: return 'other' }", 3),
             (v, "var x = 1 switch (x) { case 1: return 'one' default: return 'other' }", 3),
             (v, "var x = true switch (x) { case true: return 'yes' case false: return 'no' }", 3),
             (v, "var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 2) { return 99 } case 2: a = 12 case 3: a = 15 } return a", 7),
             (v, "var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 3) { return 99 } case 2: a = 12 case 3: a = 15 } return a", 11),
-            (v, "var x = 3 var r = '' switch (x) { case 1: r = 'one' break case 2: r = 'two' break default: r = 'default' break } return r", 7),
+            (v, "var x = 3 var r = '' switch (x) { case 1: r = 'one' break case 2: r = 'two' break default: r = 'default' break } return r", 6),
             (v, "var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s", 19),
-            (v, "var x = 'hello' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0", 8),
-            (v, "var x = 'world' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0", 14),
-            (v, "var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s", 43),
+            (v, "var x = 'hello' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0", 3),
+            (v, "var x = 'world' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0", 3),
+            (v, "var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s", 39),
         ]);
     }
     assert_rows(&rows);
