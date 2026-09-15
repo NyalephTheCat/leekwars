@@ -17,7 +17,9 @@
 //!    dependency order and the include sites.
 //!
 //! [`include_parse_failures`] hangs off the graph for the consumers
-//! that need to know an included file did not parse.
+//! that need to know an included file did not parse, and
+//! [`program_classes`] folds the graph into the interned class set every
+//! parse in the program is keyed on.
 //!
 //! ### Token level, never parse level
 //!
@@ -58,7 +60,7 @@ use leek_span::paths::canonical_or_normalized;
 use leek_span::{SourceId, Span};
 use leek_syntax::Version;
 
-use crate::{Db, SourceFile, WorkspaceFiles};
+use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 
 /// One file the include walk reached: who it is, not what it says.
 ///
@@ -166,6 +168,58 @@ impl IncludeGraph {
 pub fn include_edges(db: &dyn Db, file: SourceFile) -> IncludeEdges {
     let lexed = leek_lexer::pipeline::lex_query(db, file);
     leek_resolver::include_graph::scan_include_edges(file.text(db), &lexed.tokens)
+}
+
+/// The `class IDENT` names one file declares, in declaration order.
+///
+/// The same token-level scan [`include_edges`] runs, asked on its own so
+/// that it can answer on its own: a file whose `include("…")` sites
+/// changed but whose classes did not leaves this query's value equal,
+/// salsa backdates it, and [`program_classes`] — and therefore every
+/// parse in the program — is left alone.
+///
+/// Over [`lex_query`](leek_lexer::pipeline::lex_query) for the same
+/// reason [`include_edges`] is: a program's class set decides how its
+/// files parse, so deriving it from a parse would be a cycle.
+#[salsa::tracked]
+pub fn class_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
+    let lexed = leek_lexer::pipeline::lex_query(db, file);
+    leek_parser::scan_class_names(file.text(db), &lexed.tokens)
+}
+
+/// Every `class IDENT` name declared anywhere in `entry`'s include
+/// closure, sorted and deduplicated, interned as the key each file's
+/// [`parse_query`](leek_parser::pipeline::parse_query) is asked for.
+///
+/// Upstream resolves a potential type word against the program-wide
+/// defined-class set, so a class declared in any file of the closure is
+/// a type head in every other — `lowercaseClassFromInclude x = …` has
+/// to parse as a typed declaration. That set is a property of the
+/// *program*: the same leaf, included by two different entries, has two
+/// of them. Hence a query keyed exactly as [`include_graph`] is, whose
+/// interned result is then a parse key rather than a field on any
+/// file's input.
+///
+/// This is what retires the LSP's workspace-wide union (#163): a class
+/// typed into one AI no longer changes how an unrelated AI parses, and
+/// an edit that leaves a program's class set alone re-parses only the
+/// file that changed instead of every open document.
+#[salsa::tracked]
+pub fn program_classes(
+    db: &dyn Db,
+    files: WorkspaceFiles,
+    entry: SourceFile,
+    entry_version: Version,
+) -> ProgramClasses<'_> {
+    let graph = include_graph(db, files, entry, entry_version);
+    let mut names: Vec<String> = graph
+        .files
+        .iter()
+        .flat_map(|file| class_names(db, file.file))
+        .collect();
+    names.sort();
+    names.dedup();
+    ProgramClasses::new(db, names)
 }
 
 /// One `include("name")` as written in one file — the key
@@ -296,10 +350,14 @@ pub fn include_parse_failures(
     entry_version: Version,
 ) -> Vec<Diagnostic> {
     let graph = include_graph(db, files, entry, entry_version);
+    // The same parse key the program's own passes use, so this reads the
+    // memo they filled instead of parsing the closure a second time
+    // under an empty class set.
+    let classes = program_classes(db, files, entry, entry_version);
     graph
         .includes()
         .flat_map(|file| {
-            let parse = leek_parser::pipeline::parse_query(db, file.file);
+            let parse = leek_parser::pipeline::parse_query(db, file.file, classes);
             leek_resolver::closure::include_parse_failures(
                 &file.path,
                 file.source,

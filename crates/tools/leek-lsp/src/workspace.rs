@@ -116,14 +116,6 @@ pub struct Workspace {
     /// toggle). Mirrors the client's `leek` settings section; updated by
     /// `workspace/didChangeConfiguration` and the initial pull.
     pub settings: crate::settings::Settings,
-    /// Per-file `class IDENT` declarations, keyed by URI. The sorted
-    /// union feeds every salsa input's `extra_classes` so any file can
-    /// use any project class as a type head (`testClass tc = …`),
-    /// mirroring upstream's program-wide `getDefinedClass` lookup.
-    class_names: HashMap<Url, Vec<String>>,
-    /// Last union pushed into the salsa inputs — skip the (re-parse
-    /// triggering) input writes when an edit didn't change it.
-    class_union: Vec<String>,
 }
 
 impl Default for Workspace {
@@ -152,8 +144,6 @@ impl Default for Workspace {
             semantic_tokens_cache: HashMap::new(),
             next_result_id: 1,
             settings: crate::settings::Settings::default(),
-            class_names: HashMap::new(),
-            class_union: Vec::new(),
         }
     }
 }
@@ -177,8 +167,6 @@ impl Workspace {
         {
             let lang = self.settle(Some(path), &arc_text);
             self.apply_language(source_file, lang);
-            let source = source_file.source(&self.db);
-            let classes = Self::scan_classes(&arc_text, source, lang.version);
             let line_table = Arc::new(LineTable::new(&arc_text));
             source_file.set_text(&mut self.db).to(Arc::clone(&arc_text));
             if let Some(indexed) = self.indexed.get_mut(path) {
@@ -194,7 +182,6 @@ impl Workspace {
                     version: 0,
                 },
             );
-            self.refresh_classes(&uri, Some(classes));
             self.resync();
             return;
         }
@@ -202,11 +189,6 @@ impl Workspace {
         let source_id = self.source_id_for(path.as_deref());
         let line_table = Arc::new(LineTable::new(&arc_text));
         let lang = self.settle(path.as_deref(), &arc_text);
-        let classes = Self::scan_classes(
-            &arc_text,
-            leek_span::SourceId::new(source_id).expect("non-zero SourceId"),
-            lang.version,
-        );
         let source_file = SourceFile::new(
             &self.db,
             canonical_path_of(path.as_deref()),
@@ -216,7 +198,6 @@ impl Workspace {
             lang.strict,
             leek_types::seed_library_enabled(),
             leek_span::FeatureFlags::from_env().to_bits(),
-            self.class_union.clone(),
         );
         self.docs.insert(
             uri.clone(),
@@ -227,7 +208,6 @@ impl Workspace {
                 version: 0,
             },
         );
-        self.refresh_classes(&uri, Some(classes));
         self.resync();
     }
 
@@ -256,8 +236,6 @@ impl Workspace {
         let path = uri_to_path(uri);
         let lang = self.settle(path.as_deref(), &arc_text);
         self.apply_language(source_file, lang);
-        let source = source_file.source(&self.db);
-        let classes = Self::scan_classes(&arc_text, source, lang.version);
         source_file.set_text(&mut self.db).to(Arc::clone(&arc_text));
         if let Some(path) = path
             && let Some(indexed) = self.indexed.get_mut(&path)
@@ -265,23 +243,19 @@ impl Workspace {
             indexed.line_table = line_table;
             indexed.text = arc_text;
         }
-        self.refresh_classes(uri, Some(classes));
         self.resync();
     }
 
     /// Drop every piece of per-URI state the closed buffer owns: the open
     /// handle and its semantic-token delta baseline (a full token vector
     /// that would otherwise live for the rest of the session). A file the
-    /// project still indexes goes back to its on-disk text, so its classes
-    /// stay in the union and the project keeps analyzing it; a buffer with
-    /// no indexed file behind it contributes nothing once closed, so its
-    /// class names go away instead of lingering.
+    /// project still indexes goes back to its on-disk text so the project
+    /// keeps analyzing it; a buffer with no indexed file behind it is gone
+    /// for good.
     pub fn close(&mut self, uri: &Url) {
         self.docs.remove(uri);
         self.semantic_tokens_cache.remove(uri);
-        if !self.reload_indexed_from_disk(uri) {
-            self.refresh_classes(uri, None);
-        }
+        self.reload_indexed_from_disk(uri);
         self.resync();
     }
 
@@ -347,9 +321,6 @@ impl Workspace {
             Some(at) => self.roots[at] = index,
             None => self.roots.push(index),
         }
-        // One union rebuild after the whole tree is registered — this
-        // pushes every file's classes into every input.
-        self.rebuild_class_union();
         self.resync();
     }
 
@@ -382,7 +353,6 @@ impl Workspace {
         }
         let uri = path_to_uri(&loaded.path);
         self.register_indexed(uri, loaded);
-        self.rebuild_class_union();
         self.resync();
     }
 
@@ -396,15 +366,12 @@ impl Workspace {
     /// to a URI by exactly that id. The index's own numbering is never
     /// read from here, so letting the two diverge costs nothing.
     ///
-    /// Leaves the class union and the derived caches alone: callers
-    /// registering a whole tree rebuild both once at the end.
+    /// Leaves the derived caches alone: callers registering a whole tree
+    /// rebuild them once at the end.
     fn register_indexed(&mut self, uri: Url, loaded: leek_pipeline::LoadedProjectFile) {
         let arc_text: Arc<str> = Arc::from(loaded.text);
         let flags_bits = leek_span::FeatureFlags::from_env().to_bits();
         let source_id = self.source_id_for(Some(&loaded.path));
-        let source = leek_span::SourceId::new(source_id).expect("non-zero SourceId");
-        let classes = Self::scan_classes(&arc_text, source, loaded.version_byte);
-        self.class_names.insert(uri.clone(), classes);
         let source_file = SourceFile::new(
             &self.db,
             loaded.path.display().to_string(),
@@ -414,7 +381,6 @@ impl Workspace {
             loaded.strict,
             leek_types::seed_library_enabled(),
             flags_bits,
-            self.class_union.clone(),
         );
         self.indexed.insert(
             loaded.path.clone(),
@@ -572,57 +538,6 @@ impl Workspace {
         }
     }
 
-    /// Scan one file's `class IDENT` declarations (version-aware:
-    /// `class` only lexes as a keyword from v2 on).
-    fn scan_classes(text: &str, source: leek_span::SourceId, version_byte: u8) -> Vec<String> {
-        let version = leek_syntax::version::version_from_byte(version_byte);
-        let lexed = leek_lexer::lex(text, source, version);
-        leek_parser::scan_class_names(text, &lexed.tokens)
-    }
-
-    /// Record `uri`'s class declarations and, if the project-wide
-    /// union changed, push it into every salsa input's
-    /// `extra_classes` (invalidating their parses). Pass `None` to
-    /// drop a removed file's contribution.
-    fn refresh_classes(&mut self, uri: &Url, names: Option<Vec<String>>) {
-        match names {
-            Some(n) => {
-                self.class_names.insert(uri.clone(), n);
-            }
-            None => {
-                self.class_names.remove(uri);
-            }
-        }
-        self.rebuild_class_union();
-    }
-
-    /// Recompute the union of all files' class names and push it into
-    /// the salsa inputs when it changed.
-    fn rebuild_class_union(&mut self) {
-        let mut union: Vec<String> = self
-            .class_names
-            .values()
-            .flat_map(|v| v.iter().cloned())
-            .collect();
-        union.sort();
-        union.dedup();
-        if union == self.class_union {
-            return;
-        }
-        self.class_union = union;
-        for doc in self.docs.values() {
-            doc.source_file
-                .set_extra_classes(&mut self.db)
-                .to(self.class_union.clone());
-        }
-        for indexed in self.indexed.values() {
-            indexed
-                .source_file
-                .set_extra_classes(&mut self.db)
-                .to(self.class_union.clone());
-        }
-    }
-
     /// Stash the semantic tokens just computed for `uri` under a fresh
     /// `result_id` and return that id. The next `…/full/delta` request
     /// that cites this id can diff against the stored tokens. Only the
@@ -658,9 +573,6 @@ impl Workspace {
     pub fn rename_file(&mut self, old: &Url, new: &Url) {
         if let Some(handle) = self.docs.remove(old) {
             self.docs.insert(new.clone(), handle);
-        }
-        if let Some(classes) = self.class_names.remove(old) {
-            self.class_names.insert(new.clone(), classes);
         }
         self.semantic_tokens_cache.remove(old);
         if let (Some(old_path), Some(new_path)) = (uri_to_path(old), uri_to_path(new)) {
@@ -702,10 +614,9 @@ impl Workspace {
         }
     }
 
-    /// Re-read `uri`'s indexed entry from disk and refresh its classes.
-    /// Returns `false` — leaving the workspace untouched — when `uri` is
-    /// not an indexed file or its text can't be read, so the caller can
-    /// fall back to dropping the file's state.
+    /// Re-read `uri`'s indexed entry from disk. Returns `false` —
+    /// leaving the workspace untouched — when `uri` is not an indexed
+    /// file or its text can't be read.
     ///
     /// Leaves the derived caches to the caller: `close` resyncs once for
     /// the whole close, reload or not.
@@ -725,10 +636,7 @@ impl Workspace {
         let source_file = indexed.source_file;
         let lang = self.settle(Some(&path), &arc_text);
         self.apply_language(source_file, lang);
-        let source = source_file.source(&self.db);
-        let classes = Self::scan_classes(&arc_text, source, lang.version);
         source_file.set_text(&mut self.db).to(arc_text);
-        self.refresh_classes(uri, Some(classes));
         true
     }
 
@@ -745,24 +653,11 @@ impl Workspace {
         if let Some(path) = uri_to_path(uri) {
             self.indexed.remove(&path);
         }
-        let open = self
-            .docs
-            .get(uri)
-            .map(|doc| (Arc::clone(&doc.text), doc.source_file));
-        // Still open: the buffer is now the file's only text, so its
-        // classes stay in the union — rescanned from the buffer, since
-        // the indexed entry that held the disk copy is gone. Not open:
-        // the file contributes nothing any more.
-        if let Some((text, source_file)) = open {
-            let classes = Self::scan_classes(
-                &text,
-                source_file.source(&self.db),
-                source_file.version_byte(&self.db),
-            );
-            self.refresh_classes(uri, Some(classes));
-        } else {
+        // An open buffer is now the file's only text and stays live;
+        // nothing else is left of a file that is neither open nor on
+        // disk, so its delta baseline goes with it.
+        if !self.docs.contains_key(uri) {
             self.semantic_tokens_cache.remove(uri);
-            self.refresh_classes(uri, None);
         }
         self.resync();
     }
@@ -942,19 +837,17 @@ mod tests {
         ws.open(uri.clone(), "class Scratch {}\n".into());
         let result_id = ws.cache_semantic_tokens(&uri, Vec::new());
         assert!(ws.semantic_tokens_baseline(&uri, &result_id).is_some());
-        assert_eq!(ws.class_union, vec!["Scratch".to_string()]);
 
         ws.close(&uri);
 
         assert!(ws.docs.is_empty());
         assert!(ws.semantic_tokens_cache.is_empty());
         assert!(ws.semantic_tokens_baseline(&uri, &result_id).is_none());
-        assert!(ws.class_names.is_empty());
-        assert!(ws.class_union.is_empty());
+        assert!(ws.analysis_targets().is_empty());
     }
 
     #[test]
-    fn closing_an_indexed_file_restores_its_disk_classes() {
+    fn closing_an_indexed_file_restores_its_disk_text() {
         let root = temp_root();
         fs::create_dir_all(&root).expect("create project");
         let main = root.join("main.leek");
@@ -965,24 +858,24 @@ mod tests {
         let path = main.canonicalize().expect("canonical entry");
         let uri = path_to_uri(&path);
 
-        // An unsaved buffer replaces the file's classes while it is open.
+        // An unsaved buffer replaces the file's text while it is open.
         ws.open(uri.clone(), "class InBuffer {}\n".into());
         let result_id = ws.cache_semantic_tokens(&uri, Vec::new());
-        assert_eq!(ws.class_union, vec!["InBuffer".to_string()]);
+        assert_eq!(ws.indexed[&path].text.as_ref(), "class InBuffer {}\n");
 
         ws.close(&uri);
-        let union = ws.class_union.clone();
+        let text = ws.indexed[&path].text.to_string();
         let targets = ws.analysis_targets().len();
         let baseline = ws.semantic_tokens_baseline(&uri, &result_id);
         fs::remove_dir_all(&root).expect("remove project");
 
         // The buffer's state is gone, but the file is still a project file.
         assert!(baseline.is_none());
-        assert_eq!(union, vec!["OnDisk".to_string()]);
+        assert_eq!(text, "class OnDisk {}\n");
         assert_eq!(targets, 1);
     }
 
-    /// Mirror of `closing_an_indexed_file_restores_its_disk_classes`
+    /// Mirror of `closing_an_indexed_file_restores_its_disk_text`
     /// from the other side: the disk copy goes, the live buffer stays.
     #[test]
     fn disk_delete_keeps_an_open_buffer_editable() {
@@ -1002,15 +895,15 @@ mod tests {
         // The tab is still live, so a later edit must still land.
         ws.update(&uri, "// @version:2\nclass Edited {}\n".into());
 
-        let union = ws.class_union.clone();
         let still_open = ws.doc(&uri).is_some();
         let indexed = ws.indexed.len();
         let version = ws.doc(&uri).map(|doc| doc.source_file.version_byte(&ws.db));
+        let text = ws.doc(&uri).map(|doc| doc.text.to_string());
         fs::remove_dir_all(&root).expect("remove project");
 
         assert!(still_open, "the open buffer must survive a disk delete");
         assert_eq!(indexed, 0, "the project's copy is gone");
-        assert_eq!(union, vec!["Edited".to_string()]);
+        assert_eq!(text.as_deref(), Some("// @version:2\nclass Edited {}\n"));
         assert_eq!(version, Some(2), "the edit re-settled the buffer");
     }
 
@@ -1025,22 +918,17 @@ mod tests {
         ws.index_project_at(&root);
         let path = main.canonicalize().expect("canonical entry");
         let uri = path_to_uri(&path);
-        assert_eq!(ws.class_union, vec!["OnDisk".to_string()]);
+        assert_eq!(ws.analysis_targets().len(), 1);
 
         fs::remove_file(&main).expect("delete entry");
         ws.remove_from_disk(&uri);
 
-        let union = ws.class_union.clone();
         let indexed = ws.indexed.len();
         let targets = ws.analysis_targets().len();
         fs::remove_dir_all(&root).expect("remove project");
 
         assert_eq!(indexed, 0);
-        assert_eq!(targets, 0);
-        assert!(
-            union.is_empty(),
-            "a file that is gone contributes no classes"
-        );
+        assert_eq!(targets, 0, "a file that is gone is analyzed no more");
     }
 
     fn write_manifest(root: &Path, name: &str, language: u8) {
