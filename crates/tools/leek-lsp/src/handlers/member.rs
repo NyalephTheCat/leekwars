@@ -39,7 +39,7 @@ pub(crate) fn field_access_at(root: &SyntaxNode, offset: u32) -> Option<(FieldEx
 /// `Class.member` — the receiver name itself when it names a class.
 pub(crate) fn base_class_name(
     root: &SyntaxNode,
-    resolve_art: Option<&leek_resolver::pipeline::ResolveArtifact>,
+    resolved: &leek_db::queries::ResolveArtifact,
     table: &leek_types::TypeTable,
     base: &Expr,
 ) -> Option<String> {
@@ -57,7 +57,7 @@ pub(crate) fn base_class_name(
     // A plain `var c = new Cat()` isn't recorded with a type at its use
     // sites in non-strict mode, but its initializer *is* typed. Resolve
     // the receiver to its declaration and read the init type.
-    if let Some(name) = receiver_class_via_decl(root, resolve_art, table, start) {
+    if let Some(name) = receiver_class_via_decl(root, resolved, table, start) {
         return Some(name);
     }
     // Static receiver: `Animal.make()` — `Animal` is a class name, not
@@ -84,13 +84,12 @@ pub(crate) fn base_class_name(
 /// from the declaration's initializer type (`var c = new Cat()`).
 fn receiver_class_via_decl(
     root: &SyntaxNode,
-    resolve_art: Option<&leek_resolver::pipeline::ResolveArtifact>,
+    resolved: &leek_db::queries::ResolveArtifact,
     table: &leek_types::TypeTable,
     base_start: u32,
 ) -> Option<String> {
-    let art = resolve_art?;
-    let r = art.table.reference_at(base_start)?;
-    let sym = art.table.symbol(r.target)?;
+    let r = resolved.table.reference_at(base_start)?;
+    let sym = resolved.table.symbol(r.target)?;
     let entry = initializer_type(root, table, sym.def_span.start)?;
     class_name_of_type(&entry.ty)
 }

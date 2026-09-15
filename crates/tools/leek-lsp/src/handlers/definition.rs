@@ -11,6 +11,7 @@
 //! isolation, so cross-file references never bind locally; the
 //! program-scope search closes that gap.
 
+use leek_db::SourceFile;
 use leek_span::Span;
 use leek_syntax::SyntaxNode;
 use tower_lsp::lsp_types as lsp;
@@ -27,10 +28,8 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    // TypeChecked (not just Resolved): a member access needs the type
-    // table to resolve its receiver's class.
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
 
     // 1. Same-file: the cursor may be on a use OR on a declaration
     //    itself. Try the references list first, then fall back to a
@@ -47,7 +46,7 @@ pub fn handle(
 
     // 2. Member access: the resolver records no references for member
     //    names, so resolve `recv.member` through the receiver's class.
-    if let Some((start, end)) = member_definition(&run, &root, offset) {
+    if let Some((start, end)) = member_definition(ws, doc.source_file, &resolved, &root, offset) {
         let span = Span::new(doc.source_file_source_id(&ws.db), start, end);
         return Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
             uri: uri.clone(),
@@ -60,13 +59,25 @@ pub fn handle(
     let name = crate::handlers::ident_name_at(&root, offset)?;
     let (file, sym) = crate::handlers::find_top_level_decl(ws, uri, &name)?;
 
-    let text = file.source_file.text(&ws.db);
-    let line_table = leek_span::LineTable::new(text);
-    let range = PosMap::new(&line_table, text).span_range(sym.def_span);
+    let range = decl_range(ws, file.source_file, sym.def_span);
     Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
         uri: file.uri,
         range,
     }))
+}
+
+/// `def_span` as an LSP range in `source_file`'s own text.
+///
+/// Takes the workspace's already-built line table when it holds the file
+/// — the declaring file is normally one of its analysis targets — and
+/// only scans the text itself for a file it does not.
+fn decl_range(ws: &Workspace, source_file: SourceFile, def_span: Span) -> lsp::Range {
+    if let Some(pos_map) = ws.pos_map_for(source_file) {
+        return pos_map.span_range(def_span);
+    }
+    let text = source_file.text(&ws.db);
+    let line_table = leek_span::LineTable::new(text);
+    PosMap::new(&line_table, text).span_range(def_span)
 }
 
 /// Resolve the member access under the cursor to its declaration's
@@ -75,15 +86,19 @@ pub fn handle(
 /// token — their range is the `constructor` keyword (the
 /// declaration's first token).
 fn member_definition(
-    run: &leek_pipeline::Run<'_>,
+    ws: &Workspace,
+    source_file: SourceFile,
+    resolved: &leek_db::queries::ResolveArtifact,
     root: &SyntaxNode,
     offset: u32,
 ) -> Option<(u32, u32)> {
-    let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
-    let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>();
     let (field_expr, field_tok) = member::field_access_at(root, offset)?;
     let base = field_expr.base()?;
-    let class = member::base_class_name(root, resolve_art, &type_art.table, &base)?;
+    // The type table is asked for only once the cursor is known to sit
+    // on a member access — the handler's first two tiers never need it,
+    // and they answer the common case.
+    let typed = crate::analysis::typed(&ws.db, source_file);
+    let class = member::base_class_name(root, resolved, &typed.table, &base)?;
     let decl = member::find_member_in_chain(root, &class, field_tok.text())?;
     let r = member::member_decl_name_token(&decl)
         .map(|t| t.text_range())

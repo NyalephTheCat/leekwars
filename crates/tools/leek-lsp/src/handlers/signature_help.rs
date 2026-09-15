@@ -24,15 +24,13 @@ use tower_lsp::lsp_types as lsp;
 
 use super::member;
 use crate::workspace::Workspace;
+use leek_db::SourceFile;
 use leek_ide::signature::signature_for;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp::SignatureHelp> {
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    // TypeChecked (not just Resolved): a method callee needs the type
-    // table to resolve its receiver's class.
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Find the smallest CallExpr whose ArgList covers the cursor.
@@ -50,14 +48,14 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
                 .find(|t| t.kind() == SyntaxKind::Ident)?;
             let callee_name = callee_ident.text().to_string();
             // Render the signature. Try user fns first, then builtins.
-            resolve_user_function(&run, &root, &callee_name)
+            resolve_user_function(ws, doc.source_file, &root, &callee_name)
                 .or_else(|| resolve_builtin(&callee_name))
                 .unwrap_or_else(|| (format!("{callee_name}(...)"), Vec::new()))
         } else {
             let field_node = call
                 .children()
                 .find(|c| c.kind() == SyntaxKind::FieldExpr)?;
-            resolve_method(&run, &root, &field_node)?
+            resolve_method(ws, doc.source_file, &root, &field_node)?
         };
 
     let active_parameter = if parameters.is_empty() {
@@ -138,12 +136,13 @@ fn bump_depth(t: &SyntaxToken, depth: &mut i32) {
 /// label and the per-parameter sub-ranges (so the editor can
 /// underline the active parameter).
 fn resolve_user_function(
-    run: &leek_pipeline::Run<'_>,
+    ws: &Workspace,
+    source_file: SourceFile,
     root: &SyntaxNode,
     name: &str,
 ) -> Option<(String, Vec<lsp::ParameterInformation>)> {
-    let art = run.get::<leek_resolver::pipeline::ResolveArtifact>()?;
-    let sym = art
+    let resolved = crate::analysis::resolved(&ws.db, source_file);
+    let sym = resolved
         .table
         .symbols
         .iter()
@@ -161,21 +160,22 @@ fn resolve_user_function(
 /// chain. Always returns *something* for a well-formed FieldExpr —
 /// an unresolvable method degrades to a `name(...)` placeholder.
 fn resolve_method(
-    run: &leek_pipeline::Run<'_>,
+    ws: &Workspace,
+    source_file: SourceFile,
     root: &SyntaxNode,
     field_node: &SyntaxNode,
 ) -> Option<(String, Vec<lsp::ParameterInformation>)> {
     let f = FieldExpr::cast(field_node.clone())?;
     let field_tok = f.field()?;
     let name = field_tok.text().to_string();
-    let member_node = run
-        .get::<leek_types::pipeline::TypeCheckArtifact>()
-        .and_then(|type_art| {
-            let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>();
-            let base = f.base()?;
-            let class = member::base_class_name(root, resolve_art, &type_art.table, &base)?;
-            member::find_member_in_chain(root, &class, &name)
-        });
+    // The type table (not just the resolve table) is what carries the
+    // receiver's class — this is the one callee shape that needs it.
+    let member_node = f.base().and_then(|base| {
+        let resolved = crate::analysis::resolved(&ws.db, source_file);
+        let typed = crate::analysis::typed(&ws.db, source_file);
+        let class = member::base_class_name(root, &resolved, &typed.table, &base)?;
+        member::find_member_in_chain(root, &class, &name)
+    });
     match member_node.as_ref().and_then(signature_for) {
         Some(label) => {
             let parameters = parameters_in_label(&label);
