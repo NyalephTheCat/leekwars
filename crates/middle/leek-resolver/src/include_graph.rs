@@ -63,7 +63,11 @@ pub struct IncludeGraphResult {
 }
 
 /// One `include("…")` call site in an includer file.
-#[derive(Debug, Clone)]
+///
+/// Comparable and `salsa::Update`-able so it can ride inside a tracked
+/// query's return value — see `leek_db::queries::include_graph`.
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncludeSite {
     pub includer: PathBuf,
     pub span: Span,
@@ -280,17 +284,26 @@ pub fn build_include_graph(
     }
 }
 
-/// One `include(...)` call extracted from a file.
-struct IncludeCall {
-    name: String,
-    span: Span,
+/// One `include(...)` call extracted from a file: the name as written,
+/// without its quotes, and the span of the string literal it came from.
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeCall {
+    pub name: String,
+    pub span: Span,
 }
 
 /// What one lex of a file tells the walk: where it includes from and
 /// what classes it declares.
-struct FileScan {
-    includes: Vec<IncludeCall>,
-    classes: Vec<String>,
+///
+/// This is the unit of work the memoized include graph is built from
+/// (`leek_db::queries::include_edges`), which is why it is comparable
+/// and `salsa::Update`-able.
+#[cfg_attr(feature = "salsa", derive(salsa::Update))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncludeEdges {
+    pub includes: Vec<IncludeCall>,
+    pub classes: Vec<String>,
 }
 
 /// Token-level scan for `include("…")` and `class IDENT`. Uses the
@@ -303,13 +316,31 @@ struct FileScan {
 /// this scan sees is lexed again by the parse that follows, and that
 /// parse reports them. Keeping them here would double every lex
 /// diagnostic in an included file.
-fn scan_file(text: &str, source: SourceId, version: Version) -> FileScan {
-    let mut includes: Vec<IncludeCall> = Vec::new();
+fn scan_file(text: &str, source: SourceId, version: Version) -> IncludeEdges {
     let lexed = lex(text, source, version);
+    scan_include_edges(text, &lexed.tokens)
+}
+
+/// The include sites and class declarations `tokens` (a lex of `text`)
+/// contains.
+///
+/// Split out of [`scan_file`] so the tracked
+/// `leek_db::queries::include_edges` can run the *same* scan over the
+/// memoized `lex_query` token stream instead of lexing again. The walk
+/// below and the query therefore cannot drift on what counts as an
+/// include site.
+///
+/// **Token level, never parse level.** Reading includes off a parse
+/// tree would make the include graph depend on the parse, and the
+/// parse already depends on the graph for the program-wide class set —
+/// a cycle. Tokens break it.
+#[must_use]
+pub fn scan_include_edges(text: &str, tokens: &[leek_syntax::Token]) -> IncludeEdges {
+    let mut includes: Vec<IncludeCall> = Vec::new();
     // Walk a small state machine: KwInclude, LParen, StringLiteral,
     // optional RParen. Whitespace + comments are skipped via
     // `is_trivia`.
-    let mut iter = lexed.tokens.iter().filter(|t| !t.kind.is_trivia());
+    let mut iter = tokens.iter().filter(|t| !t.kind.is_trivia());
     while let Some(t) = iter.next() {
         if t.kind != SyntaxKind::KwInclude {
             continue;
@@ -330,9 +361,9 @@ fn scan_file(text: &str, source: SourceId, version: Version) -> FileScan {
             }
         }
     }
-    FileScan {
+    IncludeEdges {
         includes,
-        classes: leek_parser::scan_class_names(text, &lexed.tokens),
+        classes: leek_parser::scan_class_names(text, tokens),
     }
 }
 

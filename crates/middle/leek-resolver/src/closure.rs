@@ -139,35 +139,12 @@ pub fn resolve_include_closure(
                 .with_flags(flags)
                 .with_extra_classes(&class_names),
         );
-        // The parse always yields a tree — error recovery builds
-        // `ErrorNode`s inside the `SourceFile` root rather than failing
-        // the root cast — so a broken include is only visible in the
-        // diagnostics. Report the chain at the `include(...)` site too,
-        // otherwise the entry file's author sees errors pointing only
-        // into a file they may not have open. Errors only: a lint in an
-        // included file must not mark the include site.
-        if parsed
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == Severity::Error)
-        {
-            match graph.include_sites.get(&path) {
-                Some(sites) => diagnostics.extend(sites.iter().map(|site| {
-                    diag!(
-                        codes::INCLUDE_PARSE_FAILED,
-                        site.span,
-                        "included file `{}` failed to parse",
-                        path.display(),
-                    )
-                })),
-                None => diagnostics.push(diag!(
-                    codes::INCLUDE_PARSE_FAILED,
-                    Span::new(source, 0, 0),
-                    "included file `{}` failed to parse",
-                    path.display(),
-                )),
-            }
-        }
+        diagnostics.extend(include_parse_failures(
+            &path,
+            source,
+            graph.include_sites.get(&path).map(Vec::as_slice),
+            &parsed.diagnostics,
+        ));
         diagnostics.extend(parsed.diagnostics);
         files.push(ClosureFile {
             source,
@@ -189,6 +166,58 @@ pub fn resolve_include_closure(
         },
         diagnostics,
     )
+}
+
+/// The [`INCLUDE_PARSE_FAILED`](codes::INCLUDE_PARSE_FAILED)
+/// diagnostics an included file's parse earns: one per `include("…")`
+/// site that reaches it, or one anchored on the file itself when the
+/// graph recorded no site for it.
+///
+/// The parse always yields a tree — error recovery builds `ErrorNode`s
+/// inside the `SourceFile` root rather than failing the root cast — so
+/// a broken include is only visible in `parse_diagnostics`. Reporting
+/// the chain at the `include(...)` site too is what keeps the entry
+/// file's author from seeing errors that point only into a file they
+/// may not have open. Errors only: a lint in an included file must not
+/// mark the include site.
+///
+/// Split out of [`resolve_include_closure`] so the memoized path can
+/// re-derive exactly these diagnostics from its cached parses — see
+/// `leek_db::queries::include_parse_failures`. A diagnostic produced
+/// once while a cache is filled and never again is the failure this
+/// sharing exists to prevent.
+#[must_use]
+pub fn include_parse_failures(
+    path: &Path,
+    source: SourceId,
+    sites: Option<&[IncludeSite]>,
+    parse_diagnostics: &[Diagnostic],
+) -> Vec<Diagnostic> {
+    if !parse_diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error)
+    {
+        return Vec::new();
+    }
+    match sites {
+        Some(sites) => sites
+            .iter()
+            .map(|site| {
+                diag!(
+                    codes::INCLUDE_PARSE_FAILED,
+                    site.span,
+                    "included file `{}` failed to parse",
+                    path.display(),
+                )
+            })
+            .collect(),
+        None => vec![diag!(
+            codes::INCLUDE_PARSE_FAILED,
+            Span::new(source, 0, 0),
+            "included file `{}` failed to parse",
+            path.display(),
+        )],
+    }
 }
 
 #[cfg(test)]

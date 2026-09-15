@@ -18,6 +18,9 @@ leek-parser      = { workspace = true, features = ["salsa"] }
 leek-resolver    = { workspace = true, features = ["salsa"] }
 leek-types       = { workspace = true, features = ["salsa"] }
 leek-pipeline    = { workspace = true, features = ["salsa"] }
+# The query façade. Program scope is an include-graph question, and the
+# include-graph queries live there; tools -> db is a downward edge.
+leek-db          = { workspace = true }
 leek-session     = { workspace = true }
 leek-fmt         = { workspace = true, features = ["salsa"] }
 leek-rewrite     = { workspace = true }

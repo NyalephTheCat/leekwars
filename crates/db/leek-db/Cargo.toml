@@ -12,6 +12,13 @@ description = "The query façade: one salsa database and every tracked query und
 # their queries against `leek_pipeline::salsa::Db`, so the opposite edge would
 # be a cycle.
 leek-pipeline    = { workspace = true, features = ["salsa"] }
+# The include-graph queries this crate owns are written against salsa
+# directly, and build their values out of core types that need salsa's
+# `Update` — hence the explicit `salsa` features here rather than relying
+# on another crate's to unify them on.
+salsa            = "0.26"
+leek-span        = { workspace = true, features = ["salsa"] }
+leek-diagnostics = { workspace = true, features = ["salsa"] }
 # Every pass crate that ships a tracked query, each with its own `salsa`
 # feature on so the query exists to re-export. No tools-layer crate appears
 # here: `leek-fmt`'s `format_query` stays in `leek-fmt`, which depends *down*

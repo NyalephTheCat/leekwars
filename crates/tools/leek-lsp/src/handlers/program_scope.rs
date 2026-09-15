@@ -25,11 +25,10 @@
 //! approach would wrongly merge.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 
+use leek_db::queries::{IncludeRef, include_edges, resolve_include};
+use leek_db::{Db, WorkspaceFiles};
 use leek_pipeline::salsa::SourceFile;
-use leek_span::paths::normalize_lexical;
-use leek_syntax::{SyntaxKind, SyntaxNode, language::NodeOrToken};
 use tower_lsp::lsp_types::Url;
 
 use crate::workspace::{Workspace, uri_to_path};
@@ -46,8 +45,10 @@ pub(crate) struct ScopeFile {
 /// home file when it has no filesystem path (an untitled buffer, where
 /// include resolution is meaningless).
 pub(crate) fn program_scope(ws: &Workspace, home_uri: &Url) -> Vec<ScopeFile> {
-    // Index every workspace file by its normalized path.
-    let mut by_path: HashMap<PathBuf, ScopeFile> = HashMap::new();
+    // Index every workspace file by the canonical path its salsa input
+    // carries — the same key `WorkspaceFiles` is built with, so a file
+    // `resolve_include` hands back is always a file this map holds.
+    let mut by_path: HashMap<String, ScopeFile> = HashMap::new();
     let mut home_file: Option<ScopeFile> = None;
     for t in ws.analysis_targets() {
         let sf = ScopeFile {
@@ -57,12 +58,12 @@ pub(crate) fn program_scope(ws: &Workspace, home_uri: &Url) -> Vec<ScopeFile> {
         if &t.uri == home_uri {
             home_file = Some(sf.clone());
         }
-        if let Some(p) = uri_to_path(&t.uri) {
-            by_path.insert(normalize_lexical(&p), sf);
+        if !t.canonical_path.is_empty() {
+            by_path.insert(t.canonical_path.clone(), sf);
         }
     }
 
-    let Some(home_path) = uri_to_path(home_uri).map(|p| normalize_lexical(&p)) else {
+    let Some(home_path) = uri_to_path(home_uri).map(|p| p.display().to_string()) else {
         return home_file.into_iter().collect();
     };
     if !by_path.contains_key(&home_path) {
@@ -70,16 +71,18 @@ pub(crate) fn program_scope(ws: &Workspace, home_uri: &Url) -> Vec<ScopeFile> {
     }
 
     // Forward include edges: path → the paths it directly includes.
-    let mut edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let db = &ws.db;
+    let files = ws.files();
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
     for (path, sf) in &by_path {
         edges.insert(
             path.clone(),
-            include_targets(ws, sf.source_file, path, &by_path),
+            include_targets(db, files, sf.source_file, path),
         );
     }
 
     // Union every forward closure that contains the home file.
-    let mut scope: HashSet<PathBuf> = HashSet::new();
+    let mut scope: HashSet<String> = HashSet::new();
     for start in by_path.keys() {
         let closure = forward_closure(&edges, start);
         if closure.contains(&home_path) {
@@ -95,9 +98,9 @@ pub(crate) fn program_scope(ws: &Workspace, home_uri: &Url) -> Vec<ScopeFile> {
 }
 
 /// `start` plus every file reachable from it through include edges.
-fn forward_closure(edges: &HashMap<PathBuf, Vec<PathBuf>>, start: &Path) -> HashSet<PathBuf> {
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut stack = vec![start.to_path_buf()];
+fn forward_closure(edges: &HashMap<String, Vec<String>>, start: &str) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack = vec![start.to_string()];
     while let Some(p) = stack.pop() {
         if !seen.insert(p.clone()) {
             continue;
@@ -113,64 +116,34 @@ fn forward_closure(edges: &HashMap<PathBuf, Vec<PathBuf>>, start: &Path) -> Hash
     seen
 }
 
-/// Resolve a file's `include("name")` statements to normalized
-/// workspace paths, mirroring the [`Folder`](leek_resolver::folder)
-/// resolution order (sibling `<dir>/<name>.leek`, then `<dir>/<name>`).
-/// Names that don't resolve to a known workspace file are dropped.
+/// The canonical paths of the workspace files a file directly
+/// `include`s, in source order and without repeats.
+///
+/// Both halves are tracked queries: [`include_edges`] reads the file's
+/// memoized token stream, [`resolve_include`] the workspace's file map.
+/// This used to be a second include-graph implementation — a full
+/// `Target::Parsed` pipeline run per workspace file, per references /
+/// rename / completion request, with its own copy of the folder's
+/// candidate order. Both are gone: there is one scan and one candidate
+/// order in the workspace now, and repeat requests hit the memo.
 fn include_targets(
-    ws: &Workspace,
+    db: &dyn Db,
+    files: WorkspaceFiles,
     source_file: SourceFile,
-    includer: &Path,
-    by_path: &HashMap<PathBuf, ScopeFile>,
-) -> Vec<PathBuf> {
-    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_session::Target::Parsed)
-    else {
-        return Vec::new();
-    };
-    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-        return Vec::new();
-    };
-    let root = SyntaxNode::new_root(green.0.clone());
-    let dir = includer.parent().map(Path::to_path_buf).unwrap_or_default();
-
-    let mut out: Vec<PathBuf> = Vec::new();
-    for node in root.descendants() {
-        if node.kind() != SyntaxKind::IncludeStmt {
-            continue;
-        }
-        let Some(name) = include_name(&node) else {
+    includer: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for call in include_edges(db, source_file).includes {
+        let site = IncludeRef::new(db, includer.to_string(), call.name);
+        let Some(target) = resolve_include(db, files, site) else {
             continue;
         };
-        let with_ext = normalize_lexical(&dir.join(format!("{name}.leek")));
-        let bare = normalize_lexical(&dir.join(&name));
-        let resolved = if by_path.contains_key(&with_ext) {
-            Some(with_ext)
-        } else if by_path.contains_key(&bare) {
-            Some(bare)
-        } else {
-            None
-        };
-        if let Some(p) = resolved
-            && !out.contains(&p)
-        {
-            out.push(p);
+        let path = target.canonical_path(db).clone();
+        if !out.contains(&path) {
+            out.push(path);
         }
     }
     out
-}
-
-/// The unquoted name of the first string literal under an
-/// `include(...)` statement.
-fn include_name(include_stmt: &SyntaxNode) -> Option<String> {
-    let tok = include_stmt
-        .descendants_with_tokens()
-        .filter_map(NodeOrToken::into_token)
-        .find(|t| t.kind() == SyntaxKind::StringLiteral)?;
-    let raw = tok.text();
-    if raw.len() < 2 {
-        return None;
-    }
-    Some(raw[1..raw.len() - 1].to_string())
 }
 
 #[cfg(test)]
