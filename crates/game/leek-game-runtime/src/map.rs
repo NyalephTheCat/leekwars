@@ -1254,6 +1254,74 @@ impl Map {
 
     // ── "Away" path helpers ──────────────────────────────────────────────────
 
+    /// `Map.getPathAway(start, badCells, maxDistance)` — the flee heuristic
+    /// behind `moveAwayFrom`/`moveAwayFromCell`.
+    ///
+    /// It is *not* "`getAStarPath` run backwards". Java picks a destination
+    /// first and then paths to it:
+    ///
+    /// 1. Measure `getDistance2(start, badCells)` — the minimum **squared
+    ///    Euclidean** distance from the start to the set to flee (not the
+    ///    board-step distance A\* minimises).
+    /// 2. Enumerate every cell of the `generateCircleMask(1, maxDistance)`
+    ///    ring stamped on the start, keeping the ones that exist, are
+    ///    `Cell.available` (walkable *and* unoccupied) and
+    ///    whose own squared distance to the set is **strictly greater** than
+    ///    the start's. No candidate ⇒ `None` (and the entity does not move).
+    /// 3. Sort those candidates by that distance, descending. Java's
+    ///    `Collections.sort` is stable and its comparator answers `0` for a
+    ///    tie, so equal-distance candidates keep mask order — `sort_by` is
+    ///    stable too, so the tie-break ports for free.
+    /// 4. Walk the sorted list and return the **first** candidate that A\*
+    ///    can reach in at most `max_distance` steps. A candidate A\* cannot
+    ///    reach, or reaches only by a path longer than the budget, is
+    ///    skipped — so the answer is the furthest *reachable* cell, and the
+    ///    returned path is never truncated by the caller.
+    ///
+    /// Note the mask radius is a *step* radius while the ranking is
+    /// Euclidean, so the two metrics deliberately disagree: a candidate 3
+    /// steps away diagonally can outrank one 4 steps away in a straight
+    /// line. That is the reference behaviour.
+    #[must_use]
+    pub fn get_path_away(
+        &mut self,
+        start: usize,
+        bad_cells: &[usize],
+        max_distance: i32,
+    ) -> Option<Vec<usize>> {
+        let current_distance = self.get_distance2_to_set(start, bad_cells);
+        let mask = generate_circle_mask(1, max_distance)?;
+        let (x, y) = (self.cells[start].x, self.cells[start].y);
+
+        let mut potential_targets: Vec<(usize, i32)> = Vec::new();
+        for [mx, my] in mask {
+            let Some(c) = self.get_cell_xy(x + mx, y + my) else {
+                continue;
+            };
+            if !self.cell_available(c) {
+                continue;
+            }
+            let distance = self.get_distance2_to_set(c, bad_cells);
+            if distance > current_distance {
+                potential_targets.push((c, distance));
+            }
+        }
+        if potential_targets.is_empty() {
+            return None;
+        }
+        // Descending by distance; `sort_by` is stable, like `Collections.sort`.
+        potential_targets.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (cell, _) in potential_targets {
+            if let Some(path) = self.get_astar_path(start, &[cell], &[])
+                && i32::try_from(path.len()).is_ok_and(|len| len <= max_distance)
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     /// `Map.getDistance2(Cell, List<Cell>)` — minimum squared Euclidean
     /// distance from `cell` to any cell in `cells`.
     #[must_use]

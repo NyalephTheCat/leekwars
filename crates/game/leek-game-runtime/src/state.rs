@@ -102,10 +102,13 @@ impl Stats {
 // Fighter  (state/Entity.java, fight-relevant core, leek scope)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `Entity.SAY_LIMIT_TURN`.
+/// `Entity.SAY_LIMIT_TURN` — how many `say()` calls per entity per turn make
+/// it into the report. The (n+1)-th still costs its TP; see [`State::say`].
 pub const SAY_LIMIT_TURN: i32 = 2;
 /// `Entity.SHOW_LIMIT_TURN`.
 pub const SHOW_LIMIT_TURN: i32 = 5;
+/// `EntityClass.SAY_LENGTH_LIMIT` — a longer `say()` message is truncated.
+pub const SAY_LENGTH_LIMIT: usize = 100;
 
 /// `State.MAX_TURNS`.
 pub const MAX_TURNS: i32 = 64;
@@ -412,6 +415,33 @@ impl Fighter {
         self.shows_turn = 0;
         self.item_uses.clear();
     }
+}
+
+/// `EntityClass.say`'s length cut: keep the first [`SAY_LENGTH_LIMIT`]
+/// characters of `message`, or all of it when it is already short enough.
+///
+/// Java measures and cuts in **UTF-16 code units** (`String.length()` /
+/// `substring`). This counts the same units but only ever cuts on a `char`
+/// boundary, so the one input the two disagree about is a message whose
+/// 100-unit mark falls inside a surrogate pair: Java keeps the lone high
+/// surrogate, which a Rust `String` cannot even hold. Everything an AI
+/// realistically says — and every message that is pure BMP, astral emoji
+/// included as long as they don't straddle the cut — truncates identically.
+fn truncate_say(message: &str) -> String {
+    // The fast path is also the only path for ASCII: `len()` bytes >= UTF-16
+    // units, so a short byte length proves a short message.
+    if message.len() <= SAY_LENGTH_LIMIT {
+        return message.to_owned();
+    }
+    let mut units = 0usize;
+    for (offset, c) in message.char_indices() {
+        let next = units + c.len_utf16();
+        if next > SAY_LENGTH_LIMIT {
+            return message[..offset].to_owned();
+        }
+        units = next;
+    }
+    message.to_owned()
 }
 
 /// `Entity.decrementOrRemove` — shared by entity and team cooldowns.
@@ -1430,6 +1460,132 @@ impl State {
             }
             None => 0,
         }
+    }
+
+    /// `FightClass.moveAwayFrom(leek_id, pm_to_use)` — flee an entity.
+    ///
+    /// Unlike its `moveToward` twin this one lives on `FightClass` in the
+    /// reference, not on `State`; it is here so the two directions sit
+    /// together and the builtin arm stays a one-liner. Same budget handling
+    /// (`-1` = all MP, Java's `(int)` narrowing, then the clamp to MP), same
+    /// [`move_entity`](Self::move_entity) logging and MP spend — but the
+    /// destination comes from [`Map::get_path_away`], the ranked flee
+    /// heuristic, and Java applies **no** `subList` truncation here because
+    /// `getPathAway` already bounds the path by the budget.
+    ///
+    /// The target is skipped when it has no cell. That covers the dead: a
+    /// death runs `Map.removeEntity`, which does `entity.setCell(null)`, so
+    /// Java needs no explicit `isDead` check here (and doesn't have one,
+    /// where `State.moveToward` does).
+    // Same `(int)` narrowing of the AI-supplied budget as `move_toward`;
+    // see the note there.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn move_away_from(&mut self, fid: usize, leek_id: i64, pm_to_use: i64) -> i64 {
+        let mp = self.fighters[fid].mp();
+        let mut pm = if pm_to_use == -1 {
+            mp
+        } else {
+            pm_to_use as i32
+        };
+        if pm > mp {
+            pm = mp;
+        }
+        if pm <= 0 {
+            return 0;
+        }
+        let target = usize::try_from(leek_id)
+            .ok()
+            .filter(|&t| t < self.fighters.len());
+        let Some(target) = target else { return 0 };
+        let (Some(start), Some(away_from)) = (self.fighters[fid].cell, self.fighters[target].cell)
+        else {
+            return 0;
+        };
+        match self.map.get_path_away(start, &[away_from], pm) {
+            Some(path) => self.move_entity(fid, &path),
+            None => 0,
+        }
+    }
+
+    /// `FightClass.moveAwayFromCell(cell_id, pm_to_use)` — flee a cell.
+    ///
+    /// [`move_away_from`](Self::move_away_from) with a cell for a target.
+    /// Note what is *absent* next to [`move_toward_cell`](Self::move_toward_cell):
+    /// no `target == start` early return (fleeing your own cell is a legal
+    /// request — every neighbour is strictly further away) and no
+    /// unwalkable-target detour through `getValidCellsAroundObstacle`, because
+    /// the target is only ever a distance reference, never a destination.
+    // Same `(int)` narrowing of the AI-supplied budget as `move_toward`;
+    // see the note there.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn move_away_from_cell(&mut self, fid: usize, cell_id: i64, pm_to_use: i64) -> i64 {
+        let mp = self.fighters[fid].mp();
+        let mut pm = if pm_to_use == -1 {
+            mp
+        } else {
+            pm_to_use as i32
+        };
+        if pm > mp {
+            pm = mp;
+        }
+        if pm <= 0 {
+            return 0;
+        }
+        let Some(start) = self.fighters[fid].cell else {
+            return 0;
+        };
+        // `i32::try_from` rather than `as i32`, to stay consistent with
+        // `move_toward_cell`'s existing resolution of the same argument.
+        let target = i32::try_from(cell_id)
+            .ok()
+            .and_then(|c| self.map.get_cell(c));
+        let Some(away_from) = target else { return 0 };
+        match self.map.get_path_away(start, &[away_from], pm) {
+            Some(path) => self.move_entity(fid, &path),
+            None => 0,
+        }
+    }
+
+    // ── Communication ────────────────────────────────────────────────────────
+
+    /// `EntityClass.say(message)` — costs 1 TP, logs an [`Action::Say`].
+    ///
+    /// The order of the two gates is Java's, and it is observable: the TP is
+    /// spent **before** the per-turn cap is tested, so the third `say()` of a
+    /// turn still burns 1 TP and then returns `false` with nothing logged.
+    /// The cap is [`SAY_LIMIT_TURN`] (2), counted on `Fighter::says_turn` and
+    /// reset by `Fighter::end_turn`.
+    ///
+    /// Not gated by the hook check: `EntityClass.say` has no
+    /// `denyDuringHook`, so an AI may talk from `beforeFight()`/`afterFight()`
+    /// — and does, which is why the hook transcripts carry says.
+    ///
+    /// Two pieces of the reference are deliberately not here:
+    /// * `Censorship.checkString` masks swear words against a word list the
+    ///   *server* injects via `Censorship.setSwearWords`. The standalone
+    ///   generator starts with an empty set, so it is the identity function
+    ///   (and consumes no RNG); there is no list to port.
+    /// * The message is also pushed onto every *other* living AI's `says`
+    ///   mailbox, which is what `listen()` reads back. That mailbox is
+    ///   per-AI, not per-entity, so it belongs with `listen` rather than
+    ///   here.
+    ///
+    /// The tab → four-spaces rewrite lives in `ActionSay.getJSON()` upstream,
+    /// and so in [`Action::Say`]'s serializer here — this stores the message
+    /// verbatim, exactly as `Fight.log(new ActionSay(message))` does.
+    pub fn say(&mut self, fid: usize, message: &str) -> bool {
+        if self.fighters[fid].tp() < 1 {
+            return false;
+        }
+        self.fighters[fid].use_tp(1);
+        if self.fighters[fid].says_turn >= SAY_LIMIT_TURN {
+            return false;
+        }
+        self.fighters[fid].says_turn += 1;
+        self.actions.log(Action::Say {
+            message: truncate_say(message),
+        });
+        true
     }
 
     // ── Weapons ──────────────────────────────────────────────────────────────
