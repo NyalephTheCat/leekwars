@@ -245,7 +245,7 @@ impl Emitter<'_> {
     /// fallback is [`Self::write_name_unshadowed`], wrapped in a ternary.
     pub(crate) fn write_name(&self, buf: &mut String, n: &NameRef, span: Span) {
         if let NameRef::Builtin(name) | NameRef::Unresolved(name) = n
-            && self.shadowed_builtins.borrow().contains(name)
+            && self.analysis.shadowed_builtins.contains(name)
         {
             buf.push_str("(__shadows.containsKey(\"");
             buf.push_str(name);
@@ -282,7 +282,7 @@ impl Emitter<'_> {
                     // `@`-ref param bound to a `Box` — read its current value.
                     buf.push_str(&mangled);
                     buf.push_str(".get()");
-                } else if self.boxed_locals.borrow().contains(id) {
+                } else if self.analysis.boxed_locals.contains(id) {
                     // Captured-and-written by a nested lambda → shared via a
                     // one-element `Object[]`; every read/write goes through `[0]`.
                     buf.push_str(&mangled);
@@ -897,7 +897,7 @@ impl Emitter<'_> {
             // map field on the AI class. v1 allows shadowing
             // builtin names; subsequent reads via `write_name`
             // see the user's value.
-            if self.shadowed_builtins.borrow().contains(name) {
+            if self.analysis.shadowed_builtins.contains(name) {
                 buf.push_str("__shadows.put(\"");
                 buf.push_str(name);
                 buf.push_str("\", ");
@@ -1025,7 +1025,7 @@ impl Emitter<'_> {
         // the write goes into the AI class's `__shadows` map, where
         // `write_name` reads it back.
         if let ExprKind::Name(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &target.kind
-            && self.shadowed_builtins.borrow().contains(name)
+            && self.analysis.shadowed_builtins.contains(name)
         {
             buf.push_str("__shadows.put(\"");
             buf.push_str(name);
@@ -1247,7 +1247,7 @@ impl Emitter<'_> {
         let mut total = 0;
         if let ExprKind::Call(c) = &e.kind
             && let Callee::Function(NameRef::Builtin(name) | NameRef::Unresolved(name)) = &c.callee
-            && self.shadowed_builtins.borrow().contains(name)
+            && self.analysis.shadowed_builtins.contains(name)
         {
             total += super::builtin_call_cost(name);
         }
