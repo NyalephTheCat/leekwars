@@ -8,6 +8,7 @@ description = "Compiler session: pre-built pipeline recipes plus the driver that
 
 [dependencies]
 leek-complexity  = { workspace = true, features = ["salsa"] }
+leek-config      = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-environment = { workspace = true }
 leek-fmt         = { workspace = true, features = ["salsa"] }

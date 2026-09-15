@@ -1460,6 +1460,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "leek-complexity",
+ "leek-config",
  "leek-diagnostics",
  "leek-environment",
  "leek-fmt",
@@ -1611,7 +1612,6 @@ dependencies = [
  "leek-mir",
  "leek-parser",
  "leek-pipeline",
- "leek-prelude",
  "leek-project",
  "leek-resolver",
  "leek-session",
