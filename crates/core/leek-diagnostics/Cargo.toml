@@ -11,7 +11,7 @@ build = "build.rs"
 leek-span     = { workspace = true }
 serde         = { workspace = true, optional = true }
 serde_json    = { workspace = true, optional = true }
-salsa     = { version = "0.26", optional = true }
+salsa         = { workspace = true }
 
 [build-dependencies]
 serde_yaml = "0.9"
@@ -22,10 +22,6 @@ serde_json = { workspace = true }
 [features]
 default = ["serde"]
 serde = ["dep:serde", "dep:serde_json"]
-# Adds `salsa::Update` derives to the diagnostic model so it can cross
-# a tracked-query return boundary. Pulls in `leek-span/salsa` for the
-# `Span` derive.
-salsa = ["dep:salsa", "leek-span/salsa"]
 
 [lints]
 workspace = true

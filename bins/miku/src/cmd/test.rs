@@ -35,7 +35,7 @@ use leek_backend_native::{NativeArtifact, NativeError};
 
 use leek_diagnostics::{Code, Severity};
 use leek_project::Project;
-use leek_session::{DriverConfig, RecipeParams, Session, Target};
+use leek_session::{CompileParams, DriverConfig, Session, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Test};
 
@@ -58,10 +58,13 @@ pub fn run(
     // resolution, so a test file may `include(...)` its helpers.
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default(),
+        params: CompileParams::default(),
         color: color.into(),
         format: format.into(),
-        timing: None,
+        // `scope` and `timing` stay at their defaults: every `miku`
+        // subcommand compiles the whole program, and only `build --verbose`
+        // wants timings.
+        ..DriverConfig::default()
     };
     // One session for the whole run: the reporter is built once, and every
     // test file and every helper any of them includes is numbered out of

@@ -13,7 +13,7 @@
 //! tracked query cannot see a generation counter move, so it could never be
 //! keyed on the registry.
 //!
-//! [`lower_hir_query`]: crate::pipeline::lower_hir_query
+//! [`lower_hir_query`]: crate::query::lower_hir_query
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};

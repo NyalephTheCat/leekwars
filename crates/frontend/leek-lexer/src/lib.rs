@@ -34,13 +34,13 @@ mod numbers;
 mod operators;
 mod strings;
 
-pub mod pipeline;
+pub mod query;
 
 /// Test-only probe: counts how many times `lex_query` actually executed
 /// (vs being served from the salsa cache). The mutex serializes the
 /// few tests that read the counter so concurrent execution doesn't
 /// blur their measurements.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 pub(crate) mod salsa_probe {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
@@ -60,8 +60,7 @@ pub fn lex(text: &str, source: SourceId, version: Version) -> LexResult {
     Lexer::new(text, source, version).run()
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct LexResult {
     pub tokens: Vec<Token>,
     pub diagnostics: Vec<Diagnostic>,

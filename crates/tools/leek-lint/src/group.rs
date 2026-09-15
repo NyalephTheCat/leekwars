@@ -9,12 +9,13 @@
 use std::fmt;
 use std::str::FromStr;
 
-/// The opt-in groups as a request, re-exported from the recipe
-/// substrate that already defines them rather than declared a second
-/// time here — a recipe's [`RecipeParams::lints`](leek_pipeline::RecipeParams)
-/// and `pipeline::lint_query`'s key have to be the same type or the two
-/// paths can disagree about what was asked for.
-pub use leek_pipeline::LintGroups;
+/// The opt-in groups as a request, re-exported from the query substrate
+/// that already defines them rather than declared a second time here —
+/// `leek_session::CompileParams::lints` and
+/// [`lint_query`](crate::query::lint_query)'s key have to be the same
+/// type, or a driver and the cache can disagree about what was asked
+/// for.
+pub use leek_query::LintGroups;
 
 /// Category a lint belongs to. Mirrors clippy's grouping, adapted to
 /// Leekscript's teaching focus:
@@ -142,9 +143,9 @@ impl LintOptions {
     }
 
     /// These options' opt-in groups, dropping the version — the request
-    /// half, which is what a recipe carries in
-    /// [`RecipeParams::lints`](leek_pipeline::RecipeParams) and what
-    /// `pipeline::lint_query` keys on.
+    /// half, which is what a driver carries in
+    /// `leek_session::CompileParams::lints` and what
+    /// [`lint_query`](crate::query::lint_query) keys on.
     #[must_use]
     pub fn groups(&self) -> LintGroups {
         LintGroups {

@@ -48,6 +48,11 @@ jobs:
       # git; a stray `git add -A` once committed 387 files of it.
       - name: generated-artifact check
         run: cargo xtask check-artifacts
+      # docs/crate-graph.md is generated from cargo metadata, so a crate moved
+      # between layers cannot leave the architecture docs describing the old
+      # shape.
+      - name: crate-graph drift
+        run: cargo xtask graph --check
       - name: generated catalog drift
         run: tools/game-item-extract.sh --check
       # The fight-constant table and the engine's generated consts_gen.rs,

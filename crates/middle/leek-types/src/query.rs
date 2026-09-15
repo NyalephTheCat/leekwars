@@ -1,21 +1,17 @@
-//! Pipeline integration: type checker as a [`Step`].
+//! Type checking as a tracked query.
 
 use leek_diagnostics::Diagnostic;
-use leek_parser::pipeline::AstArtifact;
-use leek_pipeline::{Artifact, Context, Step, StepError};
-use leek_pipeline::{RecipeArtifact, RecipeParams, RecipeStep};
 use leek_syntax::version::version_from_byte;
 
 use crate::index::{InferredSignatures, TypeTable};
-use crate::{Options, TypeCheckResult, check_collecting, check_collecting_files};
+use crate::{Options, TypeCheckResult, check_collecting};
 
 /// Type-check outcome.
 ///
 /// Carries both the diagnostic list and the LSP-facing
 /// [`TypeTable`]. Direct callers that only need diagnostics ignore
 /// `table`.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeCheckArtifact {
     pub diagnostics: Vec<Diagnostic>,
     pub table: TypeTable,
@@ -23,125 +19,29 @@ pub struct TypeCheckArtifact {
     /// signature rendering (see [`InferredSignatures`]).
     pub signatures: InferredSignatures,
 }
-impl Artifact for TypeCheckArtifact {}
-
-/// Type checker step. Reads the AST contributed by
-/// [`leek_parser::pipeline::Parse`].
-pub struct TypeCheck;
-
-impl Step for TypeCheck {
-    fn name(&self) -> &'static str {
-        "type-check"
-    }
-    fn run(&self, cx: &mut Context<'_>) -> Result<(), StepError> {
-        let TypeCheckResult {
-            diagnostics,
-            table,
-            signatures,
-        } = run_typecheck(cx);
-        cx.emit_all(diagnostics.iter().cloned());
-        cx.insert(TypeCheckArtifact {
-            diagnostics,
-            table,
-            signatures,
-        });
-        Ok(())
-    }
-}
-
-impl RecipeStep for TypeCheck {
-    fn build(_: &RecipeParams) -> Box<dyn leek_pipeline::Step> {
-        Box::new(TypeCheck)
-    }
-}
-
-impl RecipeArtifact for TypeCheckArtifact {
-    type Producer = TypeCheck;
-    type Requires = (leek_resolver::pipeline::ResolveArtifact,);
-    type Produces = (TypeCheckArtifact,);
-}
-
-/// Salsa-aware type-check driver.
-fn run_typecheck(cx: &Context<'_>) -> TypeCheckResult {
-    // The include-aware resolver has already parsed the closure and assigned
-    // each file a source id. Type-check those ASTs together instead of
-    // entering the single-file salsa query.
-    if let Some(graph) = cx.get::<leek_resolver::pipeline::IncludeGraphArtifact>()
-        && !graph.includes.is_empty()
-        && let Some(entry) = cx.get::<AstArtifact>().map(|a| &a.0)
-    {
-        let mut files: Vec<leek_resolver::FileUnit<'_>> = graph
-            .includes
-            .iter()
-            .map(|file| leek_resolver::FileUnit {
-                ast: &file.ast,
-                source: file.source,
-                version: file.version,
-                path: &file.path,
-            })
-            .collect();
-        files.push(leek_resolver::FileUnit {
-            ast: entry,
-            source: cx.source(),
-            version: version_from_byte(cx.version_byte()),
-            path: &graph.entry_path,
-        });
-        return check_collecting_files(&files, Some(&graph.resolved), type_options(cx));
-    }
-    #[cfg(feature = "salsa")]
-    if let Some((db, file)) = cx.salsa() {
-        let art = typecheck_query(db, file);
-        return TypeCheckResult {
-            diagnostics: art.diagnostics,
-            table: art.table,
-            signatures: art.signatures,
-        };
-    }
-    let Some(ast) = cx.get::<AstArtifact>().map(|a| a.0.clone()) else {
-        return TypeCheckResult::default();
-    };
-    check_collecting(
-        &ast,
-        cx.source(),
-        version_from_byte(cx.version_byte()),
-        type_options(cx),
-    )
-}
-
-/// Assemble the checker options for a direct (non-memoized) run.
-///
-/// The one place on this path that reads the process-global
-/// [`seed_library_enabled`](crate::seed_library_enabled): it is an entry
-/// boundary, not a tracked query, so reading it here cannot strand a
-/// salsa memo. The memoized path takes the setting off the
-/// [`SourceFile`](leek_pipeline::salsa::SourceFile) input instead.
-fn type_options(cx: &Context<'_>) -> Options {
-    Options::from_settings(cx.flags(), cx.strict(), crate::seed_library_enabled())
-}
 
 /// Salsa-tracked entry point for type checking. Re-runs when the upstream
-/// [`parse_query`](leek_parser::pipeline::parse_query)'s green tree
+/// [`parse_query`](leek_parser::query::parse_query)'s green tree
 /// changes, or when an input field this body reads off the
-/// [`SourceFile`](leek_pipeline::salsa::SourceFile) changes: `strict`,
+/// [`SourceFile`](leek_query::salsa::SourceFile) changes: `strict`,
 /// `seed_library`, `flags_bits`, `source_id` or `version_byte`.
 ///
 /// Every setting the checker options are built from comes off that
 /// input. Reading a process-global here instead would be invisible to
 /// salsa, and the memo would survive a change it depends on.
-#[cfg(feature = "salsa")]
 #[salsa::tracked]
 pub fn typecheck_query(
-    db: &dyn leek_pipeline::salsa::Db,
-    file: leek_pipeline::salsa::SourceFile,
+    db: &dyn leek_query::salsa::Db,
+    file: leek_query::salsa::SourceFile,
 ) -> TypeCheckArtifact {
     use leek_parser::ast::{AstNode, SourceFile as AstSourceFile};
-    use leek_pipeline::salsa::ProgramClasses;
+    use leek_query::salsa::ProgramClasses;
     use leek_syntax::SyntaxNode;
 
     #[cfg(test)]
     crate::salsa_probe::TYPECHECK_QUERY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let parse = leek_parser::pipeline::parse_query(db, file, ProgramClasses::none(db));
+    let parse = leek_parser::query::parse_query(db, file, ProgramClasses::none(db));
     let Some(ast) = AstSourceFile::cast(SyntaxNode::new_root(parse.green.clone())) else {
         return TypeCheckArtifact::default();
     };
@@ -164,7 +64,7 @@ pub fn typecheck_query(
     }
 }
 
-/// Which [`SourceFile`](leek_pipeline::salsa::SourceFile) inputs
+/// Which [`SourceFile`](leek_query::salsa::SourceFile) inputs
 /// [`typecheck_query`] depends on.
 ///
 /// The interesting cases are the ones the parser is indifferent to:
@@ -173,41 +73,35 @@ pub fn typecheck_query(
 /// backdated and unchanged while this query still has to re-run. Getting
 /// that wrong leaves the LSP showing yesterday's diagnostics after a
 /// `// @strict` pragma is added.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod salsa_invalidation_tests {
     use std::sync::atomic::Ordering;
 
-    use leek_parser::pipeline::Parse;
-    use leek_pipeline::Pipeline;
-    use leek_pipeline::salsa::{LeekDb, SourceFile};
+    use leek_query::salsa::{LeekDb, SourceFile};
     use salsa::Setter;
 
-    use super::TypeCheck;
+    use super::typecheck_query;
     use crate::salsa_probe::{SERIAL, TYPECHECK_QUERY_CALLS};
 
     const SRC: &str = "var x = 5;\nreturn x + 1;\n";
 
-    /// Prime the cache, apply `edit`, run again, and report how many times
-    /// `typecheck_query` executed on the second run.
+    /// Prime the cache, apply `edit`, ask again, and report how many
+    /// times `typecheck_query` executed on the second call.
     fn reruns_after(edit: impl FnOnce(&mut LeekDb, SourceFile)) -> usize {
         let _guard = SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut db = LeekDb::default();
         let file = SourceFile::new(&db, String::new(), 1, SRC.into(), 4, false, false, 0);
-        // No `Resolve` step: without an `IncludeGraphArtifact` in the
-        // context `TypeCheck` takes the single-file salsa branch, which is
-        // the one under test.
-        let pipeline = Pipeline::new().with(Parse).with(TypeCheck);
 
         let before = TYPECHECK_QUERY_CALLS.load(Ordering::Relaxed);
-        let _ = pipeline.run_memoized(&db, file);
+        let _ = typecheck_query(&db, file);
         let primed = TYPECHECK_QUERY_CALLS.load(Ordering::Relaxed);
-        assert_eq!(primed - before, 1, "the first run must execute the query");
+        assert_eq!(primed - before, 1, "the first call must execute the query");
 
         edit(&mut db, file);
 
-        let _ = pipeline.run_memoized(&db, file);
+        let _ = typecheck_query(&db, file);
         TYPECHECK_QUERY_CALLS.load(Ordering::Relaxed) - primed
     }
 
@@ -277,7 +171,7 @@ mod salsa_invalidation_tests {
 }
 
 /// `seed_library` has to reach the checker as a
-/// [`SourceFile`](leek_pipeline::salsa::SourceFile) field.
+/// [`SourceFile`](leek_query::salsa::SourceFile) field.
 ///
 /// It used to be read from a process-global inside
 /// [`typecheck_query`]'s body, where salsa cannot see it: the memo then
@@ -285,9 +179,9 @@ mod salsa_invalidation_tests {
 /// `any` for every builtin call it had already checked with the library
 /// unseeded. Pinning it here means two inputs that differ in nothing
 /// else must still type-check differently.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 mod seed_library_is_an_input_tests {
-    use leek_pipeline::salsa::{LeekDb, SourceFile};
+    use leek_query::salsa::{LeekDb, SourceFile};
 
     use super::{TypeCheckArtifact, typecheck_query};
     use crate::salsa_probe::SERIAL;

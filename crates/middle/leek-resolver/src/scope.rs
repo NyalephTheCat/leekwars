@@ -44,8 +44,7 @@ pub(crate) static BUILTIN_FN_META: LazyLock<HashMap<&'static str, FnMeta>> = Laz
 /// Where in the lexical-binding taxonomy a name fits. Tracked so
 /// later checks can discriminate (`f += 1` on a `Function` is a
 /// `CANNOT_REDEFINE_FUNCTION`, on a `Local` it's fine).
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
     Global,
     Function,

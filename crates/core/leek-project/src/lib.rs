@@ -134,6 +134,41 @@ impl Project {
         }
     }
 
+    /// The one-file project a path compiled outside any `Miku.toml`
+    /// belongs to.
+    ///
+    /// `leekc` is handed a file, not a project, but everything below it —
+    /// the session, its query database, the reporter — is written over a
+    /// [`Project`]. A synthetic one costs a [`Manifest::standalone`] and an
+    /// index holding a single path, and buys one driver path instead of a
+    /// manifest-ful and a manifest-less copy of each.
+    ///
+    /// The tables are at their defaults, and public: a front-end with
+    /// flags of its own writes them in afterwards — `--deny`/`--warn`/
+    /// `--allow` into `manifest.lint`, `--fmt-config` into
+    /// `manifest.format`, `--version-pragma` into the index's
+    /// [`version_override`](ProjectIndex::version_override).
+    #[must_use]
+    pub fn standalone(entry: &Path) -> Self {
+        let index = ProjectIndex::single_file(entry);
+        let manifest = Manifest::standalone(
+            entry
+                .file_name()
+                .map_or_else(|| entry.to_path_buf(), PathBuf::from),
+        );
+        Self {
+            manifest,
+            root: index.root.clone(),
+            // There is no `Miku.toml`, so nothing can raise a manifest
+            // diagnostic against one. An empty path and text keep
+            // `report_manifest` a no-op rather than a panic.
+            manifest_path: PathBuf::new(),
+            manifest_text: String::new(),
+            warnings: Vec::new(),
+            index,
+        }
+    }
+
     pub fn index(&self) -> &ProjectIndex {
         &self.index
     }

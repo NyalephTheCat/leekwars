@@ -12,6 +12,7 @@ members = [
     "crates/core/leek-manifest",
     "crates/core/leek-prelude",
     "crates/core/leek-project",
+    "crates/core/leek-query",
     "crates/core/leek-runtime",
     "crates/core/leek-visit",
     "crates/core/leek-workpool",
@@ -25,7 +26,6 @@ members = [
     "crates/middle/leek-mir",
     "crates/middle/leek-charge",
     "crates/middle/leek-complexity",
-    "crates/db/leek-pipeline",
     "crates/db/leek-db",
     "crates/db/leek-session",
     "crates/backends/leek-backend-java",
@@ -86,7 +86,7 @@ leek-hir          = { path = "crates/middle/leek-hir" }
 leek-mir          = { path = "crates/middle/leek-mir" }
 leek-charge       = { path = "crates/middle/leek-charge" }
 leek-complexity   = { path = "crates/middle/leek-complexity" }
-leek-pipeline     = { path = "crates/db/leek-pipeline" }
+leek-query        = { path = "crates/core/leek-query" }
 leek-db           = { path = "crates/db/leek-db" }
 leek-session      = { path = "crates/db/leek-session" }
 leek-backend-java = { path = "crates/backends/leek-backend-java" }
@@ -110,8 +110,7 @@ leek-test-driver  = { path = "crates/testing/leek-test-driver" }
 leek-test-corpus  = { path = "crates/testing/leek-test-corpus" }
 leek-bench        = { path = "crates/testing/leek-bench" }
 
-# External — kept small for the first slice. We'll add winnow, rowan, salsa,
-# etc. as the slices that need them land.
+# External.
 clap        = { version = "4", features = ["derive"] }
 num-bigint  = "0.4"
 num-traits  = "0.2"
@@ -127,6 +126,11 @@ toml        = { version = "0.8", default-features = false, features = ["parse", 
 # `toml` already pulls in — no new dependency.
 toml_edit   = { version = "0.22", default-features = false, features = ["parse"] }
 comfy-table = "7"
+
+# The query engine. Pinned once for the whole workspace: the `Update` derives
+# on the IR types and the `#[salsa::tracked]` queries returning them have to
+# come from the same salsa, and a per-crate pin lets the two drift.
+salsa       = "0.26"
 
 # Debug Adapter Protocol types + server scaffolding for `leek-dap`.
 dap         = "0.4.1-alpha1"

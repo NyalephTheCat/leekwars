@@ -10,32 +10,33 @@ repository.workspace = true
 description = "Language Server Protocol implementation for Leekscript."
 
 [dependencies]
-leek-span        = { workspace = true, features = ["salsa"] }
-leek-diagnostics = { workspace = true, features = ["salsa"] }
-leek-syntax      = { workspace = true, features = ["salsa"] }
-leek-lexer       = { workspace = true, features = ["salsa"] }
-leek-parser      = { workspace = true, features = ["salsa"] }
-leek-resolver    = { workspace = true, features = ["salsa"] }
-leek-types       = { workspace = true, features = ["salsa"] }
-leek-pipeline    = { workspace = true, features = ["salsa"] }
+leek-span        = { workspace = true }
+leek-diagnostics = { workspace = true }
+leek-syntax      = { workspace = true }
+leek-lexer       = { workspace = true }
+leek-parser      = { workspace = true }
+leek-resolver    = { workspace = true }
+leek-types       = { workspace = true }
+leek-query       = { workspace = true }
+leek-project     = { workspace = true }
 # The query facade. `crate::analysis` reaches every tracked frontend query
 # through this one import path instead of through each pass crate's own
 # `pipeline` module, and program scope is an include-graph question whose
 # queries live there too; tools -> db is a downward edge.
 leek-db          = { workspace = true }
 leek-session     = { workspace = true }
-leek-fmt         = { workspace = true, features = ["salsa"] }
+leek-fmt         = { workspace = true }
 leek-rewrite     = { workspace = true }
-leek-hir         = { workspace = true, features = ["salsa"] }
+leek-hir         = { workspace = true }
 leek-lint        = { workspace = true }
-leek-complexity  = { workspace = true, features = ["salsa"] }
+leek-complexity  = { workspace = true }
 leek-ide         = { workspace = true }
 
 tower-lsp        = "0.20"
 tokio            = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
-salsa            = "0.26"
+salsa            = { workspace = true }
 tracing          = { workspace = true }
 tracing-subscriber = { workspace = true }
 

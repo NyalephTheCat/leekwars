@@ -2,19 +2,16 @@
 //!
 //! `diagnostics_without_lints` and `program_diagnostics` are the only
 //! two places in the workspace that *state* the order the compiler's
-//! complaints come out in. Everywhere else it was emergent: the recipe
-//! planner sequences a step after the step whose artifact it requires,
-//! and a `Run`'s diagnostics come out in the order the steps emitted
-//! them. Emergent is fine until something depends on it —
+//! complaints come out in, and something depends on it:
 //! `leek_lsp::handlers::code_action` matches diagnostics a client hands
 //! back against the ones the server published, and that match degrades
 //! when the order moves under it.
 //!
-//! So these tests pin the order twice over: against an explicit list of
-//! codes, and against a pipeline the *recipe planner itself* laid out.
-//! The second half is what makes this more than a restatement of the
-//! query body — if the planner ever sequences `TypeCheck` before
-//! `Resolve`, the query and the pipeline disagree and this file fails.
+//! The order used to be pinned twice over — against an explicit list of
+//! codes, and against a pipeline the recipe planner laid out from the
+//! artifact-dependency graph. There is no planner left to disagree with,
+//! so the list is the pin: a stage resequenced here is a stage
+//! resequenced in the only place that sequences anything.
 //!
 //! ### The lint stage is not here, and cannot be
 //!
@@ -30,16 +27,12 @@
 
 mod support;
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use leek_db::queries::{diagnostics_without_lints, for_source, program_diagnostics};
 use leek_diagnostics::Diagnostic;
-use leek_pipeline::{Pipeline, RecipeParams, plan_for};
-use leek_resolver::folder::MemFolder;
-use leek_resolver::interner::PathInterner;
 use leek_syntax::Version;
-use support::{Fixture, vpath};
+use support::Fixture;
 
 /// One file that breaks at every stage this crate can reach:
 ///
@@ -95,36 +88,6 @@ fn one_files_diagnostics_come_out_stage_by_stage() {
     assert_eq!(codes(&diagnostics), expected, "{diagnostics:?}");
 }
 
-/// The claim that makes the list above a *pin* rather than a copy of the
-/// query body: the same stream, in the same order, as the pipeline the
-/// recipe planner builds for the deepest single-file target.
-///
-/// `plan_for` is the real planner — the one `leek_session::plan` calls —
-/// so this compares against the artifact-dependency graph itself and not
-/// against a hand-written step list. Planned `permissive`, because the
-/// default `stop_on_diagnostics` halts the run at the first error and a
-/// truncated stream would make the comparison vacuous.
-#[test]
-fn diagnostics_without_lints_is_the_recipes_order() {
-    let fixture = Fixture::new(&[("main.leek", BROKEN)]);
-    let file = fixture.file("main.leek");
-
-    let plan = plan_for::<leek_mir::pipeline::MirArtifact>(&RecipeParams::permissive())
-        .expect("the MIR recipe plans");
-    let run = plan.build().run_memoized(&fixture.db, file);
-
-    assert_eq!(
-        codes(run.diagnostics()),
-        codes(&diagnostics_without_lints(&fixture.db, file)),
-        "the query and the recipe-planned pipeline disagree about the order"
-    );
-    assert_eq!(
-        run.diagnostics(),
-        diagnostics_without_lints(&fixture.db, file).as_slice(),
-        "…and about the diagnostics themselves"
-    );
-}
-
 /// A clean file earns nothing, and asking twice is one answer.
 #[test]
 fn a_clean_file_has_an_empty_stream() {
@@ -150,70 +113,6 @@ fn broken_program() -> Fixture {
         ("a.leek", "include(\"b\")\nvar bad = £;\nvar = ;\n"),
         ("b.leek", "var b = 1;\nvar b = 2;\n"),
     ])
-}
-
-/// The include-aware pipeline, as `leek_session::plan_with_includes`
-/// shapes it: lex the entry, walk its includes, parse, resolve, type
-/// check, lower. Its diagnostic stream is what `program_diagnostics`
-/// has to reproduce.
-fn include_aware_run(fixture: &Fixture, entry: &str, names: &[&str]) -> Vec<Diagnostic> {
-    let mut folder = MemFolder::new();
-    let interner = PathInterner::new();
-    for name in names {
-        folder.insert(PathBuf::from(vpath(name)), fixture.text(name));
-        interner.assign(
-            Path::new(&vpath(name)),
-            fixture.file(name).source(&fixture.db),
-        );
-    }
-    let pipeline = Pipeline::new()
-        .with(leek_syntax::pipeline::Pragma)
-        .with(leek_lexer::pipeline::Lex)
-        .with(leek_resolver::pipeline::ResolveIncludes::new(
-            Arc::new(folder),
-            PathBuf::from(vpath(entry)),
-            Arc::new(interner),
-        ))
-        .with(leek_parser::pipeline::Parse)
-        .with(leek_resolver::pipeline::Resolve)
-        .with(leek_types::pipeline::TypeCheck)
-        .with(leek_hir::pipeline::LowerHir::new(
-            leek_pipeline::OptLevel::O0,
-        ));
-    pipeline
-        .run_memoized(&fixture.db, fixture.file(entry))
-        .diagnostics()
-        .to_vec()
-}
-
-/// The order `program_diagnostics` documents, per file.
-///
-/// Compared *per source id* rather than end to end, which is the
-/// comparison every consumer actually makes: a diagnostic raised inside
-/// an include belongs to that include's document, so the LSP filters
-/// before it publishes. The query and the pipeline concatenate the
-/// include-parse failures differently — one block versus interleaved per
-/// file — and this is the assertion that says the difference cannot be
-/// observed.
-#[test]
-fn program_diagnostics_matches_the_include_aware_pipeline_per_source() {
-    let fixture = broken_program();
-    let entry = fixture.file("main.leek");
-    let names = ["main.leek", "a.leek", "b.leek"];
-
-    let from_pipeline = include_aware_run(&fixture, "main.leek", &names);
-    let from_query = program_diagnostics(&fixture.db, fixture.files, entry, Version::V4);
-
-    for name in names {
-        let source = fixture.file(name).source(&fixture.db);
-        assert_eq!(
-            codes(&for_source(&from_query, source)),
-            codes(&for_source(&from_pipeline, source)),
-            "{name}: query {:?} vs pipeline {:?}",
-            for_source(&from_query, source),
-            for_source(&from_pipeline, source),
-        );
-    }
 }
 
 /// The include walk's own complaints come first, then the per-site
@@ -246,22 +145,23 @@ fn the_program_stream_opens_with_the_graphs_own_diagnostics() {
     );
 }
 
-/// Two broken leaves, so the two orders genuinely differ end to end: the
-/// query emits both `E0274`s together, the pipeline emits each one just
-/// before its own file's parse errors. Per source they are the same
-/// list, which is the whole justification for keeping
-/// `include_parse_failures` a single query.
+/// Two broken leaves. `include_parse_failures` is one query over the
+/// whole closure, so the stream emits both `E0274`s together where
+/// `resolve_include_closure` interleaved each one just before its own
+/// file's parse errors. That difference is unobservable, because every
+/// consumer filters by source first — an `E0274` for a leaf is anchored
+/// at the `include("…")` site inside the file that includes it, and an
+/// includer always comes after the leaf in dependency order. This pins
+/// the part that survives: both failures land on the entry, and each
+/// file's own slice is the documented order.
 #[test]
-fn interleaving_the_include_failures_is_invisible_per_source() {
+fn the_include_failures_land_on_the_includer() {
     let fixture = Fixture::new(&[
         ("main.leek", "include(\"a\")\ninclude(\"b\")\nreturn 1;\n"),
         ("a.leek", "var = ;\n"),
         ("b.leek", "var = ;\n"),
     ]);
-    let names = ["main.leek", "a.leek", "b.leek"];
     let entry = fixture.file("main.leek");
-
-    let from_pipeline = include_aware_run(&fixture, "main.leek", &names);
     let from_query = program_diagnostics(&fixture.db, fixture.files, entry, Version::V4);
 
     // Both leaves failed, and both failures are reported at their
@@ -275,12 +175,16 @@ fn interleaving_the_include_failures_is_invisible_per_source() {
         2,
         "{from_query:?}"
     );
-    for name in names {
+    // And each leaf reports only its own parse error, not the other's.
+    for name in ["a.leek", "b.leek"] {
         let source = fixture.file(name).source(&fixture.db);
         assert_eq!(
-            codes(&for_source(&from_query, source)),
-            codes(&for_source(&from_pipeline, source)),
-            "{name}"
+            codes(&for_source(&from_query, source))
+                .iter()
+                .filter(|c| **c == "E0274")
+                .count(),
+            0,
+            "{name}: the failure belongs to the includer"
         );
     }
 }

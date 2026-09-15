@@ -34,10 +34,8 @@ use std::sync::Arc;
 
 use leek_diagnostics::{Severity, codes};
 use leek_hir::HirFile;
-use leek_hir::pipeline::HirArtifact;
 use leek_migrate::migrate_text;
 use leek_project::Input;
-use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::Version;
 use leek_test_corpus::{TestCase, embedded_manifest, run_on_large_stack};
@@ -75,15 +73,16 @@ fn build(text: &str, version: u8, strict: bool) -> Built {
         strict,
         flags: leek_span::FeatureFlags::from_env(),
     };
-    let pipeline =
-        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
-    let run = pipeline.run(input);
-    let first_error = run
-        .diagnostics()
-        .iter()
-        .find(|d| d.severity == Severity::Error)
-        .map(|d| format!("[{}] {}", d.code.0, d.message));
-    let hir = run.get::<HirArtifact>().map(|a| Arc::clone(&a.0));
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
+    let first_error =
+        leek_db::queries::file_diagnostics_upto(&db, file, leek_db::queries::Stage::Hir)
+            .iter()
+            .find(|d| d.severity == Severity::Error)
+            .map(|d| format!("[{}] {}", d.code.0, d.message));
+    // Always lowered, permissively: the harness decides what a compile
+    // error means for a case, not the frontend.
+    let hir = Some(leek_db::queries::lower_hir_query(&db, file).hir);
     Built {
         hir,
         compile_error: first_error.is_some(),

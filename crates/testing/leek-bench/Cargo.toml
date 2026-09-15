@@ -13,9 +13,15 @@ leek-syntax       = { workspace = true }
 leek-hir          = { workspace = true }
 leek-backend-java = { workspace = true }
 leek-backend-native = { workspace = true }
-leek-pipeline     = { workspace = true }
+leek-query        = { workspace = true }
+# The query façade, plus the two crates whose process-global compilation
+# settings a query reads at its entry boundary — the same pair
+# `leek-session` threads in when it builds an input.
+leek-db           = { workspace = true }
+leek-prelude      = { workspace = true }
 leek-project      = { workspace = true }
 leek-session      = { workspace = true }
+leek-types        = { workspace = true }
 anyhow            = { workspace = true }
 
 [lints]

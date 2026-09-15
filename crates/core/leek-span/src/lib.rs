@@ -12,10 +12,10 @@ pub mod paths;
 pub mod pragma;
 
 /// Define a `u32`-backed index newtype with the workspace's standard
-/// derives (`Copy`/`Eq`/`Hash`/`Ord`, plus salsa's `Update` when the
-/// invoking crate's `salsa` feature is on) and, optionally, a `Display`
-/// format. Centralizes the boilerplate the HIR/MIR/resolver index types
-/// (`DefId`, `LocalId`, `BlockId`, `SymbolId`) all repeated.
+/// derives (`Copy`/`Eq`/`Hash`/`Ord`, plus salsa's `Update`) and,
+/// optionally, a `Display` format. Centralizes the boilerplate the
+/// HIR/MIR/resolver index types (`DefId`, `LocalId`, `BlockId`,
+/// `SymbolId`) all repeated.
 ///
 /// ```ignore
 /// newtype_index! {
@@ -25,10 +25,9 @@ pub mod pragma;
 /// }
 /// ```
 ///
-/// The salsa `derive` is emitted as `#[cfg_attr(feature = "salsa", …)]`,
-/// evaluated against the crate that *invokes* the macro — so each such
-/// crate must keep its optional `salsa` dependency + feature (they all
-/// already do).
+/// The `salsa::Update` derive is resolved against the crate that
+/// *invokes* the macro, so every such crate must depend on `salsa`
+/// (they all already do).
 #[macro_export]
 macro_rules! newtype_index {
     (
@@ -37,7 +36,7 @@ macro_rules! newtype_index {
         $(display = $fmt:literal;)?
     ) => {
         $(#[$meta])*
-        #[cfg_attr(feature = "salsa", derive(salsa::Update))]
+        #[derive(salsa::Update)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         $vis struct $name(pub u32);
 
@@ -52,8 +51,7 @@ macro_rules! newtype_index {
 }
 
 /// Stable identifier for a source file, opaque to consumers.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceId(NonZeroU32);
 
 impl SourceId {
@@ -70,8 +68,7 @@ impl SourceId {
 }
 
 /// Half-open byte range inside a source file.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     pub source: SourceId,
     pub start: u32,
@@ -166,8 +163,7 @@ pub fn offset(n: usize) -> u32 {
 ///
 /// The three agree on pure-ASCII, tab-free lines and diverge everywhere else,
 /// so a value's unit must travel with it rather than be assumed.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineCol {
     pub line: u32,
     pub col: u32,

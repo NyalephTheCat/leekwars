@@ -9,6 +9,8 @@ description = "Fight-scenario format for Leekscript: a mergable, file-composable
 [dependencies]
 leek-generator    = { workspace = true }
 leek-hir          = { workspace = true }
+leek-db           = { workspace = true }
+# `official-fight` registers the leek-wars library and its fold set.
 leek-session      = { workspace = true }
 leek-project      = { workspace = true }
 leek-span         = { workspace = true }

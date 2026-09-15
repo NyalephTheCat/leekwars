@@ -128,8 +128,8 @@ core → frontend → middle → db → backends → game → tools · testing �
 ```
 
 A crate's layer is its directory. Peers (`·`) may not depend on each other,
-dev-dependencies may reach one layer up, and `leek-pipeline` must depend only
-on `core`. Known exceptions live in
+dev-dependencies may reach one layer up, and `leek-query` — the salsa
+database itself — must depend only on `core`. Known exceptions live in
 [`xtask/layer-allowlist.txt`](xtask/layer-allowlist.txt); that list should only
 shrink. If you find yourself wanting an "upward" dependency, that's usually a
 sign the abstraction belongs in a lower layer — see

@@ -66,8 +66,7 @@ pub struct IncludeGraphResult {
 ///
 /// Comparable and `salsa::Update`-able so it can ride inside a tracked
 /// query's return value — see `leek_db::queries::include_graph`.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct IncludeSite {
     pub includer: PathBuf,
     pub span: Span,
@@ -286,8 +285,7 @@ pub fn build_include_graph(
 
 /// One `include(...)` call extracted from a file: the name as written,
 /// without its quotes, and the span of the string literal it came from.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub struct IncludeCall {
     pub name: String,
     pub span: Span,
@@ -299,8 +297,7 @@ pub struct IncludeCall {
 /// This is the unit of work the memoized include graph is built from
 /// (`leek_db::queries::include_edges`), which is why it is comparable
 /// and `salsa::Update`-able.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq, Eq)]
 pub struct IncludeEdges {
     pub includes: Vec<IncludeCall>,
     pub classes: Vec<String>,

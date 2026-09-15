@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 use leek_db::queries::{IncludeRef, include_edges, resolve_include};
 use leek_db::{Db, WorkspaceFiles};
-use leek_pipeline::salsa::SourceFile;
+use leek_query::salsa::SourceFile;
 use tower_lsp::lsp_types::Url;
 
 use crate::workspace::{Workspace, uri_to_path};

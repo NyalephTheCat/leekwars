@@ -15,7 +15,7 @@
 //! [`guard`], so a panic in analysis blanks a single document's report
 //! instead of unwinding out of the tower-lsp service future.
 
-use leek_pipeline::salsa::SourceFile;
+use leek_query::salsa::SourceFile;
 use tower_lsp::lsp_types as lsp;
 
 use crate::diagnostics::{file_diagnostics, to_lsp};
@@ -100,7 +100,7 @@ fn collect_target(
     source_file: SourceFile,
 ) -> Vec<lsp::Diagnostic> {
     let labels = crate::diagnostics::LabelSources::from_workspace(ws);
-    file_diagnostics(ws, uri, source_file)
+    file_diagnostics(ws, source_file)
         .iter()
         .map(|d| to_lsp(d, pm, Some(uri), &labels))
         .collect()

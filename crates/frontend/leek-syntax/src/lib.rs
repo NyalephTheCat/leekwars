@@ -11,8 +11,8 @@ pub mod doc;
 pub mod ident;
 pub mod kind;
 pub mod language;
-pub mod pipeline;
 pub mod pragma;
+pub mod query;
 pub mod token;
 pub mod version;
 

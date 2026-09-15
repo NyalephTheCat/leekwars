@@ -12,8 +12,7 @@ use std::fmt;
 
 /// The root a size variable hangs off — the stable input whose value
 /// (or one of whose fields) carries the element count.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SizeRoot {
     /// 0-based parameter position.
     Param(u32),
@@ -35,8 +34,7 @@ pub enum SizeRoot {
 /// field path composed onto the argument's), while a `this` root is
 /// *instance state* the caller can't supply, so it passes through and
 /// surfaces in the method's own big-O.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SizeSource {
     pub root: SizeRoot,
     pub path: Vec<String>,
@@ -47,8 +45,7 @@ pub struct SizeSource {
 /// (`count(arr)`, `count(this.data)`, `count(obj.cells)`). Two
 /// `SizeVar`s are equal iff their [`source`](SizeVar::source) matches;
 /// `name` is purely cosmetic (for display).
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone)]
+#[derive(salsa::Update, Debug, Clone)]
 pub struct SizeVar {
     /// Identity of the size variable.
     pub source: SizeSource,
@@ -172,8 +169,7 @@ impl fmt::Display for SizeVar {
 }
 
 /// Symbolic ops-cost expression.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub enum CostExpr {
     /// A literal ops count. The straight-line floor of `leek-charge`
     /// flows through here unchanged.

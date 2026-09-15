@@ -8,33 +8,33 @@ description = "The query façade: one salsa database and every tracked query und
 
 [dependencies]
 # Owns the database itself — `Db`, `LeekDb`, `SourceFile`, `WorkspaceFiles`.
-# This crate sits *above* `leek-pipeline`, never below: the pass crates write
+# This crate sits *above* `leek-query`, never below: the pass crates write
 # their queries against `leek_pipeline::salsa::Db`, so the opposite edge would
 # be a cycle.
-leek-pipeline    = { workspace = true, features = ["salsa"] }
+leek-query       = { workspace = true }
 # The include-graph queries this crate owns are written against salsa
-# directly, and build their values out of core types that need salsa's
-# `Update` — hence the explicit `salsa` features here rather than relying
-# on another crate's to unify them on.
-salsa            = "0.26"
-leek-span        = { workspace = true, features = ["salsa"] }
-leek-diagnostics = { workspace = true, features = ["salsa"] }
-# Every pass crate that ships a tracked query, each with its own `salsa`
-# feature on so the query exists to re-export. No tools-layer crate appears
-# here: `leek-fmt`'s `format_query` stays in `leek-fmt`, which depends *down*
-# on this crate, because db -> tools is a layering breach.
+# directly.
+salsa            = { workspace = true }
+leek-span        = { workspace = true }
+leek-diagnostics = { workspace = true }
+# `input_file` turns a driver's `Input` into a `SourceFile`.
+leek-project     = { workspace = true }
+# Every pass crate that ships a tracked query, re-exported from here. No
+# tools-layer crate appears here: `leek-fmt`'s `format_query` stays in
+# `leek-fmt`, which depends *down* on this crate, because db -> tools is a
+# layering breach.
 # The compilation configuration `lower_program` samples at its entry
 # boundary (which libraries and constant catalogs are active). A core
 # crate, so the db -> core edge is downward.
 leek-prelude     = { workspace = true }
-leek-syntax      = { workspace = true, features = ["salsa"] }
-leek-lexer       = { workspace = true, features = ["salsa"] }
-leek-parser      = { workspace = true, features = ["salsa"] }
-leek-resolver    = { workspace = true, features = ["salsa"] }
-leek-types       = { workspace = true, features = ["salsa"] }
-leek-hir         = { workspace = true, features = ["salsa"] }
-leek-mir         = { workspace = true, features = ["salsa"] }
-leek-complexity  = { workspace = true, features = ["salsa"] }
+leek-syntax      = { workspace = true }
+leek-lexer       = { workspace = true }
+leek-parser      = { workspace = true }
+leek-resolver    = { workspace = true }
+leek-types       = { workspace = true }
+leek-hir         = { workspace = true }
+leek-mir         = { workspace = true }
+leek-complexity  = { workspace = true }
 
 [features]
 default = []
@@ -48,8 +48,7 @@ testing = []
 [dev-dependencies]
 # This crate's integration tests need `leek_db::testing`, and a test target
 # links the library as an ordinary dependency — so the feature has to be
-# turned on the same way any other dev-only feature is. Same shape as
-# `leek-mir` and `leek-complexity` do for their own `salsa` feature.
+# turned on the same way any other dev-only feature is.
 leek-db = { path = ".", features = ["testing"] }
 
 [lints]

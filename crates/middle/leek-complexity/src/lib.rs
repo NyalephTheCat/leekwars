@@ -44,15 +44,15 @@
 //! Returns one [`Complexity`] per user function and method, plus
 //! one entry for `<main>` (the top-level statements).
 //!
-//! ## Pipeline integration
+//! ## As a query
 //!
-//! The analysis is exposed as a [`pipeline`] [`Step`] producing a
-//! [`ComplexityArtifact`], so tools plan it through `leek-pipeline`
-//! / `leek-session` (and reuse salsa-cached HIR) instead of calling
-//! [`analyze_file`] by hand.
+//! The analysis is exposed as [`complexity_query`], memoized over the
+//! lowered HIR, so a tool asks for it as often as it likes instead of
+//! calling [`analyze_file`] by hand on every request.
+//! `leek_db::queries::program_complexity` is the include-aware
+//! counterpart, over the whole closure's merged tree.
 //!
 //! [`leek_builtins`]: ../../leek_builtins/index.html
-//! [`Step`]: leek_pipeline::Step
 //!
 //! [`HirFile`]: leek_hir::HirFile
 //! [`leek_charge`]: ../../leek-charge/index.html
@@ -63,11 +63,11 @@ pub mod call_graph;
 pub mod cost_expr;
 pub mod loop_bound;
 pub mod native;
-pub mod pipeline;
+pub mod query;
 
 pub use analyze::{Complexity, ParamInfo, analyze_file, analyze_function};
 pub use big_o::BigO;
 pub use cost_expr::{CostExpr, SizeRoot, SizeSource, SizeVar};
 pub use loop_bound::LoopBound;
 pub use native::{native_big_o, native_call_cost, native_growth};
-pub use pipeline::{Analyze, ComplexityArtifact};
+pub use query::{ComplexityReport, complexity_query};

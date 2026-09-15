@@ -3,8 +3,7 @@
 use crate::SyntaxKind;
 use leek_span::Span;
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {
     pub kind: SyntaxKind,
     pub span: Span,

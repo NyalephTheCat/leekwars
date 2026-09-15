@@ -63,6 +63,9 @@ cargo xtask check-fmt-idiom
 step "generated-artifact check (cargo xtask check-artifacts)"
 cargo xtask check-artifacts
 
+step "crate-graph drift (cargo xtask graph --check)"
+cargo xtask graph --check
+
 # Generated weapon/chip/bulb catalogs must match the upstream JSON (skipped
 # when the official-generator submodule isn't checked out).
 if [[ -d official-generator/leek-wars-generator/data ]]; then

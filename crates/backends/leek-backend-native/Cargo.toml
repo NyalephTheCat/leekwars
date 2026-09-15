@@ -15,7 +15,7 @@ leek-span     = { workspace = true }
 # backend failure reaches the user with a file, a line and a caret.
 leek-diagnostics = { workspace = true }
 # `NativeOptions::jit_for_input` reads the settled language settings from
-# the project `Input`. Deliberately *not* `leek-pipeline`: this crate is
+# the project `Input`. Deliberately *not* `leek-query`: this crate is
 # linked into `leek-aot-runtime`'s staticlib, which every AOT executable
 # embeds, so the orchestration layer must stay out of the archive.
 leek-project  = { workspace = true }

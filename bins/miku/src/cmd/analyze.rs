@@ -1,9 +1,9 @@
 //! `miku analyze` — per-function / per-method complexity table.
 //!
-//! Runs the `leek-session` [`Complexity`](leek_session::Target::Complexity)
-//! pipeline over each source file (which lowers to HIR and runs
-//! `leek-complexity`'s [`Analyze`](leek_complexity::pipeline::Analyze)
-//! step) and prints a per-item summary:
+//! Compiles each source file at
+//! [`Target::Complexity`](leek_session::Target::Complexity) — HIR over
+//! the file's whole include closure, measured by `leek-complexity` — and
+//! prints a per-item summary:
 //!
 //! ```text
 //! src/main.leek
@@ -59,6 +59,10 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
     for (i, path) in files.iter().enumerate() {
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let compiled = session.compile_file(path, source)?;
+        // The session's interner is the id authority, so the id this
+        // file's spans actually carry comes off the compilation rather
+        // than the loop counter above.
+        let source = compiled.input().source;
         let Some(report) = compiled.complexity() else {
             eprintln!(
                 "miku analyze: failed to analyze {}",

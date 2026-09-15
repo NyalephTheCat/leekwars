@@ -4,9 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use leek_diagnostics::Severity;
-use leek_hir::pipeline::HirArtifact;
 use leek_project::Input;
-use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use serde::Deserialize;
 
@@ -153,14 +151,11 @@ fn run_case(case: &Case, file_id: usize) -> Result<Outcome> {
         flags: leek_span::FeatureFlags::from_env(),
     };
 
-    let pipeline =
-        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
-    let run = pipeline.run(input);
-    if let Some(d) = run
-        .diagnostics()
-        .iter()
-        .find(|d| d.severity == Severity::Error)
-    {
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
+    let diagnostics =
+        leek_db::queries::file_diagnostics_upto(&db, file, leek_db::queries::Stage::Hir);
+    if let Some(d) = diagnostics.iter().find(|d| d.severity == Severity::Error) {
         // A rejected program never reaches the backend, so `error` is
         // satisfied here; every other expectation wanted it to compile.
         return Ok(match case.expect {
@@ -169,12 +164,8 @@ fn run_case(case: &Case, file_id: usize) -> Result<Outcome> {
         });
     }
 
-    let Some(hir_art) = run.get::<HirArtifact>() else {
-        return Ok(Outcome::Fail(
-            "the pipeline produced no HIR and no error diagnostic".into(),
-        ));
-    };
-    let hir = hir_art.0.as_ref();
+    let lowered = leek_db::queries::lower_hir_query(&db, file).hir;
+    let hir = lowered.as_ref();
 
     // `ops_at_most` runs at 4x its own bound so an over-budget row reports the
     // count it actually reached rather than tripping the budget first.

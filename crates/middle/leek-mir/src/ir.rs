@@ -24,8 +24,7 @@ use leek_types::Type;
 /// A whole HIR file lowered to MIR. Carries the functions (one per
 /// user-defined function plus a synthetic `main` for the top-level
 /// statements) and a flat list of globals.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, Default, PartialEq)]
 pub struct MirProgram {
     pub functions: Vec<MirFunction>,
     pub globals: Vec<MirGlobal>,
@@ -217,8 +216,7 @@ impl MirProgram {
 
 // ---- Classes ----
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct MirClass {
     pub def_id: DefId,
     pub name: String,
@@ -261,8 +259,7 @@ impl MirClass {
 /// One instance-field slot in a class's flattened layout. Lets a
 /// backend allocate an instance (slot count) and resolve a field
 /// name → slot in O(1) without re-walking the class chain.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct FieldSlot {
     pub name: String,
     pub slot: usize,
@@ -276,8 +273,7 @@ pub struct FieldSlot {
 }
 
 /// One instance-method entry in a class's flattened vtable.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct VtableSlot {
     pub name: String,
     pub slot: usize,
@@ -288,16 +284,14 @@ pub struct VtableSlot {
     pub owner: DefId,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
     Public,
     Protected,
     Private,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct MirField {
     pub name: String,
     /// `None` if the field has no initializer (defaults to null).
@@ -316,8 +310,7 @@ pub struct MirField {
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct MirMethod {
     pub name: String,
     pub function_idx: usize,
@@ -332,8 +325,7 @@ pub struct MirMethod {
 /// A global variable. Its initializer (if any) is lowered into the
 /// main function's prologue rather than carried inline, so the
 /// declaration here is just signature.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct MirGlobal {
     pub def_id: DefId,
     pub name: String,
@@ -343,8 +335,7 @@ pub struct MirGlobal {
 
 // ---- Functions ----
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct MirFunction {
     /// `None` for the synthetic `main` function lowered from the
     /// file's top-level statements.
@@ -374,8 +365,7 @@ impl MirFunction {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionKind {
     /// User-defined function (`function foo() { … }`).
     User,
@@ -398,8 +388,7 @@ leek_span::newtype_index! {
 
 /// One local slot. Parameters live in the first `params.len()`
 /// slots; synthetic temporaries (`_t0`, `_t1`, …) come after.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct LocalDecl {
     /// User-visible name, if any. Synthetic temporaries leave this
     /// `None`. Kept for debug output and for the Java backend's
@@ -434,8 +423,7 @@ pub struct LocalDecl {
     pub is_by_ref: bool,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalKind {
     Param,
     UserLocal,
@@ -445,8 +433,7 @@ pub enum LocalKind {
 
 // ---- Basic blocks ----
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct BasicBlock {
     pub id: BlockId,
     pub statements: Vec<Statement>,
@@ -472,8 +459,7 @@ pub struct BasicBlock {
 
 /// Side-effect-free or simple-effect statement. Anything that needs
 /// to change control flow is a [`Terminator`] instead.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Statement {
     /// `place = rvalue;`
     Assign(Place, Rvalue),
@@ -503,8 +489,7 @@ pub enum Statement {
 // ---- Terminators ----
 
 /// How a block ends. Exactly one terminator per block.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Terminator {
     /// Unconditional jump.
     Goto(BlockId),
@@ -543,8 +528,7 @@ pub enum Terminator {
 // ---- Places, operands, rvalues ----
 
 /// An l-value — somewhere a value can be stored.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Place {
     Local(LocalId),
     /// File-level global by `DefId`. Carries the source name so
@@ -572,8 +556,7 @@ pub enum Place {
     },
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct SliceBounds {
     pub start: Option<Operand>,
     pub end: Option<Operand>,
@@ -583,8 +566,7 @@ pub struct SliceBounds {
 /// One set-literal element: a single value, or an inclusive integer
 /// range `start..end` expanded at runtime in insertion order
 /// (`<1..3>` → `<1, 2, 3>`, descending allowed — upstream #2335).
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum SetElem {
     One(Operand),
     Range(Operand, Operand),
@@ -603,8 +585,7 @@ impl SetElem {
 
 /// An r-value — a (possibly nontrivial) value-producing operation.
 /// Every nested sub-expression is already a flat [`Operand`].
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Rvalue {
     Use(Operand),
     /// Like [`Rvalue::Use`] but the operand is a *freshly produced*
@@ -705,8 +686,7 @@ pub enum Rvalue {
     Unsupported(&'static str),
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct IntervalRvalue {
     pub start: Option<Operand>,
     pub end: Option<Operand>,
@@ -725,15 +705,13 @@ pub struct IntervalRvalue {
 
 /// A flat value reference. Either a local slot or a literal
 /// constant — no nested arithmetic, no nested calls.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Operand {
     Local(LocalId),
     Const(Const),
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Const {
     Null,
     Bool(bool),
@@ -778,16 +756,14 @@ impl Const {
 
 // ---- Calls ----
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub struct CallExpr {
     pub callee: Callee,
     pub args: Vec<Operand>,
     pub span: Span,
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq)]
 pub enum Callee {
     /// User-defined function resolved by `DefId`.
     Function(DefId),
@@ -811,8 +787,7 @@ pub enum Callee {
 
 /// Strict, eager binary operators. Short-circuit operators (`&&`,
 /// `||`, `??`) are lowered to CFG control flow before reaching MIR.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,
@@ -877,8 +852,7 @@ impl BinOp {
     }
 }
 
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
     Pos,
@@ -907,8 +881,7 @@ impl UnOp {
 /// Explicit conversions. The narrowing/widening that HIR leaves
 /// implicit becomes an explicit `Cast` in MIR so backends never
 /// have to re-derive it from operand types.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastKind {
     /// A written `expr as T`. The target type lives alongside the
     /// rvalue's containing assignment, so we don't carry it here:

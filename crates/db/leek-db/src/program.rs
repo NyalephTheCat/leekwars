@@ -11,7 +11,7 @@
 //! ### One green tree per file per program
 //!
 //! Every file's AST here comes from
-//! [`parse_query`](leek_parser::pipeline::parse_query), keyed on the
+//! [`parse_query`](leek_parser::query::parse_query), keyed on the
 //! same [`ProgramClasses`] set, so the three queries share one parse of
 //! each file rather than one each. The green tree is cast to a red tree
 //! *inside* the query body: a [`SyntaxNode`] is a per-thread cursor with
@@ -20,14 +20,11 @@
 //!
 //! ### Pure passes, untouched
 //!
-//! Each body assembles `FileUnit`s / `LowerUnit`s and calls the pure
-//! multi-file function the include-aware pipeline already calls —
+//! Each body assembles `FileUnit`s / `LowerUnit`s and calls the same
+//! pure multi-file function the include-aware front end always called —
 //! [`resolve_collecting_files`], [`check_collecting_files`],
-//! [`lower_files`]. Not a line of the passes changes: the point of this
-//! module is that the *memoization* moves here, not the semantics, so a
-//! run through these queries and a run through
-//! [`ResolveIncludes`](leek_resolver::pipeline::ResolveIncludes) must
-//! produce the same answers.
+//! [`lower_files`]. Not a line of the passes changes: what moved here is
+//! the *memoization*, not the semantics.
 //!
 //! ### What is *not* in these values
 //!
@@ -35,28 +32,27 @@
 //! the per-site [`include_parse_failures`](crate::include::include_parse_failures)
 //! reports are not folded in here. They belong to the graph, are
 //! memoized beside it, and a caller assembling a diagnostic stream
-//! concatenates them with these — exactly as the pipeline does today,
-//! where `ResolveIncludes` emits them before `Resolve` runs.
+//! concatenates them ahead of these. [`crate::diagnostics`] is that
+//! caller, and states the whole order.
 
 use std::path::{Path, PathBuf};
 
 use leek_hir::lower::{LowerUnit, PRELUDE_UNIT_PATH, finish, lower_files, prelude_tree};
-use leek_hir::pipeline::LowerHirResult;
+use leek_hir::query::LowerHirResult;
 use leek_parser::ast::{AstNode, SourceFile as Ast};
-use leek_pipeline::OptLevel;
+use leek_query::OptLevel;
 use leek_resolver::FileUnit;
-use leek_resolver::pipeline::ResolveArtifact;
+use leek_resolver::query::ResolveArtifact;
 use leek_span::{FeatureFlags, SourceId};
 use leek_syntax::{SyntaxNode, Version};
-use leek_types::pipeline::TypeCheckArtifact;
+use leek_types::query::TypeCheckArtifact;
 
 use crate::include::{IncludeGraph, include_graph, program_classes};
 use crate::{Db, ProgramClasses, SourceFile, WorkspaceFiles};
 
 /// Resolve every file `entry` reaches as one program.
 ///
-/// The pure [`resolve_collecting_files`](leek_resolver::resolve_collecting_files)
-/// behind [`ResolveIncludes`](leek_resolver::pipeline::ResolveIncludes),
+/// The pure [`resolve_collecting_files`](leek_resolver::resolve_collecting_files),
 /// over parses this database already has. Re-runs when the closure's
 /// shape, its class set, or any reached file's green tree changes — an
 /// edit that leaves one leaf's tree equal re-resolves nothing.
@@ -76,7 +72,7 @@ pub fn resolve_program(
     // process-global read from inside a tracked query — the same
     // untracked read `resolve_query` documents, and the same later slice
     // takes it off an input.
-    let pragmas = leek_syntax::pipeline::pragma_query(db, entry).pragmas;
+    let pragmas = leek_syntax::query::pragma_query(db, entry).pragmas;
     let opts = leek_resolver::Options::from_settings(
         Some(&pragmas),
         FeatureFlags::from_bits(entry.flags_bits(db)),
@@ -121,7 +117,7 @@ pub fn typecheck_program(
 /// Lower every file `entry` reaches into one `HirFile`, at `opt`.
 ///
 /// `opt` is part of the key on purpose. The single-file
-/// [`lower_hir_query`](leek_hir::pipeline::lower_hir_query) is keyed on
+/// [`lower_hir_query`](leek_hir::query::lower_hir_query) is keyed on
 /// the file alone and therefore always lowers at
 /// [`OptLevel::O0`], which leaves a codegen driver deep-cloning the
 /// cached tree and optimizing the copy on **every** run (see the `O1`
@@ -214,7 +210,7 @@ fn parse_closure(
         .files
         .iter()
         .map(|file| {
-            let parse = leek_parser::pipeline::parse_query(db, file.file, classes);
+            let parse = leek_parser::query::parse_query(db, file.file, classes);
             ProgramFile {
                 ast: Ast::cast(SyntaxNode::new_root(parse.green))
                     .expect("grammar::source_file always opens a SourceFile root"),
@@ -239,4 +235,56 @@ fn file_units(parsed: &[ProgramFile]) -> Vec<FileUnit<'_>> {
             path: &file.path,
         })
         .collect()
+}
+
+/// The whole program's MIR, lowered from [`lower_program`]'s merged HIR.
+///
+/// The include-aware counterpart of
+/// [`lower_mir_query`](leek_mir::query::lower_mir_query), which is keyed
+/// on one file and so lowers the entry alone. Lowering a project through
+/// the per-file query would silently drop every function an include
+/// provides (#428), which is what this exists to prevent.
+///
+/// Keyed on `opt` for the reason [`lower_program`] is: an optimized program
+/// is a different program, and keying it means a codegen driver reads its
+/// own tree out of the cache instead of cloning the `O0` one and
+/// optimizing the copy on every run.
+#[salsa::tracked]
+pub fn lower_program_mir(
+    db: &dyn Db,
+    files: WorkspaceFiles,
+    entry: SourceFile,
+    entry_version: Version,
+    opt: OptLevel,
+) -> leek_mir::query::LowerMirQueryResult {
+    let hir = lower_program(db, files, entry, entry_version, opt);
+    let (program, diagnostics) = leek_mir::lower::lower_and_optimize(hir.hir.as_ref(), opt);
+    leek_mir::query::LowerMirQueryResult {
+        program: std::sync::Arc::new(program),
+        diagnostics,
+    }
+}
+
+/// The whole program's per-function complexity rows, over
+/// [`lower_program`]'s merged HIR.
+///
+/// The include-aware counterpart of
+/// [`complexity_query`](leek_complexity::query::complexity_query). A
+/// `miku analyze` over a project with includes wants a row for every
+/// function the program defines, not only those the entry file spells out.
+///
+/// At [`OptLevel::O0`], matching the analysis drivers: folding constants
+/// before measuring would report the cost of a tree the author did not
+/// write.
+#[salsa::tracked]
+pub fn program_complexity(
+    db: &dyn Db,
+    files: WorkspaceFiles,
+    entry: SourceFile,
+    entry_version: Version,
+) -> leek_complexity::query::ComplexityReport {
+    let hir = lower_program(db, files, entry, entry_version, OptLevel::O0);
+    leek_complexity::query::ComplexityReport(std::sync::Arc::new(leek_complexity::analyze_file(
+        hir.hir.as_ref(),
+    )))
 }

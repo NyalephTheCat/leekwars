@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use leek_backends::{java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_backend};
 use leek_manifest::BackendKind;
 use leek_project::Project;
-use leek_session::{Compilation, DriverConfig, RecipeParams, Session, Target};
+use leek_session::{Compilation, CompileParams, DriverConfig, Session, Target};
 use leek_syntax::version::version_from_byte;
 
 use crate::cli::{Build, ColorWhen, MessageFormat};
@@ -47,21 +47,23 @@ pub fn run(
         leek_session::OptLevel::O1
     };
 
-    // `--verbose` times the very pipeline the plain build runs: the sink
-    // rides along on the config rather than selecting a separate entry point.
-    let sink = verbose.then(leek_pipeline::TimingSink::new);
+    // `--verbose` times the very compilation the plain build runs: the
+    // sink rides along on the config rather than selecting a separate
+    // entry point.
+    let sink = verbose.then(leek_query::TimingSink::new);
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default().with_opt(opt),
+        params: CompileParams::default().with_opt(opt),
         color: color.into(),
         format: format.into(),
         timing: sink.clone(),
+        ..DriverConfig::default()
     };
     let session = Session::new(&project, config)?;
     let compiled = session.compile_entry()?;
     if let Some(sink) = &sink {
         eprintln!(
-            "miku build: pipeline timings for {}:",
+            "miku build: stage timings for {}:",
             project.entry_path().display()
         );
         let mut total = std::time::Duration::ZERO;

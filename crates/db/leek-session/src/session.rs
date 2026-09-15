@@ -1,34 +1,33 @@
 //! One compiler session over a project, and one compiled file.
 //!
 //! [`Session`] is what a front-end holds for a whole invocation: the
-//! project, the driver configuration, the [`Reporter`] built from the
-//! manifest's `[lint]` levels, and the include interner. [`Compilation`] is
-//! what one compiled file *is*: the run, its text, its label, the
-//! [`Sources`] map its diagnostics render against, and the reporter that
-//! renders them.
+//! project, the driver configuration, the query database and the file set
+//! its includes resolve against, the [`Reporter`] built from the
+//! manifest's `[lint]` levels, and the include interner. [`Compilation`]
+//! is what one compiled file *is*: its text, its label, its diagnostics,
+//! the [`Sources`] map they render against, and the reporter that renders
+//! them.
 //!
-//! Before this, every `miku` subcommand assembled those five pieces itself
-//! — and three of them re-read the entry file off disk a second time to do
-//! it, because the driver returned a run and kept the text.
+//! Before this, every `miku` subcommand assembled those pieces itself —
+//! and three of them re-read the entry file off disk a second time to do
+//! it. One database per *invocation* rather than per compiled file is
+//! what makes a tracked query worth calling from a CLI at all: a
+//! `miku test` over N files re-parsed the stdlib headers N times and
+//! shared nothing between them.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use leek_complexity::Complexity;
-use leek_complexity::pipeline::ComplexityArtifact;
 use leek_diagnostics::{Diagnostic, Reporter, Severity, Sources};
 use leek_hir::HirFile;
-use leek_hir::pipeline::HirArtifact;
 use leek_mir::MirProgram;
-use leek_mir::pipeline::MirArtifact;
-use leek_pipeline::{Artifact, Pipeline, Run};
 use leek_project::{Input, Project};
 use leek_span::SourceId;
 
-use crate::driver::{
-    DriverConfig, PathInterner, SourceInterner, file_pipeline, file_pipeline_shared, reporter_for,
-    run_sources,
-};
+use crate::Target;
+use crate::driver::{DriverConfig, PathInterner, SourceInterner, reporter_for};
 use crate::error::SessionError;
 
 /// The entry file's own `SourceId`; its includes get the ones after it.
@@ -48,6 +47,24 @@ pub struct Session<'p> {
     config: DriverConfig,
     reporter: Reporter,
     interner: Arc<dyn SourceInterner>,
+    /// The one database every file of this invocation is compiled
+    /// through.
+    ///
+    /// It lived on [`Compilation`] before, which meant a `miku test` over
+    /// N files built N databases and shared nothing between them: the
+    /// stdlib headers were re-parsed per file, and two test files that
+    /// include the same helper each lowered it. A database per
+    /// *invocation* is what makes a tracked query worth calling from a
+    /// CLI at all (#129).
+    db: leek_db::LeekDb,
+    /// Which files an `include("…")` can resolve against, for the
+    /// whole-program queries. Every file the project index knows, plus
+    /// whatever their includes reach.
+    files: leek_db::WorkspaceFiles,
+    /// The input for each registered file, by canonical path, so
+    /// compiling a file the session already knows reuses its input
+    /// rather than minting a second one for the same bytes.
+    inputs: BTreeMap<String, leek_db::SourceFile>,
 }
 
 impl<'p> Session<'p> {
@@ -58,12 +75,27 @@ impl<'p> Session<'p> {
     /// every command would otherwise discover that separately.
     pub fn new(project: &'p Project, config: DriverConfig) -> Result<Self, SessionError> {
         let reporter = reporter_for(project, config.color, config.format)?;
+        let interner: Arc<dyn SourceInterner> = Arc::new(PathInterner::new());
+        let mut db = leek_db::LeekDb::default();
+        let inputs = register_project_files(&mut db, project, interner.as_ref());
+        let files = leek_db::WorkspaceFiles::empty(&db);
+        files.set_all(&mut db, inputs.clone().into_iter().collect());
         Ok(Self {
             project,
             config,
             reporter,
-            interner: Arc::new(PathInterner::new()),
+            interner,
+            db,
+            files,
+            inputs,
         })
+    }
+
+    /// The session's database, and the file set its whole-program queries
+    /// resolve includes against.
+    #[must_use]
+    pub fn db(&self) -> (&leek_db::LeekDb, leek_db::WorkspaceFiles) {
+        (&self.db, self.files)
     }
 
     #[must_use]
@@ -94,8 +126,7 @@ impl<'p> Session<'p> {
         path: &Path,
         source_id: SourceId,
     ) -> Result<Compilation<'_>, SessionError> {
-        let pipeline = file_pipeline(self.project, path, source_id, &self.config)?;
-        self.compile(&pipeline, path, source_id)
+        self.compile(path, source_id)
     }
 
     /// Compile the project's entry file.
@@ -112,32 +143,30 @@ impl<'p> Session<'p> {
     /// its includes take the ids just above the entry's hands file 2 the id
     /// file 1's first include already has (#191).
     pub fn compile_shared(&self, path: &Path) -> Result<Compilation<'_>, SessionError> {
-        // Plan first: the pipeline interns the entry, and its id is what
-        // this file's `Input` — and so every span it raises — has to carry.
-        let (pipeline, source_id) =
-            file_pipeline_shared(self.project, path, &self.config, &self.interner)?;
-        self.compile(&pipeline, path, source_id)
+        // Intern first: the entry's id is what this file's `Input` — and so
+        // every span it raises — has to carry. For a project file
+        // `Session::input_for` already holds that id; this covers the rest.
+        let source_id = self.interner.intern(path);
+        self.compile(path, source_id)
     }
 
-    /// Read `path`, build its [`Input`] and drive `pipeline` over it.
+    /// Read `path` and build the [`Compilation`] over it.
     ///
     /// The text is read exactly once per compiled file and then shared: the
     /// `Input`, the `Sources` map and [`Compilation::text`] are all the same
     /// buffer.
-    fn compile(
-        &self,
-        pipeline: &Pipeline,
-        path: &Path,
-        source_id: SourceId,
-    ) -> Result<Compilation<'_>, SessionError> {
+    fn compile(&self, path: &Path, source_id: SourceId) -> Result<Compilation<'_>, SessionError> {
         let text = std::fs::read_to_string(path).map_err(|source| SessionError::Io {
             path: path.to_path_buf(),
             source,
         })?;
         let lang = self.project.index().language_settings(&text);
+        let text: Arc<str> = Arc::from(text);
+        let file = self.input_for(path, source_id, &text, lang);
         let input = Input {
-            source: source_id,
-            text: Arc::from(text),
+            // The session's id, not the caller's. See `input_for`.
+            source: file.source(&self.db),
+            text,
             version_byte: lang.version,
             strict: lang.strict,
             // The project's flags, not `Input::from`'s per-conversion
@@ -145,12 +174,223 @@ impl<'p> Session<'p> {
             // project and has to reach the pipeline (leekwars#206).
             flags: self.project.feature_flags(),
         };
-        Ok(Compilation::adopt(
-            pipeline.run(input),
-            path.display().to_string(),
+        let label = path.display().to_string();
+        let shape = self.shape();
+
+        Ok(Compilation::in_session(
+            input,
+            label,
             &self.reporter,
+            &self.db,
+            file,
+            self.files,
+            shape,
+            self.config.timing.clone(),
         ))
     }
+
+    /// What this session's target and params mean for a run's diagnostic
+    /// stream.
+    fn shape(&self) -> RunShape {
+        use leek_db::queries::Stage;
+        let stage = match self.config.target {
+            Target::Tokens => Stage::Tokens,
+            Target::Parsed => Stage::Parsed,
+            Target::Resolved => Stage::Resolved,
+            Target::TypeChecked => Stage::TypeChecked,
+            // `Complexity` and `Mir` plan past HIR but add no diagnostics
+            // the program queries can answer for: complexity reports none,
+            // and there is no program-level MIR lowering to ask.
+            Target::Hir | Target::Complexity | Target::Mir | Target::Linted => Stage::Hir,
+        };
+        // Through the same merge the planner applies, not
+        // `self.config.params` raw: `merge_manifest_lints` ORs the
+        // manifest's `[lint] pedantic/nursery` into the CLI's, and it
+        // returns a *copy*, so the session's own config never sees them. A
+        // project that switches a group on in `Miku.toml` would otherwise
+        // have it silently ignored — which is what
+        // `test_honors_manifest_lint_groups_like_check` caught.
+        let merged = crate::driver::merge_manifest_lints(self.project, &self.config);
+        RunShape {
+            stage,
+            scope: merged.scope,
+            lints: (merged.target == Target::Linted).then_some(merged.params.lints),
+            stop_at: merged.params.stop_on_diagnostics,
+            opt: merged.params.opt,
+        }
+    }
+
+    /// This file's salsa input: the one [`register_project_files`] made
+    /// when the index knows the file, otherwise a fresh one carrying
+    /// `fallback_id`.
+    ///
+    /// **The session's interner is the single id authority.** A registered
+    /// input already carries an id, and [`compile`](Self::compile) builds
+    /// its [`Input`] from *that* rather than from the caller's
+    /// `source_id`. Two authorities would mean the `Input`'s spans and
+    /// the queries' disagree about which file a span belongs to, which
+    /// `Sources` and
+    /// [`for_source`](leek_db::queries::for_source) both key on — so a
+    /// diagnostic would render against the wrong file or vanish.
+    ///
+    /// It also generalizes what [`compile_shared`](Self::compile_shared)
+    /// was added for. Numbering an entry `1, 2, 3, …` while its includes
+    /// take ids from the interner hands one file the id another already
+    /// has (#191); taking both from the interner cannot.
+    ///
+    /// `fallback_id` is therefore used only for a file the session does
+    /// not know — one outside the project index. Such a file deliberately
+    /// does not join [`files`](Self::files) either: a file the index never
+    /// saw is not part of the program, and adding it to the set every
+    /// include resolves against would let a stray file outside the tree
+    /// satisfy an `include`.
+    fn input_for(
+        &self,
+        path: &Path,
+        fallback_id: SourceId,
+        text: &Arc<str>,
+        lang: leek_span::pragma::LanguageSettings,
+    ) -> leek_db::SourceFile {
+        let canonical = leek_span::paths::canonical_or_normalized(path)
+            .display()
+            .to_string();
+        if let Some(known) = self.inputs.get(&canonical) {
+            return *known;
+        }
+        leek_db::SourceFile::new(
+            &self.db,
+            canonical,
+            fallback_id.get(),
+            Arc::clone(text),
+            lang.version,
+            lang.strict,
+            leek_types::seed_library_enabled(),
+            self.project.feature_flags().to_bits(),
+        )
+    }
+}
+
+/// Register every file the project index knows as a salsa input, keyed by
+/// canonical path.
+///
+/// Version and strict mode are settled the same way
+/// [`Session::compile`] settles the entry's — the index's
+/// `language_settings` over the file's own text — so an included file
+/// and the entry that includes it cannot disagree about what language
+/// either is written in.
+///
+/// A file the index cannot read is skipped rather than failing the
+/// session: an unreadable file in the tree is the compile's problem to
+/// report when something includes it, not a reason for every command to
+/// refuse to start.
+///
+/// # Cost
+///
+/// This reads every project file up front, which `ProjectIndex` does not
+/// — it carries paths, not text. So `Session::new` does I/O it did not do
+/// before, and a command that compiles one file of a large project pays
+/// for the whole tree.
+///
+/// Deliberate, and worth revisiting if a project ever gets big: a
+/// LeekWars project is tens of files, every command that matters
+/// (`check`, `test`, `build`) compiles all of them anyway, and the
+/// alternative — building this lazily behind a `OnceLock` so only a
+/// caller that asks a query pays — costs a second lifetime parameter on
+/// [`Compilation`] and every signature that names it. That churn is
+/// easier to justify once a front-end actually reads a query; until then
+/// the simple shape is the honest one.
+fn register_project_files(
+    db: &mut leek_db::LeekDb,
+    project: &Project,
+    interner: &dyn SourceInterner,
+) -> BTreeMap<String, leek_db::SourceFile> {
+    let index = project.index();
+    let flags = project.feature_flags().to_bits();
+    let seed = leek_types::seed_library_enabled();
+    let mut out = BTreeMap::new();
+    let register = |db: &mut leek_db::LeekDb,
+                    out: &mut BTreeMap<String, leek_db::SourceFile>,
+                    path: &Path|
+     -> Option<leek_db::SourceFile> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let canonical = leek_span::paths::canonical_or_normalized(path)
+            .display()
+            .to_string();
+        if let Some(known) = out.get(&canonical) {
+            return Some(*known);
+        }
+        let lang = index.language_settings(&text);
+        let file = leek_db::SourceFile::new(
+            db,
+            canonical.clone(),
+            interner.intern(Path::new(&canonical)).get(),
+            Arc::from(text),
+            lang.version,
+            lang.strict,
+            seed,
+            flags,
+        );
+        out.insert(canonical, file);
+        Some(file)
+    };
+
+    // The project's files are `[paths].src`, which the index walks, *and*
+    // `[paths].tests`, which it does not — `ProjectIndex::from_manifest`
+    // enumerates the source root only. Every command that compiles more
+    // than the entry (`fix`, `doc`, `analyze`, `test`) already pairs
+    // `walk_sources` with `walk_tests` for exactly that reason, so a file
+    // set built from the index alone knows nothing about the tests tree
+    // and an `include(...)` between two test helpers resolves against
+    // nothing.
+    let mut frontier = Vec::new();
+    for path in index.files().iter().chain(&project.walk_tests()) {
+        if let Some(file) = register(db, &mut out, path) {
+            frontier.push(file);
+        }
+    }
+
+    // Close the set under includes. `resolve_include` resolves a name
+    // against `WorkspaceFiles` and nothing else — a tracked query that read
+    // the filesystem would be impure — where the disk-backed folder this
+    // replaced fell back to reading the file. So an
+    // `include("../shared/lib")` escaping the project root resolved before
+    // and would report `E0272 IncludeNotFound` without this walk.
+    //
+    // The same gap, and the same fix, as `leek_lsp::Workspace::resync`. It
+    // is written twice because the two reach files differently — the server
+    // has open buffers that shadow disk — but the rule is one rule: a file
+    // an include names is part of the program whether or not the index
+    // walked it.
+    while let Some(file) = frontier.pop() {
+        let includer = PathBuf::from(file.canonical_path(db).clone());
+        if includer.as_os_str().is_empty() {
+            continue;
+        }
+        for call in leek_db::queries::include_edges(db, file).includes {
+            for candidate in leek_resolver::folder::include_candidates(&includer, &call.name) {
+                let key = leek_span::paths::canonical_or_normalized(&candidate)
+                    .display()
+                    .to_string();
+                if out.contains_key(&key) {
+                    break;
+                }
+                if let Some(found) = register(db, &mut out, &candidate) {
+                    frontier.push(found);
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One file a compiled program reaches through `include(...)`.
+#[derive(Debug, Clone)]
+pub struct IncludedFile {
+    /// The id every span raised inside this file carries.
+    pub source: SourceId,
+    pub path: PathBuf,
+    pub text: Arc<str>,
 }
 
 /// One file compiled: the run, plus everything needed to say something
@@ -159,7 +399,6 @@ impl<'p> Session<'p> {
 /// Borrowed from the [`Session`] that produced it, so a front-end holds one
 /// of these for as long as it is still reporting on the file.
 pub struct Compilation<'a> {
-    run: Run<'a>,
     text: Arc<str>,
     label: String,
     reporter: &'a Reporter,
@@ -167,29 +406,81 @@ pub struct Compilation<'a> {
     /// `migrate` compile a whole tree and render nothing, and a source map
     /// costs a copy of every file's text plus a line table over it.
     sources: OnceLock<Sources>,
-    /// Built on demand by [`db_handle`](Self::db_handle) — a front-end that
-    /// never calls a tracked query never pays for a database.
-    db: OnceLock<leek_db::LeekDb>,
-    file: OnceLock<leek_db::SourceFile>,
+    /// The session's database and this file's input in it.
+    db: Option<(&'a leek_db::LeekDb, leek_db::SourceFile)>,
+    /// The session's file set, for the whole-program queries.
+    files: Option<leek_db::WorkspaceFiles>,
+    /// The entry's `Input` — its id, text and settled language.
+    input: Input,
+    /// Where to record how long each stage took, when the driver asked
+    /// for timings.
+    timing: Option<leek_query::TimingSink>,
+    /// Query answers behind the reference-returning accessors. Each holds
+    /// an `Arc`, so the cache is a pointer rather than a copy of the tree.
+    tokens_cache: OnceLock<Option<Arc<Vec<leek_syntax::Token>>>>,
+    hir_cache: OnceLock<Option<Arc<HirFile>>>,
+    mir_cache: OnceLock<Option<Arc<MirProgram>>>,
+    complexity_cache: OnceLock<Option<Arc<Vec<Complexity>>>>,
+    diagnostics_cache: OnceLock<Arc<Vec<Diagnostic>>>,
+    /// How far the run's target reaches, and whether a parse error stops
+    /// it — everything [`query_diagnostics`](Self::query_diagnostics)
+    /// needs to reproduce this run's stream.
+    shape: Option<RunShape>,
+}
+
+/// What a run's target and params mean for its diagnostic stream.
+#[derive(Debug, Clone, Copy)]
+struct RunShape {
+    stage: leek_db::queries::Stage,
+    /// Whether the entry's includes are part of the compilation.
+    scope: crate::Scope,
+    /// The lint groups the run planned with, when the target plans the
+    /// lint step at all. `None` when it does not.
+    lints: Option<leek_lint::LintGroups>,
+    /// `CompileParams::stop_on_diagnostics` — the severity at which the
+    /// parse aborts the run.
+    stop_at: Option<Severity>,
+    /// The optimization level the recipe planned with.
+    opt: leek_query::OptLevel,
+}
+
+/// Time `f` into `sink` under `name`, or just run it when there is none.
+fn timed<T>(sink: Option<&leek_query::TimingSink>, name: &'static str, f: impl FnOnce() -> T) -> T {
+    match sink {
+        Some(sink) => sink.time(name, f),
+        None => f(),
+    }
 }
 
 impl<'a> Compilation<'a> {
-    /// Wrap a run a front-end drove itself.
-    ///
-    /// The manifest-less half of [`Session::compile_file`], for `leekc`,
-    /// which plans its own pipeline per `--emit` and has no `Miku.toml` to
-    /// take a reporter from. The entry text comes off the run's own
-    /// [`Input`], so there is nothing to keep in sync.
+    /// A compilation a [`Session`] produced: every answer from the
+    /// session's database.
     #[must_use]
-    pub fn adopt(run: Run<'a>, file_label: String, reporter: &'a Reporter) -> Self {
+    fn in_session(
+        input: Input,
+        file_label: String,
+        reporter: &'a Reporter,
+        db: &'a leek_db::LeekDb,
+        file: leek_db::SourceFile,
+        files: leek_db::WorkspaceFiles,
+        shape: RunShape,
+        timing: Option<leek_query::TimingSink>,
+    ) -> Self {
         Self {
-            text: Arc::clone(&run.input().text),
-            run,
+            text: Arc::clone(&input.text),
+            input,
             label: file_label,
             reporter,
             sources: OnceLock::new(),
-            db: OnceLock::new(),
-            file: OnceLock::new(),
+            db: Some((db, file)),
+            files: Some(files),
+            shape: Some(shape),
+            timing,
+            tokens_cache: OnceLock::new(),
+            hir_cache: OnceLock::new(),
+            mir_cache: OnceLock::new(),
+            complexity_cache: OnceLock::new(),
+            diagnostics_cache: OnceLock::new(),
         }
     }
 
@@ -213,45 +504,222 @@ impl<'a> Compilation<'a> {
     /// both frontend and backend diagnostics build it once.
     #[must_use]
     pub fn sources(&self) -> &Sources {
-        self.sources
-            .get_or_init(|| run_sources(&self.run, &self.text, &self.label))
+        self.sources.get_or_init(|| {
+            let mut sources = Sources::single(self.input.source, &self.label, &*self.text);
+            // `includes()` is the one definition of what the program
+            // reaches; it is empty under `Scope::File`, which resolves no
+            // include and so can report nothing pointing into one.
+            for inc in self.includes() {
+                sources.push(inc.source, inc.path.display().to_string(), &*inc.text);
+            }
+            sources
+        })
     }
 
     #[must_use]
     pub fn input(&self) -> &Input {
-        self.run.input()
+        &self.input
+    }
+
+    /// Every file the compiled program reaches through `include(...)`,
+    /// in the closure's dependency order.
+    ///
+    /// [`sources`](Self::sources) is the same set shaped for rendering
+    /// diagnostics; this is for a front-end that needs the files
+    /// themselves — the debug adapter maps a breakpoint's `SourceId` back
+    /// to the path and text the editor should show.
+    ///
+    /// Empty under [`Scope::File`](crate::Scope), which resolves no
+    /// include.
+    #[must_use]
+    pub fn includes(&self) -> Vec<IncludedFile> {
+        if self.scope() == crate::Scope::File {
+            return Vec::new();
+        }
+        self.with_program(|db, files, file, version| {
+            leek_db::queries::include_graph(db, files, file, version)
+                .includes()
+                .map(|inc| IncludedFile {
+                    source: inc.source,
+                    path: inc.path.clone(),
+                    text: Arc::clone(inc.file.text(db)),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     #[must_use]
     pub fn diagnostics(&self) -> &[Diagnostic] {
-        self.run.diagnostics()
+        self.diagnostics_cache.get_or_init(|| {
+            timed(self.timing.as_ref(), "diagnostics", || {
+                self.query_diagnostics().unwrap_or_default()
+            })
+        })
     }
 
-    /// Any artifact the planned pipeline produced. The escape hatch for the
-    /// views with no named accessor below (tokens, the green tree, the
-    /// formatted text); prefer [`hir`](Self::hir) and friends where they
-    /// apply.
+    /// The entry's green tree, parsed under this compilation's class set
+    /// — the program's, or the empty one under
+    /// [`Scope::File`](crate::Scope).
     #[must_use]
-    pub fn get<A: Artifact>(&self) -> Option<&A> {
-        self.run.get::<A>()
+    pub fn green_tree(&self) -> Option<leek_syntax::language::GreenNode> {
+        self.with_program(|db, files, file, version| {
+            let classes = self.classes(db, files, file, version);
+            leek_db::queries::parse_query(db, file, classes).green
+        })
+    }
+
+    /// The entry's tokens.
+    ///
+    /// Lexing is per file, so this is the one accessor a
+    /// [`Scope::File`](crate::Scope::File) compilation answers exactly as
+    /// a program-scoped one does.
+    #[must_use]
+    pub fn tokens(&self) -> Option<&[leek_syntax::Token]> {
+        self.tokens_cache
+            .get_or_init(|| {
+                timed(self.timing.as_ref(), "tokens", || {
+                    self.with_program(|db, _, file, _| {
+                        Arc::new(leek_db::queries::lex_query(db, file).tokens)
+                    })
+                })
+            })
+            .as_deref()
+            .map(Vec::as_slice)
     }
 
     /// The lowered HIR, when the target reached it.
+    ///
+    /// Cached because the signature hands out a reference and a tracked
+    /// query returns a value; the `Arc` inside makes the cache a pointer,
+    /// not a copy of the tree.
     #[must_use]
     pub fn hir(&self) -> Option<&HirFile> {
-        self.run.get::<HirArtifact>().map(|a| a.0.as_ref())
+        self.hir_cache
+            .get_or_init(|| {
+                timed(self.timing.as_ref(), "hir", || {
+                    self.whole_program(|db, files, file, version| {
+                        leek_db::queries::lower_program(db, files, file, version, self.opt()).hir
+                    })
+                })
+            })
+            .as_deref()
+    }
+
+    /// [`hir`](Self::hir) as a shared pointer, for a caller that keeps
+    /// the tree after the compilation is gone.
+    ///
+    /// A refcount bump, not a copy: the cache holds the `Arc` the query
+    /// returned.
+    #[must_use]
+    pub fn hir_arc(&self) -> Option<Arc<HirFile>> {
+        // Through `hir`, so both go through the same cache and the same
+        // stage timer.
+        self.hir()?;
+        self.hir_cache.get().and_then(Option::clone)
     }
 
     /// The lowered MIR, when the target reached it.
     #[must_use]
     pub fn mir(&self) -> Option<&MirProgram> {
-        self.run.get::<MirArtifact>().map(|a| a.0.as_ref())
+        self.mir_cache
+            .get_or_init(|| {
+                timed(self.timing.as_ref(), "mir", || {
+                    self.whole_program(|db, files, file, version| {
+                        leek_db::queries::lower_program_mir(db, files, file, version, self.opt())
+                            .program
+                    })
+                })
+            })
+            .as_deref()
     }
 
     /// The per-function complexity rows, when the target asked for them.
     #[must_use]
     pub fn complexity(&self) -> Option<&[Complexity]> {
-        self.run.get::<ComplexityArtifact>().map(|a| a.0.as_slice())
+        self.complexity_cache
+            .get_or_init(|| {
+                timed(self.timing.as_ref(), "complexity", || {
+                    self.whole_program(|db, files, file, version| {
+                        leek_db::queries::program_complexity(db, files, file, version).0
+                    })
+                })
+            })
+            .as_deref()
+            .map(Vec::as_slice)
+    }
+
+    /// The optimization level this compilation's target asked for.
+    fn opt(&self) -> leek_query::OptLevel {
+        self.shape.map_or(leek_query::OptLevel::O0, |s| s.opt)
+    }
+
+    /// Whether this compilation's includes are part of it.
+    fn scope(&self) -> crate::Scope {
+        self.shape.map_or(crate::Scope::Program, |s| s.scope)
+    }
+
+    /// [`with_program`](Self::with_program), but `None` under
+    /// [`Scope::File`](crate::Scope::File).
+    ///
+    /// HIR, MIR and complexity are whole-program answers: they are built
+    /// over the merged tree of the include closure, and there is no
+    /// file-scoped query that means the same thing at the
+    /// [`OptLevel`](leek_query::OptLevel) the program ones are keyed
+    /// on. A file-scoped compilation never plans those passes, so `None`
+    /// is the honest answer rather than a program-wide one it did not
+    /// ask for.
+    fn whole_program<T>(
+        &self,
+        f: impl FnOnce(
+            &leek_db::LeekDb,
+            leek_db::WorkspaceFiles,
+            leek_db::SourceFile,
+            leek_syntax::Version,
+        ) -> T,
+    ) -> Option<T> {
+        match self.scope() {
+            crate::Scope::Program => self.with_program(f),
+            crate::Scope::File => None,
+        }
+    }
+
+    /// The class set this compilation's entry parses under: the
+    /// program's, or the empty one when the includes are not part of it.
+    fn classes<'db>(
+        &self,
+        db: &'db leek_db::LeekDb,
+        files: leek_db::WorkspaceFiles,
+        file: leek_db::SourceFile,
+        version: leek_syntax::Version,
+    ) -> leek_db::ProgramClasses<'db> {
+        match self.scope() {
+            crate::Scope::Program => leek_db::queries::program_classes(db, files, file, version),
+            crate::Scope::File => leek_db::ProgramClasses::none(db),
+        }
+    }
+
+    /// Run `f` against this compilation's program key, when it has one.
+    ///
+    /// Available under either [`Scope`](crate::Scope) — `files` is the
+    /// session's file set either way. What a file-scoped compilation must
+    /// not do is *use* it to reach past the entry, which is why the
+    /// accessors above take their class set from
+    /// [`classes`](Self::classes) and the whole-program ones below refuse
+    /// outright.
+    fn with_program<T>(
+        &self,
+        f: impl FnOnce(
+            &leek_db::LeekDb,
+            leek_db::WorkspaceFiles,
+            leek_db::SourceFile,
+            leek_syntax::Version,
+        ) -> T,
+    ) -> Option<T> {
+        let (db, file) = self.db?;
+        let files = self.files?;
+        let version = leek_syntax::query::version_from_byte(file.version_byte(db));
+        Some(f(db, files, file, version))
     }
 
     /// Render this compilation's diagnostics through the session's reporter
@@ -297,27 +765,69 @@ impl<'a> Compilation<'a> {
     /// the first call and kept, so two queries asked of the same compilation
     /// share one memo table.
     ///
-    /// The file is a faithful copy of the run's own `Input`, under the same
-    /// canonical-path key the include graph uses (#181), so a query answers
-    /// about the bytes the pipeline actually compiled.
-    pub fn db_handle(&self) -> (&dyn leek_db::Db, leek_db::SourceFile) {
-        let db = self.db.get_or_init(leek_db::LeekDb::default);
-        let file = *self.file.get_or_init(|| {
-            let input = self.run.input();
-            leek_db::SourceFile::new(
-                db,
-                leek_span::paths::canonical_or_normalized(Path::new(&self.label))
-                    .display()
-                    .to_string(),
-                input.source.get(),
-                Arc::clone(&input.text),
-                input.version_byte,
-                input.strict,
-                leek_types::seed_library_enabled(),
-                input.flags.to_bits(),
-            )
-        });
-        (db, file)
+    /// The file is registered under the same canonical-path key the
+    /// include graph uses (#181), so a query answers about the bytes this
+    /// compilation actually compiled.
+    pub fn db_handle(&self) -> Option<(&dyn leek_db::Db, leek_db::SourceFile)> {
+        self.db.map(|(db, file)| (db as &dyn leek_db::Db, file))
+    }
+
+    /// This compilation's diagnostics.
+    ///
+    /// `None` when there is no database to ask. Two rules sit on top of
+    /// the queries, both pinned by the tests below:
+    ///
+    /// 1. **The stage.** A compilation reports what its target reaches,
+    ///    so the stream is sliced to the target's
+    ///    [`Stage`](leek_db::queries::Stage) rather than always reporting
+    ///    the whole frontend. Widening the target only ever *adds*.
+    /// 2. **The abort.** When
+    ///    [`CompileParams::stop_on_diagnostics`](crate::CompileParams)
+    ///    is set and the parse itself reports at or above that severity,
+    ///    the stream stops there: the syntax errors, and nothing the
+    ///    later passes made of the wreckage. On the *entry's own* parse,
+    ///    because the closure's files are parsed before it and their
+    ///    errors are reported as `INCLUDE_PARSE_FAILED` at the include
+    ///    site rather than as the entry's own.
+    ///
+    /// `Severity` orders `Error < Warning`, so "at or above `min`" is
+    /// `severity <= min`.
+    #[must_use]
+    pub fn query_diagnostics(&self) -> Option<Arc<Vec<Diagnostic>>> {
+        use leek_db::queries;
+
+        let (db, file) = self.db?;
+        let files = self.files?;
+        let shape = self.shape?;
+        let version = leek_syntax::query::version_from_byte(file.version_byte(db));
+
+        // Only once the target actually reaches parsing. A `Target::Tokens`
+        // run never plans `Parse`, so there is nothing to abort and no
+        // parse diagnostics to report — checking anyway would hand a
+        // tokens-only run the parser's findings.
+        let upto = |stage| match shape.scope {
+            crate::Scope::Program => {
+                queries::program_diagnostics_upto(db, files, file, version, stage)
+            }
+            crate::Scope::File => queries::file_diagnostics_upto(db, file, stage),
+        };
+
+        if let Some(min) = shape.stop_at
+            && shape.stage >= queries::Stage::Parsed
+        {
+            let classes = self.classes(db, files, file, version);
+            let parsed = queries::parse_query(db, file, classes);
+            if parsed.diagnostics.iter().any(|d| d.severity <= min) {
+                return Some(upto(queries::Stage::Parsed));
+            }
+        }
+
+        Some(match shape.lints {
+            Some(groups) => {
+                leek_lint::query::program_diagnostics_with_lints(db, files, file, version, groups)
+            }
+            None => upto(shape.stage),
+        })
     }
 }
 
@@ -496,9 +1006,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `db_handle` is what a front-end hands a tracked query. The file it
-    /// returns must describe the bytes the pipeline compiled, and asking
-    /// twice must hand back the same input rather than a second one.
+    /// `db_handle` is what a front-end hands a tool's tracked query. The
+    /// file it returns must describe the bytes this compilation compiled,
+    /// and asking twice must hand back the same input rather than a
+    /// second one.
     #[test]
     fn the_db_handle_describes_the_compiled_file_and_is_built_once() {
         let dir = scratch("db-handle");
@@ -507,18 +1018,740 @@ mod tests {
         let session = Session::new(&project, quiet(Target::Linted)).expect("session");
         let compiled = session.compile_entry().expect("compile");
 
-        let (db, file) = compiled.db_handle();
+        let (db, file) = compiled
+            .db_handle()
+            .expect("a session compilation has a database");
         assert_eq!(&**file.text(db), "return 1 + 1;\n");
-        assert_eq!(file.source(db), ENTRY_SOURCE);
         assert_eq!(file.version_byte(db), compiled.input().version_byte);
+        assert_eq!(
+            file.source(db),
+            compiled.input().source,
+            "the input and the query answer about the same SourceId"
+        );
         assert!(
-            file.path(db).is_some_and(|p| p.ends_with("main.leek")),
+            file.path(db)
+                .is_some_and(|p: &str| p.ends_with("main.leek")),
             "{:?}",
             file.path(db)
         );
 
-        let (_, again) = compiled.db_handle();
+        let (_, again) = compiled.db_handle().expect("still there");
         assert!(file == again, "the input is created once and kept");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every target's stream is exactly its stage's.
+    ///
+    /// The mapping `Session::shape` makes — `Target` to
+    /// [`Stage`](leek_db::queries::Stage) — asserted against the stage
+    /// query directly, so a target silently rewired to the wrong stage
+    /// fails here rather than in whatever command reads it.
+    ///
+    /// The fixture parses cleanly and earns its complaints after parsing,
+    /// which is the case the slicing is for. A file that fails to parse is
+    /// a different story — see
+    /// `query_diagnostics_slices_aborts_and_stops_before_the_parse`.
+    #[test]
+    fn every_targets_stream_is_its_stages_stream() {
+        let dir = scratch("stage-parity");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar z = 1 / 0;\nreturn a;\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let cases = [
+            (Target::Tokens, leek_db::queries::Stage::Tokens),
+            (Target::Parsed, leek_db::queries::Stage::Parsed),
+            (Target::Resolved, leek_db::queries::Stage::Resolved),
+            (Target::TypeChecked, leek_db::queries::Stage::TypeChecked),
+            (Target::Hir, leek_db::queries::Stage::Hir),
+        ];
+
+        let mut widths = Vec::new();
+        for (target, stage) in cases {
+            let session = Session::new(&project, quiet(target)).expect("session");
+            let compiled = session.compile_entry().expect("compile");
+            let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+
+            let (db, files) = session.db();
+            let (_, file) = compiled.db_handle().expect("session database");
+            let sliced = leek_db::queries::program_diagnostics_upto(
+                db,
+                files,
+                file,
+                leek_syntax::query::version_from_byte(file.version_byte(db)),
+                stage,
+            );
+            let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
+
+            assert_eq!(
+                reported, from_query,
+                "{target:?} and {stage:?} must report the same stream"
+            );
+            widths.push((target, reported.len()));
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Non-trivial: a later stage reports strictly more than an
+        // earlier one. Without this the assertions above would hold just
+        // as well for five empty lists.
+        let at = |t: Target| widths.iter().find(|(x, _)| *x == t).expect("case").1;
+        assert_eq!(at(Target::Parsed), 0, "this fixture parses: {widths:?}");
+        assert!(
+            at(Target::Resolved) > at(Target::Parsed),
+            "resolution adds the redeclaration: {widths:?}"
+        );
+    }
+
+    /// `Compilation::mir` and `Compilation::complexity` see the whole
+    /// closure, which is the point of them.
+    ///
+    /// The per-file `lower_mir_query` and `complexity_query` answer for
+    /// the entry alone, so a `Compilation` wired to either would silently
+    /// drop every function an include provides (#428). The assertions
+    /// below are on the *included* function, so a per-file answer fails
+    /// them.
+    #[test]
+    fn the_program_mir_and_complexity_queries_see_the_closure() {
+        let dir = scratch("program-mir");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "include(\"util\")\nreturn helper(3);\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            dir.join("src/util.leek"),
+            "function helper(n) {\n\tvar t = 0;\n\tfor (var i = 0; i < n; i++) { t = t + i; }\n\treturn t;\n}\n",
+        )
+        .expect("include");
+        let project = project_at(dir.clone(), "");
+
+        let mir_session = Session::new(&project, quiet(Target::Mir)).expect("session");
+        let mir_compiled = mir_session.compile_entry().expect("compile");
+        let from_accessor = mir_compiled.mir().expect("MIR was lowered").clone();
+        let (db, files) = mir_session.db();
+        let (_, file) = mir_compiled.db_handle().expect("session database");
+        let version = leek_syntax::query::version_from_byte(file.version_byte(db));
+        let query_mir =
+            leek_db::queries::lower_program_mir(db, files, file, version, leek_query::OptLevel::O0);
+
+        let cx_session = Session::new(&project, quiet(Target::Complexity)).expect("session");
+        let cx_compiled = cx_session.compile_entry().expect("compile");
+        let cx_from_accessor: Vec<String> = cx_compiled
+            .complexity()
+            .expect("complexity was measured")
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        let (cx_db, cx_files) = cx_session.db();
+        let (_, cx_file) = cx_compiled.db_handle().expect("session database");
+        let query_cx = leek_db::queries::program_complexity(
+            cx_db,
+            cx_files,
+            cx_file,
+            leek_syntax::query::version_from_byte(cx_file.version_byte(cx_db)),
+        );
+        let query_cx_names: Vec<String> = query_cx.0.iter().map(|c| c.name.clone()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // The closure's function is the discriminator: a per-file answer
+        // would not have it.
+        assert!(
+            cx_from_accessor.iter().any(|n| n == "helper"),
+            "the accessor measured the included function: {cx_from_accessor:?}"
+        );
+        assert_eq!(
+            cx_from_accessor, query_cx_names,
+            "complexity: the accessor is the whole-program query"
+        );
+        assert_eq!(
+            from_accessor.functions.len(),
+            query_mir.program.functions.len(),
+            "MIR: the accessor lowered the same functions"
+        );
+        assert_eq!(
+            from_accessor, *query_mir.program,
+            "MIR: and the same program"
+        );
+    }
+
+    /// The three rules `query_diagnostics` implements, across every
+    /// target and both stop-on-error settings.
+    ///
+    /// The whole matrix in one test on purpose. Each of the three axes
+    /// hid a divergence in turn while this was still a comparison against
+    /// a pipeline run: the target hid one, the parse failure hid one, and
+    /// the threshold is what turned out to explain the second. A test that
+    /// fixed any axis would have gone green over the bug that axis
+    /// conceals.
+    ///
+    /// The run is gone, so these are the rules stated directly:
+    ///
+    /// 1. **The stage.** With no threshold, a wider target reports
+    ///    strictly more — never a different stream with the same length.
+    /// 2. **The abort.** With a threshold, a file whose *entry parse*
+    ///    errors reports the same stream at every target from `Parsed` up:
+    ///    the syntax errors, and nothing the later passes made of the
+    ///    wreckage.
+    /// 3. **The stage before parsing.** `Target::Tokens` never reports a
+    ///    parse diagnostic, threshold or not — it plans no parse, so
+    ///    there is nothing to abort and nothing to report.
+    #[test]
+    fn query_diagnostics_slices_aborts_and_stops_before_the_parse() {
+        // Parses; earns a redeclaration at resolution and a division by
+        // zero after it.
+        let clean = "var a = 1;\nvar a = 2;\nvar z = 1 / 0;\nreturn a;\n";
+        // Does not parse: the entry's own parse reports.
+        let broken = "var a = 1;\nfunction f( {\n";
+
+        let targets = [
+            Target::Tokens,
+            Target::Parsed,
+            Target::Resolved,
+            Target::TypeChecked,
+            Target::Hir,
+            Target::Linted,
+        ];
+
+        let mut compared = 0;
+        for (label, src) in [("clean", clean), ("broken", broken)] {
+            for stop in [Some(Severity::Error), None] {
+                let mut streams = Vec::new();
+                for target in targets {
+                    let dir = scratch(&format!("matrix-{label}-{}-{target:?}", stop.is_some()));
+                    std::fs::write(dir.join("src/main.leek"), src).expect("entry");
+                    let project = project_at(dir.clone(), "");
+
+                    let params = crate::CompileParams {
+                        stop_on_diagnostics: stop,
+                        ..crate::CompileParams::default()
+                    };
+                    let session = Session::new(
+                        &project,
+                        DriverConfig {
+                            target,
+                            color: ColorWhen::Never,
+                            format: MessageFormat::Human,
+                            params,
+                            ..DriverConfig::default()
+                        },
+                    )
+                    .expect("session");
+                    let compiled = session.compile_entry().expect("compile");
+
+                    // Kept as `(code, span)`, not code alone. The span
+                    // carries the `SourceId`, which is what `Sources` and
+                    // `for_source` key on to attribute a diagnostic to a
+                    // file — two streams with the same codes and different
+                    // ids render against the wrong file or vanish, and a
+                    // code-only comparison cannot see it.
+                    let stream: Vec<_> = compiled
+                        .diagnostics()
+                        .iter()
+                        .map(|d| (d.code.id(), d.span))
+                        .collect();
+                    std::fs::remove_dir_all(&dir).ok();
+                    streams.push((target, stream));
+                    compared += 1;
+                }
+
+                let at = |t: Target| {
+                    &streams
+                        .iter()
+                        .find(|(x, _)| *x == t)
+                        .expect("every target was compiled")
+                        .1
+                };
+
+                // Rule 3, at both thresholds and on both fixtures.
+                assert!(
+                    at(Target::Tokens).iter().all(|(code, _)| *code != "E0100"),
+                    "{label}/stop={stop:?}: a tokens target reported a parse \
+                     diagnostic: {:?}",
+                    at(Target::Tokens)
+                );
+
+                if label == "broken" && stop.is_some() {
+                    // Rule 2: the abort collapses every target from
+                    // `Parsed` up onto one stream.
+                    for target in [Target::Resolved, Target::Hir, Target::Linted] {
+                        assert_eq!(
+                            at(target),
+                            at(Target::Parsed),
+                            "{target:?} must stop where the parse did"
+                        );
+                    }
+                    assert!(
+                        !at(Target::Parsed).is_empty(),
+                        "the fixture must fail to parse for this to mean anything"
+                    );
+                } else {
+                    // Rule 1: nothing aborted, so each stage's stream is
+                    // a prefix of the next one's.
+                    {
+                        for pair in [
+                            (Target::Tokens, Target::Parsed),
+                            (Target::Parsed, Target::Resolved),
+                            (Target::Resolved, Target::TypeChecked),
+                            (Target::TypeChecked, Target::Hir),
+                        ] {
+                            assert!(
+                                at(pair.1).starts_with(at(pair.0)),
+                                "{label}/stop={stop:?}: {:?} is not a prefix of {:?}",
+                                pair.0,
+                                pair.1
+                            );
+                        }
+                        // And non-trivially so, on the fixture that gets
+                        // past its parse: five equal empty lists would
+                        // satisfy the prefix rule too.
+                        if label == "clean" {
+                            assert!(
+                                at(Target::Resolved).len() > at(Target::Parsed).len(),
+                                "resolution adds the redeclaration: {:?}",
+                                at(Target::Resolved)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(compared, 24, "every combination was actually compiled");
+    }
+
+    /// A failed parse stops the stream there, and the whole-program
+    /// query it is sliced from carries on regardless.
+    ///
+    /// The rule `query_diagnostics` implements, and where it came from:
+    /// `leek_parser::query::Parse` was the single production step
+    /// implementing `RecipeStepStopOnError`, so with
+    /// `CompileParams::stop_on_diagnostics` set it was wrapped in a
+    /// `StopOnDiagnostics::abort` that stopped the pipeline before any
+    /// later step when the *parse itself* reported at or above the
+    /// threshold. (An earlier version of this comment blamed a missing
+    /// AST; that was wrong — the parse always produced one, because the
+    /// root cast cannot fail.)
+    ///
+    /// The tracked passes have no such notion. They work off the green
+    /// tree, which always exists, so they carry on and report against a
+    /// tree the parser has already given up on. So the rule has to be
+    /// applied on top of them, which is what this pins: the compilation
+    /// stops, the query behind it does not.
+    ///
+    /// `a_permissive_compilation_does_not_stop_and_so_agrees` is the
+    /// other half: drop the threshold and the two line up again, which is
+    /// what makes this a statement about the abort rather than about
+    /// parse errors in general. It is also why the LSP never saw any of
+    /// it — `lsp_params` is permissive.
+    #[test]
+    fn a_failed_parse_stops_the_stream_but_not_the_query() {
+        let dir = scratch("failed-parse");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar bad = \u{a3};\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Resolved)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let sliced = leek_db::queries::program_diagnostics_upto(
+            db,
+            files,
+            file,
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
+            leek_db::queries::Stage::Resolved,
+        );
+        let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            !reported.contains(&"E0202"),
+            "the compilation stopped before resolution: {reported:?}"
+        );
+        assert!(
+            from_query.contains(&"E0202"),
+            "the query resolved anyway: {from_query:?}"
+        );
+        assert!(
+            from_query.len() > reported.len(),
+            "and so reports strictly more: reported={reported:?} query={from_query:?}"
+        );
+    }
+
+    /// With no threshold nothing aborts, and the compilation's stream is
+    /// the query's again — on the same fixture that diverges under the
+    /// default params.
+    ///
+    /// The discriminating half of
+    /// `a_failed_parse_stops_the_stream_but_not_the_query`. If the
+    /// divergence were about the parse failing, it would persist here; it
+    /// does not, which places the cause in the threshold and nowhere
+    /// else. It also explains why the LSP never hit it: `lsp_params` is
+    /// `CompileParams::permissive`.
+    #[test]
+    fn a_permissive_compilation_does_not_stop_and_so_agrees() {
+        let dir = scratch("permissive-parse");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar bad = \u{a3};\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+        let config = DriverConfig {
+            target: Target::Resolved,
+            color: ColorWhen::Never,
+            format: MessageFormat::Human,
+            params: crate::CompileParams::permissive(),
+            ..DriverConfig::default()
+        };
+        let session = Session::new(&project, config).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let sliced = leek_db::queries::program_diagnostics_upto(
+            db,
+            files,
+            file,
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
+            leek_db::queries::Stage::Resolved,
+        );
+        let from_query: Vec<&str> = sliced.iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            reported.contains(&"E0202"),
+            "no threshold, so resolution still ran: {reported:?}"
+        );
+        assert_eq!(
+            reported, from_query,
+            "and the streams agree again once nothing aborts"
+        );
+    }
+
+    /// A compilation's diagnostics grow with its target.
+    ///
+    /// `program_diagnostics` has no such notion: it always reports the
+    /// whole frontend, and `program_diagnostics_with_lints` always
+    /// appends lints. Serving `diagnostics()` from either unconditionally
+    /// would make `miku build` (`Target::Hir`) emit lint findings it has
+    /// never emitted, and `leekc --emit cst` (`Target::Parsed`) report
+    /// type errors — a behaviour change wearing a refactor's clothes.
+    /// `Stage` is what keeps them apart, and this is the test that says
+    /// the distinction is real rather than theoretical.
+    #[test]
+    fn a_compilations_diagnostics_grow_with_its_target() {
+        let dir = scratch("target-dependence");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar z = 1 / 0;\nreturn a;\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let codes_at = |target| {
+            let session = Session::new(&project, quiet(target)).expect("session");
+            let compiled = session.compile_entry().expect("compile");
+            compiled
+                .diagnostics()
+                .iter()
+                .map(|d| d.code.id())
+                .collect::<Vec<_>>()
+        };
+
+        let parsed = codes_at(Target::Parsed);
+        let typed = codes_at(Target::TypeChecked);
+        let linted = codes_at(Target::Linted);
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Parsing alone finds nothing here: the redeclaration is the
+        // resolver's, the division the linter's.
+        assert!(parsed.is_empty(), "nothing before resolution: {parsed:?}");
+        assert_eq!(typed, ["E0202"], "the resolver's finding, and no lint");
+        assert!(
+            linted.len() > typed.len() && linted.starts_with(&["E0202"]),
+            "linting adds to it rather than replacing it: {linted:?}"
+        );
+    }
+
+    /// [`Compilation::hir`] is the whole closure's tree, not the entry's.
+    ///
+    /// `check`, `run`, `build`, `test` and `leekc` all read it and
+    /// nothing else, so a per-file answer here would silently drop every
+    /// definition an include provides from every backend at once.
+    ///
+    /// Compared on the lowered tree itself, not a summary of it: two
+    /// lowerings that agree about function names and disagree about a
+    /// body would pass any count-based assertion and break every
+    /// backend.
+    #[test]
+    fn the_hir_accessor_lowers_the_whole_closure() {
+        let dir = scratch("hir-parity");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "include(\"util\")\nvar x = helper() + 1;\nreturn x;\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            dir.join("src/util.leek"),
+            "function helper() {\n\tvar a = [1, 2, 3];\n\treturn a[0] * 2;\n}\n",
+        )
+        .expect("include");
+
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Hir)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let from_accessor = compiled.hir().expect("lowered").clone();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let from_query = leek_db::queries::lower_program(
+            db,
+            files,
+            file,
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
+            leek_query::OptLevel::O0,
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Not vacuous: two empty trees are equal, so the fixture has to
+        // have lowered something, and specifically something from the
+        // *include* — that is the part a per-file query would miss.
+        assert!(
+            from_accessor
+                .defs
+                .iter()
+                .any(|def| matches!(def, leek_hir::Def::Function(f) if f.name == "helper")),
+            "the closure's function reached the HIR: {:?}",
+            from_accessor.defs.len()
+        );
+        assert_eq!(
+            from_accessor.defs.len(),
+            from_query.hir.defs.len(),
+            "same number of definitions"
+        );
+        assert_eq!(
+            from_accessor, *from_query.hir,
+            "the accessor is the whole-program query"
+        );
+    }
+
+    /// At `Target::Linted`, a compilation's stream is the lint-aware
+    /// program stream — lints included, in the same order, across the
+    /// whole closure.
+    ///
+    /// `Target::Linted` is what `check`, `lint`, `fix` and `test`
+    /// compile with, so this is the stream a user of `miku` actually
+    /// sees. Order is part of the claim, not incidental:
+    /// `leek_lsp::handlers::code_action` matches diagnostics a client
+    /// hands back against the ones the server published.
+    ///
+    /// The fixture reports across the closure on purpose — an error in
+    /// the entry, and a lint that exists only inside the include.
+    #[test]
+    fn a_linted_compilation_reports_the_lint_aware_program_stream() {
+        let dir = scratch("diagnostic-parity");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "include(\"util\")\nvar a = 1;\nvar a = 2;\nreturn helper();\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            dir.join("src/util.leek"),
+            "function helper() {\n\treturn 1 / 0;\n}\n",
+        )
+        .expect("include");
+
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let reported: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let from_query = leek_lint::query::program_diagnostics_with_lints(
+            db,
+            files,
+            file,
+            leek_syntax::query::version_from_byte(file.version_byte(db)),
+            leek_lint::LintGroups::default(),
+        );
+        let from_query_codes: Vec<&str> = from_query.iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Not vacuous, and not only the entry's: the redeclaration is the
+        // entry's, `L0016` exists only inside the include.
+        assert!(
+            reported.contains(&"E0202") && reported.contains(&"L0016"),
+            "fixture reports across the closure: {reported:?}"
+        );
+        assert_eq!(reported, from_query_codes, "same stream, same order");
+        assert_eq!(
+            compiled.diagnostics().len(),
+            from_query.len(),
+            "and nothing is dropped or duplicated"
+        );
+    }
+
+    /// An `include` that escapes the project root still resolves.
+    ///
+    /// The regression this exists for, introduced when `Compilation` moved
+    /// off the run and caught only by going looking: the pipeline resolved
+    /// includes through a folder that fell back to `DiskFolder`, while
+    /// `resolve_include` resolves against `WorkspaceFiles` and nothing
+    /// else. A project whose entry includes `../shared/lib` therefore
+    /// started reporting `E0272 IncludeNotFound` for a file that is right
+    /// there on disk, and every symbol it provided became undefined.
+    ///
+    /// Nothing caught it: the corpus is single-file, and no `miku` test
+    /// had an include pointing outside the project. It is the same gap
+    /// `leek_lsp`'s `resync` closes, which is the uncomfortable part —
+    /// the analysis was already written down before the session repeated
+    /// it.
+    #[test]
+    fn an_include_escaping_the_project_still_resolves() {
+        let base = scratch("escaping-include");
+        let shared = base.join("shared");
+        std::fs::create_dir_all(&shared).expect("shared dir");
+        std::fs::write(
+            base.join("src/main.leek"),
+            "include(\"../shared/lib\")\nreturn helper();\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            shared.join("lib.leek"),
+            "function helper() {\n\treturn 1 / 0;\n}\n",
+        )
+        .expect("include");
+
+        let project = project_at(base.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+        let codes: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&base).ok();
+
+        assert!(
+            !codes.contains(&"E0272"),
+            "the include is on disk and resolves: {codes:?}"
+        );
+        // And its contents are really in the program: the lint fires on a
+        // construct that exists only inside the escaping file.
+        assert!(
+            codes.contains(&"L0016"),
+            "the escaping file's own findings reach the stream: {codes:?}"
+        );
+    }
+
+    /// A caller's `source_id` does not override the session's.
+    ///
+    /// The regression this exists for: `Session` interns every project
+    /// file when it opens, so a file the index knows already has an id.
+    /// Building its `Input` from the caller's argument instead gave the
+    /// pipeline one id and the queries another — `SourceId(9)` against
+    /// `SourceId(2)` for the fixture below — so a diagnostic from one path
+    /// named a different file than the same diagnostic from the other.
+    ///
+    /// It survived the 24-combination matrix because that compared
+    /// diagnostic *codes*, and the codes were identical; only the spans
+    /// disagreed. The matrix compares spans now.
+    ///
+    /// The caller's id is still honoured for a file the session does not
+    /// know, which is the only case where there is no id to conflict with.
+    #[test]
+    fn the_sessions_id_wins_over_the_callers_for_a_project_file() {
+        let dir = scratch("id-authority");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        std::fs::write(dir.join("src/util.leek"), "return 2;\n").expect("other");
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+
+        let compiled = session
+            .compile_file(&dir.join("src/util.leek"), SourceId::new(9).expect("id"))
+            .expect("compile");
+        let (db, file) = compiled.db_handle().expect("session database");
+
+        assert_eq!(
+            compiled.input().source,
+            file.source(db),
+            "one id, whatever the caller asked for"
+        );
+        assert_ne!(
+            compiled.input().source,
+            SourceId::new(9).expect("id"),
+            "and it is the session's, not the caller's"
+        );
+
+        // A file outside the project index has no session id to conflict
+        // with, so the caller's stands.
+        let outside = dir.join("loose.leek");
+        std::fs::write(&outside, "return 3;\n").expect("loose");
+        let loose = session
+            .compile_file(&outside, SourceId::new(9).expect("id"))
+            .expect("compile");
+        assert_eq!(
+            loose.input().source,
+            SourceId::new(9).expect("id"),
+            "the caller's id is honoured where there is nothing to clash with"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two files compiled in one session share one database, and a file
+    /// the project index already knows keeps the input registered for it
+    /// rather than getting a second one for the same bytes.
+    ///
+    /// This is the whole point of hanging the database off the session:
+    /// per-`Compilation` databases meant a `miku test` over N files built
+    /// N of them and shared no memo between any two, so every file
+    /// re-parsed the stdlib headers from scratch.
+    #[test]
+    fn one_database_is_shared_by_every_file_of_a_session() {
+        let dir = scratch("shared-db");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        std::fs::write(dir.join("src/other.leek"), "return 2;\n").expect("other");
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+
+        let first = session.compile_entry().expect("compile entry");
+        let second = session
+            .compile_file(&dir.join("src/other.leek"), SourceId::new(9).expect("id"))
+            .expect("compile other");
+
+        let (db_a, file_a) = first.db_handle().expect("entry database");
+        let (db_b, file_b) = second.db_handle().expect("other database");
+
+        assert!(
+            std::ptr::eq(db_a, db_b),
+            "both compilations answer out of the session's one database"
+        );
+        assert!(file_a != file_b, "each file is its own input");
+        assert_eq!(&**file_b.text(db_b), "return 2;\n");
+
+        // The index walked both files, so compiling one reuses the input
+        // registered for it instead of minting a second.
+        let again = session.compile_entry().expect("recompile entry");
+        assert!(
+            again.db_handle().expect("database").1 == file_a,
+            "a project file keeps one input across compilations"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

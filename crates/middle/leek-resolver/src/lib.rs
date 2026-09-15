@@ -45,7 +45,7 @@ mod expressions;
 pub mod folder;
 pub mod include_graph;
 pub mod interner;
-pub mod pipeline;
+pub mod query;
 mod scope;
 mod statements;
 mod util;
@@ -133,7 +133,7 @@ impl Options {
     /// Build the options from the settings that decide them: the file's
     /// pragmas (`None` when no pragma scan ran), the run's feature flags
     /// and strict mode. The single place the experimental opt-ins are
-    /// spelled out, so every driver — the pipeline step, the salsa query —
+    /// spelled out, so every driver — the include closure, the salsa query —
     /// agrees on what a pragma or a flag turns on.
     #[must_use]
     pub fn from_settings(
@@ -168,8 +168,8 @@ pub fn resolve_with_options(
 
 /// Resolver outcome carrying both diagnostics and the LSP-facing
 /// [`ResolveTable`]. Prefer this entry point over
-/// [`resolve_with_options`] when downstream consumers (the LSP,
-/// `miku watch`) need symbol/reference data.
+/// [`resolve_with_options`] when downstream consumers such as the LSP
+/// need symbol/reference data.
 #[derive(Debug, Clone, Default)]
 pub struct ResolveResult {
     pub diagnostics: Vec<Diagnostic>,

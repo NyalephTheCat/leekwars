@@ -1,6 +1,6 @@
 //! Direct tests for [`leek_resolver::resolve_collecting_files`], the
 //! multi-file entry point the LSP, `miku` and `leekc` reach through
-//! `leek_resolver::pipeline::Resolve`.
+//! `leek_resolver::query::Resolve`.
 //!
 //! Nothing exercised this function before (#194): the only multi-file
 //! suites drove either `leek_hir::lower_files` or a HIR-only recipe that

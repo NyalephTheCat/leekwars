@@ -1,27 +1,50 @@
-//! Run recipe pipelines over project sources with shared diagnostic reporting.
+//! What a driver is configured with, and how it reports.
 
-use std::path::Path;
-use std::sync::Arc;
-
-use crate::error::SessionError;
-use crate::recipes::{RecipeParams, Target};
+use crate::params::{CompileParams, Target};
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter, Sources};
 use leek_diagnostics::{LintLevelError, LintLevels};
-use leek_pipeline::{Pipeline, Run, TimingSink};
 use leek_project::Project;
+use leek_query::TimingSink;
 
 /// The include-id interner, re-exported so front-ends that own one for
 /// a whole run (`miku test`) do not need a direct `leek-resolver`
 /// dependency just to name its type.
 pub use leek_resolver::interner::{PathInterner, SourceInterner};
 
+/// How much of the program a compilation answers about.
+///
+/// Every `miku` subcommand is [`Program`](Scope::Program): it compiles a
+/// file *and* what that file includes. `leekc` is too, except for the four
+/// emits that are textual views of one file — `tokens`, `flat-cst`, `cst`
+/// and `fmt`. Those describe the bytes in front of them, so they leave
+/// `include(...)` unresolved, and the formatter has to: it must stay
+/// byte-faithful to the file it was handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// The entry and its whole include closure. Parses under the
+    /// program's class set, and reports what every file in the closure
+    /// found.
+    #[default]
+    Program,
+    /// The entry's own bytes. Parses under the empty class set, and
+    /// reports only what the entry itself found.
+    ///
+    /// Valid up to [`Target::Parsed`]: the passes past it are
+    /// whole-program by construction, so a file-scoped compilation has no
+    /// HIR, MIR or complexity to hand out.
+    File,
+}
+
 /// Configuration for one driver invocation.
 #[derive(Debug, Clone)]
 pub struct DriverConfig {
     pub target: Target,
-    pub params: RecipeParams,
+    pub params: CompileParams,
     pub color: ColorWhen,
     pub format: MessageFormat,
+    /// Whether the entry's includes are part of the compilation.
+    /// [`Scope::Program`] for everything but `leekc`'s textual emits.
+    pub scope: Scope,
     /// When set, every step of the pipelines planned from this config
     /// records its duration into the sink (`miku build --verbose`).
     ///
@@ -35,31 +58,13 @@ impl Default for DriverConfig {
     fn default() -> Self {
         Self {
             target: Target::Linted,
-            params: RecipeParams::default(),
+            params: CompileParams::default(),
             color: ColorWhen::Auto,
             format: MessageFormat::Human,
+            scope: Scope::Program,
             timing: None,
         }
     }
-}
-
-/// Every file `run`'s diagnostics may point into: the entry, under its own
-/// `SourceId` from the run's `Input`, plus each resolved include under the id
-/// the resolver re-parsed it with.
-///
-/// One map for the whole run, so a *label* pointing into an include resolves
-/// the same way a primary span does. Before this, the reporter picked one
-/// file per diagnostic from the primary's span and drew every label against
-/// it, which put a "previously declared here" caret on whatever line of the
-/// entry file happened to share the include's offset.
-pub fn run_sources(run: &Run<'_>, source_text: &str, file_label: &str) -> Sources {
-    let mut sources = Sources::single(run.input().source, file_label, source_text);
-    if let Some(graph) = run.get::<leek_resolver::pipeline::IncludeGraphArtifact>() {
-        for inc in &graph.includes {
-            sources.push(inc.source, inc.path.display().to_string(), &*inc.text);
-        }
-    }
-    sources
 }
 
 /// The [`Reporter`] for `project`: the manifest's `[lint]` deny/warn/allow
@@ -197,131 +202,21 @@ fn lint_level_diagnostic(project: &Project, err: &LintLevelError) -> leek_diagno
     )
 }
 
-/// The pipeline for one project file: `config`'s target and params merged
-/// with the manifest's opt-in lint groups, with the file's includes resolved
-/// from disk (included files get `SourceId`s following `source_id`).
-///
-/// Every `miku` subcommand that compiles one file per invocation plans it
-/// here, so `check`, `lint`, `run`, `build`, `fix`, `analyze` and `doc` all
-/// see the same include closure and the same lint groups. `test` compiles a
-/// whole directory in one process and plans through
-/// [`file_pipeline_shared`] instead, for one id space across the run.
-pub fn file_pipeline(
-    project: &Project,
-    path: &Path,
-    source_id: leek_span::SourceId,
-    config: &DriverConfig,
-) -> Result<Pipeline, SessionError> {
-    standalone_pipeline(path, source_id, &merge_manifest_lints(project, config))
-}
-
-/// [`file_pipeline`] for a command that compiles many files in one run:
-/// the entry and its includes are numbered out of the caller's shared
-/// `interner` rather than counting up from a per-file id, and the
-/// entry's id comes back so the caller builds its `Input` with it.
-///
-/// `miku test` needs this — numbering each test file `1, 2, 3, …` while
-/// its includes take the ids just above the entry's hands file 2 the id
-/// file 1's first include already has (#191).
-pub fn file_pipeline_shared(
-    project: &Project,
-    path: &Path,
-    config: &DriverConfig,
-    interner: &Arc<dyn SourceInterner>,
-) -> Result<(Pipeline, leek_span::SourceId), SessionError> {
-    let merged = merge_manifest_lints(project, config);
-    let pipeline = build_with(&merged, includes_step(path, interner))?;
-    Ok((pipeline, interner.intern(path)))
-}
-
-/// The pipeline for one file compiled outside any project — the
-/// manifest-less half of [`file_pipeline`], for front-ends that have a
-/// path but no `Miku.toml` (`leekc`).
-///
-/// There are no manifest lint groups to merge, but the file's includes
-/// still resolve from disk and its included files are numbered exactly
-/// the way the one-file-per-invocation `miku` commands number theirs:
-/// from a fresh interner seeded at the entry's own `source_id`.
-pub fn standalone_pipeline(
-    path: &Path,
-    source_id: leek_span::SourceId,
-    config: &DriverConfig,
-) -> Result<Pipeline, SessionError> {
-    build_with(config, includes_step_standalone(path, source_id))
-}
-
-/// Plan `config`'s target with `includes` sequenced ahead of parsing, then
-/// build it — timing every step when `config` carries a [`TimingSink`].
-///
-/// The single place a driver pipeline is built, so `--verbose` cannot end up
-/// measuring a different plan from the one the same command runs without it.
-fn build_with(
-    config: &DriverConfig,
-    includes: Box<dyn leek_pipeline::Step>,
-) -> Result<Pipeline, SessionError> {
-    Ok(
-        crate::recipes::plan_with_includes(config.target, includes, &config.params)?
-            .build_with(config.timing.as_ref()),
-    )
-}
-
 /// Merge the manifest's opt-in lint groups into `config`'s params.
 /// OR semantics: a group runs if either the CLI flags or `Miku.toml`'s
 /// `[lint]` table asks for it.
-fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfig {
+pub(crate) fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfig {
     let mut config = config.clone();
     config.params.lints.pedantic |= project.manifest.lint.pedantic;
     config.params.lints.nursery |= project.manifest.lint.nursery;
     config
 }
 
-/// Build the `ResolveIncludes` step for a file: disk-folder I/O, with
-/// the entry and every file it includes numbered out of `interner`.
-///
-/// Front-ends that compile several files in one process pass one
-/// interner to every call, so a helper included by two entries keeps a
-/// single `SourceId` instead of colliding with the next entry's
-/// (#191). The entry is interned first, so `interner.intern(path)` is
-/// the id the caller should build its `Input` with.
-///
-/// Public so other front-ends that drive the pipeline themselves (the debug
-/// adapter, which reports diagnostics over DAP rather than rendering them)
-/// resolve includes and number sources exactly as the `miku` commands here
-/// do.
-pub fn includes_step(
-    path: &Path,
-    interner: &Arc<dyn SourceInterner>,
-) -> Box<dyn leek_pipeline::Step> {
-    // The same key rule the include graph itself uses, so the entry
-    // and its includes cannot land in the graph under two shapes (#181).
-    let canonical = leek_span::paths::canonical_or_normalized(path);
-    Box::new(leek_resolver::pipeline::ResolveIncludes::new(
-        Arc::new(leek_resolver::folder::DiskFolder),
-        canonical,
-        Arc::clone(interner),
-    ))
-}
-
-/// [`includes_step`] for a front-end that compiles exactly one entry:
-/// a fresh interner whose first path — the entry — gets `source_id`,
-/// so its includes follow on from the id the caller already put in its
-/// `Input`.
-pub fn includes_step_standalone(
-    path: &Path,
-    source_id: leek_span::SourceId,
-) -> Box<dyn leek_pipeline::Step> {
-    let interner: Arc<dyn SourceInterner> = Arc::new(
-        leek_resolver::interner::PathInterner::starting_at(source_id.get()),
-    );
-    includes_step(path, &interner)
-}
-
 #[cfg(test)]
 mod tests {
     use leek_diagnostics::{Diagnostic, Severity, codes};
     use leek_manifest::ManifestLoad;
-    use leek_pipeline::LintGroups;
-    use leek_project::Input;
+    use leek_query::LintGroups;
     use leek_span::{SourceId, Span};
 
     use super::*;
@@ -362,7 +257,7 @@ mod tests {
 
     fn config(lints: LintGroups) -> DriverConfig {
         DriverConfig {
-            params: RecipeParams::default().with_lints(lints),
+            params: CompileParams::default().with_lints(lints),
             ..DriverConfig::default()
         }
     }
@@ -383,25 +278,26 @@ mod tests {
     #[test]
     fn a_diagnostic_from_an_included_file_renders_against_that_file() {
         let dir = scratch("include-render");
-        let main_path = dir.join("main.leek");
+        // Under `src/`, where a project's sources live: the session's file
+        // set is the project's, so a fixture that scatters `.leek` files
+        // at the root is not a project the include graph can see.
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let main_path = src.join("main.leek");
         std::fs::write(&main_path, "include(\"inc\")\nvar kept = 1;\n").unwrap();
         std::fs::write(
-            dir.join("inc.leek"),
+            src.join("inc.leek"),
             "var helper = 1;\nvar broken = notDeclaredAnywhere;\n",
         )
         .unwrap();
 
         let project = project_at(dir.clone(), "");
         let source_id = SourceId::new(1).unwrap();
-        let config = DriverConfig::default();
-        let (src, text) = project.pipeline_input(source_id, &main_path).unwrap();
-        let pipeline = file_pipeline(&project, &main_path, source_id, &config).unwrap();
-        let run = pipeline.run(Input::from(src));
-        let label = main_path.display().to_string();
+        let session = Session::new(&project, DriverConfig::default()).unwrap();
+        let compiled = session.compile_file(&main_path, source_id).unwrap();
 
-        let sources = run_sources(&run, &text, &label);
         let reporter = reporter_for(&project, ColorWhen::Never, MessageFormat::Human).unwrap();
-        let out = reporter.render_all(run.diagnostics(), &sources);
+        let out = reporter.render_all(compiled.diagnostics(), compiled.sources());
 
         // Both files are registered, each under its own id, from one map.
         let at = out
@@ -478,14 +374,16 @@ mod tests {
         let project = project("[lint]\npedantic = true\n");
         let cli = DriverConfig {
             target: Target::Mir,
-            params: RecipeParams::default().with_opt(crate::recipes::OptLevel::O1),
+            params: CompileParams::default().with_opt(crate::OptLevel::O1),
             color: ColorWhen::Never,
             format: MessageFormat::Json,
+            scope: Scope::File,
             timing: None,
         };
         let merged = merge_manifest_lints(&project, &cli);
         assert_eq!(merged.target, Target::Mir);
-        assert_eq!(merged.params.opt, crate::recipes::OptLevel::O1);
+        assert_eq!(merged.scope, Scope::File);
+        assert_eq!(merged.params.opt, crate::OptLevel::O1);
         assert!(matches!(merged.format, MessageFormat::Json));
         assert!(merged.params.lints.pedantic);
     }
@@ -636,24 +534,13 @@ mod tests {
         assert_eq!(feature_flags_summary(none, none), None);
     }
 
-    #[test]
-    fn includes_step_survives_a_path_that_cannot_be_canonicalized() {
-        // `canonicalize` fails for a file that does not exist; the step must
-        // fall back to the path as given rather than panic.
-        let step = includes_step_standalone(
-            std::path::Path::new("/no/such/entry.leek"),
-            SourceId::new(7).unwrap(),
-        );
-        assert_eq!(step.name(), "resolve_includes");
-    }
-
-    /// The reason `file_pipeline_shared` exists: two entry files planned
-    /// from one interner get two ids, and a helper both of them include
-    /// keeps a third — where the per-file numbering handed entry 2 the id
-    /// entry 1's include already owned (#191).
+    /// The reason a session interns its own ids: two entry files
+    /// numbered out of one interner get two ids, and a helper both of
+    /// them include keeps a third — where the per-file numbering handed
+    /// entry 2 the id entry 1's include already owned (#191).
     #[test]
     fn one_interner_numbers_several_entries_without_collisions() {
-        let interner: Arc<dyn SourceInterner> = Arc::new(PathInterner::new());
+        let interner: std::sync::Arc<dyn SourceInterner> = std::sync::Arc::new(PathInterner::new());
         let first = interner.intern(std::path::Path::new("/tests/first.leek"));
         let helper = interner.intern(std::path::Path::new("/tests/helper.leek"));
         let second = interner.intern(std::path::Path::new("/tests/second.leek"));
@@ -666,135 +553,28 @@ mod tests {
         );
     }
 
+    /// `miku build --verbose` times the *stages* a compilation asks the
+    /// database for, and the numbers describe the same work the plain
+    /// build does.
+    ///
+    /// This used to assert the sink saw every planned pipeline step, once
+    /// each. There are no steps to see: a session compilation answers from
+    /// queries. The entries are stage names now — `diagnostics`, `hir` —
+    /// which is a visible change to what `miku build --verbose` and
+    /// `miku dev` print.
+    ///
+    /// Salsa cannot give back what was lost. It fires `WillExecute` before
+    /// a query body runs and nothing on completion, so its event stream
+    /// says which queries recomputed and never how long any took. The
+    /// epic's "timing becomes a salsa event hook" is therefore a different
+    /// measurement, not a port of this one; timing the calls keeps
+    /// durations, which is what these three consumers print.
+    ///
+    /// Recorded lazily, when an accessor is first called, so the list
+    /// reflects what the command actually asked for rather than what a
+    /// recipe would have planned regardless.
     #[test]
-    fn file_pipeline_resolves_includes_before_parsing() {
-        let dir = scratch("file-pipeline");
-        std::fs::create_dir_all(dir.join("src")).expect("src dir");
-        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
-        let project = project_at(dir.clone(), "");
-
-        let pipeline = file_pipeline(
-            &project,
-            &dir.join("src/main.leek"),
-            SourceId::new(1).unwrap(),
-            &DriverConfig::default(),
-        )
-        .expect("pipeline");
-        let names = pipeline.step_names();
-        let at = |n: &str| {
-            names
-                .iter()
-                .position(|s| *s == n)
-                .unwrap_or_else(|| panic!("no `{n}` step in {names:?}"))
-        };
-        assert!(at("lex") < at("resolve_includes"), "{names:?}");
-        assert!(at("resolve_includes") < at("parse"), "{names:?}");
-        assert!(names.contains(&"lint"), "the default target is Linted");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn file_pipeline_resolves_includes_for_every_target_a_command_asks_for() {
-        // DRIVER-02: `analyze` and `doc` ask for `Complexity`, `test` and
-        // `fix` for `Linted`, `build` for `Mir`. Whichever a command wants,
-        // it gets the same include-resolving front end — otherwise one
-        // subcommand sees a symbol another one does not.
-        let dir = scratch("every-target");
-        std::fs::create_dir_all(dir.join("src")).expect("src dir");
-        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
-        let project = project_at(dir.clone(), "");
-
-        for target in [
-            Target::Resolved,
-            Target::TypeChecked,
-            Target::Hir,
-            Target::Linted,
-            Target::Mir,
-            Target::Complexity,
-        ] {
-            let config = DriverConfig {
-                target,
-                ..DriverConfig::default()
-            };
-            let names = file_pipeline(
-                &project,
-                &dir.join("src/main.leek"),
-                SourceId::new(1).unwrap(),
-                &config,
-            )
-            .expect("pipeline")
-            .step_names();
-            let at = |n: &str| {
-                names
-                    .iter()
-                    .position(|s| *s == n)
-                    .unwrap_or_else(|| panic!("no `{n}` step for {target:?} in {names:?}"))
-            };
-            assert!(at("lex") < at("resolve_includes"), "{target:?}: {names:?}");
-            assert!(
-                at("resolve_includes") < at("parse"),
-                "{target:?}: {names:?}"
-            );
-        }
-        assert!(
-            file_pipeline(
-                &project,
-                &dir.join("src/main.leek"),
-                SourceId::new(1).unwrap(),
-                &DriverConfig {
-                    target: Target::Complexity,
-                    ..DriverConfig::default()
-                },
-            )
-            .expect("pipeline")
-            .step_names()
-            .contains(&"complexity"),
-            "the Complexity target must still end at the complexity step"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_standalone_pipeline_differs_from_the_project_one_only_in_lint_groups() {
-        // `leekc` has no manifest, so it plans through `standalone_pipeline`.
-        // The pass sequence must be the one the `miku` commands get, or the
-        // two front ends disagree about what `include(...)` means.
-        let dir = scratch("standalone");
-        std::fs::create_dir_all(dir.join("src")).expect("src dir");
-        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
-        let entry = dir.join("src/main.leek");
-        let id = SourceId::new(1).unwrap();
-
-        let project = project_at(dir.clone(), "");
-        let from_project = file_pipeline(&project, &entry, id, &DriverConfig::default())
-            .expect("project pipeline")
-            .step_names();
-        let standalone = standalone_pipeline(&entry, id, &DriverConfig::default())
-            .expect("standalone pipeline")
-            .step_names();
-        assert_eq!(standalone, from_project);
-
-        // The manifest's lint groups are the project-only half: they change
-        // what the lint step reports, never the pass sequence.
-        let loud = project_at(dir.clone(), "[lint]\npedantic = true\n");
-        assert_eq!(
-            file_pipeline(&loud, &entry, id, &DriverConfig::default())
-                .expect("pipeline")
-                .step_names(),
-            standalone
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// `miku build --verbose` must time the pipeline the plain build runs —
-    /// same steps, one entry each — and must still get the manifest's lint
-    /// groups. The old `run_file_timed` re-inlined the planning code, so
-    /// either half could drift from `file_pipeline` unnoticed.
-    #[test]
-    fn a_timing_sink_records_the_same_plan_the_untimed_config_builds() {
+    fn a_timing_sink_records_the_stages_the_compilation_asked_for() {
         let dir = scratch("timed");
         std::fs::create_dir_all(dir.join("src")).expect("src dir");
         std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
@@ -806,14 +586,6 @@ mod tests {
         };
         let plain_session = Session::new(&project, untimed.clone()).expect("session");
         let plain = plain_session.compile_entry().expect("untimed run");
-        let expected = file_pipeline(
-            &project,
-            &project.entry_path(),
-            SourceId::new(1).unwrap(),
-            &untimed,
-        )
-        .expect("pipeline")
-        .step_names();
 
         let sink = TimingSink::new();
         let timed_session = Session::new(
@@ -826,40 +598,38 @@ mod tests {
         .expect("session");
         let timed = timed_session.compile_entry().expect("timed run");
 
+        assert!(
+            sink.entries().is_empty(),
+            "nothing is computed until something is asked for"
+        );
+
+        assert_eq!(timed.had_error(), plain.had_error());
         let names: Vec<&str> = sink.entries().iter().map(|e| e.step).collect();
         assert_eq!(
-            names, expected,
-            "the sink must see every step of the untimed plan, once each"
+            names,
+            ["diagnostics"],
+            "asking whether it failed costs exactly the diagnostic stream"
         );
-        assert_eq!(timed.had_error(), plain.had_error());
-        // The manifest's `pedantic = true` reached the timed plan too: the
-        // lint step is planned, so the merge happened on this path as well.
-        assert!(names.contains(&"lint"), "{names:?}");
 
-        std::fs::remove_dir_all(&dir).ok();
-    }
+        let _ = timed.hir();
+        let names: Vec<&str> = sink.entries().iter().map(|e| e.step).collect();
+        assert_eq!(names, ["diagnostics", "hir"], "and lowering adds one entry");
 
-    #[test]
-    fn file_pipeline_follows_the_configured_target() {
-        let dir = scratch("target");
-        std::fs::create_dir_all(dir.join("src")).expect("src dir");
-        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
-        let project = project_at(dir.clone(), "");
+        let _ = timed.hir();
+        assert_eq!(
+            sink.entries().len(),
+            2,
+            "a second ask is a cache hit, not a second entry"
+        );
 
-        let config = DriverConfig {
-            target: Target::Mir,
-            ..DriverConfig::default()
-        };
-        let names = file_pipeline(
-            &project,
-            &dir.join("src/main.leek"),
-            SourceId::new(1).unwrap(),
-            &config,
-        )
-        .expect("pipeline")
-        .step_names();
-        assert!(names.contains(&"lower-mir"), "{names:?}");
-        assert!(!names.contains(&"lint"), "{names:?}");
+        // The manifest's `pedantic = true` still reaches this path: the
+        // timed and plain compilations agree about what counts as an error,
+        // which is what the merge decides.
+        assert_eq!(
+            timed.diagnostics().len(),
+            plain.diagnostics().len(),
+            "timing changes what is measured, never what is reported"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

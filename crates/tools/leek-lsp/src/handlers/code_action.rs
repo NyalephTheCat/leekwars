@@ -60,7 +60,7 @@ pub fn handle(
     // The diagnostics the client is showing for this document — exactly
     // the set push and pull publish, so a fix is never offered for a
     // problem the editor does not display.
-    let diags = file_diagnostics(ws, uri, doc.source_file);
+    let diags = file_diagnostics(ws, doc.source_file);
 
     let source_len = doc.text.len();
     let source_id = doc.source_file_source_id(&ws.db);

@@ -60,6 +60,14 @@ pub struct ProjectIndex {
     pub tests_root: Option<PathBuf>,
     pub default_version_byte: u8,
     pub default_strict: bool,
+    /// A `@version` the driver forces on every file of this index,
+    /// outranking the file's own pragma — `leekc --version-pragma`.
+    ///
+    /// Distinct from [`default_version_byte`](Self::default_version_byte),
+    /// which is the *fallback* for a file that declares nothing. `None`
+    /// for a project loaded from a `Miku.toml`: a manifest has no way to
+    /// spell "ignore what the file says".
+    pub version_override: Option<u8>,
     files: Vec<PathBuf>,
     path_to_source: HashMap<PathBuf, SourceId>,
     source_to_path: HashMap<SourceId, PathBuf>,
@@ -84,6 +92,7 @@ impl ProjectIndex {
             tests_root,
             default_version_byte: manifest.project.language,
             default_strict: manifest.project.strict,
+            version_override: None,
             files: Vec::new(),
             path_to_source: HashMap::new(),
             source_to_path: HashMap::new(),
@@ -103,12 +112,43 @@ impl ProjectIndex {
             tests_root: None,
             default_version_byte: 4,
             default_strict: false,
+            version_override: None,
             files: Vec::new(),
             path_to_source: HashMap::new(),
             source_to_path: HashMap::new(),
             next_source_id: 1,
         };
         index.enumerate_dir(src_root);
+        index
+    }
+
+    /// An index holding exactly one file.
+    ///
+    /// What a driver with a path and no `Miku.toml` gets. The directory
+    /// is still the root — an `include("helper")` resolves relative to
+    /// the including file either way — but the tree is *not* walked: a
+    /// one-file compile should not read every `.leek` beside it, and a
+    /// `leek_session::Session` closes its file set under the entry's
+    /// includes anyway, which is the only part of the tree that can
+    /// matter.
+    pub fn single_file(entry: &Path) -> Self {
+        let canonical = Self::canonicalize(entry);
+        let root = canonical
+            .parent()
+            .map_or_else(|| canonical.clone(), Path::to_path_buf);
+        let mut index = Self {
+            root: root.clone(),
+            src_root: root,
+            tests_root: None,
+            default_version_byte: leek_span::pragma::LATEST_VERSION,
+            default_strict: false,
+            version_override: None,
+            files: Vec::new(),
+            path_to_source: HashMap::new(),
+            source_to_path: HashMap::new(),
+            next_source_id: 1,
+        };
+        let _ = index.source_for_path(&canonical);
         index
     }
 
@@ -169,7 +209,12 @@ impl ProjectIndex {
     /// `[project].language` / `strict` defaults. This is the one place project
     /// inputs get their version; every pass then reads `Input::version_byte`.
     pub fn language_settings(&self, text: &str) -> LanguageSettings {
-        LanguageSettings::resolve(text, None, self.default_version_byte, self.default_strict)
+        LanguageSettings::resolve(
+            text,
+            self.version_override,
+            self.default_version_byte,
+            self.default_strict,
+        )
     }
 
     /// The index's file-identity key. Delegates to the workspace-wide

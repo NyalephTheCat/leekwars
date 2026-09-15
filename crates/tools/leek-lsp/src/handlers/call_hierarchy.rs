@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use leek_hir::Def;
-use leek_pipeline::salsa::SourceFile;
+use leek_query::salsa::SourceFile;
 use leek_resolver::{ResolveTable, SymbolKind};
 use leek_span::{LineTable, Span};
 use leek_syntax::{SyntaxKind, language::NodeOrToken};

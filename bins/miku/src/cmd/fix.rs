@@ -1,6 +1,6 @@
 //! `miku fix` — apply machine-applicable diagnostic suggestions.
 //!
-//! Files go through the same driver pipeline as `miku check` (includes
+//! Files compile through the same session as `miku check` (includes
 //! resolved, manifest lint groups merged) and the same manifest `[lint]`
 //! levels: a suggestion attached to an `allow`ed code is never applied.
 //! A file with compile errors is reported and left untouched — rewriting
@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use leek_diagnostics::{Applicability, Diagnostic, Reporter, Severity};
 use leek_project::Project;
 use leek_rewrite::EditSet;
-use leek_session::{DriverConfig, RecipeParams, Session, Target};
+use leek_session::{CompileParams, DriverConfig, Session, Target};
 use leek_span::SourceId;
 
 use crate::cli::{ColorWhen, Fix, MessageFormat};
@@ -42,10 +42,13 @@ pub fn run(
 
     let config = DriverConfig {
         target: Target::Linted,
-        params: RecipeParams::default(),
+        params: CompileParams::default(),
         color: color.into(),
         format: format.into(),
-        timing: None,
+        // `scope` and `timing` stay at their defaults: every `miku`
+        // subcommand compiles the whole program, and only `build --verbose`
+        // wants timings.
+        ..DriverConfig::default()
     };
     // One session for the whole run: the reporter is built once, and every
     // file compiles through the same driver entry point `miku check` uses.
@@ -57,6 +60,8 @@ pub fn run(
     for (next_source, path) in (1_u32..).zip(&sources) {
         let source = SourceId::new(next_source).unwrap();
         let compiled = session.compile_file(path, source)?;
+        // See `analyze`: the id the spans carry is the session's.
+        let source = compiled.input().source;
 
         if has_compile_error(session.reporter(), compiled.diagnostics()) {
             compiled.report();

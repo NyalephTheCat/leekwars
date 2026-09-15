@@ -3,7 +3,6 @@
 
 use std::ops::Range;
 
-use leek_fmt::pipeline::FormattedArtifact;
 use leek_syntax::Version;
 use tower_lsp::lsp_types as lsp;
 
@@ -20,9 +19,9 @@ use crate::workspace::Workspace;
 /// the document is unknown to the workspace.
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::TextEdit>> {
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run_formatted(ws, uri, ws.settings.format.clone())?;
-
-    let formatted = run.get::<FormattedArtifact>()?.0.as_ref().clone();
+    let formatted = crate::analysis::formatted(&ws.db, doc.source_file, &ws.settings.format)
+        .as_ref()
+        .clone();
     let original = doc.text.as_ref();
 
     if formatted == original {

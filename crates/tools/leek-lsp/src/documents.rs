@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use leek_pipeline::salsa::{Db, SourceFile};
+use leek_query::salsa::{Db, SourceFile};
 use leek_span::{LineTable, SourceId};
 
 /// Everything we need per open document: the salsa input handle
 /// (which carries the source text and lives in the workspace's
-/// [`LeekDb`](leek_pipeline::salsa::LeekDb)), plus the cached
+/// [`LeekDb`](leek_query::salsa::LeekDb)), plus the cached
 /// `LineTable` we use to translate LSP positions to byte offsets.
 pub struct DocHandle {
     pub source_file: SourceFile,

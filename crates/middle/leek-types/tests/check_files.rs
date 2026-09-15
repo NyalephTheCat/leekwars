@@ -1,5 +1,5 @@
 //! Direct tests for [`leek_types::check_collecting_files`], the
-//! multi-file type-check entry point `leek_types::pipeline::TypeCheck`
+//! multi-file type-check entry point `leek_types::query::TypeCheck`
 //! takes whenever an include graph is present.
 //!
 //! Like its resolver twin, nothing exercised this function before

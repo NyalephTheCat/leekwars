@@ -15,10 +15,8 @@ leek-manifest       = { workspace = true }
 leek-diagnostics    = { workspace = true }
 leek-hir            = { workspace = true }
 leek-runtime        = { workspace = true }
-leek-parser         = { workspace = true }
-leek-pipeline       = { workspace = true }
+leek-db             = { workspace = true }
 leek-project        = { workspace = true }
-leek-session        = { workspace = true }
 leek-span           = { workspace = true }
 leek-workpool       = { workspace = true }
 leek-syntax         = { workspace = true }

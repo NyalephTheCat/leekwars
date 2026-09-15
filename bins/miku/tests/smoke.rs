@@ -1867,6 +1867,44 @@ version = "0.1.0"
     dir
 }
 
+/// A test file that includes a helper living only under `[paths].tests`.
+///
+/// The project index walks `[paths].src` and nothing else, so a session
+/// whose file set came from the index alone knew nothing about the tests
+/// tree — and an `include(...)` between two test files resolved against
+/// nothing, reporting `E0272` for a file sitting right next to the one
+/// that names it.
+#[test]
+fn a_test_file_includes_a_helper_that_lives_only_under_tests() {
+    let dir = scratch_dir("tests_tree_include");
+    write(
+        &dir,
+        "Miku.toml",
+        "[project]\nname    = \"tested\"\nversion = \"0.1.0\"\n",
+    );
+    write(&dir, "src/main.leek", "return 1\n");
+    write(
+        &dir,
+        "tests/helpers/util.leek",
+        "function util() { return 9 }\n",
+    );
+    write(
+        &dir,
+        "tests/uses_helper.leek",
+        "// miku-test: expect-output: 9\ninclude(\"helpers/util\")\nreturn util()\n",
+    );
+
+    let out = miku(&["test", "--color", "never"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.contains("PASS tests/uses_helper.leek"),
+        "stdout: {}\nstderr: {}",
+        out.stdout,
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn include_project_passes_check_lint_and_fix() {
     let dir = include_project("include_check");
@@ -2289,22 +2327,23 @@ fn the_experimental_table_switches_the_feature_on_and_verbose_says_so() {
 
 // ---- dev ----
 
+/// The stages a compilation is asked for, not the passes it runs. There
+/// are no passes to time: a compilation answers from tracked queries, and
+/// salsa fires an event *before* a query body runs and nothing when it
+/// finishes, so an event hook can say which queries recomputed but never
+/// how long they took.
 #[test]
-fn dev_pipeline_prints_a_timing_per_front_end_pass() {
+fn dev_pipeline_prints_a_timing_per_stage_it_asks_for() {
     let dir = include_project("dev_pipeline");
     let out = miku(&["dev", "pipeline", "src/main.leek"], &dir);
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     let text = format!("{}{}", out.stdout, out.stderr);
-    for step in [
-        "pragma",
-        "lex",
-        "parse",
-        "resolve",
-        "type-check",
-        "lower-hir",
-    ] {
-        assert!(text.contains(step), "no timing for `{step}`:\n{text}");
+    for stage in ["diagnostics", "hir"] {
+        assert!(text.contains(stage), "no timing for `{stage}`:\n{text}");
     }
+    // The file it timed, so a run that silently timed the default fixture
+    // instead of the path it was given does not pass.
+    assert!(text.contains("src/main.leek"), "{text}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2421,4 +2460,63 @@ repository  = "https://example.invalid/documented"
     assert!(index.contains("v1.2.3"), "version missing:\n{index}");
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An `include(...)` that reaches *outside* the project root still
+/// resolves, and the included file's contents are really part of the
+/// program.
+///
+/// The coverage gap that let two regressions through this branch with CI
+/// green. Every other fixture here is self-contained and the upstream
+/// corpus is single-file, so nothing exercised an include the project
+/// index never walked — which is exactly the case that broke when
+/// compilation moved from a disk-backed include folder to a salsa file
+/// set.
+///
+/// Asserted two ways on purpose. `check` passing says the include
+/// resolved at all (a missing one is `E0272 IncludeNotFound`); the run's
+/// output says its *definition* reached the program, which a resolved-but-
+/// empty closure would not give.
+#[test]
+fn an_include_reaching_outside_the_project_resolves() {
+    let base = scratch_dir("escaping_include");
+    let project = base.join("app");
+    write(
+        &project,
+        "Miku.toml",
+        "[project]\nname    = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    // One level above the project root, so no index walk reaches it.
+    write(
+        &base,
+        "shared/lib.leek",
+        "// @version:4\nfunction twice(x) { return x * 2; }\n",
+    );
+    write(
+        &project,
+        "src/main.leek",
+        "// @version:4\ninclude(\"../../shared/lib\");\nreturn twice(21);\n",
+    );
+
+    let check = miku(&["check"], &project);
+    assert_eq!(
+        check.status, 0,
+        "the include is on disk and must resolve.\nstdout: {}\nstderr: {}",
+        check.stdout, check.stderr
+    );
+    assert!(!check.stderr.contains("E0272"), "stderr: {}", check.stderr);
+
+    let run = miku(&["run"], &project);
+    assert_eq!(
+        run.status, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert!(
+        run.stdout.contains("42"),
+        "the escaping file's definition reached the program.\nstdout: {}",
+        run.stdout
+    );
+
+    std::fs::remove_dir_all(&base).ok();
 }

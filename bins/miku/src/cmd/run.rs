@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use leek_backends::resolve_run_backend;
 use leek_project::Project;
-use leek_session::{Compilation, DriverConfig, OptLevel, RecipeParams, Session, Target};
+use leek_session::{Compilation, CompileParams, DriverConfig, OptLevel, Session, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Run};
 
@@ -27,10 +27,13 @@ pub fn run(
     let config = DriverConfig {
         target: Target::Linted,
         // The interpreter enforces an op budget, so fold constants to shrink it.
-        params: RecipeParams::default().with_opt(OptLevel::O1),
+        params: CompileParams::default().with_opt(OptLevel::O1),
         color: color.into(),
         format: format.into(),
-        timing: None,
+        // `scope` and `timing` stay at their defaults: every `miku`
+        // subcommand compiles the whole program, and only `build --verbose`
+        // wants timings.
+        ..DriverConfig::default()
     };
     let session = Session::new(&project, config)?;
     let compiled = session.compile_entry()?;

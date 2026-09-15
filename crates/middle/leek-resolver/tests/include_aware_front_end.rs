@@ -1,25 +1,22 @@
-//! The include-aware front-end, driven end to end.
+//! The include-aware front end, driven end to end.
 //!
-//! `leek_session::pipeline_with_includes` is the path `leekc`, `miku`,
-//! the LSP and the DAP take for a multi-file project, and it is the only
-//! one that plans the `resolve` and `type-check` steps with an
-//! [`IncludeGraphArtifact`] in the context. Nothing executed it before
-//! (#194): `multi_file_pipeline.rs` builds the HIR-only recipe, whose
-//! pushed `LowerHir` step never expands `HirArtifact::Requires`, and the
-//! recipe-shape tests in `leek-pipeline` stand a no-op `Tap` in for the
-//! includes step and assert step *names* only.
+//! `program_diagnostics_upto(..., Stage::TypeChecked)` is what every
+//! front-end asks for a multi-file project, and it is the only stream
+//! that runs `resolve_program` and `typecheck_program` over the whole
+//! include closure. Nothing executed that path before (#194):
+//! `multi_file_lowering.rs` only lowers, and the per-query tests in the
+//! pass crates each answer for one file.
+//!
+//! The stage is the guarantee an earlier version of this file spent a
+//! test on: `Stage::TypeChecked` *is* "resolve and type-check ran", so a
+//! diagnostic below arriving from an included file cannot be produced any
+//! other way.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
+use leek_db::queries::{Stage, include_graph, program_diagnostics_upto};
 use leek_diagnostics::{Diagnostic, codes};
-use leek_project::Input;
-use leek_resolver::folder::MemFolder;
-use leek_resolver::interner::PathInterner;
-use leek_resolver::pipeline::{IncludeGraphArtifact, ResolveIncludes};
-use leek_session::{RecipeParams, Target, pipeline_with_includes, plan_with_includes};
 use leek_span::SourceId;
-use leek_types::pipeline::TypeCheckArtifact;
 
 struct Run {
     diagnostics: Vec<Diagnostic>,
@@ -52,76 +49,29 @@ impl Run {
 }
 
 fn run_to_typecheck(entry_path: &str, files: &[(&str, &str)]) -> Run {
-    let mut folder = MemFolder::new();
-    for (p, t) in files {
-        folder.insert(*p, *t);
-    }
-    let entry_text = files
-        .iter()
-        .find(|(p, _)| *p == entry_path)
-        .map(|(_, t)| (*t).to_string())
-        .expect("entry exists in fixture");
-
-    let input = Input {
-        source: SourceId::new(1).unwrap(),
-        text: entry_text.into(),
-        version_byte: 4,
-        strict: true,
-        flags: leek_span::FeatureFlags::none(),
-    };
-    // The walker interns the entry first, so the counter starts at the
-    // entry's own id — exactly what `leek_session::includes_step` does.
-    // Seeding it past the entry would hand the entry a second `SourceId`
-    // and make any span-source assertion here meaningless.
-    let includes = ResolveIncludes::new(
-        Arc::new(folder),
-        PathBuf::from(entry_path),
-        Arc::new(PathInterner::starting_at(1)),
+    let mut db = leek_db::LeekDb::default();
+    // The entry keeps `SourceId(1)` and the includes take 2, 3, … — the
+    // numbering a `Session` hands out. Giving the entry a second id would
+    // make every span-source assertion here meaningless.
+    let (set, entry) = leek_db::testing::workspace(
+        &mut db,
+        entry_path,
+        files,
+        (4, true),
+        leek_span::FeatureFlags::none().to_bits(),
     );
-    let params = RecipeParams::permissive();
-    let pipeline =
-        pipeline_with_includes(Target::TypeChecked, Box::new(includes), &params).expect("recipe");
-    let run = pipeline.run(input);
-
-    assert!(
-        run.get::<TypeCheckArtifact>().is_some(),
-        "the type-check step ran: {:?}",
-        run.errors()
-    );
-    let include_sources = run
-        .get::<IncludeGraphArtifact>()
-        .map(|g| {
-            g.includes
-                .iter()
-                .map(|f| (f.path.clone(), f.source))
-                .collect()
-        })
-        .unwrap_or_default();
+    let version = leek_syntax::Version::V4;
+    let diagnostics = program_diagnostics_upto(&db, set, entry, version, Stage::TypeChecked)
+        .as_ref()
+        .clone();
+    let include_sources = include_graph(&db, set, entry, version)
+        .includes()
+        .map(|f| (f.path.clone(), f.source))
+        .collect();
     Run {
-        diagnostics: run.diagnostics().to_vec(),
+        diagnostics,
         include_sources,
     }
-}
-
-#[test]
-fn the_typechecked_target_plans_both_resolve_and_type_check_with_includes() {
-    // The guarantee the rest of this file relies on: a no-op `Tap`
-    // recipe-shape test can't tell whether these steps really execute,
-    // but if they were not even planned nothing below would run.
-    let includes = ResolveIncludes::new(
-        Arc::new(MemFolder::new()),
-        PathBuf::from("/main.leek"),
-        Arc::new(PathInterner::starting_at(2)),
-    );
-    let names = plan_with_includes(
-        Target::TypeChecked,
-        Box::new(includes),
-        &RecipeParams::permissive(),
-    )
-    .expect("plan")
-    .step_names();
-    assert!(names.contains(&"resolve"), "{names:?}");
-    assert!(names.contains(&"type-check"), "{names:?}");
 }
 
 #[test]

@@ -18,7 +18,6 @@
 
 use leek_diagnostics::{Diagnostic, Severity, codes};
 use leek_project::Input;
-use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -31,12 +30,14 @@ fn compile_errors(text: &str, source_id: SourceId, version: Version) -> Vec<Diag
         strict: false,
         flags: leek_span::FeatureFlags::from_env(),
     };
-    let Ok(pipeline) = leek_session::pipeline(Target::Hir, &RecipeParams::permissive()) else {
-        return Vec::new();
-    };
-    pipeline
-        .run(input)
-        .diagnostics()
+    // Best-effort, like the permissive pipeline this replaced: a parse error
+    // does not stop the later passes, because a migration that breaks name
+    // resolution without breaking syntax is exactly what this is looking
+    // for. A database per call — the text is pathless, so there is nothing
+    // for an `include(...)` to resolve against and nothing to share.
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
+    leek_db::queries::file_diagnostics_upto(&db, file, leek_db::queries::Stage::Hir)
         .iter()
         .filter(|d| d.severity == Severity::Error)
         .cloned()

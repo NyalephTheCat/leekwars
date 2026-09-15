@@ -5,11 +5,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use leek_pipeline::ProjectIndex;
-use leek_pipeline::salsa::{LeekDb, SourceFile, WorkspaceFiles};
+use leek_project::ProjectIndex;
+use leek_query::salsa::{LeekDb, SourceFile, WorkspaceFiles};
 use leek_resolver::folder::Folder;
 use leek_resolver::interner::{PathInterner, SourceInterner};
 use leek_span::LineTable;
+use leek_span::paths::canonical_or_normalized;
 use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
 use salsa::Setter;
 use tower_lsp::lsp_types::{SemanticToken, Url};
@@ -74,6 +75,15 @@ pub struct Workspace {
     roots: Vec<ProjectIndex>,
     /// On-disk `.leek` files from the project index (not open).
     pub indexed: HashMap<PathBuf, IndexedFile>,
+    /// Files an `include("…")` reaches that are neither open nor
+    /// indexed — an include that escapes the project root, or one
+    /// followed before its project was indexed.
+    ///
+    /// Kept across revisions rather than rebuilt per [`Workspace::resync`]
+    /// because the value here is the `SourceFile` *identity*: minting a
+    /// fresh input for the same path every keystroke would give salsa a
+    /// new key each time and throw away every memo hanging off it.
+    walked: HashMap<PathBuf, IndexedFile>,
     /// The salsa input naming every file this workspace holds, keyed by
     /// the canonical path each [`SourceFile`] carries. Rewritten by
     /// [`Workspace::resync`] from `docs` + `indexed`, so a tracked query
@@ -94,7 +104,7 @@ pub struct Workspace {
     /// include walker gives files that are neither open nor indexed,
     /// come out of the same counter, so the two can never name two
     /// different files the same (#191). Shared with
-    /// [`crate::pipeline`], whose include walker interns into it.
+    /// [`crate::folder`], whose include walker interns into it.
     pub interner: Arc<PathInterner>,
     /// Project roots received during `initialize`, indexed in
     /// `initialized`.
@@ -135,9 +145,10 @@ impl Default for Workspace {
             docs: HashMap::new(),
             roots: Vec::new(),
             indexed: HashMap::new(),
+            walked: HashMap::new(),
             files,
             targets: Vec::new(),
-            folder: crate::pipeline::include_folder(&[]),
+            folder: crate::folder::include_folder(&[]),
             interner: Arc::new(PathInterner::new()),
             pending_project_roots: Vec::new(),
             pending_library_log: Vec::new(),
@@ -361,14 +372,15 @@ impl Workspace {
     /// The [`leek_span::SourceId`] comes from the workspace interner, not
     /// from the owning [`ProjectIndex`] — each index numbers its own
     /// files from 1, so two roots (or a root and an open buffer) would
-    /// otherwise hand the same id to different files, and
-    /// [`crate::pipeline::run_on_file_with_includes`] maps a source back
-    /// to a URI by exactly that id. The index's own numbering is never
-    /// read from here, so letting the two diverge costs nothing.
+    /// otherwise hand the same id to different files, and a diagnostic's
+    /// span is mapped back to a URI by exactly that id
+    /// ([`crate::diagnostics::LabelSources`]). The index's own numbering
+    /// is never read from here, so letting the two diverge costs
+    /// nothing.
     ///
     /// Leaves the derived caches alone: callers registering a whole tree
     /// rebuild them once at the end.
-    fn register_indexed(&mut self, uri: Url, loaded: leek_pipeline::LoadedProjectFile) {
+    fn register_indexed(&mut self, uri: Url, loaded: leek_project::LoadedProjectFile) {
         let arc_text: Arc<str> = Arc::from(loaded.text);
         let flags_bits = leek_span::FeatureFlags::from_env().to_bits();
         let source_id = self.source_id_for(Some(&loaded.path));
@@ -481,14 +493,112 @@ impl Workspace {
             });
         }
 
-        let files: BTreeMap<String, SourceFile> = targets
+        let mut files: BTreeMap<String, SourceFile> = targets
             .iter()
             .filter(|target| !target.canonical_path.is_empty())
             .map(|target| (target.canonical_path.clone(), target.source_file))
             .collect();
+        self.close_under_includes(&mut files);
         self.files.set_all(&mut self.db, files);
-        self.folder = crate::pipeline::include_folder(&targets);
+        self.folder = crate::folder::include_folder(&targets);
         self.targets = targets;
+    }
+
+    /// Extend `files` with every file its members' includes reach that
+    /// the workspace does not already hold.
+    ///
+    /// [`resolve_include`](leek_db::queries::resolve_include) resolves a
+    /// name against [`WorkspaceFiles`] and nothing else — there is no
+    /// disk fallback inside the query layer, and there must not be: a
+    /// tracked query that read the filesystem would be impure, and salsa
+    /// would have no way to know when to re-run it. So the disk lookup
+    /// lives here, on the mutation path, and whatever it finds becomes an
+    /// ordinary input like every other file.
+    ///
+    /// Without this the query layer's idea of an include closure is
+    /// strictly smaller than the include folder's, and the difference is
+    /// silent: a file whose diagnostics all came from an unindexed
+    /// include would simply look clean.
+    ///
+    /// Cost per call is one memoized
+    /// [`include_edges`](leek_db::queries::include_edges) lookup per file
+    /// — a cache hit for every file whose text did not change — plus one
+    /// `read_to_string` per include name that resolves *outside* the
+    /// workspace. Open and indexed files never reach that read, so the
+    /// per-keystroke cost is bounded by the number of includes escaping
+    /// the project, which is normally none. The read is deliberately not
+    /// cached away: `DiskFolder` re-read on every run, so an escaping
+    /// include picked up an external edit immediately, and dropping that
+    /// would be a silent regression of its own.
+    fn close_under_includes(&mut self, files: &mut BTreeMap<String, SourceFile>) {
+        let mut frontier: Vec<SourceFile> = files.values().copied().collect();
+        while let Some(file) = frontier.pop() {
+            let includer = PathBuf::from(file.canonical_path(&self.db));
+            if includer.as_os_str().is_empty() {
+                continue;
+            }
+            for call in leek_db::queries::include_edges(&self.db, file).includes {
+                for candidate in leek_resolver::folder::include_candidates(&includer, &call.name) {
+                    let key = canonical_or_normalized(&candidate).display().to_string();
+                    if files.contains_key(&key) {
+                        break;
+                    }
+                    if let Some(found) = self.walk_to(&candidate, &key) {
+                        files.insert(key, found);
+                        frontier.push(found);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The input for a file the include walk reached at `candidate`, or
+    /// `None` when nothing readable is there.
+    ///
+    /// Reuses the input minted on an earlier revision when there is one,
+    /// refreshing its text if the file changed on disk underneath us —
+    /// the same shape an open buffer's edits take, so a walked file's
+    /// memos are invalidated by the same mechanism.
+    fn walk_to(&mut self, candidate: &Path, key: &str) -> Option<SourceFile> {
+        let text = std::fs::read_to_string(candidate).ok()?;
+        if let Some(known) = self.walked.get_mut(&PathBuf::from(key)) {
+            if known.text.as_ref() != text {
+                let text: Arc<str> = Arc::from(text);
+                known
+                    .source_file
+                    .set_text(&mut self.db)
+                    .to(Arc::clone(&text));
+                known.line_table = Arc::new(LineTable::new(&text));
+                known.text = text;
+            }
+            return Some(known.source_file);
+        }
+
+        let path = PathBuf::from(key);
+        let lang = self.settle(Some(&path), &text);
+        let text: Arc<str> = Arc::from(text);
+        let source_file = SourceFile::new(
+            &self.db,
+            key.to_string(),
+            self.source_id_for(Some(&path)),
+            Arc::clone(&text),
+            lang.version,
+            lang.strict,
+            leek_types::seed_library_enabled(),
+            leek_span::FeatureFlags::from_env().to_bits(),
+        );
+        self.walked.insert(
+            path.clone(),
+            IndexedFile {
+                uri: path_to_uri(&path),
+                path,
+                source_file,
+                line_table: Arc::new(LineTable::new(&text)),
+                text,
+            },
+        );
+        Some(source_file)
     }
 
     /// Settle one buffer's language settings from its text: the file's

@@ -1,9 +1,11 @@
 //! The published diagnostic set, and its conversion to `lsp_types`.
 
 use leek_diagnostics::{Diagnostic as LeekDiagnostic, Severity};
-use leek_pipeline::salsa::SourceFile;
-use leek_session::Target;
+use leek_lint::LintGroups;
+use leek_lint::query::program_diagnostics_with_lints;
+use leek_query::salsa::SourceFile;
 use leek_span::SourceId;
+use leek_syntax::query::version_from_byte;
 use tower_lsp::lsp_types as lsp;
 
 use crate::util::position::PosMap;
@@ -41,10 +43,10 @@ fn explain_href(code: &str) -> String {
 /// push (`publishDiagnostics`), pull (`textDocument/diagnostic`) and
 /// `textDocument/codeAction`.
 ///
-/// Analysis covers the whole include closure (`Linted`, so lint findings
-/// come with it) and the result is filtered to spans belonging to
-/// `source_file` itself: a diagnostic raised inside an include belongs to
-/// that include's own document.
+/// Analysis covers the whole include closure — lint findings included —
+/// and the result is filtered to spans belonging to `source_file` itself:
+/// a diagnostic raised inside an include belongs to that include's own
+/// document.
 ///
 /// Handlers must not re-derive this set. A per-file run reports
 /// undefined-symbol and type errors for everything an include provides,
@@ -52,29 +54,38 @@ fn explain_href(code: &str) -> String {
 /// `source.fixAll` apply them on save — for problems the editor never
 /// showed.
 ///
-/// The pipeline underneath is memoized by salsa, so recomputation across
-/// the handlers serving one edit is cheap; only the returned `Vec` is
-/// freshly allocated.
-pub fn file_diagnostics(
+/// One tracked query, not a planned pipeline: every stage underneath is
+/// memoized, so the handlers serving one edit share the work and only the
+/// returned `Vec` is freshly allocated. The closure it walks is
+/// [`WorkspaceFiles`](leek_db::WorkspaceFiles), which
+/// [`Workspace::resync`](crate::workspace::Workspace) keeps closed under
+/// includes — without that the query layer would see a smaller closure
+/// than the include folder does and quietly drop an unindexed include's
+/// diagnostics.
+///
+/// `LintGroups::default()` matches what `leek_session::lsp_params()` asked
+/// for: the opt-in groups stay off until the server reads them from the
+/// manifest.
+pub fn file_diagnostics(ws: &Workspace, source_file: SourceFile) -> Vec<LeekDiagnostic> {
+    leek_db::queries::for_source(&program_stream(ws, source_file), source_file.source(&ws.db))
+}
+
+/// The whole program's stream, before it is narrowed to one file.
+///
+/// Split out so a test can tell "the include's diagnostic never reached
+/// us" apart from "it reached us and the filter dropped it" — two very
+/// different bugs that look identical from `file_diagnostics` alone.
+pub(crate) fn program_stream(
     ws: &Workspace,
-    uri: &lsp::Url,
     source_file: SourceFile,
-) -> Vec<LeekDiagnostic> {
-    let source = source_file.source(&ws.db);
-    // Recipe planning can fail; degrade to "no diagnostics" rather than crash.
-    let Some(run) = crate::pipeline::run_on_file_with_includes(ws, source_file, Target::Linted)
-    else {
-        // Warn, not trace: a file that silently produces zero diagnostics is
-        // indistinguishable from a clean one, so the user has no way to tell
-        // that analysis never ran.
-        tracing::warn!(%uri, "recipe planning failed; no diagnostics for this file");
-        return Vec::new();
-    };
-    run.diagnostics()
-        .iter()
-        .filter(|d| d.span.source == source)
-        .cloned()
-        .collect()
+) -> std::sync::Arc<Vec<LeekDiagnostic>> {
+    program_diagnostics_with_lints(
+        &ws.db,
+        ws.files(),
+        source_file,
+        version_from_byte(source_file.version_byte(&ws.db)),
+        LintGroups::default(),
+    )
 }
 
 /// Every file a label may point into, by `SourceId`.
@@ -194,14 +205,113 @@ pub fn to_lsp(
 
 #[cfg(test)]
 mod tests {
-    use super::{EXPLAIN_DIR, LabelSources, explain_href, to_lsp};
+    use super::{EXPLAIN_DIR, LabelSources, explain_href, file_diagnostics, to_lsp};
     use crate::util::position::PosMap;
+    use crate::workspace::Workspace;
     use leek_diagnostics::{Code, Diagnostic};
     use leek_span::{LineTable, SourceId, Span};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower_lsp::lsp_types as lsp;
 
     fn url(name: &str) -> lsp::Url {
         lsp::Url::parse(&format!("file:///tmp/{name}")).unwrap()
+    }
+
+    fn temp_root() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "leek-lsp-diagnostics-{}-{suffix}-{seq}",
+            std::process::id()
+        ))
+    }
+
+    fn codes(diagnostics: &[Diagnostic]) -> Vec<&'static str> {
+        diagnostics.iter().map(|d| d.code.id()).collect()
+    }
+
+    /// The whole point of analysing the closure rather than the file: a
+    /// function an include provides is *defined*, so the entry does not
+    /// report it undefined.
+    #[test]
+    fn a_symbol_an_include_provides_is_not_reported_undefined() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create project");
+        fs::write(
+            root.join("main.leek"),
+            "include(\"util\")\nreturn helper();\n",
+        )
+        .expect("write entry");
+        fs::write(
+            root.join("util.leek"),
+            "function helper() {\n\treturn 1;\n}\n",
+        )
+        .expect("write include");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = root.join("main.leek").canonicalize().expect("canonical");
+        let entry = ws.indexed[&path].source_file;
+
+        let diagnostics = file_diagnostics(&ws, entry);
+        fs::remove_dir_all(&root).ok();
+
+        assert!(
+            !codes(&diagnostics).iter().any(|c| c.starts_with("E02")),
+            "the closure declares `helper`: {diagnostics:?}"
+        );
+    }
+
+    /// An include that no project index ever saw still contributes its
+    /// diagnostics.
+    ///
+    /// This is the regression guard for the file set. The query layer
+    /// resolves an include name against `WorkspaceFiles` and has no disk
+    /// fallback, so an include reaching outside the indexed project is
+    /// invisible to it unless `Workspace::resync` has registered the file
+    /// as an input. When it is not, this file's errors simply vanish —
+    /// and a document with no diagnostics looks exactly like a clean one,
+    /// which is why this is a test and not a comment.
+    #[test]
+    fn an_include_outside_the_indexed_project_still_reports() {
+        let base = temp_root();
+        let root = base.join("project");
+        let outside = base.join("shared");
+        fs::create_dir_all(&root).expect("create project");
+        fs::create_dir_all(&outside).expect("create shared dir");
+        fs::write(
+            root.join("main.leek"),
+            "include(\"../shared/lib\")\nreturn 1;\n",
+        )
+        .expect("write entry");
+        // `£` is a stray character: a lex error, from a file the index
+        // never walked.
+        fs::write(outside.join("lib.leek"), "var bad = \u{a3};\n").expect("write include");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = root.join("main.leek").canonicalize().expect("canonical");
+        let entry = ws.indexed[&path].source_file;
+
+        let all = crate::diagnostics::program_stream(&ws, entry);
+        let own = file_diagnostics(&ws, entry);
+        fs::remove_dir_all(&base).ok();
+
+        assert!(
+            codes(&all).contains(&"E0003"),
+            "the unindexed include's lex error reaches the program stream: {all:?}"
+        );
+        assert!(
+            !codes(&own).contains(&"E0003"),
+            "and is filtered out of the entry's own slice: {own:?}"
+        );
     }
 
     /// A label pointing into an included file must carry that file's URI

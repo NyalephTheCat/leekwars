@@ -36,7 +36,7 @@
 //!   `check_*` / `infer_*` methods.
 //! - [`index`] — the LSP-facing outputs: [`TypeTable`] (span → inferred
 //!   type, for hover) and [`InferredSignatures`].
-//! - [`pipeline`] — the [`Step`](leek_pipeline::Step) / salsa integration.
+//! - [`pipeline`] — the tracked [`typecheck_query`](pipeline::typecheck_query).
 //!
 //! Public entry: [`check`].
 
@@ -48,7 +48,7 @@ use leek_syntax::Version;
 mod builtins;
 mod checker;
 pub mod generic;
-pub mod pipeline;
+pub mod query;
 mod ty;
 
 pub use ty::{Type, type_from_node};
@@ -62,7 +62,7 @@ pub use leek_diagnostics::codes;
 
 /// Test-only probe: counts how many times `typecheck_query` actually
 /// executed (vs cached). Used by the memoization smoke test.
-#[cfg(all(test, feature = "salsa"))]
+#[cfg(test)]
 pub(crate) mod salsa_probe {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
@@ -163,7 +163,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// are assembled: `type_options` on the direct pipeline path, and the
 /// LSP's salsa-input construction on the memoized one. No salsa-tracked
 /// query reads it any more — the tracked path takes the value off the
-/// [`SourceFile`](leek_pipeline::salsa::SourceFile) input — so flipping
+/// [`SourceFile`](leek_query::salsa::SourceFile) input — so flipping
 /// it can no longer leave a memo computed under the old setting alive.
 /// Removing the global entirely (threading the setting through the
 /// pipeline options) is R2's job — see issue #98.
@@ -200,7 +200,7 @@ pub fn check_with_options(
 /// Type-checker outcome carrying both diagnostics and the LSP-facing
 /// [`TypeTable`]. Prefer this entry point over
 /// [`check_with_options`] when downstream consumers (the LSP,
-/// `miku watch`) need per-expression type data.
+/// `miku analyze`) need per-expression type data.
 #[derive(Debug, Clone, Default)]
 pub struct TypeCheckResult {
     pub diagnostics: Vec<Diagnostic>,

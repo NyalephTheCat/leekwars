@@ -21,7 +21,7 @@ use std::sync::Arc;
 use leek_config::LibrarySet;
 use leek_diagnostics::Diagnostic;
 use leek_parser::ast::{self, AstNode, Stmt as AstStmt};
-use leek_pipeline::OptLevel;
+use leek_query::OptLevel;
 use leek_resolver::include_graph::{ExpandUnit, IncludeExpander};
 use leek_span::{SourceId, Span};
 use leek_syntax::{SyntaxKind, SyntaxNode, SyntaxToken, Version};

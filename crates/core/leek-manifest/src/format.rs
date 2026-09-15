@@ -8,7 +8,7 @@ use crate::error::{ManifestError, ManifestErrorKind, span_of};
 use crate::parse::{bool_val, string_val, table_val, wrong_type};
 use toml_edit::{Item, TableLike};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FormatOptions {
     /// Number of columns per indent level (when [`indent_style`] is
     /// [`IndentStyle::Spaces`]). Used for width measurement when
@@ -129,13 +129,13 @@ pub struct FormatOptions {
     pub collapse_else_if: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndentStyle {
     Spaces,
     Tabs,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrailingComma {
     Preserve,
     Always,
@@ -143,7 +143,7 @@ pub enum TrailingComma {
 }
 
 /// Opening-brace placement for blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BraceStyle {
     /// K&R: `function f() {` — brace on the header's line (default).
     SameLine,
@@ -152,7 +152,7 @@ pub enum BraceStyle {
 }
 
 /// String-literal quote normalization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QuoteStyle {
     /// Keep whatever the source used (default).
     Preserve,
@@ -163,7 +163,7 @@ pub enum QuoteStyle {
 }
 
 /// Output line terminator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineEnding {
     /// `\n` (default).
     Lf,
@@ -172,7 +172,7 @@ pub enum LineEnding {
 }
 
 /// Operator placement when a binary expression breaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperatorPosition {
     /// `a +\n    b` — operator ends the first line (default).
     Trailing,
@@ -181,7 +181,7 @@ pub enum OperatorPosition {
 }
 
 /// Brace policy for single-statement control bodies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlBraces {
     /// Keep the source's choice (default).
     Preserve,
@@ -192,7 +192,7 @@ pub enum ControlBraces {
 }
 
 /// Statement-terminator (`;`) policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Semicolons {
     /// Keep the source's choice (default).
     Preserve,

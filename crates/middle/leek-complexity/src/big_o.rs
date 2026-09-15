@@ -22,8 +22,7 @@ use std::collections::BTreeMap;
 use crate::cost_expr::{CostExpr, SizeVar};
 
 /// A canonical complexity class.
-#[cfg_attr(feature = "salsa", derive(salsa::Update))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(salsa::Update, Debug, Clone, PartialEq, Eq)]
 pub enum BigO {
     /// O(1).
     Constant,

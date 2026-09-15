@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 use leek_diagnostics::Diagnostic;
 use leek_hir::{DefId, HirFile};
-use leek_pipeline::OptLevel;
+use leek_query::OptLevel;
 use leek_span::Span;
 use leek_types::Type;
 
@@ -79,9 +79,9 @@ pub fn lower_file(hir: &HirFile) -> (MirProgram, Vec<Diagnostic>) {
 /// Lower a HIR file into MIR, run the backend-agnostic passes if `opt`
 /// asks for them, and check the result's structural invariants.
 ///
-/// The pure entry point behind [`LowerMir`](crate::pipeline::LowerMir):
-/// everything that step does apart from reading and writing a
-/// [`Context`](leek_pipeline::Context). The returned diagnostics are
+/// The pure entry point behind
+/// [`lower_mir_query`](crate::query::lower_mir_query) and
+/// `leek_db::queries::lower_program_mir`. The returned diagnostics are
 /// [`lower_file`]'s own, plus an `E0302` if the program came out
 /// malformed.
 ///
@@ -200,7 +200,7 @@ pub(crate) struct LoopCtx {
 mod verify_tests {
     use leek_diagnostics::Diagnostic;
     use leek_parser::ast::{AstNode, SourceFile};
-    use leek_pipeline::OptLevel;
+    use leek_query::OptLevel;
     use leek_span::SourceId;
     use leek_syntax::{SyntaxNode, Version};
 

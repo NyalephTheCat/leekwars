@@ -7,7 +7,7 @@ license.workspace = true
 description = "Compiler session: pre-built pipeline recipes plus the driver that runs them over project sources."
 
 [dependencies]
-leek-complexity  = { workspace = true, features = ["salsa"] }
+leek-complexity  = { workspace = true }
 leek-config      = { workspace = true }
 # The query façade: what `Compilation::db_handle` hands a tracked query.
 # A peer inside `crates/db`, and the edge only goes this way — `leek-db`
@@ -15,13 +15,12 @@ leek-config      = { workspace = true }
 leek-db          = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-environment = { workspace = true }
-leek-fmt         = { workspace = true, features = ["salsa"] }
 leek-hir         = { workspace = true }
 leek-lexer       = { workspace = true }
 leek-lint        = { workspace = true }
 leek-mir         = { workspace = true }
 leek-parser      = { workspace = true }
-leek-pipeline    = { workspace = true, features = ["salsa"] }
+leek-query       = { workspace = true }
 leek-prelude     = { workspace = true }
 leek-project     = { workspace = true }
 leek-resolver    = { workspace = true }

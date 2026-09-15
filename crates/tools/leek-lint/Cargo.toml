@@ -10,40 +10,21 @@ description = "Leekscript linter — rule engine over HIR."
 leek-span        = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-hir         = { workspace = true }
-leek-pipeline    = { workspace = true }
+leek-query       = { workspace = true }
 leek-resolver    = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-parser      = { workspace = true }
-# Only under `salsa`. `diagnostics_with_lints` appends this crate's
-# findings to `leek_db::diagnostics_without_lints`, and the concatenation
-# has to live here: `leek-db` is `crates/db` (rank 3), this is
-# `crates/tools` (rank 6), and db -> tools is the edge
-# `cargo xtask check-layers` exists to reject. tools -> db is downward
-# and needs no allowlist entry.
-leek-db          = { workspace = true, optional = true }
-salsa            = { version = "0.26", optional = true }
-
-[features]
-default = []
-salsa = [
-  "dep:salsa",
-  "dep:leek-db",
-  "leek-pipeline/salsa",
-  "leek-parser/salsa",
-  "leek-hir/salsa",
-  "leek-syntax/salsa",
-  "leek-diagnostics/salsa",
-  "leek-span/salsa",
-]
+# `diagnostics_with_lints` appends this crate's findings to
+# `leek_db::diagnostics_without_lints`, and the concatenation has to live
+# here: `leek-db` is `crates/db` (rank 3), this is `crates/tools`
+# (rank 6), and db -> tools is the edge `cargo xtask check-layers` exists
+# to reject. tools -> db is downward and needs no allowlist entry.
+leek-db          = { workspace = true }
+salsa            = { workspace = true }
 
 [dev-dependencies]
 leek-project     = { workspace = true }
-leek-session     = { workspace = true }
 leek-rewrite     = { workspace = true }
-# `tests/diagnostics_query.rs` exercises the tracked queries, which only
-# exist behind the feature. Same shape `leek-mir` and `leek-complexity`
-# use for theirs.
-leek-lint        = { path = ".", features = ["salsa"] }
 
 [lints]
 workspace = true

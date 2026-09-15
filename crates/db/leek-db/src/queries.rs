@@ -6,7 +6,7 @@
 //! and read the [`WorkspaceFiles`](crate::WorkspaceFiles) input this
 //! crate owns. Each query still lives in the pass crate that computes
 //! it and keeps its single memo table there — calling
-//! `leek_db::queries::parse_query` and `leek_parser::pipeline::parse_query`
+//! `leek_db::queries::parse_query` and `leek_parser::query::parse_query`
 //! hits the same cache entry, because they are the same function. Nothing
 //! here wraps, forwards or re-declares a query; a wrapper would be a second
 //! memo table over the same work.
@@ -31,35 +31,38 @@
 //! `leek-fmt`, which depends down on this crate.
 
 /// Pragma preprocessing (`// @version:`, experimental opt-ins).
-pub use leek_syntax::pipeline::{PragmaResult, pragma_query};
+pub use leek_syntax::query::{PragmaResult, pragma_query};
 
 /// Lexing.
 pub use leek_lexer::LexResult;
-pub use leek_lexer::pipeline::lex_query;
+pub use leek_lexer::query::lex_query;
 
 /// Parsing — one query for every file, buffer or on-disk alike.
-pub use leek_parser::pipeline::{ParseQueryResult, parse_query};
+pub use leek_parser::query::{ParseQueryResult, parse_query};
 
 /// Name resolution.
-pub use leek_resolver::pipeline::{ResolveArtifact, resolve_query};
+pub use leek_resolver::query::{ResolveArtifact, resolve_query};
 
 /// Type checking.
-pub use leek_types::pipeline::{TypeCheckArtifact, typecheck_query};
+pub use leek_types::query::{TypeCheckArtifact, typecheck_query};
 
 /// HIR lowering.
-pub use leek_hir::pipeline::{LowerHirResult, lower_hir_query};
+pub use leek_hir::query::{LowerHirResult, lower_hir_query};
 
 /// MIR lowering (at `O0` — a codegen driver optimizes its own copy).
-pub use leek_mir::pipeline::{LowerMirQueryResult, lower_mir_query};
+pub use leek_mir::query::{LowerMirQueryResult, lower_mir_query};
 
 /// Complexity / big-O analysis.
-pub use leek_complexity::pipeline::{ComplexityReport, complexity_query};
+pub use leek_complexity::query::{ComplexityReport, complexity_query};
 
 /// The assembled diagnostic streams, and the per-file filter over them
 /// — see [`crate::diagnostics`]. Lint findings are deliberately absent:
 /// they are appended by `leek_lint::diagnostics_with_lints`, in the
 /// tool, because db may not depend on tools.
-pub use crate::diagnostics::{diagnostics_without_lints, for_source, program_diagnostics};
+pub use crate::diagnostics::{
+    Stage, diagnostics_without_lints, file_diagnostics_upto, for_source, program_diagnostics,
+    program_diagnostics_upto,
+};
 /// The include closure: one file's include sites, one include name
 /// resolved against the workspace, the whole graph an entry file
 /// reaches, and the program-wide class set every parse in it is keyed
@@ -68,8 +71,14 @@ pub use crate::include::{
     IncludeGraph, IncludeGraphFile, IncludeRef, class_names, include_edges, include_graph,
     include_parse_failures, program_classes, resolve_include,
 };
+pub use crate::program::{
+    lower_program, lower_program_mir, program_complexity, resolve_program, typecheck_program,
+};
 /// The whole-program passes over that closure — see [`crate::program`].
-pub use crate::program::{lower_program, resolve_program, typecheck_program};
+/// The optimization level a whole-program lowering is keyed on. Owned by
+/// the database substrate, re-exported here so a caller of
+/// [`lower_program`] needs no other import.
+pub use leek_query::OptLevel;
 /// The per-file include scan's result type, from the pure scan the
 /// graph and the folder-backed walk share.
 pub use leek_resolver::include_graph::{IncludeCall, IncludeEdges, IncludeSite};

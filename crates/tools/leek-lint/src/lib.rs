@@ -29,20 +29,18 @@
 pub mod allow;
 pub mod group;
 pub mod pass;
-pub mod pipeline;
+pub mod query;
 pub mod registry;
 pub mod rules;
 
 pub use allow::{AllowMap, collect_allows};
 pub use group::{LintGroup, LintGroups, LintOptions};
 pub use pass::{Body, BodyKind, LintCx, LintMeta, LintPass, run_passes};
-pub use pipeline::{Lint, LintFindings};
-/// The tracked queries, when the `salsa` feature is on: one file's
-/// lint findings, and the complete diagnostic stream that appends them
-/// to `leek-db`'s. See [`pipeline`] for why the second one lives here
-/// and not in `leek-db`.
-#[cfg(feature = "salsa")]
-pub use pipeline::{diagnostics_with_lints, lint_query};
+/// The tracked queries: one file's lint findings, and the complete
+/// diagnostic stream that appends them to `leek-db`'s. See [`pipeline`]
+/// for why the second one lives here and not in `leek-db`.
+pub use query::{diagnostics_with_lints, lint_query};
+pub use query::{program_diagnostics_with_lints, program_lint_query};
 
 use leek_diagnostics::Diagnostic;
 use leek_hir::HirFile;
@@ -73,12 +71,13 @@ pub fn lint_with(file: &HirFile, opts: &LintOptions) -> Vec<Diagnostic> {
 /// Run the lints `opts` enables over `file` and drop the findings
 /// `@allow(...)` annotations suppress.
 ///
-/// The pure entry point behind [`Lint`]: everything that step does apart
-/// from reading and writing a [`Context`](leek_pipeline::Context).
+/// The pure entry point behind
+/// [`lint_query`](crate::query::lint_query) and
+/// [`program_lint_query`](crate::query::program_lint_query).
 ///
 /// `root` is the file's CST, which the annotations need — they live in
 /// comment trivia the HIR doesn't carry. Pass `None` when the caller has
-/// no tree (a pipeline wired without `Parse`) and nothing is suppressed.
+/// no tree, and nothing is suppressed.
 pub fn lint_file(file: &HirFile, root: Option<&SyntaxNode>, opts: &LintOptions) -> Vec<Diagnostic> {
     let findings = lint_with(file, opts);
     match root {

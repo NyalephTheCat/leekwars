@@ -8,22 +8,12 @@
 # Do not add entries to get a new dependency past the gate; see "The layering
 # rule" in docs/architecture.md for the alternatives.
 
-# The recipe catalogue plans the formatter and lint pipeline steps. Fix: let
-# tools register their own steps on top of the db layer (ARCH-03).
-leek-session -> leek-fmt: recipes plan the Fmt step and FormattedArtifact
-leek-session -> leek-lint: recipes plan the LintFindings step
-
-# Every frontend/middle stage defines its own pipeline step and artifact types
-# on top of the generic `leek-pipeline` substrate, which itself depends only on
-# `core`. Fix: move the substrate down or the step definitions up (ARCH-03).
-leek-lexer -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-syntax -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-parser -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-resolver -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-types -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-hir -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-mir -> leek-pipeline: stage defines its pipeline step/artifacts
-leek-complexity -> leek-pipeline: stage defines its pipeline step/artifacts
+# `Compilation::diagnostics` includes lint findings when the target is
+# `Target::Linted`, which is what `miku check`, `lint`, `fix` and `test` all
+# compile with — so the session calls `leek_lint::program_diagnostics_with_lints`.
+# Fix: the linter is a pass over HIR, not a tool, so it belongs in
+# `crates/middle` beside the passes it walks (ARCH-03).
+leek-session -> leek-lint: a linted compilation's diagnostics include the findings
 
 # Dev-dependency, two layers up: tests/empirical.rs checks the complexity
 # estimates against op counts measured by running the native backend.

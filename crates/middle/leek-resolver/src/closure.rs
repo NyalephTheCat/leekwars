@@ -2,7 +2,7 @@
 //! in, parsed once, as a value.
 //!
 //! [`resolve_include_closure`] is the whole of what the
-//! [`ResolveIncludes`](crate::pipeline::ResolveIncludes) step used to
+//! [`ResolveIncludes`](crate::query::ResolveIncludes) step used to
 //! do inline — walk the graph, settle each file's version, collect the
 //! program-wide class set, parse every included file and report the
 //! failures at their `include("…")` sites — with nothing but its
@@ -18,7 +18,7 @@
 //! no `Send`. A closure is meant to become a memoized query result, and
 //! a query result has to survive being handed to another thread, so the
 //! red trees are cast at the boundary — see
-//! [`IncludeGraphArtifact`](crate::pipeline::IncludeGraphArtifact),
+//! [`IncludeGraphArtifact`](crate::query::IncludeGraphArtifact),
 //! which does exactly that for today's AST-walking consumers.
 
 use std::collections::{BTreeMap, BTreeSet};

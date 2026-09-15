@@ -1,0 +1,18 @@
+[package]
+name        = "leek-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The salsa query database every Leekscript compiler pass is memoized in."
+
+[dependencies]
+leek-span        = { workspace = true }
+leek-diagnostics = { workspace = true }
+# `SourceFile::from_input`'s counterpart lives in `leek-db`; this crate only
+# needs `Input`'s shape for the doc links on the input fields.
+leek-project     = { workspace = true }
+salsa            = { workspace = true }
+
+[lints]
+workspace = true

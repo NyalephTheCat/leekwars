@@ -6,10 +6,8 @@ use std::sync::Arc;
 
 use leek_diagnostics::Severity;
 use leek_hir::HirFile;
-use leek_hir::pipeline::HirArtifact;
 use leek_manifest::{BackendKind, BackendTable};
 use leek_project::Input;
-use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::version::version_from_byte;
 use serde::{Deserialize, Serialize};
@@ -279,7 +277,6 @@ fn default_jobs() -> usize {
 /// shared between threads, and `Step::run` takes `&self`, so reusing one
 /// across cases is the same contract the pipeline already documents.
 struct CaseRunner {
-    pipeline: leek_pipeline::Pipeline,
     flags: leek_span::FeatureFlags,
     source: SourceId,
 }
@@ -287,8 +284,6 @@ struct CaseRunner {
 impl CaseRunner {
     fn new(source: SourceId) -> Self {
         Self {
-            pipeline: leek_session::pipeline(Target::Hir, &RecipeParams::permissive())
-                .expect("recipe"),
             flags: leek_span::FeatureFlags::from_env(),
             source,
         }
@@ -302,15 +297,23 @@ impl CaseRunner {
             strict: case.strict,
             flags: self.flags,
         };
-        let run = self.pipeline.run(input);
-        let has_compile_error = run
-            .diagnostics()
-            .iter()
-            .any(|d| d.severity == Severity::Error);
-        let green = run
-            .get::<leek_parser::pipeline::GreenTreeArtifact>()
-            .map(|g| g.0.clone());
-        let hir = run.get::<HirArtifact>().map(|a| Arc::clone(&a.0));
+        // A database per case rather than per worker: the corpus is
+        // thousands of unrelated one-file programs, so nothing is shared
+        // between two of them and a database that outlived a case would
+        // only accumulate their memos.
+        let db = leek_db::LeekDb::default();
+        let file = leek_db::input_file(&db, String::new(), &input);
+        // Permissive, as the recipe was: every pass runs even after an
+        // earlier one reported, because a case's expectation is about the
+        // whole frontend's verdict.
+        let has_compile_error =
+            leek_db::queries::file_diagnostics_upto(&db, file, leek_db::queries::Stage::Hir)
+                .iter()
+                .any(|d| d.severity == Severity::Error);
+        let green = Some(
+            leek_db::queries::parse_query(&db, file, leek_db::ProgramClasses::none(&db)).green,
+        );
+        let hir = Some(leek_db::queries::lower_hir_query(&db, file).hir);
         CaseContext {
             green,
             hir,
@@ -1314,12 +1317,9 @@ fn first_error_message(case: &TestCase, source: SourceId) -> String {
         strict: case.strict,
         flags: leek_span::FeatureFlags::from_env(),
     };
-    let Ok(pipeline) = leek_session::pipeline(Target::Hir, &RecipeParams::permissive()) else {
-        return "<pipeline build failed>".into();
-    };
-    pipeline
-        .run(input)
-        .diagnostics()
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
+    leek_db::queries::file_diagnostics_upto(&db, file, leek_db::queries::Stage::Hir)
         .iter()
         .find(|d| d.severity == Severity::Error)
         .map_or_else(
