@@ -75,46 +75,46 @@ about values. Read them accordingly:
 
 ## Why `pipeline` and `java-emit` read the same
 
-`pipeline` and `java-emit` currently read `total = 12254, pass = 12071,
-fail = 141, skipped = 18` — the same numbers, and that is the *expected*
-shape rather than a baseline saved while the two shared a code path: a case
-that compiles for `pipeline` emits for `java-emit`, so the two columns can
-only diverge once the emitter itself breaks on HIR the frontend accepted. Do
-not read identical columns as "the baseline is broken", and do not add a
-check that requires them to differ — that is a check that requires the
-compiler to be broken. What separates the columns is their check *logic*,
-pinned in `leek-test-driver/tests/safety_net_honesty.rs`.
+`pipeline` and `java-emit` currently read `total = 12254, pass = 12212,
+fail = 0, skipped = 18` — the same numbers, and that is the *expected* shape
+rather than a baseline saved while the two shared a code path: a case that
+compiles for `pipeline` emits for `java-emit`, so the two columns can only
+diverge once the emitter itself breaks on HIR the frontend accepted. Do not
+read identical columns as "the baseline is broken", and do not add a check
+that requires them to differ — that is a check that requires the compiler to
+be broken. What separates the columns is their check *logic*, pinned in
+`leek-test-driver/tests/safety_net_honesty.rs`.
 
 `native` carries the value check, so it is the column that moves on its own:
-`fail = 152, skipped = 170` today, the extra failures being cases that
-compile and emit but compute the wrong value or count the wrong operations.
+`fail = 0, skipped = 30` today. Its skips are constructs outside the compiled
+subset, not wrong answers.
 
 The corollary is that the `pipeline` / `java-emit` summaries carry no
 per-backend signal. The numbers that would carry it — a real JVM value check
 for the Java backend — live outside this corpus (see `java-emit` above, and #70).
 
-### Where the failures come from
+### What the baseline holds now
 
-They arrived whole, with the `official-generator` bump to `v3.00`: it moves
-the nested `leekscript` submodule with it, and the JUnit suite `build.rs`
-extracts grew from 11005 cases to 12254. Every one of the 141/152 is a case
-this toolchain has never run, not a case it used to pass:
+Nothing: every case every backend runs, passes, so `baseline.toml` records
+only skips. That is what makes it a ratchet rather than a scoreboard — the
+next change cannot add a failure without the file moving.
 
-- **`a?[b]`, the optional array/map/string/object access operator** (`v3.00`,
-  `TestArray::testOptional_array_access` and its ternary-disambiguation
-  sibling — `c?[1]:[2]` must stay a ternary). Not in this grammar, so the 19
-  cases are `fail_parse_error`.
-- **new upstream *diagnostics*** this frontend does not raise yet — function
-  redefinition, duplicate globals, a foreach iterator shadowing a class
-  field, duplicate `switch` defaults, dead code after a returning `switch`,
-  `big_integer` DoS guards, `final` static-field assignment, incompatible
-  default-parameter types. These compile cleanly here, so they land as
-  `fail_missing_error`: the program is accepted where upstream rejects it.
-- **`native`-only value and op-count gaps**, mostly around constant folding
-  and the `switch` optimizer.
+It arrived there from the `official-generator` bump to `v3.00`, which moved
+the nested `leekscript` submodule with it and grew the extracted suite from
+11005 cases to 12254. That landed 141 compile-gate and 159 native failures at
+once, none of them regressions — every one was a case this toolchain had
+never run. Working them off is what the branch that bumped the generator did,
+feature by feature: the `a?[b]` optional access operator; the diagnostics
+v3.00 added (function redefinition, duplicate globals, a foreach iterator
+shadowing a class field, duplicate `switch` defaults, dead code after a
+returning `switch`, `big_integer` DoS guards, `final` static-field
+assignment, incompatible default-parameter types); upstream's `ConstantFolder`
+and its switch optimizer; passive weapon effects; and the typed-slot
+conversions a declared type performs on every write, parameter and return.
 
-Each is a feature to implement, not accepted behaviour — the baseline holds
-them so the *next* change cannot add to the list unnoticed.
+Skips are the remaining honest gap: a case the driver cannot model
+(`skipped_unknown`) or one upstream itself disables (`skipped_disabled`).
+They are not failures, and they are not passes either — nothing checks them.
 
 ## Formatter ratchet
 
