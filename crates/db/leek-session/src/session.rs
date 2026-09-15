@@ -26,6 +26,7 @@ use leek_pipeline::{Artifact, Pipeline, Run};
 use leek_project::{Input, Project};
 use leek_span::SourceId;
 
+use crate::Target;
 use crate::driver::{
     DriverConfig, PathInterner, SourceInterner, file_pipeline, file_pipeline_shared, reporter_for,
     run_sources,
@@ -186,7 +187,30 @@ impl<'p> Session<'p> {
             &self.reporter,
             &self.db,
             file,
+            self.files,
+            self.shape(),
         ))
+    }
+
+    /// What this session's target and params mean for a run's diagnostic
+    /// stream.
+    fn shape(&self) -> RunShape {
+        use leek_db::queries::Stage;
+        let stage = match self.config.target {
+            Target::Tokens => Stage::Tokens,
+            Target::Parsed => Stage::Parsed,
+            Target::Resolved => Stage::Resolved,
+            Target::TypeChecked => Stage::TypeChecked,
+            // `Complexity` and `Mir` plan past HIR but add no diagnostics
+            // the program queries can answer for: complexity reports none,
+            // and there is no program-level MIR lowering to ask.
+            Target::Hir | Target::Complexity | Target::Mir | Target::Linted => Stage::Hir,
+        };
+        RunShape {
+            stage,
+            lints: (self.config.target == Target::Linted).then_some(self.config.params.lints),
+            stop_at: self.config.params.stop_on_diagnostics,
+        }
     }
 
     /// This file's salsa input: the one
@@ -300,6 +324,24 @@ pub struct Compilation<'a> {
     /// compilation came from a [`Session`]. `None` for an adopted run
     /// (`leekc`, which plans its own pipeline and has no session).
     db: Option<(&'a leek_db::LeekDb, leek_db::SourceFile)>,
+    /// The session's file set, for the whole-program queries.
+    files: Option<leek_db::WorkspaceFiles>,
+    /// How far the run's target reaches, and whether a parse error stops
+    /// it — everything [`query_diagnostics`](Self::query_diagnostics)
+    /// needs to reproduce this run's stream.
+    shape: Option<RunShape>,
+}
+
+/// What a run's target and params mean for its diagnostic stream.
+#[derive(Debug, Clone, Copy)]
+struct RunShape {
+    stage: leek_db::queries::Stage,
+    /// The lint groups the run planned with, when the target plans the
+    /// lint step at all. `None` when it does not.
+    lints: Option<leek_lint::LintGroups>,
+    /// `RecipeParams::stop_on_diagnostics` — the severity at which the
+    /// parse aborts the run.
+    stop_at: Option<Severity>,
 }
 
 impl<'a> Compilation<'a> {
@@ -318,6 +360,8 @@ impl<'a> Compilation<'a> {
             reporter,
             sources: OnceLock::new(),
             db: None,
+            files: None,
+            shape: None,
         }
     }
 
@@ -331,9 +375,13 @@ impl<'a> Compilation<'a> {
         reporter: &'a Reporter,
         db: &'a leek_db::LeekDb,
         file: leek_db::SourceFile,
+        files: leek_db::WorkspaceFiles,
+        shape: RunShape,
     ) -> Self {
         Self {
             db: Some((db, file)),
+            files: Some(files),
+            shape: Some(shape),
             ..Self::adopt(run, file_label, reporter)
         }
     }
@@ -447,6 +495,67 @@ impl<'a> Compilation<'a> {
     /// about the bytes the pipeline actually compiled.
     pub fn db_handle(&self) -> Option<(&dyn leek_db::Db, leek_db::SourceFile)> {
         self.db.map(|(db, file)| (db as &dyn leek_db::Db, file))
+    }
+
+    /// This compilation's diagnostics, computed from tracked queries
+    /// instead of read off the run.
+    ///
+    /// `None` for an adopted run, which has no session and so no database
+    /// to ask.
+    ///
+    /// Reproducing a `Run`'s stream takes two things beyond calling a
+    /// query, both established by the tests below:
+    ///
+    /// 1. **The stage.** A run reports what the steps it *ran* reported,
+    ///    so the stream is sliced to the target's
+    ///    [`Stage`](leek_db::queries::Stage) rather than always reporting
+    ///    the whole frontend.
+    /// 2. **The abort.** `leek_parser::pipeline::Parse` is the one
+    ///    production step implementing `RecipeStepStopOnError`, so when
+    ///    `RecipeParams::stop_on_diagnostics` is set and the parse itself
+    ///    reports at or above that severity, `Pipeline::drive` stops
+    ///    before any later step. The check below is that rule: the
+    ///    *entry's own* parse, because the closure's parses happen in
+    ///    `ResolveIncludes`, which runs before `Parse` and so is not part
+    ///    of what the wrapper counts as new.
+    ///
+    /// `Severity` orders `Error < Warning`, so "at or above `min`" is
+    /// `severity <= min` — the same comparison `StopOnDiagnostics` makes.
+    #[must_use]
+    pub fn query_diagnostics(&self) -> Option<Arc<Vec<Diagnostic>>> {
+        use leek_db::queries;
+
+        let (db, file) = self.db?;
+        let files = self.files?;
+        let shape = self.shape?;
+        let version = leek_syntax::pipeline::version_from_byte(file.version_byte(db));
+
+        // Only once the target actually reaches parsing. A `Target::Tokens`
+        // run never plans `Parse`, so there is nothing to abort and no
+        // parse diagnostics to report — checking anyway would hand a
+        // tokens-only run the parser's findings.
+        if let Some(min) = shape.stop_at
+            && shape.stage >= queries::Stage::Parsed
+        {
+            let classes = queries::program_classes(db, files, file, version);
+            let parsed = queries::parse_query(db, file, classes);
+            if parsed.diagnostics.iter().any(|d| d.severity <= min) {
+                return Some(queries::program_diagnostics_upto(
+                    db,
+                    files,
+                    file,
+                    version,
+                    queries::Stage::Parsed,
+                ));
+            }
+        }
+
+        Some(match shape.lints {
+            Some(groups) => leek_lint::pipeline::program_diagnostics_with_lints(
+                db, files, file, version, groups,
+            ),
+            None => queries::program_diagnostics_upto(db, files, file, version, shape.stage),
+        })
     }
 }
 
@@ -719,6 +828,72 @@ mod tests {
             at(Target::Resolved) > at(Target::Parsed),
             "resolution adds the redeclaration: {widths:?}"
         );
+    }
+
+    /// `query_diagnostics` reproduces the run's stream across every
+    /// target, both stop-on-error settings, and a file that parses and one
+    /// that does not.
+    ///
+    /// The whole matrix in one test on purpose. Each of the three axes hid
+    /// a divergence in turn — the target hid one until
+    /// `the_runs_diagnostics_grow_with_the_target`, the parse failure hid
+    /// one until a fixture was strengthened, and the threshold is what
+    /// turned out to explain the second. A test that fixed any axis would
+    /// have gone green over the bug that axis conceals.
+    #[test]
+    fn query_diagnostics_reproduces_the_run_across_the_matrix() {
+        let clean = "var a = 1;\nvar a = 2;\nvar z = 1 / 0;\nreturn a;\n";
+        let broken = "var a = 1;\nvar a = 2;\nvar bad = \u{a3};\n";
+
+        let targets = [
+            Target::Tokens,
+            Target::Parsed,
+            Target::Resolved,
+            Target::TypeChecked,
+            Target::Hir,
+            Target::Linted,
+        ];
+
+        let mut compared = 0;
+        for (label, src) in [("clean", clean), ("broken", broken)] {
+            for stop in [Some(Severity::Error), None] {
+                for target in targets {
+                    let dir = scratch(&format!("matrix-{label}-{}-{target:?}", stop.is_some()));
+                    std::fs::write(dir.join("src/main.leek"), src).expect("entry");
+                    let project = project_at(dir.clone(), "");
+
+                    let mut params = leek_pipeline::RecipeParams::default();
+                    params.stop_on_diagnostics = stop;
+                    let session = Session::new(
+                        &project,
+                        DriverConfig {
+                            target,
+                            color: ColorWhen::Never,
+                            format: MessageFormat::Human,
+                            params,
+                            ..DriverConfig::default()
+                        },
+                    )
+                    .expect("session");
+                    let compiled = session.compile_entry().expect("compile");
+
+                    let from_run: Vec<&str> =
+                        compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+                    let queried = compiled.query_diagnostics().expect("session compilation");
+                    let from_query: Vec<&str> = queried.iter().map(|d| d.code.id()).collect();
+
+                    std::fs::remove_dir_all(&dir).ok();
+
+                    assert_eq!(
+                        from_run, from_query,
+                        "{label} source, stop={stop:?}, {target:?}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+
+        assert_eq!(compared, 24, "every combination was actually compared");
     }
 
     /// A file that fails to parse stops the run's later steps, and does
