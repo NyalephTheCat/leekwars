@@ -5,10 +5,9 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use leek_backends::resolve_backend;
-use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
 use leek_project::Project;
-use leek_session::{DriverConfig, RecipeParams, Target, run_entry};
+use leek_session::{Compilation, DriverConfig, RecipeParams, Session, Target};
 
 use crate::cli::{Check, ColorWhen, MessageFormat};
 
@@ -31,11 +30,13 @@ pub fn run(
         format: format.into(),
         timing: None,
     };
-    let driver_run = run_entry(&project, &config)?;
-    if !driver_run.had_error && native_compat_wanted(args, &project) {
-        report_native_compat(&project, &driver_run, color, format);
+    let session = Session::new(&project, config)?;
+    let compiled = session.compile_entry()?;
+    let had_error = compiled.report();
+    if !had_error && native_compat_wanted(args, &project) {
+        report_native_compat(&project, &compiled);
     }
-    Ok(if driver_run.had_error {
+    Ok(if had_error {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -64,40 +65,24 @@ fn native_compat_wanted(args: &Check, project: &Project) -> bool {
 /// a project that builds for Java or LeekScript must not start failing it
 /// because the native JIT can't lower one of its constructs. What the author
 /// gets is the location — the point of the pass — without a changed exit code.
-fn report_native_compat(
-    project: &Project,
-    driver_run: &leek_session::DriverRun,
-    color: ColorWhen,
-    format: MessageFormat,
-) {
-    let Some(hir) = driver_run.run.get::<HirArtifact>() else {
+fn report_native_compat(project: &Project, compiled: &Compilation<'_>) {
+    let Some(hir) = compiled.hir() else {
         return;
     };
-    // The same source map the driver rendered the frontend diagnostics
-    // against, reused so a backend warning points at the same files.
-    let entry_label = project.entry_path().display().to_string();
-    let entry_text = std::fs::read_to_string(project.entry_path()).unwrap_or_default();
-    let sources = leek_session::run_sources(&driver_run.run, &entry_text, &entry_label);
-
     let mut opts = leek_backend_native::NativeOptions::jit_for_input(
-        driver_run.run.input(),
+        compiled.input(),
         leek_backend_native::DEFAULT_OP_BUDGET,
     );
     crate::util::apply_native_settings(&mut opts, &project.manifest);
     let diagnostics: Vec<leek_diagnostics::Diagnostic> =
-        leek_backend_native::check_native_compat(hir.0.as_ref(), &opts)
+        leek_backend_native::check_native_compat(hir, &opts)
             .into_iter()
             .map(|mut d| {
                 d.severity = leek_diagnostics::Severity::Warning;
                 d
             })
             .collect();
-    if diagnostics.is_empty() {
-        return;
-    }
-    if !crate::util::report_diagnostics(project, &diagnostics, &sources, color, format) {
-        for diag in &diagnostics {
-            eprintln!("warning: {}", diag.message);
-        }
-    }
+    // Through the compilation's own reporter and source map, so a warning
+    // raised inside an included file points at that file.
+    let _ = compiled.report_backend(&diagnostics);
 }

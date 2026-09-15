@@ -7,11 +7,10 @@ use clap::Parser;
 use leek_diagnostics::{ColorWhen, LintLevels, Reporter};
 use leek_fmt::FormatOptions;
 use leek_fmt::pipeline::FormattedArtifact;
-use leek_hir::pipeline::HirArtifact;
 use leek_lexer::pipeline::TokensArtifact;
-use leek_mir::pipeline::MirArtifact;
 use leek_parser::pipeline::GreenTreeArtifact;
 use leek_project::Input;
+use leek_session::Compilation;
 use leek_span::SourceId;
 use leek_span::pragma::LanguageSettings;
 use leek_syntax::{SyntaxNode, Version, build_flat_tree};
@@ -92,8 +91,7 @@ pub fn run() -> Result<ExitCode> {
             nursery: cli.nursery,
         },
         &cli.input,
-    );
-    let result = pipeline.run(input);
+    )?;
 
     // Validate the severity flags before building the reporter, so an
     // unknown code is a usage error (exit 2) with the catalog hint rather
@@ -101,9 +99,9 @@ pub fn run() -> Result<ExitCode> {
     for code in cli.deny.iter().chain(&cli.warn).chain(&cli.allow) {
         resolve_code(code)?;
     }
-    // Diagnostics render through the same `Reporter` + `leek_session::report`
-    // as every `miku` subcommand, so one raised inside an included file is
-    // shown against *that* file's text and path, not the entry's.
+    // Diagnostics render through the same `Reporter` + `leek_session`
+    // machinery as every `miku` subcommand, so one raised inside an included
+    // file is shown against *that* file's text and path, not the entry's.
     let reporter = Reporter::new(
         if cli.no_color {
             ColorWhen::Never
@@ -118,45 +116,52 @@ pub fn run() -> Result<ExitCode> {
         },
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let file_label = cli.input.display().to_string();
-    let had_error = leek_session::report(&result, &text, &file_label, &reporter);
+    // The run, its source map and the reporter as one value — the same one
+    // `miku` holds, so a backend diagnostic here renders exactly as it does
+    // there.
+    let compiled = Compilation::adopt(
+        pipeline.run(input),
+        cli.input.display().to_string(),
+        &reporter,
+    );
+    let had_error = compiled.report();
 
     match cli.emit {
         Emit::Check => {}
         Emit::Tokens => {
-            if let Some(tokens) = result.get::<TokensArtifact>() {
+            if let Some(tokens) = compiled.get::<TokensArtifact>() {
                 print_tokens(&text, &tokens.0.tokens);
             }
         }
         Emit::FlatCst => {
-            if let Some(tokens) = result.get::<TokensArtifact>() {
+            if let Some(tokens) = compiled.get::<TokensArtifact>() {
                 let green = build_flat_tree(&text, &tokens.0.tokens);
                 let node = SyntaxNode::new_root(green);
                 print_cst(&node, 0);
             }
         }
         Emit::Cst => {
-            if let Some(green) = result.get::<GreenTreeArtifact>() {
+            if let Some(green) = compiled.get::<GreenTreeArtifact>() {
                 let node = SyntaxNode::new_root(green.0.clone());
                 print_cst(&node, 0);
             }
         }
         Emit::Hir => {
-            if let Some(hir) = result.get::<HirArtifact>() {
-                print_hir(hir.0.as_ref());
+            if let Some(hir) = compiled.hir() {
+                print_hir(hir);
             } else {
                 eprintln!("leekc: parse failed; no HIR to emit");
             }
         }
         Emit::Mir => {
-            if let Some(mir) = result.get::<MirArtifact>() {
-                print_mir(mir.0.as_ref());
+            if let Some(mir) = compiled.mir() {
+                print_mir(mir);
             } else {
                 eprintln!("leekc: parse failed; no MIR to emit");
             }
         }
         Emit::Java => {
-            if let Some(hir) = result.get::<HirArtifact>() {
+            if let Some(hir) = compiled.hir() {
                 let mut opts = if cli.clean {
                     leek_backend_java::Options::clean(version, cli.ai_id)
                 } else {
@@ -169,18 +174,12 @@ pub fn run() -> Result<ExitCode> {
                 if let Some(base) = &cli.base_class {
                     opts = opts.with_base_class(base);
                 }
-                let out = leek_backend_java::emit(hir.0.as_ref(), &opts);
+                let out = leek_backend_java::emit(hir, &opts);
                 // A construct the emitter has no shape for produces Java that
                 // javac rejects — or that compiles to something else. Render
                 // it against the Leek source and stop rather than writing a
                 // file that is not a translation of this program (#152).
-                if report_backend_diagnostics(
-                    &result,
-                    &out.diagnostics,
-                    &text,
-                    &file_label,
-                    &reporter,
-                ) {
+                if compiled.report_backend(&out.diagnostics) {
                     return Ok(ExitCode::from(1));
                 }
                 match &cli.out_dir {
@@ -204,25 +203,19 @@ pub fn run() -> Result<ExitCode> {
             }
         }
         Emit::LeekScript => {
-            if let Some(hir) = result.get::<HirArtifact>() {
+            if let Some(hir) = compiled.hir() {
                 let mut opts = if cli.compact {
                     leek_backend_leekscript::Options::compact(version)
                 } else {
                     leek_backend_leekscript::Options::pretty(version).with_source_text(text.clone())
                 };
                 opts = opts.with_optimize(cli.optimize).with_user_source(source);
-                let out = leek_backend_leekscript::emit(hir.0.as_ref(), &opts);
+                let out = leek_backend_leekscript::emit(hir, &opts);
                 // Semantics this backend could not carry across (#154). These
                 // are warnings — the emitted program is valid LeekScript — so
                 // they print and the file is still written, unless a `--deny`
                 // promotes one.
-                if report_backend_diagnostics(
-                    &result,
-                    &out.diagnostics,
-                    &text,
-                    &file_label,
-                    &reporter,
-                ) {
+                if compiled.report_backend(&out.diagnostics) {
                     return Ok(ExitCode::from(1));
                 }
                 match &cli.out_dir {
@@ -245,7 +238,7 @@ pub fn run() -> Result<ExitCode> {
             }
         }
         Emit::Fmt => {
-            if let Some(artifact) = result.get::<FormattedArtifact>() {
+            if let Some(artifact) = compiled.get::<FormattedArtifact>() {
                 // The pipeline artifact is unverified. Print nothing
                 // rather than corrupt LeekScript when the formatter
                 // would change the program — same policy as `miku fmt`.
@@ -261,15 +254,15 @@ pub fn run() -> Result<ExitCode> {
             }
         }
         Emit::Run => {
-            if let Some(hir) = result.get::<HirArtifact>() {
+            if let Some(hir) = compiled.hir() {
                 // `--emit run` executes via the native JIT (the interpreter was
                 // removed), with the same helper and budget as `miku run`.
                 use leek_backend_native::{DEFAULT_OP_BUDGET, NativeArtifact, NativeOptions};
-                let mut opts = NativeOptions::jit_for_input(result.input(), DEFAULT_OP_BUDGET);
+                let mut opts = NativeOptions::jit_for_input(compiled.input(), DEFAULT_OP_BUDGET);
                 if let Some(depth) = cli.max_call_depth {
                     opts.max_call_depth = depth;
                 }
-                match leek_backend_native::compile(hir.0.as_ref(), &opts) {
+                match leek_backend_native::compile(hir, &opts) {
                     Ok(NativeArtifact::Value(v)) => println!("{v}"),
                     Ok(_) => unreachable!("Jit emit yields a Value"),
                     Err(e) => {
@@ -282,7 +275,7 @@ pub fn run() -> Result<ExitCode> {
             }
         }
         Emit::Native => {
-            if let Some(hir) = result.get::<HirArtifact>() {
+            if let Some(hir) = compiled.hir() {
                 use crate::cli::{NativeEmitArg, OptLevelArg};
                 use leek_backend_native::{NativeArtifact, NativeEmit, NativeOptions, OptLevel};
 
@@ -302,7 +295,7 @@ pub fn run() -> Result<ExitCode> {
                 if cli.no_verifier {
                     opts.enable_verifier = false;
                 }
-                let input = result.input();
+                let input = compiled.input();
                 opts = opts.with_lang(input.version_byte, input.strict);
                 opts.link_game = cli.link_game;
                 if let Some(depth) = cli.max_call_depth {
@@ -320,12 +313,9 @@ pub fn run() -> Result<ExitCode> {
                         .native_out
                         .clone()
                         .unwrap_or_else(|| std::path::PathBuf::from("a.out"));
-                    if let Err(e) = leek_backend_native::aot::compile_to_executable(
-                        hir.0.as_ref(),
-                        &opts,
-                        &out,
-                        false,
-                    ) {
+                    if let Err(e) =
+                        leek_backend_native::aot::compile_to_executable(hir, &opts, &out, false)
+                    {
                         eprintln!("native: {e}");
                         return Ok(ExitCode::from(1));
                     }
@@ -338,7 +328,7 @@ pub fn run() -> Result<ExitCode> {
                     NativeEmitArg::Object => NativeEmit::Object(obj_path.clone()),
                     NativeEmitArg::Exe => unreachable!("handled above"),
                 };
-                match leek_backend_native::compile(hir.0.as_ref(), &opts) {
+                match leek_backend_native::compile(hir, &opts) {
                     Ok(NativeArtifact::Value(v)) => println!("{v}"),
                     Ok(NativeArtifact::Text(t)) => println!("{t}"),
                     Ok(NativeArtifact::Object) => {
@@ -360,24 +350,4 @@ pub fn run() -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
-}
-
-/// Render a backend's own diagnostics through the same [`Reporter`] the
-/// frontend ones went through, and report whether any was error-level.
-///
-/// Both source-emitting backends produce output *and* complaints, so this
-/// takes a slice rather than an error: `emit` stays infallible and the caller
-/// decides what a diagnosed file means.
-fn report_backend_diagnostics(
-    result: &leek_pipeline::Run<'_>,
-    diagnostics: &[leek_diagnostics::Diagnostic],
-    text: &str,
-    file_label: &str,
-    reporter: &Reporter,
-) -> bool {
-    if diagnostics.is_empty() {
-        return false;
-    }
-    let sources = leek_session::run_sources(result, text, file_label);
-    reporter.emit(diagnostics, &sources)
 }

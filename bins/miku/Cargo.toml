@@ -35,7 +35,6 @@ leek-complexity     = { workspace = true }
 leek-parser         = { workspace = true }
 leek-scenario       = { workspace = true }
 leek-generator      = { workspace = true }
-ignore              = "0.4"
 similar             = "2"
 clap                = { workspace = true }
 clap_complete       = "4"

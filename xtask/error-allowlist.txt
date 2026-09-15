@@ -12,11 +12,6 @@
 # depends on `anyhow`, so remove the line in the same change that drops the
 # dependency. Do not add entries to get a new `anyhow` past the gate.
 
-# `pipeline_for` and `file_pipeline` return `anyhow::Result` because they fold
-# together a recipe error, a manifest error and an IO error. Fix: a
-# `DriverError` enum over the three. `reporter_for` is already typed.
-leek-session -> anyhow: pipeline construction folds three error kinds into one
-
 # `BackendError` exists but the registry's `emit`/`link` entry points return
 # `anyhow::Result` around it.
 leek-backends -> anyhow: registry entry points wrap the typed BackendError

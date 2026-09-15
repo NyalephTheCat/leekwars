@@ -25,12 +25,10 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use leek_complexity::Complexity;
-use leek_complexity::pipeline::ComplexityArtifact;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
 use leek_ide::signature::signature_for;
 use leek_parser::pipeline::GreenTreeArtifact;
-use leek_project::Input;
-use leek_session::{DriverConfig, Target};
+use leek_session::{DriverConfig, Session, Target};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 
@@ -64,33 +62,34 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
         ..DriverConfig::default()
     };
 
+    // One session for every source: the reporter and the include-id space
+    // are built once rather than per file.
+    let session = Session::new(&project, config)?;
+
     // Build the per-source page set.
     let mut pages: Vec<Page> = Vec::new();
     for (i, path) in sources.iter().enumerate() {
         let source_id = SourceId::new((i + 1).try_into().unwrap()).unwrap();
-        let (src, text) = project.pipeline_input(source_id, path)?;
-        let input = Input::from_source_with_flags(src, project.feature_flags());
-        let pipeline = leek_session::file_pipeline(&project, path, source_id, &config)?;
-        let result = pipeline.run(input);
-        let Some(report) = result.get::<ComplexityArtifact>() else {
+        let compiled = session.compile_file(path, source_id)?;
+        let Some(report) = compiled.complexity() else {
             if !quiet {
                 eprintln!(
                     "miku doc: skipping {} (no complexity report)",
-                    rel(&project.root, path).display()
+                    project.relative(path).display()
                 );
             }
             continue;
         };
-        let Some(parse) = result.get::<GreenTreeArtifact>() else {
+        let Some(parse) = compiled.get::<GreenTreeArtifact>() else {
             continue;
         };
         let root = SyntaxNode::new_root(parse.0.clone());
 
-        let items = collect_items(&root, source_id, &text, &report.0);
-        let out_name = file_html_name(&rel(&project.root, path));
+        let items = collect_items(&root, source_id, compiled.text(), report);
+        let relative = project.relative(path);
         pages.push(Page {
-            rel_source: rel(&project.root, path),
-            html_name: out_name,
+            html_name: file_html_name(&relative),
+            rel_source: relative,
             items,
         });
     }
@@ -406,11 +405,6 @@ fn file_html_name(rel_path: &Path) -> String {
         sanitised = stripped.to_string();
     }
     format!("{sanitised}.html")
-}
-
-fn rel(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root)
-        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 fn open_in_browser(path: &Path) -> Result<()> {
