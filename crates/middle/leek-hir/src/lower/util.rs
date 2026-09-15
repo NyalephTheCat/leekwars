@@ -61,6 +61,11 @@ pub(crate) fn fn_return_type(node: &SyntaxNode) -> Option<Type> {
     // Function return type comes after `=>` / `->` in the param list
     // — find the first TypeRef *after* the ParamList.
     let mut past_params = false;
+    // A class method writes its return type the other way round —
+    // `public integer m()` — so its TypeRef sits *before* the parameter list.
+    // Remembered rather than returned on sight: the arrow form wins wherever
+    // both could appear.
+    let mut prefix = None;
     for child in node.children_with_tokens() {
         match &child {
             rowan::NodeOrToken::Node(n) => {
@@ -69,12 +74,14 @@ pub(crate) fn fn_return_type(node: &SyntaxNode) -> Option<Type> {
                 }
                 if n.kind() == SyntaxKind::ParamList {
                     past_params = true;
+                } else if !past_params && n.kind() == SyntaxKind::TypeRef {
+                    prefix = Some(n.clone());
                 }
             }
             rowan::NodeOrToken::Token(_) => {}
         }
     }
-    None
+    prefix.as_ref().map(leek_types::type_from_node)
 }
 
 pub(crate) fn collect_modifiers(member: &SyntaxNode) -> Vec<&'static str> {

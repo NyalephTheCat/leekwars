@@ -545,8 +545,37 @@ fn classify(
             },
             None => CallShape::Empty,
         }),
-        BodyEffect::Returns(lit) => Some(CallShape::Constant(lit)),
+        // A declared return type converts what leaves the function, so the
+        // substituted literal is what the *caller* would have received:
+        // `function f() -> integer { return 2.5 }` is worth 2.
+        BodyEffect::Returns(lit) => match return_type {
+            Some(ty) => converted(&lit, ty).map(CallShape::Constant),
+            None => Some(CallShape::Constant(lit)),
+        },
     }
+}
+
+/// `lit` as a function with return type `ty` hands it back, or `None` when
+/// the conversion is one this pass will not decide — the call stays, and the
+/// backend converts it at run time.
+fn converted(lit: &Literal, ty: &Type) -> Option<Literal> {
+    #[allow(clippy::cast_possible_truncation)]
+    let out = match (ty, lit) {
+        (Type::Any, _) => lit.clone(),
+        (Type::Integer, Literal::Int(_)) | (Type::Real, Literal::Real(_)) => lit.clone(),
+        (Type::Integer, Literal::Real(f)) => Literal::Int(*f as i64),
+        (Type::Integer, Literal::Bool(b)) => Literal::Int(i64::from(*b)),
+        (Type::Integer, Literal::Null) => Literal::Int(0),
+        #[allow(clippy::cast_precision_loss)]
+        (Type::Real, Literal::Int(n)) => Literal::Real(*n as f64),
+        (Type::Real, Literal::Null) => Literal::Real(0.0),
+        (Type::Boolean, Literal::Bool(_)) => lit.clone(),
+        (Type::Boolean, Literal::Int(n)) => Literal::Bool(*n != 0),
+        (Type::Boolean, Literal::Null) => Literal::Bool(false),
+        (Type::String, Literal::String(_) | Literal::Null) => lit.clone(),
+        _ => return None,
+    };
+    Some(out)
 }
 
 /// The value a declared return type gives a function that returns nothing,

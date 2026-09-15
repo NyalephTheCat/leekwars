@@ -126,9 +126,6 @@ skipped_unknown = 18
 "TestObject.java::run::432@v2" = "skipped_unknown"
 "TestObject.java::run::432@v3" = "skipped_unknown"
 "TestObject.java::run::432@v4" = "skipped_unknown"
-"TestObject.java::testFieldConversion::2@v2" = "fail_wrong_value"
-"TestObject.java::testFieldConversion::2@v3" = "fail_wrong_value"
-"TestObject.java::testFieldConversion::2@v4" = "fail_wrong_value"
 "TestSet.java::testSet_constructor::4@v1" = "skipped_disabled"
 "TestSet.java::testSet_constructor::4@v2" = "skipped_disabled"
 "TestSet.java::testSet_constructor::4@v3" = "skipped_disabled"
@@ -146,11 +143,11 @@ skipped_unknown = 18
 
 [backends.native.summary]
 total = 12254
-pass = 11266
+pass = 11269
 pass_expected_error = 912
 fail_parse_error = 0
 fail_missing_error = 0
-fail_wrong_value = 11
+fail_wrong_value = 8
 skipped_disabled = 24
 skipped_unknown = 41
 

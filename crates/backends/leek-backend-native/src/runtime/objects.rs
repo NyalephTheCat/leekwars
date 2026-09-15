@@ -240,6 +240,23 @@ shim! {
     }
 }
 
+shim! {
+    /// [`leek_field_convert`] with nothing to keep: a `return` through a
+    /// declared type, which answers null when the conversion cannot be done.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_convert_slot(value: *mut Value, tag: i64) -> *mut Value {
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => handle(Value::Null),
+        }
+    }
+}
+
 /// The native string-/index-keyed member read shared by `leek_value_index`
 /// (boxed key) and [`read_member`] (`&str` key). Returns the value; the caller
 /// boxes or coerces it. Mirrors upstream: a runtime class-ref's

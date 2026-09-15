@@ -1560,6 +1560,7 @@ pub fn translate_function(
             vars: &vars,
             var_tys: &var_tys,
             ret_ty,
+            ret_tag: slot_tag(&mir_fn.return_ty),
             lang,
             link_game,
             imports: &imports,
@@ -1681,6 +1682,11 @@ struct Tx<'a, 'b> {
     vars: &'a [Variable],
     var_tys: &'a [ValTy],
     ret_ty: ValTy,
+    /// The declared-slot tag for the function's return type, when it has one.
+    /// A `return` converts through it: the returned value lands in the
+    /// caller's hands as the type the signature promised, and a conversion
+    /// that cannot be done answers null.
+    ret_tag: Option<i64>,
     lang: Lang,
     /// Route unknown builtins to the host game runtime (see `crate::game`).
     link_game: bool,

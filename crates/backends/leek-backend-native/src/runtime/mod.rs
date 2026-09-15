@@ -501,6 +501,7 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("leek_field_convert", leek_field_convert as *const u8),
         ("leek_static_convert", leek_static_convert as *const u8),
         ("leek_global_convert", leek_global_convert as *const u8),
+        ("leek_convert_slot", leek_convert_slot as *const u8),
         ("leek_value_binop_cir", leek_value_binop_cir as *const u8),
         ("leek_value_binop_cil", leek_value_binop_cil as *const u8),
         ("leek_value_binop_crr", leek_value_binop_crr as *const u8),

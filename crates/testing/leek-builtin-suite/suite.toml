@@ -962,3 +962,26 @@ id = "a_static_field_and_a_global_convert_the_same_way"
 version = 4
 source = "class Z { public static BigInteger b = 10L } global integer g = 10 Z.b /= 4 g *= (false ? 1 : 0.5) return [Z.b, g]"
 expect = { equals = "[2, 5]" }
+
+# A declared return type converts what leaves the function, the way a typed
+# slot converts what is written into it — and a class method declares its
+# return type before its name, not after an arrow.
+[[tests]]
+id = "a_declared_return_type_converts_what_leaves_the_function"
+version = 4
+source = "function i() -> integer { return 2.5 } function r() -> real { return 2 } class S { public integer m() { return 2.5 } } return [i(), r(), new S().m()]"
+expect = { equals = "[2, 2.0, 2]" }
+
+[[tests]]
+id = "a_typed_function_that_returns_nothing_answers_its_types_value"
+version = 4
+source = "function f() -> integer { return null } function g() -> integer {} return [f(), g()]"
+expect = { equals = "[0, 0]" }
+
+# A return whose conversion cannot be done answers null rather than handing
+# the caller a value of the wrong type (#11741953).
+[[tests]]
+id = "an_impossible_return_conversion_answers_null"
+version = 4
+source = "class T { public boolean b = true } class C { public T build() { return new T() } } class S { public T foo(C c) { return c.build().b } } return new S().foo(new C())"
+expect = { equals = "null" }

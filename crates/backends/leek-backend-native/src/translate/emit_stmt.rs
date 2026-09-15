@@ -606,7 +606,16 @@ impl Tx<'_, '_> {
                     }
                     _ => self.operand(op)?,
                 };
-                let v = self.coerce(v, ty, self.ret_ty)?;
+                let mut v = self.coerce(v, ty, self.ret_ty)?;
+                // A declared return type converts what leaves the function,
+                // the way a typed slot converts what is written into it — a
+                // conversion that cannot be done answers null rather than
+                // handing the caller a value of the wrong type.
+                if let Some(tag) = self.ret_tag
+                    && self.ret_ty == ValTy::Ref
+                {
+                    v = self.convert_to_slot(v, tag)?;
+                }
                 self.flush_charge()?;
                 self.emit_leave_frame();
                 self.b.ins().return_(&[v]);
@@ -618,10 +627,16 @@ impl Tx<'_, '_> {
                 self.flush_charge()?;
                 self.emit_leave_frame();
                 let z = match self.ret_ty {
+                    // A typed function that falls off its end answers its
+                    // type's own value, not null — `-> integer {}` is 0.
                     ValTy::Ref => {
                         let null = self.imports.rt("leek_box_null")?;
                         let inst = self.b.ins().call(null, &[]);
-                        self.b.inst_results(inst)[0]
+                        let n = self.b.inst_results(inst)[0];
+                        match self.ret_tag {
+                            Some(tag) => self.convert_to_slot(n, tag)?,
+                            None => n,
+                        }
                     }
                     ValTy::Real => self.b.ins().f64const(0.0),
                     _ => self.b.ins().iconst(types::I64, 0),

@@ -237,6 +237,16 @@ impl Tx<'_, '_> {
         Ok(self.b.inst_results(inst)[0])
     }
 
+    /// Convert a boxed value to a declared type, answering null when the
+    /// conversion cannot be done. For a slot with no previous value to fall
+    /// back on — a `return`.
+    pub(super) fn convert_to_slot(&mut self, val: Value, tag: i64) -> Result<Value, NativeError> {
+        let convert = self.imports.rt("leek_convert_slot")?;
+        let tagv = self.b.ins().iconst(types::I64, tag);
+        let inst = self.b.ins().call(convert, &[val, tagv]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
     /// Emit a `leek_static_set(owner_def, name, val)`.
     pub(super) fn static_field_set(
         &mut self,
