@@ -2,13 +2,18 @@
 //!
 //! Every handler in this crate asks the same six questions of a file —
 //! what is its green tree, its syntax root, its resolve table, its type
-//! table, its HIR, its complexity report — and today each one asks them
+//! table, its HIR, its complexity report — and each one used to ask them
 //! by planning a [`Pipeline`](leek_pipeline::Pipeline) for a
 //! [`Target`](leek_session::Target), running it, and fishing the answer
 //! out of the resulting [`Run`](leek_pipeline::Run) by artifact type.
 //! That is three steps of ceremony around one salsa query, and it puts
 //! the recipe catalogue between a handler and the cache it actually
 //! wants.
+//!
+//! The tree questions no longer go that way: every handler that wants a
+//! syntax root or a green tree calls [`syntax_root`] or [`green_tree`]
+//! here. The other four still reach their artifact through a
+//! [`crate::pipeline`] run, which is why that module stays.
 //!
 //! This module is the direct route: one function per question, each a
 //! single [`leek_db::queries`] call. `leek-db` is the façade that knows
@@ -58,13 +63,15 @@ pub fn green_tree(db: &dyn Db, file: SourceFile) -> GreenNode {
 
 /// The file's syntax tree, as an owned rowan red-tree root.
 ///
-/// The one accessor worth having for its own sake: thirty call sites in
-/// this crate independently spell out
-/// `SyntaxNode::new_root(green.0.clone())` after digging a
-/// `GreenTreeArtifact` out of a `Run`, and every one of them wants this.
-/// The root is owned, so it outlives the borrow the artifact version was
-/// tied to — which `handlers::completion::file_root` currently works
-/// around by hand.
+/// The one accessor worth having for its own sake: the handlers used to
+/// spell out `SyntaxNode::new_root(green.0.clone())` at twenty-nine
+/// sites, each after digging a `GreenTreeArtifact` out of a `Run`, and
+/// every one of them wanted this. Twenty-eight now call here; the
+/// twenty-ninth (`handlers::on_type_formatting`) needs the green node
+/// itself for `leek_fmt::format_range` and so takes [`green_tree`]. The
+/// root is owned, so it outlives the borrow the artifact version was
+/// tied to — which `handlers::completion::file_root` used to work around
+/// by hand, and which is why that helper no longer exists.
 pub fn syntax_root(db: &dyn Db, file: SourceFile) -> SyntaxNode {
     SyntaxNode::new_root(green_tree(db, file))
 }
@@ -160,9 +167,42 @@ mod tests {
         }
     }
 
-    /// The payoff accessor. Thirty sites in this crate spell out
-    /// `SyntaxNode::new_root(green.0.clone())`; this is that expression,
-    /// and it has to build the identical tree.
+    /// The test above compares against a `Target::Parsed` run, but most
+    /// handlers that take their root from [`syntax_root`] still get
+    /// their *other* artifact — the resolve table, the type table, the
+    /// HIR — out of a `Run` planned for a later [`Target`], and read
+    /// both against the same offsets. Root and table therefore have to
+    /// describe one tree, which holds only while every deeper plan
+    /// parses the same way the accessor does. A divergence would not
+    /// look like a crash: the offsets would stay in range and simply
+    /// name the wrong node. So compare at each target a handler asks
+    /// for, on a clean file and on one the parser had to recover from.
+    #[test]
+    fn a_later_targets_run_parses_to_the_same_green_tree() {
+        for target in [
+            Target::Resolved,
+            Target::TypeChecked,
+            Target::Hir,
+            Target::Complexity,
+        ] {
+            for text in [SRC, BROKEN_SRC] {
+                let (ws, uri) = fixture(text);
+                let run = crate::pipeline::run(&ws, &uri, target).expect("run");
+                let artifact = run
+                    .get::<leek_parser::pipeline::GreenTreeArtifact>()
+                    .expect("green tree artifact");
+                assert_eq!(
+                    green_tree(&ws.db, source_file(&ws, &uri)),
+                    artifact.0,
+                    "{target:?} parsed a different tree than the accessor"
+                );
+            }
+        }
+    }
+
+    /// The payoff accessor. The handler sites that used to spell out
+    /// `SyntaxNode::new_root(green.0.clone())` call this instead; it is
+    /// that expression, and it has to build the identical tree.
     #[test]
     fn syntax_root_matches_the_root_handlers_build_by_hand() {
         for text in [SRC, BROKEN_SRC] {

@@ -56,8 +56,7 @@ pub fn handle(
     // declared in an `include`d file. `documentHighlight` is
     // document-local, so scan only this file for the symbol's uses
     // (highlighting nothing if the name doesn't name a known symbol).
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = leek_syntax::SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
     let name = crate::handlers::ident_name_at(&root, offset)?;
     let (_decl, sym) = crate::handlers::find_top_level_decl(ws, uri, &name)?;
     let out = crate::handlers::occurrences_in_file(ws, uri, doc.source_file, &sym.name, sym.kind)

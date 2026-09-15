@@ -21,9 +21,7 @@ use crate::workspace::Workspace;
 
 pub fn handle(ws: &Workspace, uri: &lsp::Url) -> Option<Vec<lsp::DocumentLink>> {
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Parsed)?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     let mut out: Vec<lsp::DocumentLink> = Vec::new();
     for node in root.descendants() {

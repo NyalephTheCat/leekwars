@@ -44,8 +44,7 @@ pub fn prepare(
 
     // 2. Cross-file: the cursor is on a use of a class declared in an
     //    `include`d file (e.g. `extends Animal`, `new Cat()`).
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = leek_syntax::SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
     let name = crate::handlers::ident_name_at(&root, offset)?;
     let (file, sym) = crate::handlers::find_top_level_decl(ws, uri, &name)?;
     if sym.kind != SymbolKind::Class {

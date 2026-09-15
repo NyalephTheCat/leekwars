@@ -87,8 +87,7 @@ pub fn handle(
     let offset = doc.pos_map().to_offset(pos)?;
 
     let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Computed once per request and shared by both modes: the scope
     // walk re-parses the workspace to read include edges, and
@@ -357,22 +356,12 @@ fn find_class_decl_in_program(cx: &Ctx<'_, '_>, name: &str) -> Option<SyntaxNode
         if file.uri == *cx.uri {
             continue;
         }
-        let Some(root) = file_root(cx.ws, file) else {
-            continue;
-        };
+        let root = crate::analysis::syntax_root(&cx.ws.db, file.source_file);
         if let Some(cls) = find_class_decl_by_name(&root, name) {
             return Some(cls);
         }
     }
     None
-}
-
-/// Parse one program-scope file and hand back an *owned* root, so the
-/// node outlives the `Run` that produced its green tree.
-fn file_root(ws: &Workspace, file: &ScopeFile) -> Option<SyntaxNode> {
-    let run = crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Parsed)?;
-    let green = run.get::<leek_parser::pipeline::GreenTreeArtifact>()?;
-    Some(SyntaxNode::new_root(green.0.clone()))
 }
 
 /// Extract every `ClassField` / `ClassMethod` / `ClassConstructor`
@@ -626,10 +615,7 @@ fn push_cross_file_items(
     let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
         return;
     };
-    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-        return;
-    };
-    let root = SyntaxNode::new_root(green.0.clone());
+    let root = crate::analysis::syntax_root(&ws.db, file.source_file);
 
     for sym in &art.table.symbols {
         // A top-level `var` is a `Local` to the resolver but still

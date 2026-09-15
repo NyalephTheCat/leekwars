@@ -43,8 +43,7 @@ pub fn handle(
         }));
     }
 
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // 2. Member access: the resolver records no references for member
     //    names, so resolve `recv.member` through the receiver's class.

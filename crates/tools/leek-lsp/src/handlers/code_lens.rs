@@ -85,8 +85,7 @@ pub fn resolve(ws: &Workspace, lens: lsp::CodeLens) -> Option<lsp::CodeLens> {
     let doc = ws.doc(&uri)?;
     let run = crate::pipeline::run(ws, &uri, leek_session::Target::Resolved)?;
     let table = &run.get::<ResolveArtifact>()?.table;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = leek_syntax::SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
     let sym = table
         .symbols
         .iter()

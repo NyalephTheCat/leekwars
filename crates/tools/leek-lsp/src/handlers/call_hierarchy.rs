@@ -22,7 +22,7 @@ use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::salsa::SourceFile;
 use leek_resolver::{ResolveTable, SymbolKind};
 use leek_span::{LineTable, Span};
-use leek_syntax::{SyntaxKind, SyntaxNode, language::NodeOrToken};
+use leek_syntax::{SyntaxKind, language::NodeOrToken};
 use tower_lsp::lsp_types as lsp;
 
 use crate::util::position::PosMap;
@@ -39,8 +39,7 @@ pub fn prepare(
     let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
 
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     if let Some(sym) = crate::handlers::resolve_symbol(table, offset)
         && sym.kind == SymbolKind::Function
@@ -165,8 +164,7 @@ pub fn outgoing(
     let run = crate::pipeline::run_on_file(ws, home.source_file, leek_session::Target::Hir)?;
     let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
     let hir = run.get::<HirArtifact>()?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
-    let root = SyntaxNode::new_root(green.clone());
+    let root = crate::analysis::syntax_root(&ws.db, home.source_file);
 
     // The caller's body span (the resolver's full_span is the ident
     // token only, so use the HIR function span).

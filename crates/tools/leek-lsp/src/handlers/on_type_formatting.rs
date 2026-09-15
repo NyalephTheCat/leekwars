@@ -28,8 +28,10 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Parsed)?;
-    let green = &run.get::<leek_parser::pipeline::GreenTreeArtifact>()?.0;
+    // The green tree rather than [`crate::analysis::syntax_root`]:
+    // `format_range` below wants the green node itself, and the red root
+    // this walks for the trigger's enclosing node is one step off it.
+    let green = crate::analysis::green_tree(&ws.db, doc.source_file);
     let root = SyntaxNode::new_root(green.clone());
 
     let range = match trigger {
@@ -40,7 +42,7 @@ pub fn handle(
     }?;
 
     let (target_range, replacement) = leek_fmt::format_range(
-        green,
+        &green,
         doc.source_file_version(&ws.db),
         &ws.settings.format,
         range,

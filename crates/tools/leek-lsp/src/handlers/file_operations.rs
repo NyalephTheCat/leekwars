@@ -94,14 +94,7 @@ fn edits_for_document(
     known: &HashSet<PathBuf>,
     renamed: &HashMap<PathBuf, PathBuf>,
 ) -> Vec<lsp::TextEdit> {
-    let Some(run) = crate::pipeline::run_on_file(ws, source_file, leek_session::Target::Parsed)
-    else {
-        return Vec::new();
-    };
-    let Some(green) = run.get::<leek_parser::pipeline::GreenTreeArtifact>() else {
-        return Vec::new();
-    };
-    let root = SyntaxNode::new_root(green.0.clone());
+    let root = crate::analysis::syntax_root(&ws.db, source_file);
     let text = source_file.text(&ws.db);
     let line_table = leek_span::LineTable::new(text);
     let pm = crate::util::position::PosMap::new(&line_table, text);
