@@ -2150,6 +2150,44 @@ fn range_formatting_keeps_comments_inside_statements() {
 }
 
 #[test]
+fn range_formatting_edits_a_selection_spanning_two_statements() {
+    // Two top-level statements are enclosed by nothing but the
+    // `SourceFile`, which `format_range` used to refuse — so this
+    // handler returned an empty edit list and "Format Selection" did
+    // nothing at all (#200).
+    let text = "var x   =1;\nvar y=2   ;\nvar z = 3;\n";
+    let ws = open(text);
+    let range = lsp::Range {
+        start: lsp::Position {
+            line: 0,
+            character: 0,
+        },
+        end: lsp::Position {
+            line: 1,
+            character: 11,
+        },
+    };
+    let edits = leek_lsp::handlers::range_formatting::handle(&ws, &url(), range).expect("format");
+    assert_eq!(edits.len(), 1, "expected one edit, got {edits:?}");
+    assert_eq!(edits[0].new_text, "var x = 1;\nvar y = 2;\n");
+    // Narrowed to the two selected lines — `var z` is already
+    // formatted and the client's cursor there stays put.
+    assert_eq!(
+        edits[0].range,
+        lsp::Range {
+            start: lsp::Position {
+                line: 0,
+                character: 0
+            },
+            end: lsp::Position {
+                line: 2,
+                character: 0
+            },
+        }
+    );
+}
+
+#[test]
 fn inlay_hints_can_be_disabled_via_settings() {
     let mut ws = open("var n = 1 + 2\n");
     let whole = lsp::Range {
