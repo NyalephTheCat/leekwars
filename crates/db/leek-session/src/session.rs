@@ -654,6 +654,139 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The tracked whole-program lowering answers exactly what the
+    /// planned pipeline put in `HirArtifact`.
+    ///
+    /// This is the gate on moving [`Compilation::hir`] — and with it
+    /// `check`, `run`, `build`, `test` and `leekc` — off the `Run`. Every
+    /// one of those reads the HIR and nothing else of the pipeline's, so
+    /// once the two agree the switch is mechanical; until they do, it is
+    /// a guess. The same check is what made the LSP's accessor rewrites
+    /// provably behaviour-preserving rather than hopefully so.
+    ///
+    /// Compared on the lowered tree itself, not a summary of it: two
+    /// lowerings that agree about function names and disagree about a
+    /// body would pass any count-based assertion and break every
+    /// backend.
+    #[test]
+    fn the_program_query_lowers_what_the_pipeline_lowered() {
+        let dir = scratch("hir-parity");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "include(\"util\")\nvar x = helper() + 1;\nreturn x;\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            dir.join("src/util.leek"),
+            "function helper() {\n\tvar a = [1, 2, 3];\n\treturn a[0] * 2;\n}\n",
+        )
+        .expect("include");
+
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Hir)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let from_pipeline = compiled.hir().expect("the pipeline lowered").clone();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let from_query = leek_db::queries::lower_program(
+            db,
+            files,
+            file,
+            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_pipeline::OptLevel::O0,
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Not vacuous: two empty trees are equal, so the fixture has to
+        // have lowered something, and specifically something from the
+        // *include* — that is the part a per-file query would miss.
+        assert!(
+            from_pipeline
+                .defs
+                .iter()
+                .any(|def| matches!(def, leek_hir::Def::Function(f) if f.name == "helper")),
+            "the closure's function reached the pipeline's HIR: {:?}",
+            from_pipeline.defs.len()
+        );
+        assert_eq!(
+            from_pipeline.defs.len(),
+            from_query.hir.defs.len(),
+            "same number of definitions"
+        );
+        assert_eq!(
+            from_pipeline, *from_query.hir,
+            "the query and the pipeline lower the same tree"
+        );
+    }
+
+    /// The tracked program stream is byte-for-byte what the planned
+    /// pipeline reported, lints included and in the same order.
+    ///
+    /// The other half of the gate on moving [`Compilation`] off the
+    /// `Run`. `hir` alone is not enough: a `Run` planned for a late
+    /// target has already computed and cloned everything on the way
+    /// there, so serving `hir` from a query while `diagnostics` still
+    /// came from the run would pay for both. A consumer moves wholly or
+    /// not at all, which means both halves have to agree first.
+    ///
+    /// Order is part of the claim, not incidental. `leek-db` argues its
+    /// stream is *indistinguishable* from the pipeline's after
+    /// `for_source` filtering rather than identical to it — the include
+    /// failures are one memoized block instead of interleaved per file.
+    /// This fixture is where that argument is checked against the real
+    /// thing rather than reasoned about: an error in the entry, lints in
+    /// the entry, and a lint that exists only inside the include.
+    #[test]
+    fn the_program_stream_reports_what_the_pipeline_reported() {
+        let dir = scratch("diagnostic-parity");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "include(\"util\")\nvar a = 1;\nvar a = 2;\nreturn helper();\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            dir.join("src/util.leek"),
+            "function helper() {\n\treturn 1 / 0;\n}\n",
+        )
+        .expect("include");
+
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+
+        let from_pipeline: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+        let (db, files) = session.db();
+        let (_, file) = compiled.db_handle().expect("session database");
+        let from_query = leek_lint::pipeline::program_diagnostics_with_lints(
+            db,
+            files,
+            file,
+            leek_syntax::pipeline::version_from_byte(file.version_byte(db)),
+            leek_lint::LintGroups::default(),
+        );
+        let from_query_codes: Vec<&str> = from_query.iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Not vacuous, and not only the entry's: the redeclaration is the
+        // entry's, `L0016` exists only inside the include.
+        assert!(
+            from_pipeline.contains(&"E0202") && from_pipeline.contains(&"L0016"),
+            "fixture reports across the closure: {from_pipeline:?}"
+        );
+        assert_eq!(
+            from_pipeline, from_query_codes,
+            "the query and the pipeline report the same stream, in the same order"
+        );
+        assert_eq!(
+            compiled.diagnostics().len(),
+            from_query.len(),
+            "and nothing is dropped or duplicated"
+        );
+    }
+
     /// Two files compiled in one session share one database, and a file
     /// the project index already knows keeps the input registered for it
     /// rather than getting a second one for the same bytes.
