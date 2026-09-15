@@ -15,8 +15,8 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Program-wide occurrences of a top-level symbol → Locations,
