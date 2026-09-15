@@ -28,6 +28,7 @@ impl<'a> ProgramCtx<'a> {
     }
 
     pub(crate) fn lower(&mut self) {
+        let inferred = infer_global_tys(self.hir);
         // First pass: register globals so functions lowered next
         // can resolve `NameRef::Global` references.
         // A `Global` def's `DefId` is its index in `defs` (the HIR doesn't
@@ -41,6 +42,11 @@ impl<'a> ProgramCtx<'a> {
                     def_id,
                     name: g.name.clone(),
                     ty: g.ty.clone().unwrap_or(Type::Any),
+                    inferred_ty: g
+                        .ty
+                        .is_none()
+                        .then(|| inferred.get(&def_id).cloned())
+                        .flatten(),
                     span: g.span,
                 });
             }
@@ -626,4 +632,45 @@ fn default_init_expr(ty: &Type, span: Span, is_static: bool) -> Option<Expr> {
         ty: ty.clone(),
         span,
     })
+}
+
+/// The type every write to each global agrees on, for the globals that have
+/// no declared one.
+///
+/// Both the declaration's initialiser and every plain `=` to the name count,
+/// and they must all infer to the same simple type — a global written an
+/// integer here and a string there is untyped, and narrowing it would refuse
+/// a write upstream accepts. A compound assignment (`x /= v`) is a *read* of
+/// the type, not a claim about it, so it is not counted.
+fn infer_global_tys(hir: &HirFile) -> HashMap<DefId, Type> {
+    let mut seen: HashMap<DefId, Option<Type>> = HashMap::new();
+    let mut note = |def: DefId, ty: Option<Type>| {
+        seen.entry(def)
+            .and_modify(|cur| {
+                if cur.as_ref() != ty.as_ref() {
+                    *cur = None;
+                }
+            })
+            .or_insert(ty);
+    };
+    leek_hir::walk_file_stmts_deep(hir, &mut |s| {
+        if let Stmt::VarDecl(v) = s
+            && v.is_global
+        {
+            note(
+                v.def,
+                v.init.as_ref().and_then(super::util::infer_simple_init_ty),
+            );
+        }
+    });
+    leek_hir::walk_file_exprs(hir, &mut |e| {
+        if let leek_hir::ExprKind::Binary(leek_hir::BinaryOp::Assign, lhs, rhs) = &e.kind
+            && let leek_hir::ExprKind::Name(leek_hir::NameRef::Global(def)) = &lhs.kind
+        {
+            note(*def, super::util::infer_simple_init_ty(rhs));
+        }
+    });
+    seen.into_iter()
+        .filter_map(|(def, ty)| ty.map(|t| (def, t)))
+        .collect()
 }

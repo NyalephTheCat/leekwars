@@ -330,6 +330,12 @@ pub struct MirGlobal {
     pub def_id: DefId,
     pub name: String,
     pub ty: Type,
+    /// The type every write to this global agrees on, when it has no declared
+    /// one and they all do. Upstream's strict mode commits an untyped global
+    /// to a type the same way it commits an untyped local, and then converts
+    /// each write through it — `global x = 10` is an `integer`, so `x /= v`
+    /// lands back as one.
+    pub inferred_ty: Option<Type>,
     pub span: Span,
 }
 

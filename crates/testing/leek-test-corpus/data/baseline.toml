@@ -78,7 +78,6 @@ skipped_unknown = 18
 "TestGlobals.java::testGlobals_duplicateName::1@v2" = "skipped_unknown"
 "TestGlobals.java::testGlobals_duplicateName::1@v3" = "skipped_unknown"
 "TestGlobals.java::testGlobals_duplicateName::1@v4" = "skipped_unknown"
-"TestGlobals.java::testInferredGlobalCompoundInFunction::4@v4" = "fail_wrong_value"
 "TestLoops.java::testForeach_Minus_argument::1@v1" = "skipped_unknown"
 "TestLoops.java::testForeach_Minus_argument::1@v2" = "skipped_unknown"
 "TestLoops.java::testForeach_Minus_argument::1@v3" = "skipped_unknown"
@@ -113,11 +112,11 @@ skipped_unknown = 18
 
 [backends.native.summary]
 total = 12254
-pass = 11275
+pass = 11276
 pass_expected_error = 924
 fail_parse_error = 0
 fail_missing_error = 0
-fail_wrong_value = 1
+fail_wrong_value = 0
 skipped_disabled = 24
 skipped_unknown = 30
 

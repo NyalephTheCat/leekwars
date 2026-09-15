@@ -511,7 +511,17 @@ impl Tx<'_, '_> {
             .globals
             .iter()
             .find(|g| g.name == name)
-            .and_then(|g| super::slot_tag(&g.ty))
+            .and_then(|g| {
+                super::slot_tag(&g.ty).or_else(|| {
+                    // Strict mode commits an untyped global to the type every
+                    // write to it agrees on, and converts through that — the
+                    // same rule it applies to an untyped local.
+                    self.lang
+                        .strict
+                        .then(|| g.inferred_ty.as_ref().and_then(super::slot_tag))
+                        .flatten()
+                })
+            })
         {
             let convert = self.imports.rt("leek_global_convert")?;
             let (ptr, lenv) = self.const_str_bytes(name);

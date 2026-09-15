@@ -1132,3 +1132,11 @@ id = "a_function_can_be_redefined_from_inside_another"
 version = 3
 source = "function f(x) { return x + 1 } function h() { f = function(x) { return x * 2 } } h() return f(5)"
 expect = { equals = "10" }
+
+# A global with no declared type still has one in strict mode: whatever every
+# write to it agrees on. A global written two different kinds keeps neither.
+[[tests]]
+id = "a_global_written_two_kinds_stays_untyped"
+version = 4
+source = "global x = 10 x = 'a' return x"
+expect = { equals = "\"a\"" }
