@@ -59,6 +59,10 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
     for (i, path) in files.iter().enumerate() {
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let compiled = session.compile_file(path, source)?;
+        // The session's interner is the id authority, so the id this
+        // file's spans actually carry comes off the compilation rather
+        // than the loop counter above.
+        let source = compiled.input().source;
         let Some(report) = compiled.complexity() else {
             eprintln!(
                 "miku analyze: failed to analyze {}",

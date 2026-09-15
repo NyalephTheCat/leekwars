@@ -57,6 +57,8 @@ pub fn run(
     for (next_source, path) in (1_u32..).zip(&sources) {
         let source = SourceId::new(next_source).unwrap();
         let compiled = session.compile_file(path, source)?;
+        // See `analyze`: the id the spans carry is the session's.
+        let source = compiled.input().source;
 
         if has_compile_error(session.reporter(), compiled.diagnostics()) {
             compiled.report();

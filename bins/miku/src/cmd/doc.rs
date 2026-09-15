@@ -71,6 +71,8 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
     for (i, path) in sources.iter().enumerate() {
         let source_id = SourceId::new((i + 1).try_into().unwrap()).unwrap();
         let compiled = session.compile_file(path, source_id)?;
+        // See `analyze`: the id the spans carry is the session's.
+        let source_id = compiled.input().source;
         let Some(report) = compiled.complexity() else {
             if !quiet {
                 eprintln!(

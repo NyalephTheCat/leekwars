@@ -170,9 +170,12 @@ impl<'p> Session<'p> {
             source,
         })?;
         let lang = self.project.index().language_settings(&text);
+        let text: Arc<str> = Arc::from(text);
+        let file = self.input_for(path, source_id, &text, lang);
         let input = Input {
-            source: source_id,
-            text: Arc::from(text),
+            // The session's id, not the caller's. See `input_for`.
+            source: file.source(&self.db),
+            text,
             version_byte: lang.version,
             strict: lang.strict,
             // The project's flags, not `Input::from`'s per-conversion
@@ -180,7 +183,6 @@ impl<'p> Session<'p> {
             // project and has to reach the pipeline (leekwars#206).
             flags: self.project.feature_flags(),
         };
-        let file = self.input_for(path, &input);
         Ok(Compilation::adopt_in_session(
             pipeline.run(input),
             path.display().to_string(),
@@ -213,17 +215,37 @@ impl<'p> Session<'p> {
         }
     }
 
-    /// This file's salsa input: the one
-    /// [`register_project_files`] made when the index knows the file,
-    /// otherwise a fresh one for a file outside the project.
+    /// This file's salsa input: the one [`register_project_files`] made
+    /// when the index knows the file, otherwise a fresh one carrying
+    /// `fallback_id`.
     ///
-    /// The fresh case deliberately does not join
-    /// [`files`](Self::files): a file the index never saw is not part of
-    /// the project, and adding it to the set every include resolves
-    /// against would let a stray file outside the tree satisfy an
-    /// `include`. It still gets an input, so the per-file queries answer
-    /// about it.
-    fn input_for(&self, path: &Path, input: &Input) -> leek_db::SourceFile {
+    /// **The session's interner is the single id authority.** A registered
+    /// input already carries an id, and [`compile`](Self::compile) builds
+    /// its [`Input`] from *that* rather than from the caller's
+    /// `source_id`. Two authorities would mean the pipeline's diagnostics
+    /// and the queries' disagree about which file a span belongs to, which
+    /// `Sources` and
+    /// [`for_source`](leek_db::queries::for_source) both key on — so a
+    /// diagnostic would render against the wrong file or vanish.
+    ///
+    /// It also generalizes what [`compile_shared`](Self::compile_shared)
+    /// was added for. Numbering an entry `1, 2, 3, …` while its includes
+    /// take ids from the interner hands one file the id another already
+    /// has (#191); taking both from the interner cannot.
+    ///
+    /// `fallback_id` is therefore used only for a file the session does
+    /// not know — one outside the project index. Such a file deliberately
+    /// does not join [`files`](Self::files) either: a file the index never
+    /// saw is not part of the program, and adding it to the set every
+    /// include resolves against would let a stray file outside the tree
+    /// satisfy an `include`.
+    fn input_for(
+        &self,
+        path: &Path,
+        fallback_id: SourceId,
+        text: &Arc<str>,
+        lang: leek_span::pragma::LanguageSettings,
+    ) -> leek_db::SourceFile {
         let canonical = leek_span::paths::canonical_or_normalized(path)
             .display()
             .to_string();
@@ -233,12 +255,12 @@ impl<'p> Session<'p> {
         leek_db::SourceFile::new(
             &self.db,
             canonical,
-            input.source.get(),
-            Arc::clone(&input.text),
-            input.version_byte,
-            input.strict,
+            fallback_id.get(),
+            Arc::clone(text),
+            lang.version,
+            lang.strict,
             leek_types::seed_library_enabled(),
-            input.flags.to_bits(),
+            self.project.feature_flags().to_bits(),
         )
     }
 }
@@ -750,6 +772,11 @@ mod tests {
             .expect("a session compilation has a database");
         assert_eq!(&**file.text(db), "return 1 + 1;\n");
         assert_eq!(file.version_byte(db), compiled.input().version_byte);
+        assert_eq!(
+            file.source(db),
+            compiled.input().source,
+            "the input and the query answer about the same SourceId"
+        );
         assert!(
             file.path(db)
                 .is_some_and(|p: &str| p.ends_with("main.leek")),
@@ -958,10 +985,20 @@ mod tests {
                     .expect("session");
                     let compiled = session.compile_entry().expect("compile");
 
-                    let from_run: Vec<&str> =
-                        compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+                    // Compared on `(code, span)`, not code alone. The span
+                    // carries the `SourceId`, which is what `Sources` and
+                    // `for_source` key on to attribute a diagnostic to a
+                    // file — two streams with the same codes and different
+                    // ids render against the wrong file or vanish, and a
+                    // code-only comparison cannot see it.
+                    let from_run: Vec<_> = compiled
+                        .diagnostics()
+                        .iter()
+                        .map(|d| (d.code.id(), d.span))
+                        .collect();
                     let queried = compiled.query_diagnostics().expect("session compilation");
-                    let from_query: Vec<&str> = queried.iter().map(|d| d.code.id()).collect();
+                    let from_query: Vec<_> =
+                        queried.iter().map(|d| (d.code.id(), d.span)).collect();
 
                     std::fs::remove_dir_all(&dir).ok();
 
@@ -1294,6 +1331,61 @@ mod tests {
             from_query.len(),
             "and nothing is dropped or duplicated"
         );
+    }
+
+    /// A caller's `source_id` does not override the session's.
+    ///
+    /// The regression this exists for: `Session` interns every project
+    /// file when it opens, so a file the index knows already has an id.
+    /// Building its `Input` from the caller's argument instead gave the
+    /// pipeline one id and the queries another — `SourceId(9)` against
+    /// `SourceId(2)` for the fixture below — so a diagnostic from one path
+    /// named a different file than the same diagnostic from the other.
+    ///
+    /// It survived the 24-combination matrix because that compared
+    /// diagnostic *codes*, and the codes were identical; only the spans
+    /// disagreed. The matrix compares spans now.
+    ///
+    /// The caller's id is still honoured for a file the session does not
+    /// know, which is the only case where there is no id to conflict with.
+    #[test]
+    fn the_sessions_id_wins_over_the_callers_for_a_project_file() {
+        let dir = scratch("id-authority");
+        std::fs::write(dir.join("src/main.leek"), "return 1;\n").expect("entry");
+        std::fs::write(dir.join("src/util.leek"), "return 2;\n").expect("other");
+        let project = project_at(dir.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+
+        let compiled = session
+            .compile_file(&dir.join("src/util.leek"), SourceId::new(9).expect("id"))
+            .expect("compile");
+        let (db, file) = compiled.db_handle().expect("session database");
+
+        assert_eq!(
+            compiled.input().source,
+            file.source(db),
+            "one id, whatever the caller asked for"
+        );
+        assert_ne!(
+            compiled.input().source,
+            SourceId::new(9).expect("id"),
+            "and it is the session's, not the caller's"
+        );
+
+        // A file outside the project index has no session id to conflict
+        // with, so the caller's stands.
+        let outside = dir.join("loose.leek");
+        std::fs::write(&outside, "return 3;\n").expect("loose");
+        let loose = session
+            .compile_file(&outside, SourceId::new(9).expect("id"))
+            .expect("compile");
+        assert_eq!(
+            loose.input().source,
+            SourceId::new(9).expect("id"),
+            "the caller's id is honoured where there is nothing to clash with"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Two files compiled in one session share one database, and a file
