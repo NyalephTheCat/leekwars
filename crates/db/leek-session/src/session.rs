@@ -375,6 +375,15 @@ fn register_project_files(
     out
 }
 
+/// One file a compiled program reaches through `include(...)`.
+#[derive(Debug, Clone)]
+pub struct IncludedFile {
+    /// The id every span raised inside this file carries.
+    pub source: SourceId,
+    pub path: PathBuf,
+    pub text: Arc<str>,
+}
+
 /// One file compiled: the run, plus everything needed to say something
 /// about it.
 ///
@@ -535,24 +544,11 @@ impl<'a> Compilation<'a> {
                 return run_sources(run, &self.text, &self.label);
             }
             let mut sources = Sources::single(self.input.source, &self.label, &*self.text);
-            // A file-scoped compilation resolves no include, so nothing it
-            // reports can point into one — and building the graph to find
-            // that out would read the very files this scope exists to
-            // leave alone.
-            if self.scope() == crate::Scope::File {
-                return sources;
-            }
-            let graph = self.with_program(|db, files, file, version| {
-                leek_db::queries::include_graph(db, files, file, version)
-            });
-            if let (Some((db, _)), Some(graph)) = (self.db, graph) {
-                for inc in graph.includes() {
-                    sources.push(
-                        inc.source,
-                        inc.path.display().to_string(),
-                        &**inc.file.text(db),
-                    );
-                }
+            // `includes()` is the one definition of what the program
+            // reaches; it is empty under `Scope::File`, which resolves no
+            // include and so can report nothing pointing into one.
+            for inc in self.includes() {
+                sources.push(inc.source, inc.path.display().to_string(), &*inc.text);
             }
             sources
         })
@@ -561,6 +557,50 @@ impl<'a> Compilation<'a> {
     #[must_use]
     pub fn input(&self) -> &Input {
         &self.input
+    }
+
+    /// Every file the compiled program reaches through `include(...)`,
+    /// in the closure's dependency order.
+    ///
+    /// [`sources`](Self::sources) is the same set shaped for rendering
+    /// diagnostics; this is for a front-end that needs the files
+    /// themselves — the debug adapter maps a breakpoint's `SourceId` back
+    /// to the path and text the editor should show.
+    ///
+    /// Empty under [`Scope::File`](crate::Scope), which resolves no
+    /// include.
+    #[must_use]
+    pub fn includes(&self) -> Vec<IncludedFile> {
+        if let Some(run) = &self.run {
+            return run
+                .get::<leek_resolver::pipeline::IncludeGraphArtifact>()
+                .map(|graph| {
+                    graph
+                        .includes
+                        .iter()
+                        .map(|inc| IncludedFile {
+                            source: inc.source,
+                            path: inc.path.clone(),
+                            text: Arc::clone(&inc.text),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        if self.scope() == crate::Scope::File {
+            return Vec::new();
+        }
+        self.with_program(|db, files, file, version| {
+            leek_db::queries::include_graph(db, files, file, version)
+                .includes()
+                .map(|inc| IncludedFile {
+                    source: inc.source,
+                    path: inc.path.clone(),
+                    text: Arc::clone(inc.file.text(db)),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     #[must_use]
@@ -677,6 +717,23 @@ impl<'a> Compilation<'a> {
                 })
             })
             .as_deref()
+    }
+
+    /// [`hir`](Self::hir) as a shared pointer, for a caller that keeps
+    /// the tree after the compilation is gone.
+    ///
+    /// A refcount bump either way: a session compilation's cache holds
+    /// the `Arc` the query returned, and an adopted run's artifact holds
+    /// the one the lowering step produced.
+    #[must_use]
+    pub fn hir_arc(&self) -> Option<Arc<HirFile>> {
+        if let Some(run) = &self.run {
+            return run.get::<HirArtifact>().map(|a| Arc::clone(&a.0));
+        }
+        // Through `hir`, so both go through the same cache and the same
+        // stage timer.
+        self.hir()?;
+        self.hir_cache.get().and_then(Option::clone)
     }
 
     /// The lowered MIR, when the target reached it.

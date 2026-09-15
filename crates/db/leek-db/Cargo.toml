@@ -17,6 +17,8 @@ leek-pipeline    = { workspace = true }
 salsa            = { workspace = true }
 leek-span        = { workspace = true }
 leek-diagnostics = { workspace = true }
+# `input_file` turns a driver's `Input` into a `SourceFile`.
+leek-project     = { workspace = true }
 # Every pass crate that ships a tracked query, re-exported from here. No
 # tools-layer crate appears here: `leek-fmt`'s `format_query` stays in
 # `leek-fmt`, which depends *down* on this crate, because db -> tools is a

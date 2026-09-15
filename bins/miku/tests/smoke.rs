@@ -2289,22 +2289,23 @@ fn the_experimental_table_switches_the_feature_on_and_verbose_says_so() {
 
 // ---- dev ----
 
+/// The stages a compilation is asked for, not the passes it runs. There
+/// are no passes to time: a compilation answers from tracked queries, and
+/// salsa fires an event *before* a query body runs and nothing when it
+/// finishes, so an event hook can say which queries recomputed but never
+/// how long they took.
 #[test]
-fn dev_pipeline_prints_a_timing_per_front_end_pass() {
+fn dev_pipeline_prints_a_timing_per_stage_it_asks_for() {
     let dir = include_project("dev_pipeline");
     let out = miku(&["dev", "pipeline", "src/main.leek"], &dir);
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     let text = format!("{}{}", out.stdout, out.stderr);
-    for step in [
-        "pragma",
-        "lex",
-        "parse",
-        "resolve",
-        "type-check",
-        "lower-hir",
-    ] {
-        assert!(text.contains(step), "no timing for `{step}`:\n{text}");
+    for stage in ["diagnostics", "hir"] {
+        assert!(text.contains(stage), "no timing for `{stage}`:\n{text}");
     }
+    // The file it timed, so a run that silently timed the default fixture
+    // instead of the path it was given does not pass.
+    assert!(text.contains("src/main.leek"), "{text}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

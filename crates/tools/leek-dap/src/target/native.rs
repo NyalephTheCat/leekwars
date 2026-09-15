@@ -21,12 +21,9 @@ use std::sync::Arc;
 use leek_backend_native::NativeOptions;
 use leek_diagnostics::Severity;
 use leek_hir::HirFile;
-use leek_hir::pipeline::HirArtifact;
-use leek_project::Input;
-use leek_resolver::pipeline::IncludeGraphArtifact;
 use leek_session::Target;
 use leek_span::paths::canonical_or_normalized;
-use leek_span::pragma::{LATEST_VERSION, LanguageSettings};
+use leek_span::pragma::LATEST_VERSION;
 use leek_span::{LineTable, SourceId, Span};
 
 use crate::breakpoints::ProgramMap;
@@ -155,30 +152,40 @@ impl NativeTarget {
             }
         };
 
-        let lang = settle_language(&source, &self.config, manifest_defaults(path));
         // The entry keeps id 1 and the include walker hands out 2, 3, … —
         // the same numbering `leek-session` uses, so spans line up with the
         // rest of the toolchain.
         let src_id = SourceId::new(1).expect("source id 1 is non-zero");
-        let input = Input {
-            source: src_id,
-            text: source.clone().into(),
-            version_byte: lang.version,
-            strict: lang.strict,
-            flags: leek_span::FeatureFlags::from_env(),
-        };
 
-        let pipeline = match leek_session::pipeline_with_includes(
-            Target::Hir,
-            leek_session::includes_step_standalone(path, src_id),
-            &leek_session::driver_params(),
+        // The debugged file need not belong to a project, so it compiles
+        // through the one-file project `Project::standalone` builds for it
+        // — the same `Session` every other front-end drives, so the
+        // debugger cannot disagree with `miku` about what this program is.
+        //
+        // The launch config's language settings become the index's, which
+        // resolves them exactly as `settle_language` documents: the
+        // config's `version` outranks the file's `@version` pragma
+        // (an override), the manifest's `[project].language` is the
+        // fallback below it, and strict is on when the file, the manifest
+        // or the config asks.
+        let mut project = leek_project::Project::standalone(path);
+        apply_language(project.index_mut(), &self.config, manifest_defaults(path));
+        let session = match leek_session::Session::new(
+            &project,
+            leek_session::DriverConfig {
+                target: Target::Hir,
+                ..leek_session::DriverConfig::default()
+            },
         ) {
-            Ok(pipeline) => pipeline,
-            Err(e) => return Err(RunOutcome::failed(format!("building pipeline: {e}"))),
+            Ok(session) => session,
+            Err(e) => return Err(RunOutcome::failed(format!("opening the session: {e}"))),
         };
-        let run = pipeline.run(input);
+        let compiled = match session.compile_file(path, src_id) {
+            Ok(compiled) => compiled,
+            Err(e) => return Err(RunOutcome::failed(e.to_string())),
+        };
 
-        let errors: Vec<&str> = run
+        let errors: Vec<&str> = compiled
             .diagnostics()
             .iter()
             .filter(|d| matches!(d.severity, Severity::Error))
@@ -191,26 +198,25 @@ impl NativeTarget {
             )));
         }
 
-        let Some(hir) = run.get::<HirArtifact>() else {
-            return Err(RunOutcome::failed("pipeline produced no HIR"));
+        let Some(hir) = compiled.hir_arc() else {
+            return Err(RunOutcome::failed("compilation produced no HIR"));
         };
+        let input = compiled.input();
         let mut sources = vec![CompiledSource {
-            source: src_id,
+            source: input.source,
             path: canonical_or_normalized(path),
             text: source,
         }];
-        if let Some(graph) = run.get::<IncludeGraphArtifact>() {
-            sources.extend(graph.includes.iter().map(|file| CompiledSource {
-                source: file.source,
-                path: file.path.clone(),
-                text: file.text.to_string(),
-            }));
-        }
+        sources.extend(compiled.includes().iter().map(|file| CompiledSource {
+            source: file.source,
+            path: file.path.clone(),
+            text: file.text.to_string(),
+        }));
         Ok(Compiled {
-            hir: hir.0.clone(),
+            hir,
             sources,
-            version: lang.version,
-            strict: lang.strict,
+            version: input.version_byte,
+            strict: input.strict,
         })
     }
 }
@@ -231,17 +237,20 @@ fn manifest_defaults(program: &Path) -> (u8, bool) {
 /// the manifest's `[project].language` > [`DEFAULT_VERSION`]; strict when the
 /// file has `@strict`, the manifest asks for it, or the launch config does.
 /// The same values drive lowering and the backend.
-fn settle_language(
-    source: &str,
+///
+/// Written into the project index rather than resolved here, because the
+/// compile goes through a `Session` over that index: the config's
+/// `version` is an *override* (it outranks the file's pragma), the
+/// manifest's is the *default* below it, and the index resolves the two
+/// against the pragma exactly as this doc comment describes.
+fn apply_language(
+    index: &mut leek_project::ProjectIndex,
     config: &LaunchConfig,
     (default_version, default_strict): (u8, bool),
-) -> LanguageSettings {
-    LanguageSettings::resolve(
-        source,
-        config.version,
-        default_version,
-        default_strict || config.strict,
-    )
+) {
+    index.version_override = config.version;
+    index.default_version_byte = default_version;
+    index.default_strict = default_strict || config.strict;
 }
 
 impl NativeTarget {
@@ -269,10 +278,25 @@ pub(crate) fn run_compiled(program: &Compiled, debug_hooks: bool) -> RunOutcome 
 
 #[cfg(test)]
 mod tests {
+    use leek_span::pragma::LanguageSettings;
+
     use super::*;
 
     /// Language defaults of a file that belongs to no project.
     const STANDALONE: (u8, bool) = (DEFAULT_VERSION, false);
+
+    /// What `compile` would settle for `source`: the launch config and the
+    /// manifest defaults written into an index, then read back the way a
+    /// `Session` reads them.
+    fn settle_language(
+        source: &str,
+        config: &LaunchConfig,
+        defaults: (u8, bool),
+    ) -> LanguageSettings {
+        let mut index = leek_project::ProjectIndex::single_file(Path::new("main.leek"));
+        apply_language(&mut index, config, defaults);
+        index.language_settings(source)
+    }
 
     fn config(version: Option<u8>, strict: bool) -> LaunchConfig {
         serde_json::from_value(serde_json::json!({

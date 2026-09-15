@@ -21,4 +21,4 @@ pub mod session;
 pub use driver::*;
 pub use error::SessionError;
 pub use recipes::*;
-pub use session::{Compilation, Session};
+pub use session::{Compilation, IncludedFile, Session};

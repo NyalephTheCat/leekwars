@@ -71,35 +71,43 @@ fn run_tool(script: &str, extra_args: &[&str], quiet: bool) -> Result<ExitCode> 
 
 fn pipeline(cmd: crate::cli::DevPipeline, quiet: bool) -> Result<ExitCode> {
     use leek_pipeline::TimingSink;
-    use leek_project::Input;
-    use leek_session::{RecipeParams, Target};
+    use leek_project::Project;
+    use leek_session::{DriverConfig, RecipeParams, Session, Target};
     use leek_span::SourceId;
 
     let path = cmd.path.unwrap_or_else(|| {
         workspace_root().join("crates/tools/leek-fmt/tests/fixtures/hello.in.leek")
     });
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    // `--lang-version` > the file's `@version` pragma > latest; `@strict`.
-    let lang = leek_span::pragma::LanguageSettings::resolve(
-        &text,
-        cmd.lang_version,
-        leek_span::pragma::LATEST_VERSION,
-        false,
-    );
+
+    // Stage timings, not step timings. There are no steps left to time: a
+    // compilation answers from tracked queries, and salsa fires an event
+    // *before* a query body runs and nothing when it finishes, so an event
+    // hook can say which queries recomputed but never how long they took.
+    // What a caller can still time is the stages it asks `Compilation` for,
+    // which is what `miku build --verbose` reports too.
     let sink = TimingSink::new();
-    let pipeline = leek_session::plan(Target::Hir, &RecipeParams::permissive())
-        .expect("recipe")
-        .build_with(Some(&sink));
-    let _run = pipeline.run(Input {
-        source: SourceId::new(1).unwrap(),
-        text: text.into(),
-        version_byte: lang.version,
-        strict: lang.strict,
-        flags: leek_span::FeatureFlags::from_env(),
-    });
+    // `--lang-version` outranks the file's own `@version`, so it is the
+    // index's override rather than its default.
+    let mut project = Project::standalone(&path);
+    project.index_mut().version_override = cmd.lang_version;
+    let session = Session::new(
+        &project,
+        DriverConfig {
+            target: Target::Hir,
+            // Permissive: this is a stopwatch, so a file that does not
+            // parse should still be timed through every stage rather than
+            // stopping at the first error.
+            params: RecipeParams::permissive(),
+            timing: Some(sink.clone()),
+            ..DriverConfig::default()
+        },
+    )?;
+    let compiled = session.compile_file(&path, SourceId::new(1).unwrap())?;
+    let _ = compiled.diagnostics();
+    let _ = compiled.hir();
+
     if !quiet {
-        eprintln!("Pipeline timings for {}:", path.display());
+        eprintln!("Stage timings for {}:", path.display());
         for entry in sink.entries() {
             eprintln!("  {:>14}: {:?}", entry.step, entry.duration);
         }

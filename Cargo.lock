@@ -1158,6 +1158,7 @@ dependencies = [
  "leek-parser",
  "leek-pipeline",
  "leek-prelude",
+ "leek-project",
  "leek-resolver",
  "leek-span",
  "leek-syntax",
@@ -1333,6 +1334,7 @@ name = "leek-migrate"
 version = "0.0.1"
 dependencies = [
  "leek-backend-native",
+ "leek-db",
  "leek-diagnostics",
  "leek-hir",
  "leek-lexer",
@@ -1340,7 +1342,6 @@ dependencies = [
  "leek-project",
  "leek-rewrite",
  "leek-runtime",
- "leek-session",
  "leek-span",
  "leek-syntax",
  "leek-test-corpus",
@@ -1450,6 +1451,7 @@ name = "leek-scenario"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "leek-db",
  "leek-diagnostics",
  "leek-game-runtime",
  "leek-generator",

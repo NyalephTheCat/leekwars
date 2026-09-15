@@ -43,6 +43,35 @@ pub mod testing;
 
 pub use leek_pipeline::salsa::{Db, LeekDb, ProgramClasses, SourceFile, WorkspaceFiles};
 
+/// The salsa input for a text a driver already holds, keyed at `path`.
+///
+/// The boundary a driver crosses to go from "a string and the settings it
+/// compiles under" to "a file the queries can answer about". Every field
+/// of [`SourceFile`] comes from the [`Input`](leek_project::Input) except
+/// `seed_library`, which is read here from the process-global
+/// [`leek_types::seed_library_enabled`] — the same place the pipeline's
+/// type-check step read it, and for the same reason: the entry boundary is
+/// where a global belongs, so that every query below it sees it as an
+/// ordinary input it can be invalidated by.
+///
+/// `path` is the canonical path, or empty for a text with no file behind
+/// it at all — a scenario's inline AI source, a migration's rewritten
+/// buffer. A pathless input resolves no `include`, which is what those
+/// callers want and why they need no [`WorkspaceFiles`].
+#[must_use]
+pub fn input_file(db: &dyn Db, path: String, input: &leek_project::Input) -> SourceFile {
+    SourceFile::new(
+        db,
+        path,
+        input.source.get(),
+        std::sync::Arc::clone(&input.text),
+        input.version_byte,
+        input.strict,
+        leek_types::seed_library_enabled(),
+        input.flags.to_bits(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use leek_pipeline::OptLevel;

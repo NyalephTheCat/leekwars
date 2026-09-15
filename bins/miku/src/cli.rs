@@ -134,7 +134,7 @@ pub enum DevCommand {
     Builtins,
     /// Run focused builtin tests (`leek-builtin-suite`).
     BuiltinSuite,
-    /// Run the front/middle pipeline with per-step timings.
+    /// Compile one file with per-stage timings.
     Pipeline(DevPipeline),
 }
 

@@ -12,14 +12,10 @@
 //! output version target with the same code." A textual rename
 //! that changes runtime behaviour fails here.
 
-use std::sync::Arc;
-
 use leek_diagnostics::Severity;
-use leek_hir::pipeline::HirArtifact;
 use leek_migrate::migrate_text;
 use leek_project::Input;
 use leek_runtime::Value;
-use leek_session::{RecipeParams, Target};
 use leek_span::SourceId;
 use leek_syntax::Version;
 
@@ -48,23 +44,19 @@ fn run(src: &str, version: Version) -> Value {
         strict: false,
         flags: leek_span::FeatureFlags::from_env(),
     };
-    let pipeline =
-        leek_session::pipeline(Target::Hir, &RecipeParams::permissive()).expect("recipe");
-    let outcome = pipeline.run(input);
-    let fatal: Vec<_> = outcome
-        .diagnostics()
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .cloned()
-        .collect();
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
+    let fatal: Vec<_> =
+        leek_db::queries::file_diagnostics_upto(&db, file, leek_db::queries::Stage::Hir)
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .cloned()
+            .collect();
     assert!(
         fatal.is_empty(),
         "compile errors in fixture under {version:?}:\n{src}\n{fatal:?}",
     );
-    let hir = outcome
-        .get::<HirArtifact>()
-        .map(|a| Arc::clone(&a.0))
-        .expect("hir artifact");
+    let hir = leek_db::queries::lower_hir_query(&db, file).hir;
     let opts = leek_backend_native::NativeOptions::release()
         .with_lang(version_num(version), false)
         .with_op_limit(1_000_000);

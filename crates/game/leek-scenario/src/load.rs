@@ -11,9 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use leek_diagnostics::Severity;
 use leek_generator::{Entity, Fight};
 use leek_hir::HirFile;
-use leek_hir::pipeline::HirArtifact;
 use leek_project::Input;
-use leek_session::Target;
 use leek_span::{FeatureFlags, SourceId};
 
 use crate::schema::{EntitySpec, Scenario};
@@ -262,12 +260,27 @@ pub fn compile_ai_source(
         flags: FeatureFlags::from_env(),
     };
 
-    let pipeline = leek_session::pipeline(Target::Hir, &leek_session::driver_params())
-        .map_err(|e| anyhow!("building pipeline: {e}"))?;
-    let run = pipeline.run(input);
+    // A database of its own: this compiles one pathless string, so there
+    // is no file set for an `include(...)` to resolve against and nothing
+    // to share with another AI's compile.
+    let db = leek_db::LeekDb::default();
+    let file = leek_db::input_file(&db, String::new(), &input);
 
-    let errors: Vec<String> = run
-        .diagnostics()
+    // The driver's stop-on-error rule, which is what the recipe this
+    // replaced wrapped its parse in: a file that does not parse reports
+    // its syntax errors and nothing the later passes made of the wreckage.
+    let parsed = leek_db::queries::parse_query(&db, file, leek_db::ProgramClasses::none(&db));
+    let stage = if parsed
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error)
+    {
+        leek_db::queries::Stage::Parsed
+    } else {
+        leek_db::queries::Stage::Hir
+    };
+
+    let errors: Vec<String> = leek_db::queries::file_diagnostics_upto(&db, file, stage)
         .iter()
         .filter(|d| matches!(d.severity, Severity::Error))
         .map(|d| d.message.clone())
@@ -276,10 +289,7 @@ pub fn compile_ai_source(
         bail!("compiling {label}:\n{}", errors.join("\n"));
     }
 
-    let hir = run
-        .get::<HirArtifact>()
-        .ok_or_else(|| anyhow!("compiling {label}: produced no HIR"))?;
-    Ok(hir.0.clone())
+    Ok(leek_db::queries::lower_hir_query(&db, file).hir)
 }
 
 #[cfg(test)]
