@@ -197,8 +197,8 @@ impl super::Emitter<'_> {
         body: &leek_hir::Block,
         captures: &[leek_hir::DefId],
     ) {
-        let id = self.outline_counter.get();
-        self.outline_counter.set(id + 1);
+        let id = self.shared.outline_counter.get();
+        self.shared.outline_counter.set(id + 1);
         let factory = format!("__anon_{id}");
 
         // Render the call site: `__anon_N(u_x, u_y, …[, _self_box])`.
@@ -322,7 +322,7 @@ impl super::Emitter<'_> {
         }
         factory_buf.push_str("}}; }");
         self.lambda_depth.set(self.lambda_depth.get() - 1);
-        self.outlined.borrow_mut().push(factory_buf);
+        self.shared.outlined.borrow_mut().push(factory_buf);
     }
 }
 

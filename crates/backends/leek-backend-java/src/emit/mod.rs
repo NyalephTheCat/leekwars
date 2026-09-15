@@ -75,13 +75,68 @@ pub fn emit(hir: &HirFile, opts: &Options) -> EmittedJava {
     let mut em = Emitter::new(opts, hir_ref, &analysis);
     em.emit_file();
     let class_name = opts.class_name();
-    let diagnostics = em.diagnostics.take();
+    let diagnostics = em.shared.diagnostics.take();
     let (java, lines) = em.writer.into_parts();
     EmittedJava {
         class_name,
         java,
         lines,
         diagnostics,
+    }
+}
+
+/// The output-side state of one emission run: everything a scratch emitter
+/// produces that has to end up in the *parent's* file.
+///
+/// Every scratch [`Emitter`] that [`Emitter::fork_scope`] hands out points at
+/// the same `Shared` through an `Rc`, so an outline synthesized inside a
+/// block-bodied lambda, a member it hoists, a name counter it advances and a
+/// diagnostic it raises all land in the one place the file is assembled from.
+/// Before, each of those was copied into the scratch and copied back by name
+/// when `render_block_to_string` returned, so adding a field without extending
+/// that list silently dropped whatever it held (#252).
+///
+/// Interior mutability throughout, for the same reason `lambda_depth` is a
+/// `Cell`: every `write_*` method takes `&self`.
+pub(crate) struct Shared {
+    /// Outlined-lambda factories queued for emission at end of class.
+    /// Each entry is one full `private FunctionLeekValue
+    /// __anon_<n>(…) { … }` declaration. Block-bodied lambdas that
+    /// close over outer locals get routed through these so the
+    /// captured values become final parameters (Java's inner-class
+    /// rules accept those even when the original locals are
+    /// reassignable).
+    outlined: std::cell::RefCell<Vec<String>>,
+    /// Hoisted `FunctionLeekValue` singletons for first-class function/builtin
+    /// references (`var f = test`, `test == test`), plus the runtime-dispatch
+    /// helper methods [`Emitter::hoist_member`] registers. One entry per
+    /// distinct function so repeated references are the SAME instance —
+    /// `equals_equals` then compares two refs to one object (`test == test` →
+    /// true). Keyed by the field name; value is the full declaration, emitted
+    /// at class-body end like `outlined`.
+    fn_singletons: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+    /// Monotonic counter for `__anon_<n>` outlined-lambda names.
+    outline_counter: std::cell::Cell<u32>,
+    /// Monotonic counter for switch temp names (`__sw_<n>` / `__si_<n>`),
+    /// mirroring upstream `SwitchBlock`'s `mId`. Unique per emitted file so
+    /// sequential and nested switches never redeclare a Java local.
+    switch_counter: std::cell::Cell<u32>,
+    /// Constructs this run could not render faithfully, each anchored at the
+    /// construct that caused it. Drained into [`EmittedJava`] by [`emit`] —
+    /// including the ones raised while a scratch emitter rendered a lambda
+    /// body, which is the hand-off this `Rc` makes structural.
+    diagnostics: std::cell::RefCell<Vec<Diagnostic>>,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            outlined: std::cell::RefCell::new(Vec::new()),
+            fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            outline_counter: std::cell::Cell::new(0),
+            switch_counter: std::cell::Cell::new(0),
+            diagnostics: std::cell::RefCell::new(Vec::new()),
+        }
     }
 }
 
@@ -96,32 +151,12 @@ pub(crate) struct Emitter<'a> {
     in_function: bool,
     /// Monotonic counter for foreach iterator temp names.
     iter_counter: u32,
-    /// Monotonic counter for switch temp names (`__sw_<n>` / `__si_<n>`),
-    /// mirroring upstream `SwitchBlock`'s `mId`. Unique per emitted file so
-    /// sequential and nested switches never redeclare a Java local. `Cell`
-    /// so scratch emitters (`render_block_to_string`) can hand it back.
-    switch_counter: std::cell::Cell<u32>,
     /// Lambda nesting depth. When > 0, the bare Java `this` would
     /// resolve to the anonymous `FunctionLeekValue` inner class
     /// instead of the surrounding AI — so we emit `ai` (the lambda's
     /// own AI parameter) instead at any "pass the AI" site.
     /// `Cell` because `write_expr` and friends take `&self`.
     lambda_depth: std::cell::Cell<u32>,
-    /// Outlined-lambda factories queued for emission at end of class.
-    /// Each entry is one full `private FunctionLeekValue
-    /// __anon_<n>(…) { … }` declaration. Block-bodied lambdas that
-    /// close over outer locals get routed through these so the
-    /// captured values become final parameters (Java's inner-class
-    /// rules accept those even when the original locals are
-    /// reassignable).
-    outlined: std::cell::RefCell<Vec<String>>,
-    /// Hoisted `FunctionLeekValue` singletons for first-class function/builtin
-    /// references (`var f = test`, `test == test`). One field per distinct
-    /// function so repeated references are the SAME instance — `equals_equals`
-    /// then compares two refs to one object (`test == test` → true). Keyed by
-    /// the field name; value is the full `private FunctionLeekValue <name> = …;`
-    /// declaration, emitted at class-body end like `outlined`.
-    fn_singletons: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
     /// True while rendering an *outlined* lambda body (one hoisted to an
     /// AI-level `__anon_<n>` method). There, `<u_Class>.this` is NOT in scope
     /// (the method isn't lexically inside the class), so a class-instance `this`
@@ -135,8 +170,6 @@ pub(crate) struct Emitter<'a> {
     /// `@` callbacks). At v2+ `@` params are plain (no propagation), so this set
     /// stays empty.
     ref_boxes: std::cell::RefCell<std::collections::HashSet<leek_hir::DefId>>,
-    /// Monotonic counter for `__anon_<n>` outlined-lambda names.
-    outline_counter: std::cell::Cell<u32>,
     /// DefId currently being initialized by a `var X = …`. When the
     /// init expression is a recursive lambda referencing `X`, the
     /// lambda emitter excludes `X` from the capture set (passing it
@@ -162,11 +195,11 @@ pub(crate) struct Emitter<'a> {
     /// (see `render_block_to_string`) costs a pointer copy rather than six set
     /// clones per block lambda (#307).
     analysis: &'a Analysis,
-    /// Constructs this run could not render faithfully. `RefCell` because
-    /// every `write_*` method takes `&self` — the same reason
-    /// `switch_counter` and `lambda_depth` are `Cell`s. Drained into
-    /// [`EmittedJava`] by [`emit`].
-    diagnostics: std::cell::RefCell<Vec<Diagnostic>>,
+    /// Everything this run *accumulates for the output* — outlines, hoisted
+    /// members, the two name counters and the diagnostics. Held behind an
+    /// `Rc` so every scratch emitter (see [`Emitter::fork_scope`]) writes into
+    /// the same allocation and there is no hand-back step to forget (#252).
+    shared: std::rc::Rc<Shared>,
     /// Span of the construct currently being emitted, kept as the anchor for
     /// a diagnostic raised somewhere that has no span of its own
     /// ([`Emitter::def_name`]). Mirrors the native backend's `Tx::cur_span`
@@ -195,19 +228,46 @@ impl<'a> Emitter<'a> {
             writer: JavaWriter::new(),
             in_function: false,
             iter_counter: 0,
-            switch_counter: std::cell::Cell::new(0),
             lambda_depth: std::cell::Cell::new(0),
-            outlined: std::cell::RefCell::new(Vec::new()),
-            fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             in_outlined: std::cell::Cell::new(false),
             ref_boxes: std::cell::RefCell::new(analysis.caller_boxes.clone()),
-            outline_counter: std::cell::Cell::new(0),
             initializing_def: std::cell::Cell::new(None),
             self_rec_def: std::cell::Cell::new(None),
             current_class: std::cell::Cell::new(None),
             analysis,
-            diagnostics: std::cell::RefCell::new(Vec::new()),
+            shared: std::rc::Rc::new(Shared::new()),
             cur_span: std::cell::Cell::new(Span::synthetic()),
+        }
+    }
+
+    /// A scratch emitter that continues this one's *scope*.
+    ///
+    /// Per-scope state — the flags, the two `Option` anchors, the current
+    /// class, the span anchor, the foreach counter — is copied, and
+    /// `ref_boxes` is cloned because a nested block's `@`-param rebindings
+    /// must not leak back out. Everything on the output side is the same
+    /// [`Shared`] allocation, so whatever the scratch accumulates is already
+    /// in the parent: there is nothing to hand back (#252).
+    ///
+    /// The writer is the one thing deliberately *not* continued — the caller
+    /// wants the scratch's text as a `String`, which is the whole point of
+    /// [`Emitter::render_block_to_string`].
+    fn fork_scope(&self) -> Emitter<'a> {
+        Emitter {
+            opts: self.opts,
+            hir: self.hir,
+            writer: JavaWriter::new(),
+            in_function: self.in_function,
+            iter_counter: self.iter_counter,
+            lambda_depth: std::cell::Cell::new(self.lambda_depth.get()),
+            in_outlined: std::cell::Cell::new(self.in_outlined.get()),
+            ref_boxes: std::cell::RefCell::new(self.ref_boxes.borrow().clone()),
+            initializing_def: std::cell::Cell::new(self.initializing_def.get()),
+            self_rec_def: std::cell::Cell::new(self.self_rec_def.get()),
+            current_class: std::cell::Cell::new(self.current_class.get()),
+            analysis: self.analysis,
+            shared: std::rc::Rc::clone(&self.shared),
+            cur_span: std::cell::Cell::new(self.cur_span.get()),
         }
     }
 
@@ -232,7 +292,7 @@ impl<'a> Emitter<'a> {
         } else {
             span
         };
-        self.diagnostics.borrow_mut().push(Diagnostic::error(
+        self.shared.diagnostics.borrow_mut().push(Diagnostic::error(
             codes::JAVA_UNSUPPORTED,
             span,
             format!("the Java backend does not support {what}"),
@@ -263,7 +323,7 @@ impl<'a> Emitter<'a> {
         // got was `__unresolved(...)` and a javac error. Keep the
         // placeholder (the caller needs a `&str`, and the file still has to
         // render), and make the breach visible.
-        self.diagnostics.borrow_mut().push(
+        self.shared.diagnostics.borrow_mut().push(
             Diagnostic::error(
                 codes::JAVA_UNSUPPORTED,
                 self.cur_span.get(),
@@ -513,12 +573,12 @@ impl<'a> Emitter<'a> {
         // directly, but accept passing them into a method as final
         // parameters; the FunctionLeekValue we build inside the
         // factory closes over those final params instead.
-        let outlined: Vec<String> = std::mem::take(&mut *self.outlined.borrow_mut());
+        let outlined: Vec<String> = std::mem::take(&mut *self.shared.outlined.borrow_mut());
         for helper in outlined {
             self.writer.add_line(&helper);
         }
         // Hoisted first-class function/builtin singletons (`ufunction_<name>`).
-        let singletons = std::mem::take(&mut *self.fn_singletons.borrow_mut());
+        let singletons = std::mem::take(&mut *self.shared.fn_singletons.borrow_mut());
         for decl in singletons.into_values() {
             self.writer.add_line(&decl);
         }

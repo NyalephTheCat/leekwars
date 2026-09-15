@@ -762,47 +762,21 @@ impl Emitter<'_> {
     /// `JavaWriter`, running the statement emitter on it, and
     /// pulling the text out. Used to inline block-bodied lambdas
     /// (which need full statement emission) inside an expression
-    /// context that otherwise only sees `&self`. Inherits the
-    /// `in_function`/`iter_counter` state from the parent.
+    /// context that otherwise only sees `&self`.
+    ///
+    /// The scratch continues this emitter's scope ([`Emitter::fork_scope`])
+    /// except that it is always `in_function`: a lambda body is a function
+    /// body however the surrounding code got here. Everything the scratch
+    /// accumulates for the *output* — outlines, hoisted members, the
+    /// `__anon_`/`__sw_` counters and any diagnostic it raises — is written
+    /// straight into the shared [`Shared`], so there is nothing to hand back.
     pub(crate) fn render_block_to_string(&self, b: &leek_hir::Block) -> String {
         let mut scratch = Emitter {
-            opts: self.opts,
-            hir: self.hir,
             writer: JavaWriter::new(),
             in_function: true,
-            iter_counter: self.iter_counter,
-            switch_counter: std::cell::Cell::new(self.switch_counter.get()),
-            lambda_depth: std::cell::Cell::new(self.lambda_depth.get()),
-            outlined: std::cell::RefCell::new(Vec::new()),
-            fn_singletons: std::cell::RefCell::new(std::collections::BTreeMap::new()),
-            in_outlined: std::cell::Cell::new(self.in_outlined.get()),
-            ref_boxes: std::cell::RefCell::new(self.ref_boxes.borrow().clone()),
-            outline_counter: std::cell::Cell::new(self.outline_counter.get()),
-            initializing_def: std::cell::Cell::new(self.initializing_def.get()),
-            self_rec_def: std::cell::Cell::new(self.self_rec_def.get()),
-            current_class: std::cell::Cell::new(self.current_class.get()),
-            analysis: self.analysis,
-            diagnostics: std::cell::RefCell::new(Vec::new()),
-            cur_span: std::cell::Cell::new(self.cur_span.get()),
+            ..self.fork_scope()
         };
         scratch.emit_stmts(&b.stmts);
-        // Hand off any outlined-lambda helpers the scratch run
-        // synthesized to the parent, and advance our counter so
-        // subsequent outlines don't collide.
-        self.outline_counter.set(scratch.outline_counter.get());
-        self.switch_counter.set(scratch.switch_counter.get());
-        self.outlined
-            .borrow_mut()
-            .append(&mut *scratch.outlined.borrow_mut());
-        self.fn_singletons
-            .borrow_mut()
-            .append(&mut *scratch.fn_singletons.borrow_mut());
-        // …and its complaints: a lambda body is emitted through this scratch
-        // run, so without the hand-off an unsupported construct inside one
-        // would be raised and then dropped on the floor.
-        self.diagnostics
-            .borrow_mut()
-            .append(&mut *scratch.diagnostics.borrow_mut());
         let (java, _) = scratch.writer.into_parts();
         java
     }
