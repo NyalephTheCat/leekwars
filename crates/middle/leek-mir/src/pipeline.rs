@@ -168,7 +168,17 @@ mod salsa_tests {
     use super::salsa_probe::{LOWER_MIR_CALLS, SERIAL};
 
     fn source(db: &mut LeekDb, text: &str) -> SourceFile {
-        SourceFile::new(db, 1, text.to_string(), 4, false, false, 0, Vec::new())
+        SourceFile::new(
+            db,
+            String::new(),
+            1,
+            text.into(),
+            4,
+            false,
+            false,
+            0,
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -216,7 +226,7 @@ mod salsa_tests {
         let _ = pipeline.run_memoized(&db, file);
         let after_first = LOWER_MIR_CALLS.load(Ordering::Relaxed);
 
-        file.set_text(&mut db).to("var y = 6;".to_string());
+        file.set_text(&mut db).to("var y = 6;".into());
 
         let _ = pipeline.run_memoized(&db, file);
         let after_second = LOWER_MIR_CALLS.load(Ordering::Relaxed);

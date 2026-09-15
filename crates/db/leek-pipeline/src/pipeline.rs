@@ -108,7 +108,7 @@ impl Pipeline {
     ) -> Run<'db> {
         let input = Input {
             source: file.source(db),
-            text: file.text(db).as_str().into(),
+            text: std::sync::Arc::clone(file.text(db)),
             version_byte: file.version_byte(db),
             strict: file.strict(db),
             flags: leek_span::FeatureFlags::from_bits(file.flags_bits(db)),

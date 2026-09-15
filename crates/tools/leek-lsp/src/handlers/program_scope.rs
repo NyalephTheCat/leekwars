@@ -54,10 +54,10 @@ pub(crate) fn program_scope(ws: &Workspace, home_uri: &Url) -> Vec<ScopeFile> {
             uri: t.uri.clone(),
             source_file: t.source_file,
         };
-        if t.uri == home_uri {
+        if &t.uri == home_uri {
             home_file = Some(sf.clone());
         }
-        if let Some(p) = uri_to_path(t.uri) {
+        if let Some(p) = uri_to_path(&t.uri) {
             by_path.insert(normalize_lexical(&p), sf);
         }
     }

@@ -1,6 +1,6 @@
 //! Shared pipeline drivers for LSP handlers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use leek_fmt::FormatOptions;
@@ -12,7 +12,7 @@ use leek_session::{self, Target};
 use leek_span::paths::canonical_or_normalized;
 use tower_lsp::lsp_types as lsp;
 
-use crate::workspace::Workspace;
+use crate::workspace::{AnalysisTarget, Workspace};
 
 pub fn run_on_file(ws: &Workspace, source_file: SourceFile, target: Target) -> Option<Run<'_>> {
     let pipeline = leek_session::pipeline(target, &leek_session::lsp_params()).ok()?;
@@ -32,7 +32,7 @@ pub fn run_on_file_with_includes(
     let source = source_file.source(&ws.db);
     let uri = ws
         .analysis_targets()
-        .into_iter()
+        .iter()
         .find(|t| t.source_file.source(&ws.db) == source)
         .map(|t| t.uri.clone());
     match uri {
@@ -53,9 +53,8 @@ fn run_on_uri<'db>(
         return Some(pipeline.run_memoized(&ws.db, source_file));
     };
 
-    let folder = WorkspaceFolder::from_workspace(ws);
     let includes = leek_resolver::pipeline::ResolveIncludes::new(
-        folder,
+        ws.include_folder(),
         canonical_or_normalized(&entry_path),
         Arc::clone(&ws.interner) as Arc<dyn SourceInterner>,
     );
@@ -92,31 +91,35 @@ struct WorkspaceFolder {
     disk: leek_resolver::folder::DiskFolder,
 }
 
-impl WorkspaceFolder {
-    /// The folder for one include-aware run, and — as a side effect —
-    /// the workspace interner seeded with every analysis target's id.
-    ///
-    /// The seeding is what keeps the include graph naming an open or
-    /// indexed file by the `SourceId` its salsa input already carries:
-    /// [`run_on_file_with_includes`] maps a source back to a URI by
-    /// exactly that id. Files the walker reaches that are neither open
-    /// nor indexed get fresh ids from the same interner, so they cannot
-    /// collide with an id the workspace hands out later.
-    fn from_workspace(ws: &Workspace) -> Arc<dyn Folder> {
-        let mut memory = MemFolder::new();
-        for target in ws.analysis_targets() {
-            let Some(path) = crate::workspace::uri_to_path(target.uri) else {
-                continue;
-            };
-            let path = canonical_or_normalized(&path);
-            memory.insert(path.clone(), target.text.to_string());
-            ws.interner.assign(&path, target.source_file.source(&ws.db));
+/// The include folder over `targets`.
+///
+/// Built once per workspace revision by
+/// [`Workspace::resync`](crate::workspace::Workspace) rather than once
+/// per pipeline run: a diagnostics pass over a project of N files used
+/// to build N copies of this map, each one a full copy of every file's
+/// text. Each entry now costs a refcount bump, and the canonical path
+/// comes off the file's own salsa input instead of being re-derived
+/// (and re-canonicalized, a syscall per file) from its URI.
+///
+/// Files the include walker reaches that are neither open nor indexed
+/// are interned into the same [`PathInterner`](leek_resolver::interner::PathInterner)
+/// the workspace mints its ids from, so the walker and the workspace
+/// agree on every id without either having to re-assign the other's.
+pub(crate) fn include_folder(targets: &[AnalysisTarget]) -> Arc<dyn Folder> {
+    let mut memory = MemFolder::new();
+    for target in targets {
+        if target.canonical_path.is_empty() {
+            continue;
         }
-        Arc::new(Self {
-            memory,
-            disk: leek_resolver::folder::DiskFolder,
-        })
+        memory.insert(
+            PathBuf::from(&target.canonical_path),
+            Arc::clone(&target.text),
+        );
     }
+    Arc::new(WorkspaceFolder {
+        memory,
+        disk: leek_resolver::folder::DiskFolder,
+    })
 }
 
 impl Folder for WorkspaceFolder {

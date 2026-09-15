@@ -15,10 +15,9 @@
 //! [`SourceFile`](crate::SourceFile): `complexity_query` → `lower_hir_query`
 //! → `parse_query` → `lex_query`, with `typecheck_query`, `resolve_query`
 //! and `lower_mir_query` hanging off it, so asking for the deepest one
-//! computes each stage once. [`parse_project_file_query`] is the exception:
-//! it is keyed on a [`ProjectFile`](crate::ProjectFile) — an indexed on-disk
-//! file rather than an editor buffer — and re-lexes internally instead of
-//! sharing `lex_query`'s cache.
+//! computes each stage once. There is no second cascade for an indexed
+//! on-disk file: it is the same input, carrying its canonical path, so it
+//! shares every memo on this one.
 //!
 //! `leek-fmt`'s `format_query` is deliberately absent. It is a tools-layer
 //! query and `crates/db` may not depend on `crates/tools`; it stays in
@@ -31,9 +30,8 @@ pub use leek_syntax::pipeline::{PragmaResult, pragma_query};
 pub use leek_lexer::LexResult;
 pub use leek_lexer::pipeline::lex_query;
 
-/// Parsing: the editor-buffer query and the indexed-project-file query,
-/// which share a result type but not a cache key.
-pub use leek_parser::pipeline::{ParseQueryResult, parse_project_file_query, parse_query};
+/// Parsing — one query for every file, buffer or on-disk alike.
+pub use leek_parser::pipeline::{ParseQueryResult, parse_query};
 
 /// Name resolution.
 pub use leek_resolver::pipeline::{ResolveArtifact, resolve_query};

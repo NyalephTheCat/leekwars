@@ -193,7 +193,17 @@ mod salsa_invalidation_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut db = LeekDb::default();
-        let file = SourceFile::new(&db, 1, SRC.to_string(), 4, false, false, 0, Vec::new());
+        let file = SourceFile::new(
+            &db,
+            String::new(),
+            1,
+            SRC.into(),
+            4,
+            false,
+            false,
+            0,
+            Vec::new(),
+        );
         // No `Resolve` step: without an `IncludeGraphArtifact` in the
         // context `TypeCheck` takes the single-file salsa branch, which is
         // the one under test.
@@ -257,7 +267,7 @@ mod salsa_invalidation_tests {
         // keying it on the raw text.
         assert_eq!(
             reruns_after(|db, file| {
-                file.set_text(db).to(SRC.to_string());
+                file.set_text(db).to(SRC.into());
             }),
             0
         );
@@ -268,7 +278,7 @@ mod salsa_invalidation_tests {
         assert_eq!(
             reruns_after(|db, file| {
                 file.set_text(db)
-                    .to("var y = \"s\";\nreturn y + 1;\n".to_string());
+                    .to("var y = \"s\";\nreturn y + 1;\n".into());
             }),
             1
         );
@@ -300,8 +310,9 @@ mod seed_library_is_an_input_tests {
     fn checked(db: &LeekDb, seed_library: bool) -> TypeCheckArtifact {
         let file = SourceFile::new(
             db,
+            String::new(),
             1,
-            SRC.to_string(),
+            SRC.into(),
             4,
             false,
             seed_library,

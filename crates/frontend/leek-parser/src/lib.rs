@@ -17,9 +17,9 @@
 //! * **tokens you already lexed** → [`parse_tokens_with`] (or
 //!   [`parse_tokens_with_classes`]), which leaves the lex diagnostics to
 //!   you. See the [`entry`] module docs for which path reports them.
-//! * **a salsa database** → [`pipeline::parse_query`] for an open buffer
-//!   and [`pipeline::parse_project_file_query`] for an indexed on-disk
-//!   file.
+//! * **a salsa database** → [`pipeline::parse_query`], for an open buffer
+//!   and an indexed on-disk file alike — both are one
+//!   [`SourceFile`](leek_pipeline::salsa::SourceFile) input.
 //!
 //! No entry point reads `LEEK_EXPERIMENTAL_*`: the flags are threaded in
 //! as data, read once at a driver's boundary via
