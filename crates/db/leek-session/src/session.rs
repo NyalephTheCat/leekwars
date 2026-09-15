@@ -654,6 +654,61 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A `Run`'s diagnostics are whatever the steps it *ran* reported, so
+    /// the stream grows with the target. The tracked program stream has no
+    /// such notion: it always reports the whole frontend, and
+    /// `program_diagnostics_with_lints` always appends lints.
+    ///
+    /// This is the constraint on replacing [`Compilation::diagnostics`],
+    /// and it is easy to miss because
+    /// `the_program_stream_reports_what_the_pipeline_reported` passes:
+    /// that test compiles at `Target::Linted`, the one target where the
+    /// two agree. Below it they diverge, and in the direction that hurts
+    /// — the query reports *more*. Swapping it in unconditionally would
+    /// make `miku build` (`Target::Hir`) start emitting lint findings it
+    /// has never emitted, and `leekc --emit ast` (`Target::Parsed`) start
+    /// reporting type errors, which is a behaviour change wearing a
+    /// refactor's clothes.
+    ///
+    /// So a replacement needs the stream sliced to the target. Until that
+    /// exists, this test is the reason `diagnostics()` still comes from
+    /// the run.
+    #[test]
+    fn the_runs_diagnostics_grow_with_the_target() {
+        let dir = scratch("target-dependence");
+        std::fs::write(
+            dir.join("src/main.leek"),
+            "var a = 1;\nvar a = 2;\nvar z = 1 / 0;\nreturn a;\n",
+        )
+        .expect("entry");
+        let project = project_at(dir.clone(), "");
+
+        let codes_at = |target| {
+            let session = Session::new(&project, quiet(target)).expect("session");
+            let compiled = session.compile_entry().expect("compile");
+            compiled
+                .diagnostics()
+                .iter()
+                .map(|d| d.code.id())
+                .collect::<Vec<_>>()
+        };
+
+        let parsed = codes_at(Target::Parsed);
+        let typed = codes_at(Target::TypeChecked);
+        let linted = codes_at(Target::Linted);
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Parsing alone finds nothing here: the redeclaration is the
+        // resolver's, the division the linter's.
+        assert!(parsed.is_empty(), "nothing before resolution: {parsed:?}");
+        assert_eq!(typed, ["E0202"], "the resolver's finding, and no lint");
+        assert!(
+            linted.len() > typed.len() && linted.starts_with(&["E0202"]),
+            "linting adds to it rather than replacing it: {linted:?}"
+        );
+    }
+
     /// The tracked whole-program lowering answers exactly what the
     /// planned pipeline put in `HirArtifact`.
     ///
@@ -730,6 +785,11 @@ mod tests {
     /// there, so serving `hir` from a query while `diagnostics` still
     /// came from the run would pay for both. A consumer moves wholly or
     /// not at all, which means both halves have to agree first.
+    ///
+    /// **Only at this target.** The two streams agree at
+    /// `Target::Linted` and nowhere below it — see
+    /// `the_runs_diagnostics_grow_with_the_target`, which is the
+    /// constraint this test does *not* discharge.
     ///
     /// Order is part of the claim, not incidental. `leek-db` argues its
     /// stream is *indistinguishable* from the pipeline's after
