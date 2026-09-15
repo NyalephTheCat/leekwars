@@ -12,7 +12,7 @@
 //! it, because the driver returned a run and kept the text.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use leek_complexity::Complexity;
@@ -306,15 +306,16 @@ fn register_project_files(
     let flags = project.feature_flags().to_bits();
     let seed = leek_types::seed_library_enabled();
     let mut out = BTreeMap::new();
-    for path in index.files() {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
+    let register = |db: &mut leek_db::LeekDb,
+                    out: &mut BTreeMap<String, leek_db::SourceFile>,
+                    path: &Path|
+     -> Option<leek_db::SourceFile> {
+        let text = std::fs::read_to_string(path).ok()?;
         let canonical = leek_span::paths::canonical_or_normalized(path)
             .display()
             .to_string();
-        if out.contains_key(&canonical) {
-            continue;
+        if let Some(known) = out.get(&canonical) {
+            return Some(*known);
         }
         let lang = index.language_settings(&text);
         let file = leek_db::SourceFile::new(
@@ -328,6 +329,47 @@ fn register_project_files(
             flags,
         );
         out.insert(canonical, file);
+        Some(file)
+    };
+
+    let mut frontier = Vec::new();
+    for path in index.files() {
+        if let Some(file) = register(db, &mut out, path) {
+            frontier.push(file);
+        }
+    }
+
+    // Close the set under includes. `resolve_include` resolves a name
+    // against `WorkspaceFiles` and nothing else — a tracked query that read
+    // the filesystem would be impure — while the pipeline this replaced
+    // resolved through a folder that fell back to `DiskFolder`. So an
+    // `include("../shared/lib")` escaping the project root resolved before
+    // and would report `E0272 IncludeNotFound` now.
+    //
+    // The same gap, and the same fix, as `leek_lsp::Workspace::resync`. It
+    // is written twice because the two reach files differently — the server
+    // has open buffers that shadow disk — but the rule is one rule: a file
+    // an include names is part of the program whether or not the index
+    // walked it.
+    while let Some(file) = frontier.pop() {
+        let includer = PathBuf::from(file.canonical_path(db).clone());
+        if includer.as_os_str().is_empty() {
+            continue;
+        }
+        for call in leek_db::queries::include_edges(db, file).includes {
+            for candidate in leek_resolver::folder::include_candidates(&includer, &call.name) {
+                let key = leek_span::paths::canonical_or_normalized(&candidate)
+                    .display()
+                    .to_string();
+                if out.contains_key(&key) {
+                    break;
+                }
+                if let Some(found) = register(db, &mut out, &candidate) {
+                    frontier.push(found);
+                    break;
+                }
+            }
+        }
     }
     out
 }
@@ -1488,6 +1530,56 @@ mod tests {
             compiled.diagnostics().len(),
             from_query.len(),
             "and nothing is dropped or duplicated"
+        );
+    }
+
+    /// An `include` that escapes the project root still resolves.
+    ///
+    /// The regression this exists for, introduced when `Compilation` moved
+    /// off the run and caught only by going looking: the pipeline resolved
+    /// includes through a folder that fell back to `DiskFolder`, while
+    /// `resolve_include` resolves against `WorkspaceFiles` and nothing
+    /// else. A project whose entry includes `../shared/lib` therefore
+    /// started reporting `E0272 IncludeNotFound` for a file that is right
+    /// there on disk, and every symbol it provided became undefined.
+    ///
+    /// Nothing caught it: the corpus is single-file, and no `miku` test
+    /// had an include pointing outside the project. It is the same gap
+    /// `leek_lsp`'s `resync` closes, which is the uncomfortable part —
+    /// the analysis was already written down before the session repeated
+    /// it.
+    #[test]
+    fn an_include_escaping_the_project_still_resolves() {
+        let base = scratch("escaping-include");
+        let shared = base.join("shared");
+        std::fs::create_dir_all(&shared).expect("shared dir");
+        std::fs::write(
+            base.join("src/main.leek"),
+            "include(\"../shared/lib\")\nreturn helper();\n",
+        )
+        .expect("entry");
+        std::fs::write(
+            shared.join("lib.leek"),
+            "function helper() {\n\treturn 1 / 0;\n}\n",
+        )
+        .expect("include");
+
+        let project = project_at(base.clone(), "");
+        let session = Session::new(&project, quiet(Target::Linted)).expect("session");
+        let compiled = session.compile_entry().expect("compile");
+        let codes: Vec<&str> = compiled.diagnostics().iter().map(|d| d.code.id()).collect();
+
+        std::fs::remove_dir_all(&base).ok();
+
+        assert!(
+            !codes.contains(&"E0272"),
+            "the include is on disk and resolves: {codes:?}"
+        );
+        // And its contents are really in the program: the lint fires on a
+        // construct that exists only inside the escaping file.
+        assert!(
+            codes.contains(&"L0016"),
+            "the escaping file's own findings reach the stream: {codes:?}"
         );
     }
 
