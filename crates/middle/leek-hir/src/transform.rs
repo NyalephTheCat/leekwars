@@ -527,6 +527,13 @@ fn classify(
     body: Option<&Block>,
 ) -> Option<CallShape> {
     let body = body?;
+    // A reference-typed parameter or return is a cast in the generated code,
+    // and a cast can throw — `function vide(Array a) {} vide(5)` raises
+    // IMPOSSIBLE_CAST, so dropping the call would drop the error with it.
+    // A scalar conversion takes anything and never throws.
+    if params.iter().any(|p| p.ty.as_ref().is_some_and(casts)) || return_type.is_some_and(casts) {
+        return None;
+    }
     if !params.iter().all(|p| {
         p.default
             .as_ref()
@@ -576,6 +583,22 @@ fn converted(lit: &Literal, ty: &Type) -> Option<Literal> {
         _ => return None,
     };
     Some(out)
+}
+
+/// Whether converting to `ty` is a cast that can fail at run time. A number,
+/// boolean or string conversion takes any value; a container or class one is
+/// a cast, and what it refuses it raises on.
+fn casts(ty: &Type) -> bool {
+    match ty {
+        Type::Array(_)
+        | Type::Map(..)
+        | Type::Set(_)
+        | Type::Object
+        | Type::ClassInstance(..)
+        | Type::Interval => true,
+        Type::Nullable(inner) => casts(inner),
+        _ => false,
+    }
 }
 
 /// The value a declared return type gives a function that returns nothing,

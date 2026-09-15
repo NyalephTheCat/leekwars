@@ -1424,6 +1424,24 @@ pub fn translate_function(
                 _ => builder.ins().iconst(types::I64, 0),
             },
         };
+        // A parameter declared with a *reference* type is a Java cast in
+        // upstream's generated code, so a value of another kind makes it
+        // throw — the player sees IMPOSSIBLE_CAST. Scalar parameters convert
+        // through the calling convention above and never throw.
+        let raw = match param_index.get(&lid) {
+            Some(_)
+                if src_ty == ValTy::Ref
+                    && slot_tag(&mir_fn.locals[i].ty)
+                        .is_some_and(crate::runtime::slot::is_reference) =>
+            {
+                let tag = slot_tag(&mir_fn.locals[i].ty).unwrap_or(0);
+                let check = imports.rt("leek_check_param")?;
+                let tagv = builder.ins().iconst(types::I64, tag);
+                let inst = builder.ins().call(check, &[raw, tagv]);
+                builder.inst_results(inst)[0]
+            }
+            _ => raw,
+        };
         let init = if is_cell {
             // A cell local's var holds a shared `Value::Cell` handle. Box
             // the incoming value to a `Ref` first (a captured scalar param
@@ -2262,6 +2280,10 @@ fn slot_tag(t: &Type) -> Option<i64> {
         Type::String => slot::STRING,
         Type::BigInteger => slot::BIG_INTEGER,
         Type::ClassInstance(..) => slot::INSTANCE,
+        Type::Array(_) => slot::ARRAY,
+        Type::Map(..) => slot::MAP,
+        Type::Set(_) => slot::SET,
+        Type::Object => slot::OBJECT,
         Type::Nullable(inner) => slot_tag(inner)? | slot::NULLABLE,
         _ => return None,
     })

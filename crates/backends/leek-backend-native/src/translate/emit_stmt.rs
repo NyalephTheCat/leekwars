@@ -526,7 +526,20 @@ impl Tx<'_, '_> {
             };
             let (v, vt) = self.operand(op)?;
             let target = self.var_tys[param.0 as usize];
-            let v = self.coerce(v, vt, target)?;
+            let mut v = self.coerce(v, vt, target)?;
+            // A default value lands in the parameter through the same
+            // declared type an explicit argument does, so it fails the same
+            // way: `f(integer a, Set<integer> s = [1, 2])` called as `f(1)`
+            // is the cast `f(1, [1, 2])` would have been.
+            if target == ValTy::Ref
+                && let Some(tag) = super::slot_tag(&self.mir_locals[param.0 as usize].ty)
+                && crate::runtime::slot::is_reference(tag)
+            {
+                let check = self.imports.rt("leek_check_param")?;
+                let tagv = self.b.ins().iconst(types::I64, tag);
+                let inst = self.b.ins().call(check, &[v, tagv]);
+                v = self.b.inst_results(inst)[0];
+            }
             if self.cell_locals.contains(&param) {
                 let cell = self.b.use_var(self.vars[param.0 as usize]);
                 let set = self.imports.rt("leek_cell_set")?;

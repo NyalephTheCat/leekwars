@@ -1028,3 +1028,41 @@ id = "ordinary_big_integer_arithmetic_is_untouched"
 version = 4
 source = "big_integer n = 2L for (var i = 0; i < 1000; i++) n *= 2 return [bitLength(n), 1L << 8, 3L ** 5]"
 expect = { equals = "[1002, 256, 243]" }
+
+# A parameter declared with a container or class type is a cast: a value of
+# another kind fails it, and the failure reaches the player as a runtime
+# error rather than a silently wrong value.
+[[tests]]
+id = "a_reference_typed_parameter_refuses_another_kind"
+version = 4
+source = "function vide(Array a) {} var x = 5 vide(x) return 1"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+[[tests]]
+id = "a_default_of_the_wrong_type_fails_like_the_argument_would"
+version = 4
+source = "function f(integer a, Set<integer> s = [1, 2]) { return a } return f(1)"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+# …so such a call is never eliminated, however empty the body: dropping it
+# would drop the error with it.
+[[tests]]
+id = "a_call_whose_conversion_can_throw_is_never_eliminated"
+version = 4
+source = "function vide(Array a) {} any x = 5 vide(x) return 1"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+# A conversion that takes any value keeps the call eliminable.
+[[tests]]
+id = "a_scalar_typed_parameter_never_throws_and_stays_eliminable"
+version = 4
+source = "function vide(integer a) {} vide(5) return 3"
+expect = { ops_at_most = 0 }
+
+# A scalar declaration initialised with a container is refused by the
+# analysis: upstream's emitter cannot write that cast at all.
+[[tests]]
+id = "a_scalar_declaration_refuses_a_container_initialiser"
+version = 4
+source = "boolean b = [1, 2]; return b"
+expect = "error"

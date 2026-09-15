@@ -105,9 +105,22 @@ pub mod slot {
     pub const BIG_INTEGER: i64 = 5;
     /// A class instance: only an instance (or null) may be stored.
     pub const INSTANCE: i64 = 6;
+    pub const ARRAY: i64 = 7;
+    pub const MAP: i64 = 8;
+    pub const SET: i64 = 9;
+    pub const OBJECT: i64 = 10;
     /// Added to any of the above for a `T?` slot, where `null` stays `null`
     /// instead of becoming the type's own value.
-    pub const NULLABLE: i64 = 8;
+    pub const NULLABLE: i64 = 0x10;
+    /// The base type a tag names, with the nullable bit removed.
+    pub const BASE: i64 = 0x0F;
+    /// Whether a tag names a *reference* type — one upstream stores through a
+    /// Java cast, so a value of another kind is a cast failure rather than a
+    /// conversion.
+    #[must_use]
+    pub fn is_reference(tag: i64) -> bool {
+        matches!(tag & BASE, INSTANCE | ARRAY | MAP | SET | OBJECT)
+    }
 }
 
 /// What `value` becomes when stored in a slot declared with `tag`, or `None`
@@ -117,7 +130,7 @@ pub(super) fn convert_for_slot(value: &Value, tag: i64) -> Option<Value> {
     if nullable && matches!(value, Value::Null) {
         return Some(Value::Null);
     }
-    let converted = match tag & 7 {
+    let converted = match tag & slot::BASE {
         slot::INTEGER => match value {
             Value::Null | Value::Bool(_) | Value::Int(_) | Value::Real(_) | Value::BigInt(_) => {
                 Value::Int(value.to_long())
@@ -159,6 +172,24 @@ pub(super) fn convert_for_slot(value: &Value, tag: i64) -> Option<Value> {
             | Value::BigInt(_)
             | Value::String(_) => return None,
             _ => value.clone(),
+        },
+        // A container slot takes that container or null — again a Java cast,
+        // so nothing else converts into it.
+        slot::ARRAY => match value {
+            Value::Null | Value::Array(_) => value.clone(),
+            _ => return None,
+        },
+        slot::MAP => match value {
+            Value::Null | Value::Map(_) => value.clone(),
+            _ => return None,
+        },
+        slot::SET => match value {
+            Value::Null | Value::Set(_) => value.clone(),
+            _ => return None,
+        },
+        slot::OBJECT => match value {
+            Value::Null | Value::Object(_) => value.clone(),
+            _ => return None,
         },
         _ => value.clone(),
     };
@@ -253,6 +284,28 @@ shim! {
         match convert_for_slot(v, tag) {
             Some(converted) => handle(converted),
             None => handle(Value::Null),
+        }
+    }
+}
+
+shim! {
+    /// A parameter bound through its declared type. Unlike a field, there is
+    /// no previous value to keep: upstream compiles a reference-typed
+    /// parameter to a Java cast, and a value of another kind makes that cast
+    /// throw, which reaches the player as `IMPOSSIBLE_CAST`.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_check_param(value: *mut Value, tag: i64) -> *mut Value {
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => {
+                raise_runtime_error("IMPOSSIBLE_CAST");
+                handle(Value::Null)
+            }
         }
     }
 }
