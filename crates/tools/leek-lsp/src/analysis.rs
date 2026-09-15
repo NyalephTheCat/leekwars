@@ -10,15 +10,32 @@
 //! the recipe catalogue between a handler and the cache it actually
 //! wants.
 //!
-//! The tree questions no longer go that way, and neither does name
-//! resolution: every handler that wants a green tree, a syntax root or
-//! a resolve table calls [`green_tree`], [`syntax_root`] or [`resolved`]
-//! here, and the handlers that wanted a resolve table *and* a deeper
-//! artifact in one run take both halves from here. What still plans a
-//! run is a handler reaching for a type table, HIR or complexity report
-//! on its own, plus the two paths no accessor covers — include-aware
-//! diagnostics and options-carrying formatting — which is why
-//! [`crate::pipeline`] stays.
+//! No handler goes that way any more. Every one of the six questions is
+//! asked here, by [`green_tree`], [`syntax_root`], [`resolved`],
+//! [`typed`], [`hir`] and [`complexity`]; the two paths no accessor
+//! covers — include-aware diagnostics and options-carrying formatting —
+//! are all that is left of [`crate::pipeline`], and they are the only
+//! two `run*` call sites outside this file's own tests.
+//!
+//! **Ask for each answer where it is needed.** A `Run` planned for a
+//! late [`Target`](leek_session::Target) executed every earlier step
+//! whether or not the handler read it, so a hover that landed on a
+//! local still lowered HIR and measured complexity, and a completion
+//! request still type-checked to answer a global-name query. An
+//! accessor costs nothing until it is called, so the rewritten
+//! handlers call each one inside the branch that reads it: hover asks
+//! for [`complexity`] only on a top-level function, `implementation`
+//! for [`hir`] only on a method, completion for [`typed`] only in
+//! member mode and [`resolved`] only in global mode. The saving is per
+//! keystroke, and it multiplies by the program scope in the handlers
+//! that fan out over every file.
+//!
+//! The inverse of that rule matters too. A [`Run`](leek_pipeline::Run)
+//! for `Target::Hir` or `Target::Complexity` has *already* deep-cloned
+//! the resolve table into its context, so calling [`resolved`] beside a
+//! surviving run would clone the same table a second time, per file per
+//! request. A handler is therefore moved off the pipeline completely or
+//! not at all — never half.
 //!
 //! This module is the direct route: one function per question, each a
 //! single [`leek_db::queries`] call. `leek-db` is the façade that knows
@@ -32,8 +49,9 @@
 //! the pass crates), so an accessor and the equivalent `pipeline::run`
 //! read one memo entry. The tests at the bottom of this file pin that —
 //! every accessor is compared against the artifact the pipeline produces
-//! for the same file, so the handler rewrites that follow are
-//! provably behaviour-preserving rather than hopefully so.
+//! for the same file, which is what makes the handler rewrites that
+//! moved onto them provably behaviour-preserving rather than hopefully
+//! so.
 //!
 //! **What is deliberately missing.** There is no `lints` accessor and no
 //! `formatted` accessor, and neither is an oversight. `leek-lint` ships
@@ -44,6 +62,11 @@
 //! editor pushed — an accessor over it would quietly ignore the user's
 //! settings. Formatting and linting therefore stay on the pipeline until
 //! an options-keyed `format_query` and a `lint_query` exist.
+//!
+//! Those two survivors are the whole of the pipeline's remaining
+//! surface: `handlers::formatting` (options-keyed) and
+//! [`crate::diagnostics`] (include-aware). Every other reader of a
+//! frontend artifact in this crate is below.
 //!
 //! # Includes
 //!
@@ -104,12 +127,12 @@ pub fn syntax_root(db: &dyn Db, file: SourceFile) -> SyntaxNode {
 ///
 /// The one whose fan-out paid for the accessors. The helpers behind
 /// references, rename, document highlight, the two hierarchies,
-/// workspace symbols and cross-file completion ask this once per file
-/// in the program scope, and each of those calls used to plan a
-/// [`Pipeline`](leek_pipeline::Pipeline) — a `RecipePlan` plus its
-/// boxed steps — for one table.
+/// `implementation`, workspace symbols and cross-file completion ask
+/// this once per file in the program scope, and each of those calls
+/// used to plan a [`Pipeline`](leek_pipeline::Pipeline) — a `RecipePlan`
+/// plus its boxed steps — for one table.
 ///
-/// It also settles, for the handlers that moved, the question
+/// It also settles the question
 /// `a_later_targets_run_parses_to_the_same_green_tree` below has to
 /// argue: [`resolve_query`](queries::resolve_query) reads its AST from
 /// `parse_query(db, file, ProgramClasses::none(db))`, which is
@@ -125,6 +148,9 @@ pub fn resolved(db: &dyn Db, file: SourceFile) -> queries::ResolveArtifact {
 /// checker's own diagnostics.
 ///
 /// Replaces `run.get::<leek_types::pipeline::TypeCheckArtifact>()`.
+/// Always answers, where the artifact was an `Option`: the pipeline's
+/// `TypeCheck` step inserts unconditionally, so `None` never meant
+/// "no table" — it meant the run had not reached the step.
 pub fn typed(db: &dyn Db, file: SourceFile) -> queries::TypeCheckArtifact {
     queries::typecheck_query(db, file)
 }
@@ -142,16 +168,23 @@ pub fn hir(db: &dyn Db, file: SourceFile) -> queries::LowerHirResult {
 /// Per-function / per-method complexity estimates.
 ///
 /// Replaces `run.get::<leek_complexity::pipeline::ComplexityArtifact>()`,
-/// whose payload is this report's field.
+/// whose payload is this report's field. That artifact really could be
+/// absent — the `Analyze` step skips its insert when nothing lowered —
+/// where this answers with an empty report, which every caller already
+/// treated the same way: neither finds a row for the function it asked
+/// about.
 pub fn complexity(db: &dyn Db, file: SourceFile) -> queries::ComplexityReport {
     queries::complexity_query(db, file)
 }
 
-/// Each accessor must return exactly what the handler it is meant to
-/// replace gets from [`crate::pipeline::run`] today. These tests are the
-/// reason the handler rewrites that follow can be called
-/// behaviour-preserving: an accessor nobody checked against the existing
-/// path is a second opinion, not a refactor.
+/// Each accessor must return exactly what the handler it replaced used
+/// to get from [`crate::pipeline::run`]. These tests are the reason the
+/// handler rewrites can be called behaviour-preserving: an accessor
+/// nobody checked against the path it replaced is a second opinion, not
+/// a refactor. They are also now the only `pipeline::run` callers left
+/// in the crate outside `handlers::formatting` and
+/// [`crate::diagnostics`], and they are what would notice if a recipe
+/// step and its query ever drifted apart.
 #[cfg(test)]
 mod tests {
     use leek_session::Target;
@@ -204,16 +237,15 @@ mod tests {
         }
     }
 
-    /// The test above compares against a `Target::Parsed` run, but most
-    /// handlers that take their root from [`syntax_root`] still get
-    /// their *other* artifact — the resolve table, the type table, the
-    /// HIR — out of a `Run` planned for a later [`Target`], and read
-    /// both against the same offsets. Root and table therefore have to
-    /// describe one tree, which holds only while every deeper plan
-    /// parses the same way the accessor does. A divergence would not
-    /// look like a crash: the offsets would stay in range and simply
-    /// name the wrong node. So compare at each target a handler asks
-    /// for, on a clean file and on one the parser had to recover from.
+    /// The test above compares against a `Target::Parsed` run. No
+    /// handler mixes a parse with a deeper `Run` any more — they take
+    /// root and table from accessors that share one `parse_query` by
+    /// construction — but the include-aware diagnostics path still
+    /// plans deeper targets, and a recipe step that parsed differently
+    /// from its query would not look like a crash: the offsets would
+    /// stay in range and simply name the wrong node. So compare at each
+    /// target, on a clean file and on one the parser had to recover
+    /// from.
     #[test]
     fn a_later_targets_run_parses_to_the_same_green_tree() {
         for target in [

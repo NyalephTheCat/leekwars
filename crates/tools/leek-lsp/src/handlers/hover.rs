@@ -1,7 +1,7 @@
 //! `textDocument/hover` — show the inferred type and (when on a
 //! declaration) the full signature plus any leading doc-comment.
 
-use leek_complexity::pipeline::ComplexityArtifact;
+use leek_db::queries::ComplexityReport;
 use leek_span::Span;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
@@ -20,14 +20,8 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    // `Target::Complexity` rather than `Target::Hir`: the plan is a strict
-    // superset (the complexity artifact requires HIR, which requires resolve
-    // and type-check), and the report it carries is salsa-cached per file
-    // revision instead of rebuilt on every hover. See #165.
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Complexity)?;
-
-    let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>();
-    let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
+    let resolve_art = crate::analysis::resolved(&ws.db, doc.source_file);
+    let type_art = crate::analysis::typed(&ws.db, doc.source_file);
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Two information sources, in priority order:
@@ -45,7 +39,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     // Resolve the cursor to a symbol — try references first
     // (`foo()` calls `foo`), then fall back to declarations
     // (cursor right on the declared name).
-    let (symbol, ref_span) = locate_symbol(resolve_art, offset);
+    let (symbol, ref_span) = locate_symbol(&resolve_art, offset);
 
     // When the cursor sits on a `this` / `super` keyword, the symbol we
     // resolved to is the *class* (or its parent), but the expression is
@@ -144,10 +138,15 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
         }
         // For top-level functions, append a complexity row computed from
         // the lowered HIR. Constant-time functions get a trivial line
-        // but it's still useful next to a multi-line body.
+        // but it's still useful next to a multi-line body. The report
+        // is memoized per file revision rather than rebuilt per hover
+        // (#165), and it is asked for only here, so a hover that lands
+        // anywhere else never pays for lowering at all.
         if is_top_level_fn
-            && let Some(complexity_md) =
-                complexity_section(run.get::<ComplexityArtifact>(), &sym.name)
+            && let Some(complexity_md) = complexity_section(
+                &crate::analysis::complexity(&ws.db, doc.source_file),
+                &sym.name,
+            )
         {
             sections.push(complexity_md);
         }
@@ -162,7 +161,7 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, pos: lsp::Position) -> Option<lsp:
     if sections.is_empty()
         && let Some((sig, span)) = member_access_hover(
             &root,
-            resolve_art,
+            &resolve_art,
             &type_art.table,
             &type_art.signatures,
             offset,
@@ -283,14 +282,7 @@ fn cross_file_sections(
     file: &crate::handlers::program_scope::ScopeFile,
     sym: &leek_resolver::Symbol,
 ) -> Vec<String> {
-    let Some(run) =
-        crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Complexity)
-    else {
-        return Vec::new();
-    };
-    let Some(type_art) = run.get::<leek_types::pipeline::TypeCheckArtifact>() else {
-        return Vec::new();
-    };
+    let type_art = crate::analysis::typed(&ws.db, file.source_file);
     let root = crate::analysis::syntax_root(&ws.db, file.source_file);
     let text = file.source_file.text(&ws.db);
 
@@ -320,7 +312,10 @@ fn cross_file_sections(
         if let Some(t) = function_type_string(&type_art.signatures, &sym.name) {
             sections.push(format!("*type:* `{t}`"));
         }
-        if let Some(c) = complexity_section(run.get::<ComplexityArtifact>(), &sym.name) {
+        if let Some(c) = complexity_section(
+            &crate::analysis::complexity(&ws.db, file.source_file),
+            &sym.name,
+        ) {
             sections.push(c);
         }
     } else if sym.kind == leek_resolver::SymbolKind::Class {
@@ -333,12 +328,9 @@ fn cross_file_sections(
 /// — ref_span is `Some` when the cursor was on a *use*, `None`
 /// when it was on the declaration itself.
 fn locate_symbol(
-    resolve_art: Option<&leek_resolver::pipeline::ResolveArtifact>,
+    art: &leek_db::queries::ResolveArtifact,
     offset: u32,
 ) -> (Option<leek_resolver::Symbol>, Option<Span>) {
-    let Some(art) = resolve_art else {
-        return (None, None);
-    };
     if let Some(r) = art.table.reference_at(offset) {
         let ref_span = Span::new(
             // SourceId isn't needed for hover (single-file); reuse
@@ -539,14 +531,15 @@ fn symbol_kind_label(kind: leek_resolver::SymbolKind) -> &'static str {
 }
 
 /// Render the complexity row for a function name. Returns `None` when
-/// `report` is absent (lowering failed) or the function isn't found.
+/// the report has no row for it — including the empty report a file
+/// that would not lower produces.
 ///
 /// Uses the file-level report (not the standalone `analyze_function`)
 /// so a call to another user function substitutes the callee's formula
 /// instead of collapsing to `O(?)` — matching what the codeLens,
 /// `leek.showComplexity` command, and `miku analyze` already report.
-fn complexity_section(report: Option<&ComplexityArtifact>, name: &str) -> Option<String> {
-    let complexity = report?.0.iter().find(|c| c.name == name)?;
+fn complexity_section(report: &ComplexityReport, name: &str) -> Option<String> {
+    let complexity = report.0.iter().find(|c| c.name == name)?;
     // For a constant-cost function the operation count is more useful
     // than a bare `O(1)` — the formula has already simplified to that
     // scalar, so show it as the cost directly.
@@ -566,7 +559,7 @@ fn complexity_section(report: Option<&ComplexityArtifact>, name: &str) -> Option
 /// the inheritance chain so inherited members resolve too.
 fn member_access_hover(
     root: &SyntaxNode,
-    resolve_art: Option<&leek_resolver::pipeline::ResolveArtifact>,
+    resolve_art: &leek_db::queries::ResolveArtifact,
     table: &leek_types::TypeTable,
     signatures: &InferredSignatures,
     offset: u32,

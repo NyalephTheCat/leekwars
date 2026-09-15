@@ -852,12 +852,12 @@ fn hover_code_lens_and_command_report_the_same_formula() {
     }
 }
 
-/// The three complexity handlers must go through the pipeline's
-/// `ComplexityArtifact`, never call `analyze_file` themselves: the
-/// artifact is salsa-cached per file revision, a direct call is a full
-/// re-analysis per request (#165). A behavioural test cannot see the
-/// difference — both routes return the same numbers — so assert on the
-/// source, the way `leek-test-corpus`'s build-script hygiene test does.
+/// The three complexity handlers must read the memoized report, never
+/// call `analyze_file` themselves: `complexity_query` is salsa-cached
+/// per file revision, a direct call is a full re-analysis per request
+/// (#165). A behavioural test cannot see the difference — both routes
+/// return the same numbers — so assert on the source, the way
+/// `leek-test-corpus`'s build-script hygiene test does.
 #[test]
 fn complexity_handlers_do_not_call_analyze_file_directly() {
     const HANDLERS: [(&str, &str); 3] = [
@@ -872,9 +872,9 @@ fn complexity_handlers_do_not_call_analyze_file_directly() {
         assert!(
             !src.contains("analyze_file("),
             "{name} calls analyze_file directly — that recomputes the whole-file \
-             complexity analysis on every request. Read \
-             `leek_complexity::pipeline::ComplexityArtifact` off a \
-             `Target::Complexity` run instead (#165)."
+             complexity analysis on every request. Call \
+             `crate::analysis::complexity`, which reads the memoized \
+             `complexity_query`, instead (#165)."
         );
     }
 }

@@ -9,7 +9,6 @@
 //! - Returns `None` for primitive types (no source to jump to).
 
 use leek_hir::Def;
-use leek_hir::pipeline::HirArtifact;
 use leek_resolver::SymbolKind;
 use leek_syntax::{SyntaxKind, SyntaxNode};
 use leek_types::Type;
@@ -26,10 +25,11 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Hir)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
-    let type_table = &run.get::<leek_types::pipeline::TypeCheckArtifact>()?.table;
-    let hir = run.get::<HirArtifact>()?;
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
+    let typed = crate::analysis::typed(&ws.db, doc.source_file);
+    let type_table = &typed.table;
+    let hir = crate::analysis::hir(&ws.db, doc.source_file);
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Type lookup strategy:
@@ -55,7 +55,7 @@ pub fn handle(
             // expression's `ClassInstance` etc.).
             let sym = crate::handlers::resolve_symbol(table, offset).cloned()?;
             // Try the HIR-declared type first.
-            if let Some(ty) = type_of_symbol(&hir.0, &sym.name, sym.kind)
+            if let Some(ty) = type_of_symbol(&hir.hir, &sym.name, sym.kind)
                 && let Some(name) = class_name_of_type(&ty)
             {
                 return Some(name);

@@ -16,10 +16,8 @@ pub fn handle(ws: &Workspace, uri: &lsp::Url, range: lsp::Range) -> Option<Vec<l
         return Some(Vec::new());
     }
     let doc = ws.doc(uri)?;
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
-
-    let resolve_art = run.get::<leek_resolver::pipeline::ResolveArtifact>()?;
-    let type_art = run.get::<leek_types::pipeline::TypeCheckArtifact>()?;
+    let resolve_art = crate::analysis::resolved(&ws.db, doc.source_file);
+    let type_art = crate::analysis::typed(&ws.db, doc.source_file);
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     let from_offset = doc.pos_map().to_offset(range.start);

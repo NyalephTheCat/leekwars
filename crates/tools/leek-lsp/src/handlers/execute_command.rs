@@ -20,7 +20,6 @@
 //! discards an `executeCommand` result it did not ask for, so a lens
 //! click would otherwise show nothing.
 
-use leek_complexity::pipeline::ComplexityArtifact;
 use serde_json::Value as Json;
 use tower_lsp::lsp_types as lsp;
 
@@ -43,9 +42,8 @@ fn show_complexity(ws: &Workspace, args: &[Json]) -> Option<Json> {
     let uri_str = args.first()?.as_str()?;
     let fn_name = args.get(1)?.as_str()?;
     let uri = lsp::Url::parse(uri_str).ok()?;
-    let _doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_session::Target::Complexity)?;
-    let report = run.get::<ComplexityArtifact>()?;
+    let doc = ws.doc(&uri)?;
+    let report = crate::analysis::complexity(&ws.db, doc.source_file);
     let c = report.0.iter().find(|c| c.name == fn_name)?;
     Some(Json::String(format!("{} — ops: {}", c.big_o, c.formula)))
 }
@@ -55,9 +53,8 @@ fn show_complexity(ws: &Workspace, args: &[Json]) -> Option<Json> {
 fn analyze(ws: &Workspace, args: &[Json]) -> Option<Json> {
     let uri_str = args.first()?.as_str()?;
     let uri = lsp::Url::parse(uri_str).ok()?;
-    let _doc = ws.doc(&uri)?;
-    let run = crate::pipeline::run(ws, &uri, leek_session::Target::Complexity)?;
-    let report = run.get::<ComplexityArtifact>()?;
+    let doc = ws.doc(&uri)?;
+    let report = crate::analysis::complexity(&ws.db, doc.source_file);
     let entries: Vec<Json> = report
         .0
         .iter()

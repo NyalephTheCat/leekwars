@@ -16,9 +16,8 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use leek_db::SourceFile;
 use leek_hir::Def;
-use leek_hir::pipeline::HirArtifact;
-use leek_pipeline::salsa::SourceFile;
 use leek_resolver::SymbolKind;
 use leek_span::{LineTable, Span};
 use tower_lsp::lsp_types as lsp;
@@ -33,9 +32,8 @@ pub fn handle(
 ) -> Option<lsp::request::GotoImplementationResponse> {
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Hir)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
-    let hir = run.get::<HirArtifact>()?;
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
 
     let mut locations: Vec<lsp::Location> = Vec::new();
 
@@ -49,7 +47,11 @@ pub fn handle(
             SymbolKind::Function => {
                 // A method symbol: find the enclosing class (the base)
                 // from this file's HIR, then walk subclass overrides.
-                if let Some(base) = base_class_for_method(&hir.0, offset, &sym.name) {
+                // Lowering is asked for only on this branch — the class
+                // branch and the two fallbacks answer off the resolve
+                // table alone.
+                let hir = crate::analysis::hir(&ws.db, doc.source_file);
+                if let Some(base) = base_class_for_method(&hir.hir, offset, &sym.name) {
                     collect_overrides(ws, uri, &base, &sym.name, &mut locations);
                 }
             }
@@ -141,23 +143,12 @@ struct ProgClass {
 fn program_classes(ws: &Workspace, home_uri: &lsp::Url) -> Vec<ProgClass> {
     let mut out: Vec<ProgClass> = Vec::new();
     for file in crate::handlers::program_scope::program_scope(ws, home_uri) {
-        let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Hir)
-        else {
-            continue;
-        };
-        let Some(table) = run
-            .get::<leek_resolver::pipeline::ResolveArtifact>()
-            .map(|a| &a.table)
-        else {
-            continue;
-        };
-        let Some(hir) = run.get::<HirArtifact>() else {
-            continue;
-        };
-        for def in &hir.0.defs {
+        let resolved = crate::analysis::resolved(&ws.db, file.source_file);
+        let hir = crate::analysis::hir(&ws.db, file.source_file);
+        for def in &hir.hir.defs {
             let Def::Class(c) = def else { continue };
-            let Some(sym) = table
+            let Some(sym) = resolved
+                .table
                 .symbols
                 .iter()
                 .find(|s| s.kind == SymbolKind::Class && s.name == c.name)
@@ -205,9 +196,15 @@ fn loc(uri: &lsp::Url, pm: PosMap<'_>, span: Span) -> lsp::Location {
 
 /// Build a location whose span is converted against `source_file`'s own
 /// text (a subclass/override may live in a different file).
+///
+/// Takes the workspace's already-built line table when it holds the
+/// file, which it does for every file program scope reaches; the scan
+/// is the fallback for one it does not.
 fn loc_in(ws: &Workspace, uri: &lsp::Url, source_file: SourceFile, span: Span) -> lsp::Location {
+    if let Some(pm) = ws.pos_map_for(source_file) {
+        return loc(uri, pm, span);
+    }
     let text = source_file.text(&ws.db);
     let line_table = LineTable::new(text);
-    let pm = PosMap::new(&line_table, text);
-    loc(uri, pm, span)
+    loc(uri, PosMap::new(&line_table, text), span)
 }

@@ -54,6 +54,7 @@ use super::member::{class_name_of_type, class_parent_name_of, find_class_decl_by
 use super::program_scope::{ScopeFile, program_scope};
 use crate::handlers::{enclosing_class_name, is_top_level_decl, symbol_in_scope_at};
 use crate::workspace::Workspace;
+use leek_db::SourceFile;
 use leek_ide::signature::signature_for;
 
 /// Everything the item builders need about one completion request: the
@@ -61,11 +62,16 @@ use leek_ide::signature::signature_for;
 ///
 /// Bundled because both builders need all of it and threading seven
 /// parameters through each of them reads badly.
-struct Ctx<'a, 'db> {
+struct Ctx<'a> {
     ws: &'a Workspace,
     /// The file the cursor is in — the *home* file of the program.
     uri: &'a lsp::Url,
-    run: &'a leek_pipeline::Run<'db>,
+    /// The home file's salsa input, for the analyses each mode asks
+    /// for on its own: member mode wants the type table, global mode
+    /// the resolve table. Neither is fetched up front, so a `.` that
+    /// resolves to a class never pays for name resolution and a global
+    /// completion never pays for type checking.
+    home: SourceFile,
     /// CST of the home file.
     root: &'a SyntaxNode,
     /// Every file the home file shares a flat namespace with, home
@@ -86,7 +92,6 @@ pub fn handle(
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
 
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::TypeChecked)?;
     let root = crate::analysis::syntax_root(&ws.db, doc.source_file);
 
     // Computed once per request and shared by both modes: the scope
@@ -97,7 +102,7 @@ pub fn handle(
     let cx = Ctx {
         ws,
         uri,
-        run: &run,
+        home: doc.source_file,
         root: &root,
         scope: &scope,
         offset,
@@ -260,7 +265,7 @@ fn trailing_len(s: &str, pred: impl Fn(char) -> bool) -> usize {
 }
 
 fn member_items(
-    cx: &Ctx<'_, '_>,
+    cx: &Ctx<'_>,
     receiver: &str,
     receiver_start: u32,
 ) -> Option<Vec<lsp::CompletionItem>> {
@@ -283,8 +288,8 @@ fn member_items(
     //     members. Handles the common `var c = new Cat(); c.<here>`
     //     case that v0.2's completion missed.
     let mut named_a_class = false;
-    if let Some(art) = cx.run.get::<leek_types::pipeline::TypeCheckArtifact>()
-        && let Some(entry) = art.table.smallest_at(receiver_start)
+    let typed = crate::analysis::typed(&cx.ws.db, cx.home);
+    if let Some(entry) = typed.table.smallest_at(receiver_start)
         && let Some(class_name) = class_name_of_type(&entry.ty)
         && class_name != receiver
     {
@@ -301,8 +306,9 @@ fn member_items(
     }
 
     // 3) Receiver names a user-declared class → list its members.
-    // Use the CST directly: in salsa mode the type-check step does not
-    // leave a ResolveArtifact in the run context. Skipped once the
+    // Straight off the CST: a class is found by its declaration node,
+    // which is what `push_class_chain` walks for the `extends` chain
+    // anyway, so the resolve table would add nothing. Skipped once the
     // receiver's type already named a class, so an ordinary variable
     // doesn't cost a program-wide search for a class of its name on
     // every keystroke after a `.`.
@@ -319,11 +325,7 @@ fn member_items(
 ///
 /// Members already in `items` are skipped, so an override hides the
 /// inherited copy and a class reached by two routes is listed once.
-fn push_class_chain(
-    cx: &Ctx<'_, '_>,
-    class_name: &str,
-    items: &mut Vec<lsp::CompletionItem>,
-) -> bool {
+fn push_class_chain(cx: &Ctx<'_>, class_name: &str, items: &mut Vec<lsp::CompletionItem>) -> bool {
     let mut current = class_name.to_string();
     // False for `class_name` itself, true for every ancestor above it —
     // and so also "the head of the chain was found".
@@ -348,7 +350,7 @@ fn push_class_chain(
 /// file of the program — `#400` expands includes in the HIR lowerer,
 /// not the CST, so an included class is simply absent from this file's
 /// green tree and has to be looked up in its own.
-fn find_class_decl_in_program(cx: &Ctx<'_, '_>, name: &str) -> Option<SyntaxNode> {
+fn find_class_decl_in_program(cx: &Ctx<'_>, name: &str) -> Option<SyntaxNode> {
     if let Some(cls) = find_class_decl_by_name(cx.root, name) {
         return Some(cls);
     }
@@ -437,7 +439,7 @@ fn member_kind(k: SyntaxKind) -> lsp::CompletionItemKind {
 
 // ─── global completion ──────────────────────────────────────────────
 
-fn global_items(cx: &Ctx<'_, '_>) -> Vec<lsp::CompletionItem> {
+fn global_items(cx: &Ctx<'_>) -> Vec<lsp::CompletionItem> {
     let mut items: Vec<lsp::CompletionItem> = Vec::new();
 
     // 1. User symbols with their rendered signatures, restricted to the
@@ -445,30 +447,29 @@ fn global_items(cx: &Ctx<'_, '_>) -> Vec<lsp::CompletionItem> {
     //    function's local is worse than offering nothing. The
     //    doc-comment above the declaration is deferred to `resolve`; we
     //    only stash a `data` pointer to its declaration here.
-    if let Some(art) = cx.run.get::<leek_resolver::pipeline::ResolveArtifact>() {
-        for sym in &art.table.symbols {
-            if !symbol_in_scope_at(cx.root, sym, cx.offset) {
-                continue;
-            }
-            let detail = decl_signature_for_symbol(cx.root, sym)
-                .unwrap_or_else(|| symbol_kind_label(sym.kind).into());
-            items.push(lsp::CompletionItem {
-                label: sym.name.clone(),
-                kind: Some(symbol_kind_to_lsp(sym.kind)),
-                detail: Some(detail),
-                // Stash the *declaration node's* start (the
-                // `function`/`class`/`var` keyword), which is what
-                // `doc_comment_before` needs in `resolve` — the symbol
-                // span sits mid-line and would find no comment above.
-                data: resolve_data(
-                    cx.uri,
-                    &sym.name,
-                    "user",
-                    decl_start_for_symbol(cx.root, sym),
-                ),
-                ..Default::default()
-            });
+    let resolved = crate::analysis::resolved(&cx.ws.db, cx.home);
+    for sym in &resolved.table.symbols {
+        if !symbol_in_scope_at(cx.root, sym, cx.offset) {
+            continue;
         }
+        let detail = decl_signature_for_symbol(cx.root, sym)
+            .unwrap_or_else(|| symbol_kind_label(sym.kind).into());
+        items.push(lsp::CompletionItem {
+            label: sym.name.clone(),
+            kind: Some(symbol_kind_to_lsp(sym.kind)),
+            detail: Some(detail),
+            // Stash the *declaration node's* start (the
+            // `function`/`class`/`var` keyword), which is what
+            // `doc_comment_before` needs in `resolve` — the symbol
+            // span sits mid-line and would find no comment above.
+            data: resolve_data(
+                cx.uri,
+                &sym.name,
+                "user",
+                decl_start_for_symbol(cx.root, sym),
+            ),
+            ..Default::default()
+        });
     }
 
     // We track the names already emitted so later passes never add a
