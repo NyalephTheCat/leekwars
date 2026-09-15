@@ -29,7 +29,7 @@ use leek_span::SourceId;
 use leek_syntax::Version;
 
 use crate::cli::{Migrate, MigrateVersion};
-use leek_project::Project;
+use leek_project::{Project, walk_leek_files};
 
 pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<ExitCode> {
     let project = Project::discover(manifest_path)?;
@@ -69,7 +69,7 @@ pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<
             if !quiet {
                 eprintln!(
                     "{}: already at {} — skipped",
-                    display_relative(&project.root, path).display(),
+                    project.relative(path).display(),
                     version_label(target),
                 );
             }
@@ -88,11 +88,7 @@ pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<
         for diag in &out.diagnostics {
             warnings += 1;
             if !quiet {
-                eprintln!(
-                    "{}: {}",
-                    display_relative(&project.root, path).display(),
-                    diag.message,
-                );
+                eprintln!("{}: {}", project.relative(path).display(), diag.message);
             }
         }
 
@@ -105,7 +101,7 @@ pub fn run(args: &Migrate, manifest_path: Option<&Path>, quiet: bool) -> Result<
                 } else {
                     "migrated"
                 },
-                display_relative(&project.root, path).display(),
+                project.relative(path).display(),
                 version_label(from),
                 version_label(target),
             );
@@ -173,7 +169,7 @@ fn collect_files(project: &Project, requested: &[PathBuf]) -> Result<Vec<PathBuf
                 anyhow::bail!("{}: not a .leek file", p.display());
             }
         } else if p.is_dir() {
-            out.extend(walk_dir(&p));
+            out.extend(walk_leek_files(&p));
         } else {
             anyhow::bail!("{}: not a file or directory", p.display());
         }
@@ -181,35 +177,6 @@ fn collect_files(project: &Project, requested: &[PathBuf]) -> Result<Vec<PathBuf
     out.sort();
     out.dedup();
     Ok(out)
-}
-
-/// `.gitignore`-aware walk for an arbitrary directory. Mirrors
-/// the policy in `Project::walk_sources` (skip `build/`,
-/// `target/`, hidden, respect `.gitignore`/`.ignore`).
-fn walk_dir(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut builder = ignore::WalkBuilder::new(dir);
-    builder
-        .standard_filters(true)
-        .hidden(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(false)
-        .parents(true)
-        .require_git(false);
-    let mut overrides = ignore::overrides::OverrideBuilder::new(dir);
-    let _ = overrides.add("!build/");
-    let _ = overrides.add("!target/");
-    if let Ok(ov) = overrides.build() {
-        builder.overrides(ov);
-    }
-    for entry in builder.build().flatten() {
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|e| e == "leek") {
-            out.push(path.to_path_buf());
-        }
-    }
-    out
 }
 
 /// The file's source version: its `@version:N` pragma if present, else
@@ -226,11 +193,6 @@ fn version_label(v: Version) -> &'static str {
         Version::V3 => "v3",
         Version::V4 => "v4",
     }
-}
-
-fn display_relative(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root)
-        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 // Suppress an unused-import warning if `MigrateVersion` is not

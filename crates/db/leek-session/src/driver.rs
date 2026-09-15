@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::error::SessionError;
 use crate::recipes::{RecipeParams, Target};
-use anyhow::Result;
 use leek_diagnostics::{ColorWhen, MessageFormat, Reporter, Sources};
 use leek_diagnostics::{LintLevelError, LintLevels};
 use leek_pipeline::{Pipeline, Run, TimingSink};
-use leek_project::{Input, Project};
+use leek_project::Project;
 
 /// The include-id interner, re-exported so front-ends that own one for
 /// a whole run (`miku test`) do not need a direct `leek-resolver`
@@ -41,38 +41,6 @@ impl Default for DriverConfig {
             timing: None,
         }
     }
-}
-
-/// Result of running the pipeline on one source file.
-pub struct DriverRun<'a> {
-    pub run: Run<'a>,
-    pub had_error: bool,
-}
-
-/// Run the pipeline on `input`, render diagnostics, return the [`Run`].
-///
-/// When the pipeline resolved includes, diagnostics raised in included
-/// files render against those files' own text and path.
-pub fn run_with_reporter(
-    pipeline: &Pipeline,
-    input: Input,
-    source_text: &str,
-    file_label: &str,
-    reporter: &Reporter,
-) -> DriverRun<'static> {
-    let run = pipeline.run(input);
-    let had_error = report(&run, source_text, file_label, reporter);
-    DriverRun { run, had_error }
-}
-
-/// Render `run`'s diagnostics through `reporter` (manifest lint levels
-/// applied); returns whether any error was emitted.
-///
-/// When the pipeline resolved includes, diagnostics raised in included
-/// files render against those files' own text and path.
-pub fn report(run: &Run<'_>, source_text: &str, file_label: &str, reporter: &Reporter) -> bool {
-    let sources = run_sources(run, source_text, file_label);
-    reporter.emit(run.diagnostics(), &sources)
 }
 
 /// Every file `run`'s diagnostics may point into: the entry, under its own
@@ -243,7 +211,7 @@ pub fn file_pipeline(
     path: &Path,
     source_id: leek_span::SourceId,
     config: &DriverConfig,
-) -> Result<Pipeline> {
+) -> Result<Pipeline, SessionError> {
     standalone_pipeline(path, source_id, &merge_manifest_lints(project, config))
 }
 
@@ -260,7 +228,7 @@ pub fn file_pipeline_shared(
     path: &Path,
     config: &DriverConfig,
     interner: &Arc<dyn SourceInterner>,
-) -> Result<(Pipeline, leek_span::SourceId)> {
+) -> Result<(Pipeline, leek_span::SourceId), SessionError> {
     let merged = merge_manifest_lints(project, config);
     let pipeline = build_with(&merged, includes_step(path, interner))?;
     Ok((pipeline, interner.intern(path)))
@@ -278,7 +246,7 @@ pub fn standalone_pipeline(
     path: &Path,
     source_id: leek_span::SourceId,
     config: &DriverConfig,
-) -> Result<Pipeline> {
+) -> Result<Pipeline, SessionError> {
     build_with(config, includes_step_standalone(path, source_id))
 }
 
@@ -287,7 +255,10 @@ pub fn standalone_pipeline(
 ///
 /// The single place a driver pipeline is built, so `--verbose` cannot end up
 /// measuring a different plan from the one the same command runs without it.
-fn build_with(config: &DriverConfig, includes: Box<dyn leek_pipeline::Step>) -> Result<Pipeline> {
+fn build_with(
+    config: &DriverConfig,
+    includes: Box<dyn leek_pipeline::Step>,
+) -> Result<Pipeline, SessionError> {
     Ok(
         crate::recipes::plan_with_includes(config.target, includes, &config.params)?
             .build_with(config.timing.as_ref()),
@@ -345,48 +316,16 @@ pub fn includes_step_standalone(
     includes_step(path, &interner)
 }
 
-/// Convenience: discover project, build reporter, run one file.
-pub fn run_file(
-    project: &Project,
-    path: &Path,
-    source_id: leek_span::SourceId,
-    config: &DriverConfig,
-) -> Result<DriverRun<'static>> {
-    let (src, text) = project.pipeline_input(source_id, path)?;
-    let reporter = reporter_for(project, config.color, config.format)?;
-    let pipeline = file_pipeline(project, path, source_id, config)?;
-    let label = path.display().to_string();
-    Ok(run_with_reporter(
-        &pipeline,
-        // The project's flags, not `Input::from`'s per-conversion
-        // `FeatureFlags::from_env`: `[experimental]` is part of the project
-        // and has to reach the pipeline (leekwars#206).
-        Input::from_source_with_flags(src, project.feature_flags()),
-        &text,
-        &label,
-        &reporter,
-    ))
-}
-
-/// Run the project entry file.
-pub fn run_entry(project: &Project, config: &DriverConfig) -> Result<DriverRun<'static>> {
-    let entry = project.entry_path();
-    run_file(
-        project,
-        &entry,
-        leek_span::SourceId::new(1).unwrap(),
-        config,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use leek_diagnostics::{Diagnostic, Severity, codes};
     use leek_manifest::ManifestLoad;
     use leek_pipeline::LintGroups;
+    use leek_project::Input;
     use leek_span::{SourceId, Span};
 
     use super::*;
+    use crate::session::Session;
 
     fn scratch(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -865,7 +804,8 @@ mod tests {
             color: ColorWhen::Never,
             ..DriverConfig::default()
         };
-        let plain = run_entry(&project, &untimed).expect("untimed run");
+        let plain_session = Session::new(&project, untimed.clone()).expect("session");
+        let plain = plain_session.compile_entry().expect("untimed run");
         let expected = file_pipeline(
             &project,
             &project.entry_path(),
@@ -876,21 +816,22 @@ mod tests {
         .step_names();
 
         let sink = TimingSink::new();
-        let timed = run_entry(
+        let timed_session = Session::new(
             &project,
-            &DriverConfig {
+            DriverConfig {
                 timing: Some(sink.clone()),
                 ..untimed
             },
         )
-        .expect("timed run");
+        .expect("session");
+        let timed = timed_session.compile_entry().expect("timed run");
 
         let names: Vec<&str> = sink.entries().iter().map(|e| e.step).collect();
         assert_eq!(
             names, expected,
             "the sink must see every step of the untimed plan, once each"
         );
-        assert_eq!(timed.had_error, plain.had_error);
+        assert_eq!(timed.had_error(), plain.had_error());
         // The manifest's `pedantic = true` reached the timed plan too: the
         // lint step is planned, so the merge happened on this path as well.
         assert!(names.contains(&"lint"), "{names:?}");
@@ -924,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn run_entry_reports_a_resolver_error_from_the_project_entry() {
+    fn compile_entry_reports_a_resolver_error_from_the_project_entry() {
         let dir = scratch("run-entry");
         std::fs::create_dir_all(dir.join("src")).expect("src dir");
         // A redeclared symbol (E0202) — a resolver error, so it also proves
@@ -940,22 +881,22 @@ mod tests {
             color: ColorWhen::Never,
             ..DriverConfig::default()
         };
-        let run = run_entry(&project, &config).expect("run");
-        assert!(run.had_error, "diagnostics: {:?}", run.run.diagnostics());
+        let session = Session::new(&project, config).expect("session");
+        let run = session.compile_entry().expect("run");
+        assert!(run.had_error(), "diagnostics: {:?}", run.diagnostics());
         assert!(
-            run.run
-                .diagnostics()
+            run.diagnostics()
                 .iter()
                 .any(|d| d.code == codes::REDECLARED_SYMBOL),
             "diagnostics: {:?}",
-            run.run.diagnostics()
+            run.diagnostics()
         );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn run_entry_is_clean_for_a_well_formed_entry() {
+    fn compile_entry_is_clean_for_a_well_formed_entry() {
         let dir = scratch("run-entry-ok");
         std::fs::create_dir_all(dir.join("src")).expect("src dir");
         std::fs::write(dir.join("src/main.leek"), "return 1 + 1;\n").expect("entry");
@@ -965,9 +906,11 @@ mod tests {
             color: ColorWhen::Never,
             ..DriverConfig::default()
         };
-        let run = run_entry(&project, &config).expect("run");
-        assert!(!run.had_error, "diagnostics: {:?}", run.run.diagnostics());
-        assert!(run.run.errors().is_empty());
+        let session = Session::new(&project, config).expect("session");
+        let run = session.compile_entry().expect("run");
+        assert!(!run.had_error(), "diagnostics: {:?}", run.diagnostics());
+        // Nothing aborted the pipeline either: the target was reached.
+        assert!(run.hir().is_some());
 
         std::fs::remove_dir_all(&dir).ok();
     }

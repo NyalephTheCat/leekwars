@@ -26,19 +26,16 @@
 //!   compile diagnostics are emitted as NDJSON through the reporter.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use leek_backend_native::{NativeArtifact, NativeError};
-use leek_hir::pipeline::HirArtifact;
 
-use leek_diagnostics::{Code, Reporter, Severity};
-use leek_project::Input;
+use leek_diagnostics::{Code, Severity};
 use leek_project::Project;
-use leek_session::{DriverConfig, PathInterner, RecipeParams, SourceInterner, Target};
+use leek_session::{DriverConfig, RecipeParams, Session, Target};
 
 use crate::cli::{ColorWhen, MessageFormat, Test};
 
@@ -66,7 +63,12 @@ pub fn run(
         format: format.into(),
         timing: None,
     };
-    let reporter = leek_session::reporter_for(&project, config.color, config.format)?;
+    // One session for the whole run: the reporter is built once, and every
+    // test file and every helper any of them includes is numbered out of
+    // the session's one id space. Numbering each test file `1, 2, 3, …` and
+    // letting its includes count up from there gave file 2 the id file 1's
+    // first include already held (#191).
+    let session = Session::new(&project, config)?;
 
     let tests = project.walk_tests();
     if tests.is_empty() {
@@ -79,19 +81,13 @@ pub fn run(
         return Ok(ExitCode::SUCCESS);
     }
 
-    // One id space for the whole run: every test file and every helper
-    // any of them includes gets its own `SourceId`. Numbering each test
-    // file `1, 2, 3, …` and letting its includes count up from there gave
-    // file 2 the id file 1's first include already held (#191).
-    let interner: Arc<dyn SourceInterner> = Arc::new(PathInterner::new());
-
     let mut records: Vec<TestRecord> = Vec::new();
     for path in &tests {
         let start = Instant::now();
-        let outcome = run_one(&project, &config, &reporter, &interner, path)?;
+        let outcome = run_one(&session, path)?;
         let duration = start.elapsed();
 
-        let rel = display_relative(&project.root, path);
+        let rel = project.relative(path);
         let is_pass = matches!(outcome, TestOutcome::Pass);
         let reason = match &outcome {
             TestOutcome::Pass => None,
@@ -161,19 +157,13 @@ struct TestRecord {
     failure: Option<String>,
 }
 
-fn run_one(
-    project: &Project,
-    config: &DriverConfig,
-    reporter: &Reporter,
-    interner: &Arc<dyn SourceInterner>,
-    path: &Path,
-) -> Result<TestOutcome> {
-    // Plan first: the pipeline interns the entry, and its id is what this
-    // file's `Input` — and so every span it raises — has to carry.
-    let (pipeline, source) = leek_session::file_pipeline_shared(project, path, config, interner)?;
-    let (src, text) = project.pipeline_input(source, path)?;
-    let input = Input::from_source_with_flags(src, project.feature_flags());
-    let annotations = parse_annotations(&text);
+fn run_one(session: &Session<'_>, path: &Path) -> Result<TestOutcome> {
+    // `compile_shared`, not `compile_file`: the entry and its includes are
+    // numbered out of the session's interner, so two test files that include
+    // the same helper agree on its id (#191).
+    let compiled = session.compile_shared(path)?;
+    let project = session.project();
+    let annotations = parse_annotations(compiled.text());
     if !annotations.problems.is_empty() {
         return Ok(TestOutcome::Fail(format!(
             "invalid miku-test directive: {}",
@@ -181,12 +171,10 @@ fn run_one(
         )));
     }
 
-    let result = pipeline.run(input);
-    let label = path.display().to_string();
-
     if let Expectation::CompileError(code) = &annotations.expect {
-        let errors: Vec<&'static str> = reporter
-            .apply_levels(result.diagnostics())
+        let errors: Vec<&'static str> = session
+            .reporter()
+            .apply_levels(compiled.diagnostics())
             .iter()
             .filter(|d| d.severity == Severity::Error)
             .map(|d| d.code.id())
@@ -195,7 +183,7 @@ fn run_one(
         if errors.contains(&code.as_str()) {
             return Ok(TestOutcome::Pass);
         }
-        leek_session::report(&result, &text, &label, reporter);
+        compiled.report();
         return Ok(TestOutcome::Fail(if errors.is_empty() {
             format!("expected compile error {code} but the program compiled")
         } else {
@@ -203,12 +191,11 @@ fn run_one(
         }));
     }
 
-    let had_compile_error = leek_session::report(&result, &text, &label, reporter);
-    if had_compile_error {
+    if compiled.report() {
         return Ok(TestOutcome::Fail("compile error".into()));
     }
 
-    let Some(hir) = result.get::<HirArtifact>() else {
+    let Some(hir) = compiled.hir() else {
         return Ok(TestOutcome::Fail("HIR lowering produced no output".into()));
     };
 
@@ -219,9 +206,9 @@ fn run_one(
     // Execute via the native JIT (the interpreter backend was removed), at the
     // input's settled version and strict mode. A runtime error surfaces as
     // `Err(NativeError::runtime(..))`.
-    let mut opts = leek_backend_native::NativeOptions::jit_for_input(result.input(), budget);
+    let mut opts = leek_backend_native::NativeOptions::jit_for_input(compiled.input(), budget);
     crate::util::apply_native_settings(&mut opts, &project.manifest);
-    let run = match leek_backend_native::compile(hir.0.as_ref(), &opts) {
+    let run = match leek_backend_native::compile(hir, &opts) {
         Ok(NativeArtifact::Value(v)) => Ok(v.to_string()),
         Ok(_) => return Ok(TestOutcome::Fail("the JIT produced no result value".into())),
         Err(e) => Err(e),
@@ -414,11 +401,6 @@ fn split_directive(directive: &str) -> (&str, &str) {
     let rest = rest.trim_start();
     let rest = rest.strip_prefix(':').unwrap_or(rest);
     (name, rest.trim())
-}
-
-fn display_relative(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root)
-        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 /// Decide where the JUnit XML goes (manifest `[test].junit_xml` if

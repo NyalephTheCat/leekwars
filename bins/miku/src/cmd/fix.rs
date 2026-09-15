@@ -12,10 +12,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use leek_diagnostics::{Applicability, Diagnostic, Reporter, Severity};
-use leek_project::Input;
 use leek_project::Project;
 use leek_rewrite::EditSet;
-use leek_session::{DriverConfig, RecipeParams, Target};
+use leek_session::{DriverConfig, RecipeParams, Session, Target};
 use leek_span::SourceId;
 
 use crate::cli::{ColorWhen, Fix, MessageFormat};
@@ -48,25 +47,25 @@ pub fn run(
         format: format.into(),
         timing: None,
     };
-    let reporter = leek_session::reporter_for(&project, config.color, config.format)?;
+    // One session for the whole run: the reporter is built once, and every
+    // file compiles through the same driver entry point `miku check` uses.
+    let session = Session::new(&project, config)?;
 
     let mut changed_files = 0usize;
     let mut total_edits = 0usize;
     let mut skipped: Vec<PathBuf> = Vec::new();
     for (next_source, path) in (1_u32..).zip(&sources) {
         let source = SourceId::new(next_source).unwrap();
-        let (src, text) = project.pipeline_input(source, path)?;
-        let pipeline = leek_session::file_pipeline(&project, path, source, &config)?;
-        let result = pipeline.run(Input::from_source_with_flags(src, project.feature_flags()));
+        let compiled = session.compile_file(path, source)?;
 
-        if has_compile_error(&reporter, result.diagnostics()) {
-            leek_session::report(&result, &text, &path.display().to_string(), &reporter);
+        if has_compile_error(session.reporter(), compiled.diagnostics()) {
+            compiled.report();
             skipped.push(path.clone());
             continue;
         }
 
-        let diagnostics = reporter.apply_levels(result.diagnostics());
-        let fixed = collect_edits(&diagnostics, source, &text);
+        let diagnostics = session.reporter().apply_levels(compiled.diagnostics());
+        let fixed = collect_edits(&diagnostics, source, compiled.text());
         if fixed.edits == 0 {
             continue;
         }
@@ -77,7 +76,7 @@ pub fn run(
             eprintln!(
                 "{} {}: {} fix{}",
                 if args.dry_run { "would fix" } else { "fix" },
-                display_relative(&project.root, path).display(),
+                project.relative(path).display(),
                 fixed.edits,
                 if fixed.edits == 1 { "" } else { "es" },
             );
@@ -109,7 +108,7 @@ pub fn run(
             if skipped.len() == 1 { "" } else { "s" },
         );
         for path in &skipped {
-            eprintln!("  {}", display_relative(&project.root, path).display());
+            eprintln!("  {}", project.relative(path).display());
         }
     }
 
@@ -183,9 +182,4 @@ fn collect_edits(diagnostics: &[Diagnostic], source: SourceId, text: &str) -> Fi
             edits: 0,
         },
     }
-}
-
-fn display_relative(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root)
-        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
 }

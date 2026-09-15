@@ -20,9 +20,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use leek_complexity::Complexity;
-use leek_complexity::pipeline::ComplexityArtifact;
-use leek_project::Input;
-use leek_session::{DriverConfig, Target};
+use leek_session::{DriverConfig, Session, Target};
 use leek_span::SourceId;
 
 use crate::cli::Analyze;
@@ -55,16 +53,16 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
         target: Target::Complexity,
         ..DriverConfig::default()
     };
+    // One session for every file: the reporter and the include-id space are
+    // built once rather than per file.
+    let session = Session::new(&project, config)?;
     for (i, path) in files.iter().enumerate() {
         let source = SourceId::new((i + 1).try_into().unwrap()).unwrap();
-        let (src, _text) = project.pipeline_input(source, path)?;
-        let input = Input::from_source_with_flags(src, project.feature_flags());
-        let pipeline = leek_session::file_pipeline(&project, path, source, &config)?;
-        let result = pipeline.run(input);
-        let Some(report) = result.get::<ComplexityArtifact>() else {
+        let compiled = session.compile_file(path, source)?;
+        let Some(report) = compiled.complexity() else {
             eprintln!(
                 "miku analyze: failed to analyze {}",
-                display_relative(&project.root, path).display(),
+                project.relative(path).display(),
             );
             continue;
         };
@@ -73,12 +71,11 @@ pub fn run(args: Analyze, manifest_path: Option<&Path>, quiet: bool) -> Result<E
         // right, so keep only the rows declared here — otherwise an
         // included function is printed once per file that includes it.
         let own: Vec<Complexity> = report
-            .0
             .iter()
             .filter(|c| c.span.is_none_or(|s| s.source == source))
             .cloned()
             .collect();
-        print_report(&project.root, path, &own, args.formula, quiet);
+        print_report(&project, path, &own, args.formula, quiet);
     }
 
     Ok(ExitCode::SUCCESS)
@@ -94,14 +91,15 @@ fn resolve_path(p: &Path) -> Result<PathBuf> {
     }
 }
 
-fn display_relative(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root)
-        .map_or_else(|_| p.to_path_buf(), std::path::Path::to_path_buf)
-}
-
-fn print_report(root: &Path, path: &Path, report: &[Complexity], show_formula: bool, quiet: bool) {
+fn print_report(
+    project: &Project,
+    path: &Path,
+    report: &[Complexity],
+    show_formula: bool,
+    quiet: bool,
+) {
     if !quiet {
-        println!("{}", display_relative(root, path).display());
+        println!("{}", project.relative(path).display());
     }
     // Determine column widths.
     let name_w = report

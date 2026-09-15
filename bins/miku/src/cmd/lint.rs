@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use leek_pipeline::LintGroups;
 use leek_project::Project;
-use leek_session::{DriverConfig, RecipeParams, Target, run_entry};
+use leek_session::{DriverConfig, RecipeParams, Session, Target};
 
 use crate::cli::{ColorWhen, Lint, MessageFormat};
 
@@ -34,8 +34,8 @@ pub fn run(
         format: format.into(),
         timing: None,
     };
-    let driver_run = run_entry(&project, &config)?;
-    Ok(if driver_run.had_error {
+    let session = Session::new(&project, config)?;
+    Ok(if session.compile_entry()?.report() {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

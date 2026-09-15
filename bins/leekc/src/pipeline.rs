@@ -6,7 +6,7 @@ use anyhow::Result;
 use leek_diagnostics::Code;
 use leek_fmt::FormatOptions;
 use leek_pipeline::{LintGroups, Pipeline};
-use leek_session::{self, DriverConfig, Target};
+use leek_session::{self, DriverConfig, SessionError, Target};
 use leek_span::SourceId;
 
 use crate::cli::Emit;
@@ -30,7 +30,7 @@ pub fn pipeline_for(
     fmt_opts: FormatOptions,
     lints: LintGroups,
     input: &Path,
-) -> Pipeline {
+) -> Result<Pipeline, SessionError> {
     let params = leek_session::driver_params().with_lints(lints);
     let with_includes = |target: Target| {
         let config = DriverConfig {
@@ -39,17 +39,14 @@ pub fn pipeline_for(
             ..DriverConfig::default()
         };
         leek_session::standalone_pipeline(input, SourceId::new(ENTRY_SOURCE).unwrap(), &config)
-            .expect("recipe")
     };
     match emit {
         Emit::Check | Emit::Hir | Emit::Java | Emit::LeekScript | Emit::Run | Emit::Native => {
             with_includes(Target::Linted)
         }
-        Emit::Tokens | Emit::FlatCst => {
-            leek_session::pipeline(Target::Tokens, &params).expect("recipe")
-        }
-        Emit::Cst => leek_session::pipeline(Target::Parsed, &params).expect("recipe"),
-        Emit::Fmt => leek_session::pipeline_formatted(fmt_opts, &params).expect("recipe"),
+        Emit::Tokens | Emit::FlatCst => Ok(leek_session::pipeline(Target::Tokens, &params)?),
+        Emit::Cst => Ok(leek_session::pipeline(Target::Parsed, &params)?),
+        Emit::Fmt => Ok(leek_session::pipeline_formatted(fmt_opts, &params)?),
         Emit::Mir => with_includes(Target::Mir),
     }
 }
@@ -128,7 +125,8 @@ mod tests {
                 FormatOptions::default(),
                 LintGroups::default(),
                 entry(),
-            );
+            )
+            .expect("planned");
             assert_eq!(
                 pipeline.step_names(),
                 expected_steps(*emit),
@@ -153,21 +151,23 @@ mod tests {
             FormatOptions::default(),
             LintGroups::default(),
             entry(),
-        );
+        )
+        .expect("planned");
         assert_eq!(leekc.step_names(), driver.step_names());
     }
 
     #[test]
     fn no_emit_builds_an_empty_pipeline() {
-        // `pipeline_for` unwraps the recipe; an empty plan would mean the
-        // emit silently produces nothing at all.
+        // Every emit plans *something*: an empty plan would mean the emit
+        // silently produces nothing at all.
         for emit in Emit::value_variants() {
             let pipeline = pipeline_for(
                 *emit,
                 FormatOptions::default(),
                 LintGroups::default(),
                 entry(),
-            );
+            )
+            .expect("planned");
             assert!(!pipeline.is_empty(), "--emit {emit:?} planned no steps");
         }
     }
@@ -181,7 +181,8 @@ mod tests {
             FormatOptions::default(),
             LintGroups::default(),
             entry(),
-        );
+        )
+        .expect("planned");
         let loud = pipeline_for(
             Emit::Check,
             FormatOptions::default(),
@@ -190,7 +191,8 @@ mod tests {
                 nursery: true,
             },
             entry(),
-        );
+        )
+        .expect("planned");
         assert_eq!(plain.step_names(), loud.step_names());
     }
 

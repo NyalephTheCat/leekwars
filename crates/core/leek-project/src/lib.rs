@@ -216,6 +216,20 @@ impl Project {
             .map(|p| self.scenario_path(&p))
     }
 
+    /// `path` written relative to the project root, or unchanged when it
+    /// lies outside it.
+    ///
+    /// Every command that names a file on a progress or summary line prints
+    /// it through here, so `miku fix`, `miku test`, `miku analyze` and
+    /// `miku migrate` cannot disagree about whether a path is shown whole
+    /// or relative (DRIVER-13). Display only: the result is not a path to
+    /// open, which is why it is never joined back onto the root.
+    #[must_use]
+    pub fn relative(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.root)
+            .map_or_else(|_| path.to_path_buf(), Path::to_path_buf)
+    }
+
     pub fn walk_sources(&self) -> Vec<PathBuf> {
         walk_leek_files(&self.src_dir())
     }

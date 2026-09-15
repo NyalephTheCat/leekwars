@@ -5,11 +5,20 @@
 //! crates and are one because nothing ever wanted the driver without the
 //! recipes it plans with.
 //!
-//! Both modules' public names are re-exported at the crate root, so
+//! [`session`] is the front door over both: a [`Session`] is one invocation
+//! over one project, and [`Compilation`] is one file it compiled — the run,
+//! its text, its diagnostics and the reporter they render through, in one
+//! value instead of five a caller has to keep in step.
+//!
+//! Every module's public names are re-exported at the crate root, so
 //! `leek_session::` is the only path a front-end needs.
 
 pub mod driver;
+pub mod error;
 pub mod recipes;
+pub mod session;
 
 pub use driver::*;
+pub use error::SessionError;
 pub use recipes::*;
+pub use session::{Compilation, Session};

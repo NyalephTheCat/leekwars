@@ -129,8 +129,10 @@ A `.leek` program flows down the layers:
    generic engine; `leek-db` is the query façade, re-exporting the one salsa
    database and every tracked query under a single import path so a consumer
    needs neither the pass crates nor their `salsa` features; `leek-session`
-   defines the concrete steps (its `recipes` module) and ties them to a
-   project/manifest (its `driver` module).
+   defines the concrete steps (its `recipes` module), ties them to a
+   project/manifest (its `driver` module), and hands a front-end one
+   `Session` per invocation and one `Compilation` per compiled file (its
+   `session` module).
 4. **Backends** consume MIR:
    - `leek-backend-native` is a Cranelift JIT/AOT backend (`miku run`, and
      `leekc --emit` for a standalone executable, linked via `cc`). Scalars

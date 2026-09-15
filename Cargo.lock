@@ -1463,9 +1463,9 @@ dependencies = [
 name = "leek-session"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "leek-complexity",
  "leek-config",
+ "leek-db",
  "leek-diagnostics",
  "leek-environment",
  "leek-fmt",
@@ -1723,7 +1723,6 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
- "ignore",
  "leek-backend-java",
  "leek-backend-leekscript",
  "leek-backend-native",

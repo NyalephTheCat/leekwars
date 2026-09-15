@@ -5,10 +5,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use leek_backends::{java_clean_mode, pick_java_out_dir, pick_out_dir, resolve_backend};
-use leek_hir::pipeline::HirArtifact;
 use leek_manifest::BackendKind;
 use leek_project::Project;
-use leek_session::{DriverConfig, RecipeParams, Target, run_entry};
+use leek_session::{Compilation, DriverConfig, RecipeParams, Session, Target};
 use leek_syntax::version::version_from_byte;
 
 use crate::cli::{Build, ColorWhen, MessageFormat};
@@ -58,7 +57,8 @@ pub fn run(
         format: format.into(),
         timing: sink.clone(),
     };
-    let driver_run = run_entry(&project, &config)?;
+    let session = Session::new(&project, config)?;
+    let compiled = session.compile_entry()?;
     if let Some(sink) = &sink {
         eprintln!(
             "miku build: pipeline timings for {}:",
@@ -71,33 +71,16 @@ pub fn run(
         }
         eprintln!("  {:>14}: {:?}", "total", total);
     }
-    if driver_run.had_error {
+    if compiled.report() {
         return Ok(ExitCode::from(1));
     }
 
-    let version = version_from_byte(driver_run.run.input().version_byte);
+    let version = version_from_byte(compiled.input().version_byte);
 
     match backend {
-        BackendKind::Java => emit_java(
-            &project,
-            &driver_run.run,
-            version,
-            args,
-            quiet,
-            environment,
-            color,
-            format,
-        ),
-        BackendKind::Native => emit_native(&project, &driver_run.run, args, quiet),
-        BackendKind::LeekScript => emit_leekscript(
-            &project,
-            &driver_run.run,
-            version,
-            args,
-            quiet,
-            color,
-            format,
-        ),
+        BackendKind::Java => emit_java(&project, &compiled, version, args, quiet, environment),
+        BackendKind::Native => emit_native(&project, &compiled, args, quiet),
+        BackendKind::LeekScript => emit_leekscript(&project, &compiled, version, args, quiet),
         BackendKind::Jar => {
             bail!("jar backend not yet supported in this toolchain");
         }
@@ -107,55 +90,19 @@ pub fn run(
     }
 }
 
-/// Render a backend's own diagnostics through the project's reporter — the
-/// same codes, carets and `[lint]` levels a frontend diagnostic gets — and
-/// report whether any of them was error-level.
-///
-/// Both source-emitting backends produce output *and* complaints (unlike the
-/// native backend, which fails outright), so this takes a slice rather than
-/// an error. Falls back to a plain one-line form when the reporter can't be
-/// built from a broken `[lint]` table, exactly as `miku run` does for a
-/// native failure.
-fn report_backend_diagnostics(
-    project: &Project,
-    result: &leek_pipeline::Run<'_>,
-    diagnostics: &[leek_diagnostics::Diagnostic],
-    color: ColorWhen,
-    format: MessageFormat,
-) -> bool {
-    if diagnostics.is_empty() {
-        return false;
-    }
-    // The same source map the driver rendered the frontend diagnostics
-    // against, so a backend complaint raised inside an included file points
-    // at *that* file.
-    let entry_label = project.entry_path().display().to_string();
-    let entry_text = std::fs::read_to_string(project.entry_path()).unwrap_or_default();
-    let sources = leek_session::run_sources(result, &entry_text, &entry_label);
-    if let Ok(reporter) = leek_session::reporter_for(project, color.into(), format.into()) {
-        return reporter.emit(diagnostics, &sources);
-    }
-    for d in diagnostics {
-        eprintln!("{}: {}", d.severity, d.message);
-    }
-    diagnostics
-        .iter()
-        .any(|d| d.severity == leek_diagnostics::Severity::Error)
-}
-
 /// AOT-compile the project to a standalone native executable. The output path
 /// is `--out-dir` if given, else `[backend.native].out_dir`, else
 /// `[backend.native].out`, else `<project root>/<project name>`.
 fn emit_native(
     project: &Project,
-    result: &leek_pipeline::Run<'_>,
+    compiled: &Compilation<'_>,
     args: &Build,
     quiet: bool,
 ) -> Result<ExitCode> {
-    let hir = result
-        .get::<HirArtifact>()
+    let hir = compiled
+        .hir()
         .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
-    let input = result.input();
+    let input = compiled.input();
     let settings = project.manifest.backend.native.clone().unwrap_or_default();
     let out = native_out_path(project, args.out_dir.as_deref(), &settings);
     // `out` may name a path in a directory that does not exist yet
@@ -170,7 +117,7 @@ fn emit_native(
         // A standalone binary runs unbounded — no per-turn op budget.
         .with_op_limit(u64::MAX);
     crate::util::apply_native_settings(&mut opts, &project.manifest);
-    leek_backend_native::aot::compile_to_executable(hir.0.as_ref(), &opts, &out, quiet)
+    leek_backend_native::aot::compile_to_executable(hir, &opts, &out, quiet)
         .with_context(|| format!("compiling native executable to {}", out.display()))?;
     Ok(ExitCode::SUCCESS)
 }
@@ -197,17 +144,15 @@ fn native_out_path(
 /// else `<build>/leekscript`.
 fn emit_leekscript(
     project: &Project,
-    result: &leek_pipeline::Run<'_>,
+    compiled: &Compilation<'_>,
     version: leek_syntax::Version,
     args: &Build,
     quiet: bool,
-    color: ColorWhen,
-    format: MessageFormat,
 ) -> Result<ExitCode> {
-    let hir = result
-        .get::<HirArtifact>()
+    let hir = compiled
+        .hir()
         .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
-    let input = result.input();
+    let input = compiled.input();
 
     let mut opts = if args.compact {
         leek_backend_leekscript::Options::compact(version)
@@ -218,11 +163,11 @@ fn emit_leekscript(
         .with_optimize(args.optimize)
         .with_user_source(input.source);
 
-    let out = leek_backend_leekscript::emit(hir.0.as_ref(), &opts);
+    let out = leek_backend_leekscript::emit(hir, &opts);
     // A semantic this backend cannot carry across is a warning: the emitted
     // program is valid, it just means slightly less than the input did. It
     // still has to be *said* — dropping it silently is #154.
-    if report_backend_diagnostics(project, result, &out.diagnostics, color, format) {
+    if compiled.report_backend(&out.diagnostics) {
         return Ok(ExitCode::from(1));
     }
 
@@ -254,16 +199,14 @@ fn emit_leekscript(
 
 fn emit_java(
     project: &Project,
-    result: &leek_pipeline::Run<'_>,
+    compiled: &Compilation<'_>,
     version: leek_syntax::Version,
     args: &Build,
     quiet: bool,
     environment: Option<&std::sync::Arc<dyn leek_environment::EnvironmentCatalog>>,
-    color: ColorWhen,
-    format: MessageFormat,
 ) -> Result<ExitCode> {
-    let hir = result
-        .get::<HirArtifact>()
+    let hir = compiled
+        .hir()
         .ok_or_else(|| anyhow::anyhow!("lowering produced no HIR"))?;
 
     let settings = project.manifest.backend.java.clone().unwrap_or_default();
@@ -279,7 +222,7 @@ fn emit_java(
         opts = opts.with_environment(env.clone());
     }
 
-    let out = leek_backend_java::emit(hir.0.as_ref(), &opts);
+    let out = leek_backend_java::emit(hir, &opts);
     // A construct the emitter has no shape for produces Java that javac
     // rejects — or, worse, that compiles to something else. Say so against
     // the Leek source and stop, instead of writing the file and reporting
@@ -290,7 +233,7 @@ fn emit_java(
     // `out.has_errors()`: a project that has decided it knows better can
     // demote `E0610` through the manifest's `[lint]` table, and then the
     // build proceeds as it did before.
-    if report_backend_diagnostics(project, result, &out.diagnostics, color, format) {
+    if compiled.report_backend(&out.diagnostics) {
         return Ok(ExitCode::from(1));
     }
 

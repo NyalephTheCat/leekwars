@@ -9,6 +9,10 @@ description = "Compiler session: pre-built pipeline recipes plus the driver that
 [dependencies]
 leek-complexity  = { workspace = true, features = ["salsa"] }
 leek-config      = { workspace = true }
+# The query façade: what `Compilation::db_handle` hands a tracked query.
+# A peer inside `crates/db`, and the edge only goes this way — `leek-db`
+# knows nothing about sessions.
+leek-db          = { workspace = true }
 leek-diagnostics = { workspace = true }
 leek-environment = { workspace = true }
 leek-fmt         = { workspace = true, features = ["salsa"] }
@@ -24,7 +28,6 @@ leek-resolver    = { workspace = true }
 leek-span        = { workspace = true }
 leek-syntax      = { workspace = true }
 leek-types       = { workspace = true }
-anyhow           = { workspace = true }
 
 [dev-dependencies]
 # Tests build a `Project` from a manifest string; the driver itself only
