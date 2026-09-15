@@ -12,6 +12,7 @@ use crate::effect::{
     MODIFIER_MULTIPLIED_BY_TARGETS, MODIFIER_NOT_REPLACEABLE, MODIFIER_ON_CASTER, TARGET_ALLIES,
     TARGET_CASTER, TARGET_ENEMIES, TARGET_NON_SUMMONS,
 };
+use crate::state::{CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE};
 use crate::{ActiveEffect, Effect, EffectKind, GameHost, chips, weapons};
 
 /// Return codes for action functions (`useWeapon`, `useChip`), mirroring the
@@ -23,12 +24,6 @@ pub const USE_INVALID_TARGET: i64 = -1;
 pub const USE_NOT_ENOUGH_TP: i64 = -2;
 pub const USE_INVALID_POSITION: i64 = -3;
 pub const USE_TOO_MANY_USES: i64 = -4;
-
-// Cell contents (`CELL_EMPTY`, `CELL_ENTITY`, `CELL_OBSTACLE`, `CELL_PLAYER`).
-// Generated from the same table the language side resolves and folds, so the
-// engine's `getCellContent` answers and an AI's `CELL_*` constants cannot
-// drift apart — see tools/game-builtin-extract.sh.
-include!("consts_gen.rs");
 
 /// Dispatch a leek-wars fight function — the game-side analogue of
 /// `leek_runtime::call_builtin`. Returns [`Value::Null`] for an unknown or
@@ -891,7 +886,8 @@ fn int_array(ids: Vec<i64>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, CELL_PLAYER, call_game_builtin};
+    use super::call_game_builtin;
+    use crate::state::{CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, CELL_PLAYER};
     use crate::{Entity, Fight};
     use leek_runtime::Value;
 

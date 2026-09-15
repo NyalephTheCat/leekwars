@@ -13,7 +13,8 @@ use leek_runtime::Value;
 
 use crate::attack::{EffectType, EntityState};
 use crate::state::{
-    ChipSpec, ERROR_HELP_PAGE_LINK, FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
+    CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, ChipSpec, ERROR_HELP_PAGE_LINK,
+    FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
     FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED, FARMER_LOG_LOADOUT_NOT_FOUND,
     FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, Fighter,
     LOG_SSTANDARD, LOG_SWARNING, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_DAMAGE_RETURN,
@@ -63,6 +64,48 @@ pub fn call_official_builtin(
         // ---- FightClass ----
         "getTurn" => Value::Int(i64::from(state.order.turn())),
         "getNearestEnemy" => Value::Int(nearest_enemy(state, current)),
+        // `FightClass.getNearestAlly` — `getNearestEnemy`'s twin, over the
+        // caller's own team and skipping the caller itself. Same squared
+        // Euclidean metric, same first-seen tie rule, same `-1` sentinel.
+        "getNearestAlly" => Value::Int(nearest_ally(state, current)),
+        // ---- FightClass (entity lists) ----
+        // Every list here is built by `State.getAllEntities` /
+        // `getTeamEntities` / `getEnemiesEntities`, which iterate the teams by
+        // index and each `Team.mEntities` in insertion order — so a summon
+        // comes right after the entity that summoned it (`State.summonEntity`
+        // appends to its owner's team) and summons are *in* every one of these
+        // lists.
+        //
+        // `getEnemies`/`getAllies` and their counts pass `get_deads = true`, so
+        // dead entities are included; and Java filters the caller out of
+        // neither, so `getAllies()` contains the caller. (`getAliveAllies`,
+        // `getDeadAllies`, `getAliveEnemies` and `getDeadEnemies` are the
+        // filtered variants; they are a later slice.)
+        "getEnemies" => {
+            let my_team = state.fighters[current].team;
+            int_array(team_members(state, true, |t| t != my_team).into_iter())
+        }
+        "getAllies" => {
+            let my_team = state.fighters[current].team;
+            int_array(team_members(state, true, |t| t == my_team).into_iter())
+        }
+        "getEnemiesCount" => {
+            let my_team = state.fighters[current].team;
+            Value::Int(team_members(state, true, |t| t != my_team).len() as i64)
+        }
+        "getAlliesCount" => {
+            let my_team = state.fighters[current].team;
+            Value::Int(team_members(state, true, |t| t == my_team).len() as i64)
+        }
+        // Neither of these two is a reference-engine function: `FightFunctions`
+        // registers no `getEntities` and no `getAliveEntities`, and neither
+        // appears in `leekwars.library`. `getEntities` *is* in this toolchain's
+        // resolver catalog and `builtins.rs` answers both, so — like
+        // `getMaxLife` and `getTeam` below — they are served here with exactly
+        // the meaning that engine gives them (`State.getAllEntities(true)` and
+        // `getAllEntities(false)`), keeping the two engines in agreement.
+        "getEntities" => int_array(team_members(state, true, |_| true).into_iter()),
+        "getAliveEntities" => int_array(team_members(state, false, |_| true).into_iter()),
         "moveToward" => {
             // moveToward(leek_id[, pm_to_use]) — pm defaults to -1 (all MP).
             if deny_during_hook(state, current, "moveToward") {
@@ -122,6 +165,84 @@ pub fn call_official_builtin(
                 .get_cell(int_arg(0) as i32)
                 .is_none_or(|c| !state.map.cells[c].walkable),
         ),
+        // `Map.getObstacles()` — every non-walkable cell in cell-id order,
+        // lazily cached on the map (hence the `&mut`).
+        "getObstacles" => {
+            let obstacles: Vec<i64> = state.map.obstacles().iter().map(|&c| c as i64).collect();
+            int_array(obstacles.into_iter())
+        }
+        // `!walkable ? 2 : (player != null ? 1 : 0)`, and `-1` — not null —
+        // for a cell that doesn't exist. Keep the order: an obstacle answers
+        // `CELL_OBSTACLE` whatever else the map says about it, and
+        // `CELL_ENTITY` and its deprecated `CELL_PLAYER` alias are both 1.
+        "getCellContent" => state
+            .map
+            .get_cell(int_arg(0) as i32)
+            .map_or(Value::Int(-1), |c| {
+                Value::Int(if !state.map.cells[c].walkable {
+                    CELL_OBSTACLE
+                } else if state.entity_on(c).is_some() {
+                    CELL_ENTITY
+                } else {
+                    CELL_EMPTY
+                })
+            }),
+        // The four two-cell functions all answer their own sentinel when
+        // either argument is off the board: `-1` for the two distances,
+        // `false` for `isOnSameLine`, `null` for `lineOfSight`.
+        "getCellDistance" => Value::Int(
+            cell_pair(state, int_arg(0), int_arg(1))
+                .map_or(-1, |(a, b)| i64::from(state.map.get_cell_distance(a, b))),
+        ),
+        // `Map.getDistance` is `sqrt(getDistance2(..))` — a `double`, and the
+        // off-board sentinel is a `double` -1 too.
+        "getDistance" => Value::Real(
+            cell_pair(state, int_arg(0), int_arg(1))
+                .map_or(-1.0, |(a, b)| state.map.get_euclidean_distance(a, b)),
+        ),
+        "isOnSameLine" => Value::Bool(
+            cell_pair(state, int_arg(0), int_arg(1)).is_some_and(|(a, b)| state.map.in_line(a, b)),
+        ),
+        // `verifyLoS(s, e, null, cells)` — a *null* attack is `needLos = true`
+        // there, so the LOS is always actually traced. The ignored-cell list
+        // is the interesting half; see [`los_ignored_cells`].
+        "lineOfSight" => match cell_pair(state, int_arg(0), int_arg(1)) {
+            Some((a, b)) => {
+                let ignored = los_ignored_cells(state, current, args.get(2));
+                Value::Bool(state.map.verify_los(a, b, true, &ignored))
+            }
+            None => Value::Null,
+        },
+        // `getPath`/`getPathLength` share a shape: null for an off-board
+        // endpoint, the empty answer when the two cells are the same (checked
+        // *before* the A*, which reports no path at all for `start == end`),
+        // then `Map.getPathBetween` — null again when the target is walled off.
+        // Java also charges `distance² × 20` operations here; this dispatcher
+        // models no operation budget at all, so that is not ported.
+        "getPath" => match cell_pair(state, int_arg(0), int_arg(1)) {
+            None => Value::Null,
+            Some((a, b)) if a == b => int_array(std::iter::empty()),
+            Some((a, b)) => {
+                let ignored = path_ignored_cells(state, args.get(2));
+                state
+                    .map
+                    .get_path_between(a, b, &ignored)
+                    .map_or(Value::Null, |path| {
+                        int_array(path.into_iter().map(|c| c as i64))
+                    })
+            }
+        },
+        "getPathLength" => match cell_pair(state, int_arg(0), int_arg(1)) {
+            None => Value::Null,
+            Some((a, b)) if a == b => Value::Int(0),
+            Some((a, b)) => {
+                let ignored = path_ignored_cells(state, args.get(2));
+                state
+                    .map
+                    .get_path_between(a, b, &ignored)
+                    .map_or(Value::Null, |path| Value::Int(path.len() as i64))
+            }
+        },
 
         // ---- EntityClass ----
         "getCell" => get_cell(state, current, args.first()),
@@ -429,6 +550,142 @@ fn nearest_enemy(state: &State, current: usize) -> i64 {
         }
     }
     nearest
+}
+
+/// `FightClass.getNearestAlly` — [`nearest_enemy`] over the caller's own team,
+/// skipping the caller itself (`l == ai.getEntity()`). Same squared Euclidean
+/// metric, same `d < dist || dist == -1` first-seen tie rule, same `-1`.
+#[allow(clippy::cast_possible_wrap)]
+fn nearest_ally(state: &State, current: usize) -> i64 {
+    let Some(my_cell) = state.fighters[current].cell else {
+        return -1;
+    };
+    let my_team = state.fighters[current].team;
+    let mut dist = -1;
+    let mut nearest = -1;
+    for &fid in &state.teams[my_team].fighters {
+        if fid == current {
+            continue;
+        }
+        let f = &state.fighters[fid];
+        if f.is_dead() {
+            continue;
+        }
+        let Some(cell) = f.cell else { continue };
+        let d = state.map.get_distance_sq(my_cell, cell);
+        if d < dist || dist == -1 {
+            dist = d;
+            nearest = fid as i64;
+        }
+    }
+    nearest
+}
+
+/// `State.getAllEntities` / `getTeamEntities` / `getEnemiesEntities` — the fids
+/// of every entity on a team `keep` selects.
+///
+/// The order is the reference engine's: teams by index, then each team's
+/// `mEntities` in insertion order. Summons are in these lists (Java's
+/// `State.summonEntity` does `teams.get(team).addEntity(invoc)`), right after
+/// the entity that summoned them. `with_dead` is Java's `get_deads` flag.
+#[allow(clippy::cast_possible_wrap)]
+fn team_members(state: &State, with_dead: bool, keep: impl Fn(usize) -> bool) -> Vec<i64> {
+    let mut fids = Vec::new();
+    for (t, team) in state.teams.iter().enumerate() {
+        if !keep(t) {
+            continue;
+        }
+        for &fid in &team.fighters {
+            if with_dead || !state.fighters[fid].is_dead() {
+                fids.push(fid as i64);
+            }
+        }
+    }
+    fids
+}
+
+/// The two cells a `FieldClass` function's arguments name, or `None` when
+/// either is off the board — the branch every one of them takes to its own
+/// sentinel. The `as i32` is the file-wide `(int)` narrowing documented on
+/// [`call_official_builtin`]; `Map::get_cell` range-checks what comes out.
+#[allow(clippy::cast_possible_truncation)]
+fn cell_pair(state: &State, a: i64, b: i64) -> Option<(usize, usize)> {
+    Some((state.map.get_cell(a as i32)?, state.map.get_cell(b as i32)?))
+}
+
+/// Java's `value instanceof Number` over a LeekScript value — what the
+/// `lineOfSight` and `getPath` ignore arguments branch on. `BigIntegerValue`
+/// extends `Number`, so a big integer takes the numeric branch too.
+fn is_number(v: &Value) -> bool {
+    matches!(v, Value::Int(_) | Value::Real(_) | Value::BigInt(_))
+}
+
+/// `ai.getFight().getEntity(ai.integer(v))`, then its cell. `ai.integer` is a
+/// Java `(int)` cast, so the same truncation as everywhere else in this file.
+#[allow(clippy::cast_possible_truncation)]
+fn ignored_entity_cell(state: &State, id: i64) -> Option<usize> {
+    let fid = usize::try_from(id as i32).ok()?;
+    state.fighters.get(fid)?.cell
+}
+
+/// `FieldClass.lineOfSight`'s ignored-cell list.
+///
+/// The three Java branches are deliberately **not** symmetric, and the
+/// asymmetry is observable:
+///
+/// * a *number* is one **entity** id, and its cell is the whole list — the
+///   caller's own cell is NOT ignored on this path;
+/// * an *array* is a list of **entity** ids, each resolved to its cell, and
+///   the caller's own cell is prepended;
+/// * anything else — including the 2-argument form, which delegates with
+///   `ignore = null` — ignores exactly the caller's own cell.
+///
+/// Java's last branch adds `ai.getEntity().getCell()` unconditionally, so a
+/// cell-less (dead) caller pushes a `null` that `List.contains` can never
+/// match; skipping it here is the same answer.
+fn los_ignored_cells(state: &State, current: usize, arg: Option<&Value>) -> Vec<usize> {
+    let mut cells = Vec::new();
+    match arg {
+        Some(v) if is_number(v) => {
+            cells.extend(ignored_entity_cell(state, v.to_long()));
+        }
+        Some(Value::Array(a)) => {
+            cells.extend(state.fighters[current].cell);
+            for v in a.borrow().iter() {
+                if is_number(v) {
+                    cells.extend(ignored_entity_cell(state, v.to_long()));
+                }
+            }
+        }
+        _ => cells.extend(state.fighters[current].cell),
+    }
+    cells
+}
+
+/// `FieldClass.getPath`/`getPathLength`'s ignored-cell list — and note that it
+/// reads its array the *other* way round from [`los_ignored_cells`]: despite
+/// the `leeks_to_ignore` parameter name, `EntityAI.putCells` resolves each
+/// element as a **cell** id, dropping the ones that aren't on the board, and
+/// it never adds the caller's own cell.
+///
+/// The number form is the deprecated `getPath(start, end, leek_to_ignore)`
+/// overload, which does take an entity. Java also emits a free-text
+/// `AILog.WARNING` there; this crate has no free-text AI-log channel (only
+/// keyed system logs), so that one log line is unported — the returned path is
+/// the same.
+#[allow(clippy::cast_possible_truncation)]
+fn path_ignored_cells(state: &State, arg: Option<&Value>) -> Vec<usize> {
+    match arg {
+        Some(Value::Array(a)) => a
+            .borrow()
+            .iter()
+            .filter_map(|v| state.map.get_cell(v.to_long() as i32))
+            .collect(),
+        Some(v) if is_number(v) => ignored_entity_cell(state, v.to_long())
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// `EntityClass.setWeapon` — template must exist and be owned; then
@@ -763,11 +1020,12 @@ fn use_weapon(state: &mut State, current: usize, leek_id: i64) -> i64 {
 mod tests {
     use leek_runtime::Value;
 
-    use super::call_official_builtin;
+    use super::{call_official_builtin, int_array};
     use crate::state::{
-        Fighter, HookPhase, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_DAMAGE_RETURN, STAT_LIFE,
-        STAT_MAGIC, STAT_MP, STAT_POWER, STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE,
-        STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats,
+        CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, Fighter, HookPhase, STAT_ABSOLUTE_SHIELD,
+        STAT_AGILITY, STAT_DAMAGE_RETURN, STAT_LIFE, STAT_MAGIC, STAT_MP, STAT_POWER,
+        STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM,
+        State, Stats,
     };
 
     /// Every extreme an AI can hand a builtin. LeekScript integers are `i64`,
@@ -839,6 +1097,21 @@ mod tests {
             "summon",
             "getCellToUseChip",
             "isStatic",
+            "getEnemies",
+            "getAllies",
+            "getEnemiesCount",
+            "getAlliesCount",
+            "getEntities",
+            "getAliveEntities",
+            "getNearestAlly",
+            "getObstacles",
+            "getCellContent",
+            "getCellDistance",
+            "getDistance",
+            "isOnSameLine",
+            "lineOfSight",
+            "getPath",
+            "getPathLength",
             "getLife",
             "getTotalLife",
             "getMaxLife",
@@ -1293,6 +1566,425 @@ mod tests {
             &call(&mut state, "isDead", &[Value::Int(99)]),
             &Value::Bool(false),
             "isDead(99) is false too — a missing entity is not a dead one",
+        );
+    }
+
+    // ── Entity lists (FightClass) ────────────────────────────────────────────
+
+    /// An index (fid or cell id) as the argument a builtin takes.
+    fn id(n: usize) -> Value {
+        Value::Int(i64::try_from(n).expect("an index fits in i64"))
+    }
+
+    /// Two teams of unequal size, filled **alternately** so that fid order and
+    /// team-list order disagree: team 0 is `[0, 2, 4]` and team 1 is `[1, 3]`,
+    /// while the fighter arena is `0, 1, 2, 3, 4`. A list built by walking
+    /// `state.fighters` instead of `state.teams` comes out in the wrong order
+    /// and fails here.
+    ///
+    /// Fid 2 is a dead ally (the `get_deads` flag is what decides whether it
+    /// shows up), fid 3 is the enemy's summon (summons are in every one of
+    /// these lists) and fid 4 is a live ally standing next to the caller.
+    fn a_team_fight() -> State {
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, 100);
+        stats.set(STAT_TP, 10);
+        stats.set(STAT_MP, 5);
+
+        let mut state = State::new(42);
+        let me = state.add_entity(0, Fighter::new(0, 1, "mine".into(), 0, stats.clone()));
+        let enemy = state.add_entity(1, Fighter::new(0, 2, "theirs".into(), 1, stats.clone()));
+        let dead_ally = state.add_entity(0, Fighter::new(0, 3, "ghost".into(), 0, stats.clone()));
+        let summon = state.add_entity(1, Fighter::new(0, 4, "bulb".into(), 1, stats.clone()));
+        let ally = state.add_entity(0, Fighter::new(0, 5, "friend".into(), 0, stats));
+
+        state.place_entity(me, 306);
+        state.place_entity(enemy, 300);
+        state.place_entity(dead_ally, 0);
+        state.place_entity(summon, 307);
+        state.place_entity(ally, 289);
+
+        state.fighters[dead_ally].life = 0;
+        state.fighters[summon].summoner = Some(enemy);
+        state
+    }
+
+    /// The four AI-visible lists, and the two resolver-only names, all come out
+    /// in `State.getAllEntities` order — teams by index, then each team's
+    /// members in insertion order.
+    ///
+    /// The three facts this pins that are easy to get wrong, all read off
+    /// `FightClass.java`: `getAllies`/`getEnemies` pass `get_deads = true`, so
+    /// the dead ally is in the list; neither filters the caller out, so
+    /// `getAllies()` contains the caller itself; and summons are ordinary team
+    /// members, so the enemy bulb is an enemy.
+    #[test]
+    fn entity_lists_follow_the_java_team_order() {
+        let mut state = a_team_fight();
+        assert_eq!(
+            int_vec(&call(&mut state, "getAllies", &[])),
+            vec![0, 2, 4],
+            "getAllies() is team 0 with the dead ally AND the caller in it"
+        );
+        assert_eq!(
+            int_vec(&call(&mut state, "getEnemies", &[])),
+            vec![1, 3],
+            "getEnemies() is team 1, the summon included"
+        );
+        assert_value(
+            &call(&mut state, "getAlliesCount", &[]),
+            &Value::Int(3),
+            "getAlliesCount()",
+        );
+        assert_value(
+            &call(&mut state, "getEnemiesCount", &[]),
+            &Value::Int(2),
+            "getEnemiesCount()",
+        );
+        // Teams first, arena order second: `[0, 2, 4]` then `[1, 3]`.
+        assert_eq!(
+            int_vec(&call(&mut state, "getEntities", &[])),
+            vec![0, 2, 4, 1, 3],
+            "getEntities() is getAllEntities(true)"
+        );
+        assert_eq!(
+            int_vec(&call(&mut state, "getAliveEntities", &[])),
+            vec![0, 4, 1, 3],
+            "getAliveEntities() is getAllEntities(false) — fid 2 is dead"
+        );
+        // And the same lists read from the enemy's seat are the mirror image,
+        // so "ally" isn't hard-coded to team 0.
+        assert_eq!(
+            int_vec(&call_official_builtin(&mut state, 1, "getAllies", &[])),
+            vec![1, 3],
+            "getAllies() as fighter 1"
+        );
+        assert_eq!(
+            int_vec(&call_official_builtin(&mut state, 1, "getEnemies", &[])),
+            vec![0, 2, 4],
+            "getEnemies() as fighter 1"
+        );
+    }
+
+    /// `getNearestAlly` is `getNearestEnemy`'s twin: same squared-Euclidean
+    /// metric, same `-1` sentinel — but over the caller's own team, skipping
+    /// the caller and every dead member.
+    #[test]
+    fn get_nearest_ally_skips_the_caller_and_the_dead() {
+        let mut state = a_team_fight();
+        // Fid 4 stands on 289, a neighbour of the caller's 306; fid 2 is a
+        // corner away but dead, and fid 0 is the caller.
+        assert_value(
+            &call(&mut state, "getNearestAlly", &[]),
+            &Value::Int(4),
+            "getNearestAlly()",
+        );
+        // Kill the only live ally and the answer is the sentinel, not the
+        // caller and not the corpse.
+        state.fighters[4].life = 0;
+        assert_value(
+            &call(&mut state, "getNearestAlly", &[]),
+            &Value::Int(-1),
+            "getNearestAlly() with no live ally left",
+        );
+        // A lone leek has no ally either.
+        let mut alone = one_leek();
+        assert_value(
+            &call_official_builtin(&mut alone, 0, "getNearestAlly", &[]),
+            &Value::Int(-1),
+            "getNearestAlly() with a one-entity team",
+        );
+    }
+
+    // ── Field geometry (FieldClass) ──────────────────────────────────────────
+
+    /// A 1v1 on a **generated** board — `State::init()` draws the obstacle
+    /// count and runs `Map::generate_map`, exactly as a real fight does — so
+    /// the pathfinding and obstacle tests run against a real board rather than
+    /// an empty grid.
+    fn generated_fight() -> State {
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, 100);
+        stats.set(STAT_TP, 10);
+        stats.set(STAT_MP, 5);
+        let mut state = State::new(7);
+        state.add_entity(0, Fighter::new(0, 1, "mine".into(), 0, stats.clone()));
+        state.add_entity(1, Fighter::new(0, 2, "theirs".into(), 1, stats));
+        state.init();
+        state
+    }
+
+    /// `getObstacles` is `Map.getObstacles()` — every non-walkable cell, in
+    /// cell-id order.
+    #[test]
+    fn get_obstacles_lists_every_unwalkable_cell() {
+        let mut state = generated_fight();
+        let want: Vec<i64> = state
+            .map
+            .cells
+            .iter()
+            .filter(|c| !c.walkable)
+            .map(|c| i64::try_from(c.id).expect("a cell id fits in i64"))
+            .collect();
+        assert!(!want.is_empty(), "a generated board has obstacles on it");
+        assert_eq!(int_vec(&call(&mut state, "getObstacles", &[])), want);
+    }
+
+    /// `!walkable ? CELL_OBSTACLE : (entity ? CELL_ENTITY : CELL_EMPTY)`, and
+    /// `-1` — a plain integer, not `null` — for a cell that isn't on the board.
+    #[test]
+    fn get_cell_content_answers_obstacle_entity_or_empty() {
+        let mut state = generated_fight();
+        let obstacle = state
+            .map
+            .cells
+            .iter()
+            .find(|c| !c.walkable)
+            .expect("a generated board has an obstacle")
+            .id;
+        let occupied = state.fighters[0].cell.expect("init places both leeks");
+        let empty = state
+            .map
+            .cells
+            .iter()
+            .find(|c| c.walkable && state.entity_on(c.id).is_none())
+            .expect("a generated board has a free cell")
+            .id;
+
+        assert_value(
+            &call(&mut state, "getCellContent", &[id(obstacle)]),
+            &Value::Int(CELL_OBSTACLE),
+            "getCellContent(an obstacle)",
+        );
+        assert_value(
+            &call(&mut state, "getCellContent", &[id(occupied)]),
+            &Value::Int(CELL_ENTITY),
+            "getCellContent(an occupied cell)",
+        );
+        assert_value(
+            &call(&mut state, "getCellContent", &[id(empty)]),
+            &Value::Int(CELL_EMPTY),
+            "getCellContent(a free cell)",
+        );
+        for off_board in [-1_i64, 613, 10_000] {
+            assert_value(
+                &call(&mut state, "getCellContent", &[Value::Int(off_board)]),
+                &Value::Int(-1),
+                &format!("getCellContent({off_board})"),
+            );
+        }
+    }
+
+    /// The two-cell measurements: `getCellDistance` is the Manhattan
+    /// `Pathfinding.getCaseDistance`, `getDistance` the Euclidean
+    /// `Map.getDistance`, `isOnSameLine` a shared-row-or-column test.
+    #[test]
+    fn two_cell_measurements_use_the_map_metrics() {
+        let mut state = one_leek();
+        // 288 = (16, 0), 306 = (17, 0), 324 = (18, 0) — one board row.
+        assert_value(
+            &call(&mut state, "getCellDistance", &[id(288), id(324)]),
+            &Value::Int(2),
+            "getCellDistance(288, 324)",
+        );
+        assert_value(
+            &call(&mut state, "isOnSameLine", &[id(288), id(324)]),
+            &Value::Bool(true),
+            "isOnSameLine(288, 324)",
+        );
+        assert_value(
+            &call(&mut state, "isOnSameLine", &[id(288), id(289)]),
+            &Value::Bool(false),
+            "isOnSameLine(288, 289) — neither row nor column is shared",
+        );
+        let got = call(&mut state, "getDistance", &[id(288), id(324)]);
+        let Value::Real(d) = got else {
+            panic!("getDistance must answer a real, got {got:?}");
+        };
+        assert!(
+            (d - 2.0).abs() < 1e-9,
+            "getDistance(288, 324) = {d}, expected 2"
+        );
+    }
+
+    /// Off-board arguments take each two-cell function to its own sentinel:
+    /// `-1` for the distances, `false` for `isOnSameLine`, `null` for
+    /// `lineOfSight`, `getPath` and `getPathLength`.
+    #[test]
+    fn off_board_cells_take_each_field_function_to_its_sentinel() {
+        let mut state = one_leek();
+        for (a, b) in [(613_i64, 306_i64), (306, 613), (-1, -1)] {
+            let args = [Value::Int(a), Value::Int(b)];
+            assert_value(
+                &call(&mut state, "getCellDistance", &args),
+                &Value::Int(-1),
+                &format!("getCellDistance({a}, {b})"),
+            );
+            let got = call(&mut state, "getDistance", &args);
+            let Value::Real(d) = got else {
+                panic!("getDistance must answer a real, got {got:?}");
+            };
+            assert!(
+                (d + 1.0).abs() < 1e-9,
+                "getDistance({a}, {b}) = {d}, expected -1"
+            );
+            assert_value(
+                &call(&mut state, "isOnSameLine", &args),
+                &Value::Bool(false),
+                &format!("isOnSameLine({a}, {b})"),
+            );
+            for name in ["lineOfSight", "getPath", "getPathLength"] {
+                assert_value(
+                    &call(&mut state, name, &args),
+                    &Value::Null,
+                    &format!("{name}({a}, {b})"),
+                );
+            }
+        }
+    }
+
+    /// `getPath` is the map's diamond A*, not a hand-rolled grid walk.
+    ///
+    /// The board here is **generated** — the same `Map::generate_map` a real
+    /// fight draws, obstacles and all — and the expectation is recomputed from
+    /// `Map::get_astar_path` rather than written out as a cell list, which on
+    /// an obstacle-free grid would prove nothing about which pathfinder ran.
+    #[test]
+    fn get_path_is_the_maps_a_star_on_a_generated_map() {
+        let mut state = generated_fight();
+        let start = state.fighters[0].cell.expect("init places both leeks");
+        let end = state.fighters[1].cell.expect("init places both leeks");
+        let want: Vec<i64> = state
+            .map
+            .get_astar_path(start, &[end], &[])
+            .expect("the generator only accepts connected boards")
+            .into_iter()
+            .map(|c| i64::try_from(c).expect("a cell id fits in i64"))
+            .collect();
+        // A straight-line walk would be `getCellDistance` steps; a real board
+        // makes the A* longer than that at least sometimes, and either way the
+        // path has to be the map's own.
+        assert!(want.len() > 1, "the two spawns are not adjacent");
+        assert_eq!(
+            int_vec(&call(&mut state, "getPath", &[id(start), id(end)])),
+            want,
+            "getPath(spawn, spawn) must be Map::get_astar_path"
+        );
+        assert_value(
+            &call(&mut state, "getPathLength", &[id(start), id(end)]),
+            &Value::Int(i64::try_from(want.len()).expect("a path length fits in i64")),
+            "getPathLength agrees with getPath",
+        );
+        // Same cell twice: the empty path and 0, decided *before* the A* (which
+        // reports no path at all when start == end).
+        assert_eq!(
+            int_vec(&call(&mut state, "getPath", &[id(start), id(start)])),
+            Vec::<i64>::new(),
+            "getPath(c, c) is the empty array, not null"
+        );
+        assert_value(
+            &call(&mut state, "getPathLength", &[id(start), id(start)]),
+            &Value::Int(0),
+            "getPathLength(c, c)",
+        );
+    }
+
+    /// The caller on 306 with the row 288–306–324 otherwise clear, and one
+    /// live enemy parked in the far corner (cell 0, which is not on that row).
+    /// Whether `lineOfSight(288, 324)` is true then turns entirely on whether
+    /// the caller's own cell is in the ignored list.
+    fn a_blocked_row() -> State {
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, 100);
+        stats.set(STAT_TP, 10);
+        stats.set(STAT_MP, 5);
+        let mut state = State::new(42);
+        let me = state.add_entity(0, Fighter::new(0, 1, "mine".into(), 0, stats.clone()));
+        let enemy = state.add_entity(1, Fighter::new(0, 2, "theirs".into(), 1, stats));
+        state.place_entity(me, 306);
+        state.place_entity(enemy, 0);
+        state
+    }
+
+    /// `lineOfSight`'s three ignore branches, which upstream deliberately does
+    /// **not** make symmetric (`FieldClass.lineOfSight`):
+    ///
+    /// * no third argument ignores the caller's own cell;
+    /// * a number is one entity id and ignores only *its* cell — the caller's
+    ///   own cell stays blocking, which is the surprising one;
+    /// * an array is a list of entity ids *plus* the caller's own cell.
+    #[test]
+    fn line_of_sight_ignores_the_caller_only_on_two_of_three_branches() {
+        let mut state = a_blocked_row();
+        assert_value(
+            &call(&mut state, "lineOfSight", &[id(288), id(324)]),
+            &Value::Bool(true),
+            "lineOfSight(288, 324) ignores the caller standing on 306",
+        );
+        assert_value(
+            &call(
+                &mut state,
+                "lineOfSight",
+                &[id(288), id(324), Value::Int(1)],
+            ),
+            &Value::Bool(false),
+            "lineOfSight(288, 324, enemy) ignores only the enemy, so 306 blocks",
+        );
+        let ignore_list = int_array(std::iter::once(1_i64));
+        assert_value(
+            &call(&mut state, "lineOfSight", &[id(288), id(324), ignore_list]),
+            &Value::Bool(true),
+            "lineOfSight(288, 324, [enemy]) ignores the caller as well",
+        );
+    }
+
+    /// `getPath`'s ignore argument reads the *other* way round from
+    /// `lineOfSight`'s: `EntityAI.putCells` resolves each array element as a
+    /// **cell** id, and the caller's own cell is never added.
+    #[test]
+    fn get_path_ignores_cells_where_line_of_sight_ignores_entities() {
+        let mut state = a_blocked_row();
+        // The caller occupies 306, the one cell between 288 and 324, so the
+        // plain A* has to detour.
+        let detour = int_vec(&call(&mut state, "getPath", &[id(288), id(324)]));
+        assert!(
+            detour.len() > 2,
+            "the caller on 306 must force a detour, got {detour:?}"
+        );
+        // Ignoring cell 306 opens the straight line: 306 then 324.
+        let ignore_cells = int_array(std::iter::once(306_i64));
+        assert_eq!(
+            int_vec(&call(
+                &mut state,
+                "getPath",
+                &[id(288), id(324), ignore_cells]
+            )),
+            vec![306, 324],
+            "getPath's array is cell ids"
+        );
+        // The array is NOT entity ids: `[0]` names cell 0 (the enemy's corner,
+        // nowhere near this row), so the detour is unchanged even though 0 is
+        // also the caller's fid.
+        let entity_shaped = int_array(std::iter::once(0_i64));
+        assert_eq!(
+            int_vec(&call(
+                &mut state,
+                "getPath",
+                &[id(288), id(324), entity_shaped],
+            )),
+            detour,
+            "getPath([0]) must ignore cell 0, not entity 0"
+        );
+        // The deprecated number form *is* an entity: fid 0 is the caller, whose
+        // cell is 306, so the straight line opens again.
+        assert_eq!(
+            int_vec(&call(
+                &mut state,
+                "getPath",
+                &[id(288), id(324), Value::Int(0)],
+            )),
+            vec![306, 324],
+            "getPath(a, b, entity) is the legacy leek_to_ignore overload"
         );
     }
 }
