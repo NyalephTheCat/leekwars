@@ -856,8 +856,10 @@ fn apply_effect(
 }
 
 /// The raw text of a `say` argument — a string's content (unquoted), or the
-/// display form of any other value.
-fn message_text(v: Option<&Value>) -> String {
+/// display form of any other value. Shared with
+/// [`crate::official_builtins`], whose `say` arm takes its message the same
+/// way (`ai.string(messageObject)`).
+pub(crate) fn message_text(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => (**s).clone(),
         Some(other) => other.to_string(),

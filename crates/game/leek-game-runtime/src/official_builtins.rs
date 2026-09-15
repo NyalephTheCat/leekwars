@@ -12,6 +12,7 @@
 use leek_runtime::Value;
 
 use crate::attack::{EffectType, EntityState};
+use crate::builtins::message_text;
 use crate::state::{
     CELL_EMPTY, CELL_ENTITY, CELL_OBSTACLE, ChipSpec, ERROR_HELP_PAGE_LINK,
     FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
@@ -123,6 +124,31 @@ pub fn call_official_builtin(
             }
             let pm = args.get(1).map_or(-1, Value::to_long);
             Value::Int(state.move_toward_cell(current, int_arg(0), pm))
+        }
+        "moveAwayFrom" => {
+            // moveAwayFrom(leek_id[, pm_to_use]) — pm defaults to -1 (all MP).
+            //
+            // Note the asymmetry with `moveToward` right above: that one
+            // charges `ai.ops(2000)` and this one charges nothing. The
+            // dispatcher has no ops accounting at all yet, so neither is
+            // modelled here — recorded so the gap is a known one rather than
+            // a transcription slip.
+            if deny_during_hook(state, current, "moveAwayFrom") {
+                return Value::Int(0);
+            }
+            let pm = args.get(1).map_or(-1, Value::to_long);
+            Value::Int(state.move_away_from(current, int_arg(0), pm))
+        }
+        "moveAwayFromCell" => {
+            // moveAwayFromCell(cell_id[, pm_to_use]) — pm defaults to -1
+            // (all MP); unlike `moveTowardCell` the reference's 1-arg
+            // overload passes `-1` rather than `getMP()`, which comes to the
+            // same thing after the clamp.
+            if deny_during_hook(state, current, "moveAwayFromCell") {
+                return Value::Int(0);
+            }
+            let pm = args.get(1).map_or(-1, Value::to_long);
+            Value::Int(state.move_away_from_cell(current, int_arg(0), pm))
         }
         "getWinner" => Value::Int(i64::from(state.win_team)),
         "setLoadout" => Value::Bool(set_loadout(state, current, args)),
@@ -420,6 +446,44 @@ pub fn call_official_builtin(
             Some(fid) => Value::Int(i64::from(state.fighters[fid].birth_turn)),
             None => Value::Null,
         },
+
+        // ---- EntityClass (communication) ----
+        // `say(message)` — 1 TP, at most `SAY_LIMIT_TURN` logged per turn.
+        // Deliberately *not* behind `deny_during_hook`: `EntityClass.say`
+        // carries no `denyDuringHook` call, so talking from `beforeFight()`
+        // or `afterFight()` is legal and logs normally.
+        //
+        // Java returns a real boolean here — `false` when the entity is out
+        // of TP or has already used its says for the turn — so this arm
+        // forwards `State::say`'s answer rather than the unconditional
+        // `true` `builtins.rs` gives.
+        "say" => Value::Bool(state.say(current, &message_text(args.first()))),
+
+        // ---- UtilClass (debug marks) ----
+        // `mark`, `markText` and `clearMarks` write to `ai.getLogs()` —
+        // `LeekLog.addCell`/`addCellText`/`addClearCells`, which land as
+        // `MARK`/`MARK_TEXT`/`CLEAR_CELLS` entries in the calling *farmer's*
+        // private debug-log stream, the same channel as `debug()`. They do
+        // NOT go through `Fight.log`, so no `Action` of any kind reaches the
+        // report and no fight transcript can observe them. (`show(cell)` is
+        // the one that logs `ActionShowCell` under the `showsTurn` cap; it is
+        // a different function and not part of this batch.)
+        //
+        // `State` models the farmer log only as the keyed system-log table
+        // (`add_system_log`), which has no room for a mark payload, so the
+        // payload stays unmodelled — as it already is in `builtins.rs`. What
+        // *is* ported is the return value, which an AI can branch on: a mark
+        // answers whether it had at least one real cell to mark.
+        "mark" => Value::Bool(marked_cell_count(state, args.first()) > 0),
+        // `markText` additionally accepts a `map<cell, text>`, and answers
+        // `true` for one unconditionally — even an empty map, whose `for`
+        // loop marks nothing and still falls through to `return true`.
+        "markText" => Value::Bool(match args.first() {
+            Some(Value::Map(_)) => true,
+            other => marked_cell_count(state, other) > 0,
+        }),
+        // `UtilClass.clearMarks` is declared `Type.VOID` and returns `null`.
+        "clearMarks" => Value::Null,
 
         _ => Value::Null,
     }
@@ -743,6 +807,29 @@ fn resolve_entity(state: &State, current: usize, arg: Option<&Value>) -> Option<
         Some(v) => usize::try_from(v.to_long())
             .ok()
             .filter(|&t| t < state.fighters.len()),
+    }
+}
+
+/// How many real board cells a `mark`/`markText` argument names —
+/// `UtilClass.mark`'s `cel` array, whose emptiness is the whole difference
+/// between the function's `true` and its `false`.
+///
+/// A number is one candidate (`ai.integer` narrows it with Java's `(int)`
+/// cast first, so an id outside `int` aliases rather than missing); an array
+/// contributes each of its elements that resolves, silently dropping the
+/// rest; anything else — a string, a boolean, `null`, a missing argument —
+/// is not a cell argument at all and contributes nothing.
+// `as i32` is `AI.integer`'s own `(int)` cast, the narrowing the fn doc
+// above describes; `Map::get_cell` range-checks whatever comes out of it.
+#[allow(clippy::cast_possible_truncation)]
+fn marked_cell_count(state: &State, arg: Option<&Value>) -> usize {
+    let resolves = |v: &Value| state.map.get_cell(v.to_long() as i32).is_some();
+    match arg {
+        // `cell instanceof Number` — `Long`, `Double` and `BigInteger` all
+        // are; `Boolean` is not.
+        Some(v @ (Value::Int(_) | Value::Real(_) | Value::BigInt(_))) => usize::from(resolves(v)),
+        Some(Value::Array(a)) => a.borrow().iter().filter(|v| resolves(v)).count(),
+        _ => 0,
     }
 }
 
@@ -1090,6 +1177,12 @@ mod tests {
             "getCell",
             "moveToward",
             "moveTowardCell",
+            "moveAwayFrom",
+            "moveAwayFromCell",
+            "say",
+            "mark",
+            "markText",
+            "clearMarks",
             "useChip",
             "useChipOnCell",
             "useWeapon",
@@ -1986,5 +2079,273 @@ mod tests {
             vec![306, 324],
             "getPath(a, b, entity) is the legacy leek_to_ignore overload"
         );
+    }
+
+    // ── moveAwayFrom / moveAwayFromCell (R4-07) ──────────────────────────
+
+    /// `one_leek` plus an enemy standing next to it, so the flee builtins
+    /// have something to run away from. Fighter 0 is on 306, fighter 1 on an
+    /// adjacent cell.
+    fn leek_and_chaser() -> State {
+        let mut state = one_leek();
+        let mut stats = Stats::default();
+        stats.set(STAT_LIFE, 100);
+        stats.set(STAT_TP, 10);
+        stats.set(STAT_MP, 5);
+        let chaser = state.add_entity(1, Fighter::new(0, 2, "chaser".into(), 1, stats));
+        let neighbour = state
+            .map
+            .cells_around(306)
+            .into_iter()
+            .flatten()
+            .next()
+            .expect("a mid-board cell has neighbours");
+        state.place_entity(chaser, neighbour);
+        state
+    }
+
+    /// The headline behaviour: `moveAwayFrom` puts distance between the
+    /// caster and the target, spends exactly the MP it reports, and logs the
+    /// move.
+    #[test]
+    fn move_away_from_increases_the_distance_and_charges_mp() {
+        let mut state = leek_and_chaser();
+        let target_cell = state.fighters[1].cell.expect("the chaser is placed");
+        let before = state.map.get_distance_sq(
+            state.fighters[0].cell.expect("the caster is placed"),
+            target_cell,
+        );
+        let mp_before = state.fighters[0].mp();
+
+        let moved = call_official_builtin(&mut state, 0, "moveAwayFrom", &[Value::Int(1)]);
+        let Value::Int(steps) = moved else {
+            panic!("moveAwayFrom answers an int, got {moved:?}");
+        };
+        assert!(
+            steps > 0,
+            "a leek with 5 MP on an open board can always flee"
+        );
+
+        let after = state.map.get_distance_sq(
+            state.fighters[0].cell.expect("the caster is still placed"),
+            target_cell,
+        );
+        assert!(
+            after > before,
+            "moveAwayFrom must strictly increase the squared distance: {before} -> {after}"
+        );
+        assert_eq!(
+            i64::from(mp_before - state.fighters[0].mp()),
+            steps,
+            "the MP spent is the value returned"
+        );
+        assert!(
+            state
+                .actions
+                .to_json()
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "the move is logged"
+        );
+    }
+
+    /// `moveAwayFromCell` flees a cell rather than an entity — including the
+    /// caster's own cell, which `moveTowardCell` refuses but this one
+    /// accepts (every neighbour is strictly further from it).
+    #[test]
+    fn move_away_from_cell_flees_even_its_own_cell() {
+        let mut state = one_leek();
+        let start = state.fighters[0].cell.expect("placed");
+        let start_id = i64::try_from(start).expect("a cell id fits in i64");
+        let moved =
+            call_official_builtin(&mut state, 0, "moveAwayFromCell", &[Value::Int(start_id)]);
+        let Value::Int(steps) = moved else {
+            panic!("moveAwayFromCell answers an int, got {moved:?}");
+        };
+        assert!(steps > 0, "fleeing your own cell is a legal request");
+        assert_ne!(
+            state.fighters[0].cell,
+            Some(start),
+            "the leek actually moved"
+        );
+    }
+
+    /// Both flee builtins are behind `deny_during_hook`, like their
+    /// `moveToward` twins: they answer 0 and spend nothing.
+    #[test]
+    fn move_away_is_denied_during_a_hook() {
+        for (name, arg) in [("moveAwayFrom", 1_i64), ("moveAwayFromCell", 0)] {
+            let mut state = leek_and_chaser();
+            state.hook_phase = HookPhase::BeforeFight;
+            let mp_before = state.fighters[0].mp();
+            let cell_before = state.fighters[0].cell;
+            let got = call_official_builtin(&mut state, 0, name, &[Value::Int(arg)]);
+            assert_value(&got, &Value::Int(0), name);
+            assert_eq!(state.fighters[0].mp(), mp_before, "{name} spent MP");
+            assert_eq!(state.fighters[0].cell, cell_before, "{name} moved the leek");
+        }
+    }
+
+    /// A dead target has no cell (`Map.removeEntity` nulls it), so there is
+    /// nothing to flee and no MP is spent.
+    #[test]
+    fn move_away_from_a_cell_less_target_does_nothing() {
+        let mut state = leek_and_chaser();
+        state.remove_entity_from_map(1);
+        let mp_before = state.fighters[0].mp();
+        let got = call_official_builtin(&mut state, 0, "moveAwayFrom", &[Value::Int(1)]);
+        assert_value(&got, &Value::Int(0), "moveAwayFrom(dead)");
+        assert_eq!(state.fighters[0].mp(), mp_before);
+    }
+
+    // ── say (R4-07) ──────────────────────────────────────────────────────
+
+    /// How many `[203, …]` say actions are in the report so far.
+    fn say_count(state: &State) -> usize {
+        state
+            .actions
+            .to_json()
+            .as_array()
+            .map(|actions| {
+                actions
+                    .iter()
+                    .filter(|a| a.get(0) == Some(&serde_json::json!(crate::actions::SAY)))
+                    .count()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A say past `SAY_LIMIT_TURN` is dropped — but it still costs its TP,
+    /// because `EntityClass.say` spends the TP *before* it tests the cap.
+    #[test]
+    fn a_third_say_in_one_turn_is_dropped_and_still_costs_tp() {
+        let mut state = one_leek();
+        let tp_before = state.fighters[0].tp();
+        for i in 0..2 {
+            let got = call_official_builtin(&mut state, 0, "say", &[rt_str("hello")]);
+            assert_value(&got, &Value::Bool(true), &format!("say #{i}"));
+        }
+        assert_eq!(say_count(&state), 2, "both says are logged");
+
+        let third = call_official_builtin(&mut state, 0, "say", &[rt_str("hello")]);
+        assert_value(&third, &Value::Bool(false), "the third say of a turn");
+        assert_eq!(say_count(&state), 2, "the third say logs nothing");
+        assert_eq!(
+            state.fighters[0].tp(),
+            tp_before - 3,
+            "all three says cost 1 TP, the dropped one included"
+        );
+
+        // The cap is per turn, so the counter reset lets the AI talk again.
+        state.fighters[0].end_turn();
+        let fourth = call_official_builtin(&mut state, 0, "say", &[rt_str("next turn")]);
+        assert_value(&fourth, &Value::Bool(true), "say after end_turn");
+        assert_eq!(say_count(&state), 3);
+    }
+
+    /// Out of TP, `say` answers false and logs nothing (the TP gate is
+    /// tested before anything else happens).
+    #[test]
+    fn say_without_tp_is_refused() {
+        let mut state = one_leek();
+        let tp = state.fighters[0].tp();
+        state.fighters[0].use_tp(tp);
+        let got = call_official_builtin(&mut state, 0, "say", &[rt_str("hello")]);
+        assert_value(&got, &Value::Bool(false), "say with 0 TP");
+        assert_eq!(say_count(&state), 0);
+        assert_eq!(
+            state.fighters[0].says_turn, 0,
+            "the cap counter is untouched"
+        );
+    }
+
+    /// `say` is NOT a combat action: `EntityClass.say` has no
+    /// `denyDuringHook`, so an AI can talk from `beforeFight()` and the
+    /// message reaches the report. That difference is what makes the hook
+    /// transcripts carry says at all.
+    #[test]
+    fn say_is_allowed_during_a_hook() {
+        for phase in [HookPhase::BeforeFight, HookPhase::AfterFight] {
+            let mut state = one_leek();
+            state.hook_phase = phase;
+            let got = call_official_builtin(&mut state, 0, "say", &[rt_str("hi from the hook")]);
+            assert_value(&got, &Value::Bool(true), &format!("say during {phase:?}"));
+            assert_eq!(say_count(&state), 1, "say during {phase:?} is logged");
+        }
+    }
+
+    /// A long message is cut to `SAY_LENGTH_LIMIT`, and a non-string
+    /// argument is stringified rather than refused.
+    #[test]
+    fn a_long_say_is_truncated_and_any_value_is_stringified() {
+        let mut state = one_leek();
+        let long = "x".repeat(250);
+        let _ = call_official_builtin(&mut state, 0, "say", &[rt_str(&long)]);
+        let _ = call_official_builtin(&mut state, 0, "say", &[Value::Int(42)]);
+        let actions = state.actions.to_json();
+        let actions = actions.as_array().expect("an action array");
+        assert_eq!(actions[0][1], serde_json::json!("x".repeat(100)));
+        assert_eq!(actions[1][1], serde_json::json!("42"));
+    }
+
+    // ── mark / markText / clearMarks (R4-07) ─────────────────────────────
+
+    /// The marks are farmer-log debug output, not report actions: nothing
+    /// they do reaches the action list. What an AI *can* observe is the
+    /// return value, and that tracks whether the argument named a real cell.
+    #[test]
+    fn marks_answer_by_cell_validity_and_log_no_action() {
+        let mut state = one_leek();
+        let array = |ids: &[i64]| int_array(ids.iter().copied());
+
+        for (arg, want) in [
+            (Value::Int(306), true),
+            (Value::Int(613), false), // one past the board
+            (Value::Int(-1), false),
+            (array(&[306, 307]), true),
+            (array(&[900, 901]), false), // no element resolves
+            (array(&[900, 306]), true),  // one does
+            (array(&[]), false),
+            (Value::Null, false),
+            (rt_str("306"), false), // a string is not `instanceof Number`
+            (Value::Bool(true), false),
+        ] {
+            let got = call_official_builtin(&mut state, 0, "mark", std::slice::from_ref(&arg));
+            assert_value(&got, &Value::Bool(want), &format!("mark({arg:?})"));
+        }
+
+        // `markText` takes the same cell arguments...
+        let got = call_official_builtin(&mut state, 0, "markText", &[Value::Int(306), rt_str("A")]);
+        assert_value(&got, &Value::Bool(true), "markText(306, text)");
+        let got = call_official_builtin(&mut state, 0, "markText", &[Value::Int(613), rt_str("A")]);
+        assert_value(&got, &Value::Bool(false), "markText(613, text)");
+
+        // ...and `clearMarks` is declared void, so it answers null.
+        let got = call_official_builtin(&mut state, 0, "clearMarks", &[]);
+        assert_value(&got, &Value::Null, "clearMarks()");
+
+        assert_eq!(
+            state.actions.to_json().as_array().map(Vec::len),
+            Some(0),
+            "no mark reaches the report"
+        );
+    }
+
+    /// A `map<cell, text>` is `markText`'s own overload and always answers
+    /// true — an empty one included, whose loop marks nothing and falls
+    /// through to `return true`.
+    #[test]
+    fn mark_text_accepts_a_map_unconditionally() {
+        let mut state = one_leek();
+        let empty_map = Value::Map(std::rc::Rc::new(std::cell::RefCell::new(
+            leek_runtime::MapData::default(),
+        )));
+        let got = call_official_builtin(&mut state, 0, "markText", &[empty_map]);
+        assert_value(&got, &Value::Bool(true), "markText(empty map)");
+    }
+
+    /// A LeekScript string argument.
+    fn rt_str(s: &str) -> Value {
+        Value::String(std::rc::Rc::new(s.to_string()))
     }
 }
