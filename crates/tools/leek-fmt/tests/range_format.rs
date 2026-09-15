@@ -314,12 +314,12 @@ fn the_edit_is_narrowed_to_the_changed_lines_of_a_long_file() {
     // change: forty formatted lines around three malformed ones.
     let mut src = String::new();
     for i in 0..20 {
-        writeln!(src, "var a{i} = {i};").unwrap();
+        let _ = writeln!(src, "var a{i} = {i};");
     }
     let selected = "var b   =1;\nfunction g( ) {\nreturn 2;\n}\n";
     src.push_str(selected);
     for i in 0..20 {
-        writeln!(src, "var c{i} = {i};").unwrap();
+        let _ = writeln!(src, "var c{i} = {i};");
     }
     let (s, e) = span_of(&src, selected);
     let (range, out) = fmt_range(&src, s, e).expect("an edit");
