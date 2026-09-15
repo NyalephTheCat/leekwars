@@ -205,6 +205,17 @@ impl Tx<'_, '_> {
     /// The declared-slot tag for `base.name`, when `base`'s class is known
     /// and declares a typed field of that name — what a write to it converts
     /// through.
+    /// The declared-slot tag of the *container* `base` names: its own
+    /// declared type, or — when the local is just the temp a global read
+    /// landed in — that global's.
+    pub(super) fn slot_base_tag(&self, base: LocalId) -> Option<i64> {
+        super::slot_tag(&self.mir_locals[base.0 as usize].ty).or_else(|| {
+            let name = self.global_locals.get(&base)?;
+            let g = self.program.globals.iter().find(|g| &g.name == name)?;
+            super::slot_tag(&g.ty)
+        })
+    }
+
     pub(super) fn field_slot_tag(&self, base: LocalId, name: &str) -> Option<i64> {
         receiver_class(
             self.mir_locals,

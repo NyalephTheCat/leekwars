@@ -116,6 +116,20 @@ impl FnLowerer<'_> {
         }
     }
 
+    /// The value a declaration with no initialiser stores, or `None` for one
+    /// that stays null.
+    ///
+    /// v1 is the whole exception: there a declaration is a box that starts
+    /// null whatever its type, which is why `Map m m['a'] = 7` indexes into
+    /// null and faults there and nowhere else. From v2 a typed slot is never
+    /// null and takes its type's own value.
+    fn declared_default(&self, ty: Option<&Type>) -> Option<Rvalue> {
+        if self.hir.version <= 1 {
+            return None;
+        }
+        ty.and_then(default_rvalue_for_type)
+    }
+
     pub(crate) fn lower_var_decl(&mut self, v: &VarDecl) {
         if v.is_global {
             // A top-level `global x = init` declaration: the
@@ -139,7 +153,7 @@ impl FnLowerer<'_> {
                 // (`ops(default, 1)` upstream) — the 1-op store applies
                 // with or without an explicit initializer.
                 self.push_stmt(Statement::Charge(1));
-                if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
+                if let Some(rv) = self.declared_default(v.ty.as_ref()) {
                     self.push_stmt(Statement::Assign(Place::Global(v.def, v.name.clone()), rv));
                 }
             }
@@ -216,7 +230,7 @@ impl FnLowerer<'_> {
             // (`ops(default, 1)` upstream) — the 1-op store applies with
             // or without an explicit initializer.
             self.push_stmt(Statement::Charge(1));
-            if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
+            if let Some(rv) = self.declared_default(v.ty.as_ref()) {
                 // Typed local with no initializer defaults to its type's
                 // value (container → empty, scalar → zero), matching the
                 // upstream "typed slots are never null" rule.

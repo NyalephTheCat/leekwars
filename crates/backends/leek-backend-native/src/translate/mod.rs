@@ -56,8 +56,8 @@ pub use analysis::{lambda_body_idxs, method_value_info, needs_cell_semantics};
 mod classes;
 use classes::{
     aliased_class_locals, builtin_ancestor, class_extends_builtin, class_reflect, classref_locals,
-    new_class_locals, object_field_srcs, object_locals, program_writes_global, receiver_class,
-    resolve_instance_method_value, resolve_static_field, resolve_static_method,
+    global_read_locals, new_class_locals, object_field_srcs, object_locals, program_writes_global,
+    receiver_class, resolve_instance_method_value, resolve_static_field, resolve_static_method,
     resolve_static_method_value, static_field_accesses, static_method_value_refs, super_locals,
 };
 // Surface the resolution tables `lib.rs` builds at the `translate::` path.
@@ -1557,6 +1557,7 @@ pub fn translate_function(
     let new_classes = new_class_locals(mir_fn);
     let aliased_classes = aliased_class_locals(mir_fn);
     let classref_locals = classref_locals(mir_fn);
+    let global_locals = global_read_locals(mir_fn);
     let super_locals = super_locals(mir_fn);
     let object_locals = object_locals(mir_fn);
     let object_field_srcs = object_field_srcs(mir_fn);
@@ -1590,6 +1591,7 @@ pub fn translate_function(
             new_classes: &new_classes,
             aliased_classes: &aliased_classes,
             classref_locals: &classref_locals,
+            global_locals: &global_locals,
             ctor_thunk_classes,
             owning_class: mir_fn.owning_class,
             cell_locals: &cell_locals,
@@ -1734,6 +1736,9 @@ struct Tx<'a, 'b> {
     /// Locals proven to hold a `ClassRef(C)` — lets `C.staticMethod()`
     /// dispatch to the static method.
     classref_locals: &'a HashMap<LocalId, String>,
+    /// Locals that hold a file-level global, by name — so an element write
+    /// can find the global's declared type behind the temp it reads into.
+    global_locals: &'a HashMap<LocalId, String>,
     /// Raw `DefId`s of classes with a constructor thunk — a class ref of one
     /// of these may flow as a value (it constructs via `dispatch_call_value`);
     /// others keep skipping at the use-as-value sites.
@@ -2216,6 +2221,11 @@ fn pinned_valty(t: &Type) -> Option<ValTy> {
         // (`Ref` holds null fine, and the store coercion still applies).
         Type::BigInteger => Some(ValTy::Ref),
         Type::Nullable(t) if matches!(t.as_ref(), Type::BigInteger) => Some(ValTy::Ref),
+        // A container or class slot is always a boxed value, so pin it too —
+        // otherwise a declaration with no initialiser (which stores nothing at
+        // v1) leaves inference with nothing to go on and it guesses a scalar.
+        Type::Array(_) | Type::Map(..) | Type::Set(_) | Type::Object => Some(ValTy::Ref),
+        Type::ClassInstance(..) | Type::Interval => Some(ValTy::Ref),
         // A nullable type can hold null, so it isn't a fixed scalar.
         _ => None,
     }

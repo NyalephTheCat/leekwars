@@ -1066,3 +1066,24 @@ id = "a_scalar_declaration_refuses_a_container_initialiser"
 version = 4
 source = "boolean b = [1, 2]; return b"
 expect = "error"
+
+# v1 leaves a declaration with no initialiser at null whatever its type;
+# from v2 a typed slot takes its type's own value. Reaching an element of
+# the v1 one faults, because upstream gets there through a cast.
+[[tests]]
+id = "a_typed_declaration_takes_its_types_value_from_v2"
+version = 2
+source = "Map m m['a'] = 7 integer i Array a return [m['a'], i, a]"
+expect = { equals = "[7, 0, []]" }
+
+[[tests]]
+id = "writing_an_element_of_a_null_container_faults"
+version = 1
+source = "Map m m['a'] = 7 return m['a']"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+[[tests]]
+id = "writing_an_element_of_a_null_global_container_faults"
+version = 1
+source = "global Map m m['a'] = 7 return m['a']"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }

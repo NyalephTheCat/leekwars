@@ -2168,6 +2168,7 @@ mod tests {
                 ty: leek_types::Type::Any,
                 span: span(),
             })],
+            ..HirFile::default()
         };
         let n = fold_constants(&mut hir, &values);
         assert_eq!(n, 1);
@@ -2188,6 +2189,7 @@ mod tests {
             defs: Vec::new(),
             items: Vec::new(),
             main: vec![Stmt::Expr(name("SOMETHING"))],
+            ..HirFile::default()
         };
         assert_eq!(fold_constants(&mut hir, &values), 0);
         assert_eq!(hir.main[0], Stmt::Expr(name("SOMETHING")));

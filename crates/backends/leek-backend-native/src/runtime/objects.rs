@@ -310,6 +310,24 @@ shim! {
     }
 }
 
+shim! {
+    /// Fault an indexed write into a slot that holds nothing. A container
+    /// declaration with no initialiser is a box at null in v1, and upstream's
+    /// generated code reaches its elements through a cast that fails there —
+    /// so `Map m  m['a'] = 7` is IMPOSSIBLE_CAST rather than a write into the
+    /// void.
+    ///
+    /// # Safety
+    /// `base` must satisfy the [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_check_container(base: *mut Value, tag: i64) {
+        // SAFETY: handle contract on `base`.
+        let v = unsafe { val(&base) };
+        if matches!(v, Value::Null) || convert_for_slot(v, tag).is_none() {
+            raise_runtime_error("IMPOSSIBLE_CAST");
+        }
+    }
+}
+
 /// The native string-/index-keyed member read shared by `leek_value_index`
 /// (boxed key) and [`read_member`] (`&str` key). Returns the value; the caller
 /// boxes or coerces it. Mirrors upstream: a runtime class-ref's

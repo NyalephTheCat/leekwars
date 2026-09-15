@@ -467,7 +467,10 @@ impl Lowerer {
         Self {
             source,
             version,
-            out: HirFile::default(),
+            out: HirFile {
+                version: u8::from(version),
+                ..HirFile::default()
+            },
             diagnostics: Vec::new(),
             source_text: String::new(),
             // Pure default; the public `lower_file*` entries set this (from env

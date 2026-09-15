@@ -33,6 +33,12 @@ pub struct HirFile {
     /// Top-level statements (the "main block"). Run after all items
     /// are registered.
     pub main: Vec<Stmt>,
+    /// The language version this file was lowered at, so a later stage can
+    /// read it without being handed it again. A few rules are version-shaped
+    /// below the type level — v1 leaves a typed declaration with no
+    /// initialiser at null, where v2+ gives it the type's own value — and
+    /// MIR lowering is where they land.
+    pub version: u8,
 }
 
 /// Pointer into [`HirFile::defs`]. Same shape as `DefId` but kept

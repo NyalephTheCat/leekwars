@@ -354,6 +354,17 @@ impl Tx<'_, '_> {
             }
         }
         let (arr, _) = self.local_value(base)?;
+        // Writing an element of a declared container reaches it through a
+        // cast in upstream's generated code, so a slot holding null faults
+        // there rather than swallowing the write. Only a v1 declaration with
+        // no initialiser gets there — from v2 a typed slot is never null.
+        if let Some(tag) = self.slot_base_tag(base)
+            && crate::runtime::slot::is_reference(tag)
+        {
+            let check = self.imports.rt("leek_check_container")?;
+            let tagv = self.b.ins().iconst(types::I64, tag);
+            self.b.ins().call(check, &[arr, tagv]);
+        }
         let (i, it) = self.operand(idx)?;
         let (mut v, mut vt) = self.rvalue(rv)?;
         // A typed numeric array coerces the written element to its element
