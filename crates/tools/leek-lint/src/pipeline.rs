@@ -141,3 +141,79 @@ pub fn diagnostics_with_lints(
     out.extend(lint_query(db, file, groups).as_ref().iter().cloned());
     std::sync::Arc::new(out)
 }
+
+/// One *program*'s lint findings: the whole include closure's merged HIR,
+/// linted once.
+///
+/// Deliberately not [`lint_query`] per file of the closure, because that
+/// is not what the pipeline does and this has to match it. The `Lint`
+/// step reads whatever `HirArtifact` the run produced, which on the
+/// include-aware path is the *merged* program HIR — every included file's
+/// functions, classes and globals folded into the entry's tree — and it
+/// reads `GreenTreeArtifact`, which is the **entry's** tree alone. So a
+/// lint fires once for the program, and an `// @allow(LXXXX)` comment
+/// suppresses it only when it sits in the entry file. Linting each file
+/// separately would report a finding per file that declares the
+/// construct, and would honour an `@allow` inside an include; both are
+/// behaviour changes wearing a refactor's clothes.
+///
+/// The version comes off the entry's own input rather than out of
+/// `entry_version`, matching `Context::version_byte` — drivers settle the
+/// language version onto the input before anything runs, so the two agree,
+/// and following the input is what keeps this identical to the step if
+/// they ever stop agreeing.
+#[salsa::tracked]
+pub fn program_lint_query(
+    db: &dyn leek_db::Db,
+    files: leek_db::WorkspaceFiles,
+    entry: leek_db::SourceFile,
+    entry_version: leek_syntax::Version,
+    groups: crate::LintGroups,
+) -> std::sync::Arc<Vec<Diagnostic>> {
+    let hir = leek_db::queries::lower_program(
+        db,
+        files,
+        entry,
+        entry_version,
+        leek_pipeline::OptLevel::O0,
+    );
+    // The program's own parse key, so this reads the memo the whole-program
+    // passes filled rather than opening a second one under an empty set.
+    let classes = leek_db::queries::program_classes(db, files, entry, entry_version);
+    let green = leek_db::queries::parse_query(db, entry, classes).green;
+    let root = SyntaxNode::new_root(green);
+    let opts = crate::LintOptions::from_groups(groups, entry.version_byte(db));
+    std::sync::Arc::new(crate::lint_file(&hir.hir, Some(&root), &opts))
+}
+
+/// One program's complete diagnostic stream: everything the compiler
+/// frontend found across the include closure, then the lints.
+///
+/// The include-aware counterpart of [`diagnostics_with_lints`], and the
+/// same layering argument puts it here rather than in `leek-db`:
+/// [`leek_db::queries::program_diagnostics`] produces the frontend's
+/// stream and this crate, depending **down**, appends the findings.
+///
+/// A consumer wanting one file's slice filters with
+/// [`leek_db::queries::for_source`]; a program stream reports the whole
+/// program, so a type error inside an included file is raised against
+/// *that* file's `SourceId`.
+#[salsa::tracked]
+pub fn program_diagnostics_with_lints(
+    db: &dyn leek_db::Db,
+    files: leek_db::WorkspaceFiles,
+    entry: leek_db::SourceFile,
+    entry_version: leek_syntax::Version,
+    groups: crate::LintGroups,
+) -> std::sync::Arc<Vec<Diagnostic>> {
+    let mut out = leek_db::queries::program_diagnostics(db, files, entry, entry_version)
+        .as_ref()
+        .clone();
+    out.extend(
+        program_lint_query(db, files, entry, entry_version, groups)
+            .as_ref()
+            .iter()
+            .cloned(),
+    );
+    std::sync::Arc::new(out)
+}
