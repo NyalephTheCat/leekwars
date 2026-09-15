@@ -349,6 +349,30 @@ impl Tx<'_, '_> {
         l: &Operand,
         r: &Operand,
     ) -> Result<(Value, ValTy), NativeError> {
+        self.binary_maybe_charged(op, l, r, true)
+    }
+
+    /// [`Self::binary_uncharged`] with the *dynamic* surcharge dropped too —
+    /// the per-character cost a boxed string comparison or concatenation
+    /// meters inside the runtime shim. A synthesized operation whose upstream
+    /// equivalent is never evaluated must not meter it: a `switch` that
+    /// dispatches in one operation never calls `eq()`.
+    pub(super) fn binary_raw(
+        &mut self,
+        op: BinOp,
+        l: &Operand,
+        r: &Operand,
+    ) -> Result<(Value, ValTy), NativeError> {
+        self.binary_maybe_charged(op, l, r, false)
+    }
+
+    fn binary_maybe_charged(
+        &mut self,
+        op: BinOp,
+        l: &Operand,
+        r: &Operand,
+        charged: bool,
+    ) -> Result<(Value, ValTy), NativeError> {
         // v1 real division by a statically-zero divisor yields `null`, not
         // `±∞` — produce a boxed-null `Ref` (so `8 / 0 === null` is true and
         // `0 / 0 === NaN` is false), rather than emitting an infinity v1
@@ -384,7 +408,15 @@ impl Tx<'_, '_> {
             // `Value::Real` on the stack, so the result is unchanged — only the
             // scalar's per-op allocation is removed. `Bool` keeps the boxed
             // path (its `Value::Bool` dispatch differs from an int rebuild).
-            let res = if lt == ValTy::Ref && rt == ValTy::Int {
+            // The `_c*` fast paths meter through the charged shim, so an
+            // uncharged operation takes the plain raw entry instead.
+            let res = if !charged {
+                let binop = self.imports.rt("leek_value_binop_raw")?;
+                let a = self.coerce(a, lt, ValTy::Ref)?;
+                let b = self.coerce(b, rt, ValTy::Ref)?;
+                let inst = self.b.ins().call(binop, &[code, a, b, ver]);
+                self.b.inst_results(inst)[0]
+            } else if lt == ValTy::Ref && rt == ValTy::Int {
                 let a = self.coerce(a, lt, ValTy::Ref)?;
                 let cir = self.imports.rt("leek_value_binop_cir")?;
                 let inst = self.b.ins().call(cir, &[code, a, b, ver]);

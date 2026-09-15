@@ -1,9 +1,11 @@
 //! Per-function CFG lowering.
 
+use std::collections::HashSet;
+
 use leek_diagnostics::convert;
 use leek_hir::{
     Callee as HirCallee, DoWhileStmt, Expr, ExprKind, ForStmt, ForeachBind, ForeachStmt, IfStmt,
-    NameRef, Stmt, SwitchStmt, VarDecl, WhileStmt,
+    Literal, NameRef, Stmt, SwitchStmt, VarDecl, WhileStmt,
 };
 use leek_types::Type;
 
@@ -594,31 +596,41 @@ impl FnLowerer<'_> {
             break_target: exit,
         });
 
+        // Upstream emits a real Java `switch` — one O(1) dispatch, charged a
+        // single operation however many cases there are — when every label is
+        // a constant of one kind and the subject is already that kind, because
+        // `eq()` then reduces to strict equality. The comparisons below are
+        // that same selection, so only the charging changes.
+        let dispatched = constant_dispatch(sw, &self.locals[disc_local.0 as usize].ty);
+        if dispatched {
+            self.push_stmt(Statement::Charge(1));
+        }
+
         // First pass: emit the test chain.
         let default_target = default_body.unwrap_or(exit);
         for (arm, &body_bb) in sw.arms.iter().zip(&bodies) {
             let Some(case_expr) = &arm.case else { continue };
             let case = self.lower_expr_to_operand(case_expr);
             let cmp = self.fresh_temp(Type::Boolean, sw.span);
-            // The comparison is `Synthetic`: upstream charges one op per
-            // case test (reference.tsv: `var x = 2 switch (x) { case 1: ...
-            // case 2: ... }` = 4 ops), which is the flow-control charge
-            // below — the equality itself must not add another (#78).
+            // `eq()`, not `==`: a switch's loose comparison is the same in
+            // every version, so `switch ('1') { case 1: … }` matches at v4 as
+            // it does at v1.
+            let test = Rvalue::Binary(BinOp::LooseEq, Operand::Local(disc_local), case);
+            // A tested case charges the one operation upstream's `ops(eq(…))`
+            // wrapper does, plus whatever comparing those two values costs —
+            // for strings, per character. A *dispatched* switch calls `eq()`
+            // for no case at all, so its comparisons are synthetic: they
+            // compute the same answer and charge nothing, the single dispatch
+            // operation above covering the lot.
             self.push_stmt(Statement::Assign(
                 Place::Local(cmp),
-                Rvalue::Synthetic(Box::new(Rvalue::Binary(
-                    // `eq()`, not `==`: a switch's loose comparison is the
-                    // same in every version, so `switch ('1') { case 1: … }`
-                    // matches at v4 as it does at v1.
-                    BinOp::LooseEq,
-                    Operand::Local(disc_local),
-                    case,
-                ))),
+                if dispatched {
+                    Rvalue::Synthetic(Box::new(test))
+                } else {
+                    test
+                },
             ));
             let next_bb = self.new_block();
-            // Each case test costs 1 op (flow-control charge; the
-            // native backend's branches themselves are free).
-            self.push_stmt(Statement::Charge(1));
             self.set_terminator(Terminator::Branch {
                 cond: Operand::Local(cmp),
                 then_block: body_bb,
@@ -647,5 +659,60 @@ impl FnLowerer<'_> {
 
         self.loop_stack.pop();
         self.resume(exit);
+    }
+}
+
+/// Whether a `switch` selects its arm through upstream's O(1) dispatch, which
+/// costs one operation however many cases it has, rather than testing each
+/// case in turn.
+///
+/// Upstream's conditions, and its reasons: every label must be a constant of
+/// one kind — all `integer`s in Java's `int` range, or all strings — with no
+/// duplicate (a Java `switch` would not compile with one, so upstream keeps
+/// the chain, where the first case wins), at most one `default`, and at least
+/// one label. The subject must *already* be that kind: only then does the
+/// loose `eq()` a switch compares with reduce to strict equality.
+///
+/// A dynamically-typed subject gets upstream's guarded form, which dispatches
+/// in one operation when the value turns out to be of the label kind and
+/// falls back to the chain otherwise. That is a run-time distinction this
+/// lowering does not draw, so such a switch keeps charging per case here.
+fn constant_dispatch(sw: &SwitchStmt, subject: &Type) -> bool {
+    let labels: Vec<&Expr> = sw.arms.iter().filter_map(|a| a.case.as_ref()).collect();
+    if labels.is_empty() || sw.arms.iter().filter(|a| a.case.is_none()).count() > 1 {
+        return false;
+    }
+    let strings = matches!(labels[0].kind, ExprKind::Literal(Literal::String(_)));
+    let mut seen: HashSet<String> = HashSet::new();
+    for label in labels {
+        let key = match (strings, constant_label(label)) {
+            (true, Some(Label::Str(s))) => s,
+            (false, Some(Label::Int(n))) => n.to_string(),
+            _ => return false,
+        };
+        if !seen.insert(key) {
+            return false;
+        }
+    }
+    *subject == if strings { Type::String } else { Type::Integer }
+}
+
+enum Label {
+    Int(i32),
+    Str(String),
+}
+
+/// A case label as the constant it is, when it is one. `case -1:` is a unary
+/// minus on a literal rather than a literal, and an integer outside Java's
+/// `int` range cannot be a Java `switch` label at all.
+fn constant_label(e: &Expr) -> Option<Label> {
+    match &e.kind {
+        ExprKind::Literal(Literal::String(s)) => Some(Label::Str(s.clone())),
+        ExprKind::Literal(Literal::Int(n)) => i32::try_from(*n).ok().map(Label::Int),
+        ExprKind::Unary(leek_hir::UnaryOp::Neg, x) => match &x.kind {
+            ExprKind::Literal(Literal::Int(n)) => i32::try_from(-*n).ok().map(Label::Int),
+            _ => None,
+        },
+        _ => None,
     }
 }

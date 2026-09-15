@@ -631,14 +631,29 @@ fn does_nothing(s: &Stmt) -> bool {
     }
 }
 
-/// The value of a condition decidable at compile time — boolean and `null`
-/// literals (including the ones a `static final` inlined) under `!`, `&&`
-/// and `||`. Everything it accepts is side-effect free, so a folded-away
+/// The value of a condition decidable at compile time — boolean, `null` and
+/// number literals (including the ones a `static final` inlined) under `!`,
+/// `&&` and `||`. A string literal is deliberately not folded, matching
+/// upstream. Everything it accepts is side-effect free, so a folded-away
 /// operand is nothing to miss.
 fn const_condition(e: &Expr) -> Option<bool> {
     match &e.kind {
         ExprKind::Literal(Literal::Bool(b)) => Some(*b),
         ExprKind::Literal(Literal::Null) => Some(false),
+        // A number's truthiness is `!= 0` in every version. A *string*'s is
+        // not folded, here or upstream: `if ('')` stays a real test.
+        ExprKind::Literal(Literal::Int(n)) => Some(*n != 0),
+        ExprKind::Literal(Literal::Real(f)) => Some(*f != 0.0),
+        // `-5` is a unary minus on a literal, not a literal — and negating
+        // never changes whether a number is zero.
+        ExprKind::Unary(UnaryOp::Neg, x)
+            if matches!(
+                x.kind,
+                ExprKind::Literal(Literal::Int(_) | Literal::Real(_))
+            ) =>
+        {
+            const_condition(x)
+        }
         ExprKind::Unary(UnaryOp::Not, x) => const_condition(x).map(|b| !b),
         ExprKind::Binary(BinaryOp::And, l, r) => match const_condition(l) {
             Some(false) => Some(false),

@@ -491,7 +491,7 @@ impl Tx<'_, '_> {
     /// emission.
     pub(super) fn synthetic(&mut self, inner: &Rvalue) -> Result<(Value, ValTy), NativeError> {
         match inner {
-            Rvalue::Binary(op, l, r) => self.binary_uncharged(*op, l, r),
+            Rvalue::Binary(op, l, r) => self.binary_raw(*op, l, r),
             Rvalue::Index(base, idx) => {
                 let (i, it) = self.operand(idx)?;
                 if it == ValTy::Int && !self.classref_locals.contains_key(base) {

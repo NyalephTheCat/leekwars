@@ -490,6 +490,7 @@ pub(super) fn declare_imports(
             ("leek_call_value", &[i, i, i, i], Some(i)),
             ("leek_call_method", &[i, i, i, i, i], Some(i)),
             ("leek_value_binop", &[i, i, i, i], Some(i)),
+            ("leek_value_binop_raw", &[i, i, i, i], Some(i)),
             ("leek_value_binop_cir", &[i, i, i, i], Some(i)),
             ("leek_value_binop_cil", &[i, i, i, i], Some(i)),
             ("leek_value_binop_crr", &[i, i, types::F64, i], Some(i)),

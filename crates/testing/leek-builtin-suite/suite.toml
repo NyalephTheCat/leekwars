@@ -874,3 +874,49 @@ id = "a_bare_static_name_reads_the_class_storage_from_an_instance_method"
 version = 4
 source = "class A { static integer x = 12 m() { integer i = x return i } } return new A().m()"
 expect = { equals = "12" }
+
+# A number literal's truthiness folds like a boolean's, so a constant `if`
+# on one costs nothing. A string's does not, here or upstream.
+[[tests]]
+id = "a_number_condition_folds_but_a_string_one_does_not"
+version = 4
+source = "if (1) {} if (0) {} if (-5) {} if ('') { return 1 } return 2"
+expect = { equals = "2" }
+
+[[tests]]
+id = "a_constant_number_condition_costs_nothing"
+version = 1
+source = "if (1) {}"
+expect = { ops_at_most = 0 }
+
+# Upstream dispatches a switch whose labels are all constants of one kind, on
+# a subject already of that kind, in a single operation however many cases it
+# has — and never calls `eq()`, so a long string label costs nothing to skip.
+[[tests]]
+id = "a_constant_switch_on_a_typed_subject_dispatches_in_one_op"
+version = 3
+source = "integer x = 8 switch (x) { case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: return 1 } return 0"
+expect = { ops_at_most = 3 }
+
+[[tests]]
+id = "a_constant_string_switch_skips_the_per_character_compare"
+version = 3
+source = "string x = 'delta' switch (x) { case 'alpha': case 'bravo': case 'charlie': case 'delta': return 1 } return 0"
+expect = { ops_at_most = 3 }
+
+# The dispatch is only a charging shortcut: a duplicate label, a non-constant
+# one, or a subject of another kind keeps the per-case chain — and every one
+# of them still selects the same arm.
+[[tests]]
+id = "a_switch_that_cannot_dispatch_still_selects_the_same_arm"
+version = 3
+source = """
+integer a = 2 var r = ''
+switch (a) { case 1: r += 'a' break case 1 + 1: r += 'b' break default: r += 'c' }
+integer b = 1
+switch (b) { case 1: r += 'x' break case 1: r += 'y' break }
+string s = 'b'
+switch (s) { case 'a': r += 'p' break case 'b': r += 'q' break }
+return r
+"""
+expect = { equals = "\"bxq\"" }

@@ -315,6 +315,35 @@ shim! {
     }
 }
 
+shim! {
+    /// [`leek_value_binop`] with no charging at all — not the dynamic
+    /// string-concat / comparison surcharge either. For a compiler-synthesized
+    /// operation whose upstream equivalent is never evaluated: a `switch` that
+    /// dispatches in one operation never calls `eq()`, so its comparisons must
+    /// not meter one.
+    ///
+    /// # Safety
+    /// `a` and `b` must satisfy the
+    /// [handle contract](super#handle-safety-contract); they may alias, since
+    /// both borrows are shared and nothing here writes through a handle.
+    pub unsafe extern "C" fn leek_value_binop_raw(
+        code: i64,
+        a: *mut Value,
+        b: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(op) = binop_from_code(code) else {
+            return handle(Value::Null);
+        };
+        // SAFETY: handle contract on `a`.
+        let l = unsafe { val(&a) };
+        // SAFETY: handle contract on `b`; may alias `a`, but both are shared
+        // borrows and nothing below writes through a handle.
+        let r = unsafe { val(&b) };
+        handle(apply_binop(op, l, r, version as u8))
+    }
+}
+
 /// [`apply_binop`] plus the dynamic string-concat charge — the shim-side
 /// entry so every boxed `Add` meters upstream's concat cost (number→string
 /// conversion + per-char surcharge) exactly once. The pure [`apply_binop`]
