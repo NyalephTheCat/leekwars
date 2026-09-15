@@ -535,3 +535,29 @@ builtin = "bitCount"
 version = 4
 source = "return [bitCount(255L), bitCount((1L << 100) - 1L), trailingZeros(8L), trailingZeros(1L << 100), trailingZeros(0L)]"
 expect = { equals = "[8, 100, 3, 100, -1]" }
+
+# --- Redefining a system function (v1–v3 only). ---
+
+# Once a plain assignment has redefined a builtin name, it is an ordinary
+# variable: mutating it is ordinary too. Upstream fixed this in 2026 after a
+# real AI failed to compile on `count = 0; count += 1` inside a function.
+[[tests]]
+id = "a_redefined_builtin_can_then_be_mutated"
+version = 3
+source = "function f() { count = 0; count += 1; count++; return count; } return f()"
+expect = { equals = "2" }
+
+# Mutating one that is still the function reads a function value first, and
+# stays an error at every version.
+[[tests]]
+id = "mutating_a_builtin_that_is_still_a_function_is_refused"
+version = 3
+source = "abs += 1; return 0"
+expect = "error"
+
+# v4 dropped first-class redefinition altogether: even the plain form is out.
+[[tests]]
+id = "redefining_a_builtin_is_refused_at_v4"
+version = 4
+source = "abs = 2 return abs"
+expect = "error"

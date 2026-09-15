@@ -176,15 +176,22 @@ impl Resolver {
             );
         }
         if let Some(kind) = self.lookup(&name) {
-            // Compound assignment (`f += 1`, `abs *= 2`) requires
-            // reading the prior value, which on a function name is
-            // nonsense — error at all versions. Plain `f = 1` is
-            // only banned at v4, where functions stop being
-            // first-class values reassignable as variables.
+            // Plain `f = 1` is only banned at v4, where functions stop
+            // being first-class values reassignable as variables.
+            //
+            // A compound assignment (`abs += 1`, `abs *= 2`) reads the
+            // prior value first, which on a name that is *still* the
+            // function is nonsense — so it is banned at every version
+            // too. But once a plain assignment has redefined the name,
+            // it is an ordinary variable and mutating it is ordinary:
+            // `count = 0; count += 1` is a v1–v3 program upstream runs
+            // (the redefined function lives in its own `rfunction_<name>`
+            // box, and the mutation operators reach it).
             let compound = b.op().is_some_and(|o| o.kind() != SyntaxKind::Eq);
+            let redefined = self.reassigned_names.contains(&name);
             match kind {
                 SymbolKind::Function | SymbolKind::Builtin
-                    if compound || self.version >= Version::V4 =>
+                    if self.version >= Version::V4 || (compound && !redefined) =>
                 {
                     self.err(
                         codes::CANNOT_REDEFINE_FUNCTION,

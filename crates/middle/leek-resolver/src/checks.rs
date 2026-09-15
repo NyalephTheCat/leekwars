@@ -267,6 +267,10 @@ impl Resolver {
     /// (`abs++`, `--push`, etc.) targets a name bound to a function
     /// or builtin. Also catches `obj.final_field++` by re-using the
     /// final-field assignment check.
+    ///
+    /// A name a plain assignment has already redefined (legal at v1–v3)
+    /// is a variable by then, so `count = 0; count++` is not this —
+    /// same rule as the compound assignments in `check_name_assignment`.
     pub(crate) fn check_fn_increment(&mut self, target: &Expr) {
         match target {
             Expr::Name(n) => {
@@ -275,7 +279,8 @@ impl Resolver {
                     if matches!(
                         self.lookup(&name),
                         Some(SymbolKind::Function | SymbolKind::Builtin)
-                    ) {
+                    ) && !self.reassigned_names.contains(&name)
+                    {
                         self.err(
                             codes::CANNOT_REDEFINE_FUNCTION,
                             self.span_of(&ident),
