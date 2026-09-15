@@ -183,14 +183,37 @@ impl<'p> Session<'p> {
             // project and has to reach the pipeline (leekwars#206).
             flags: self.project.feature_flags(),
         };
-        Ok(Compilation::adopt_in_session(
-            pipeline.run(input),
-            path.display().to_string(),
+        let label = path.display().to_string();
+        let shape = self.shape();
+
+        // The one case that still drives the pipeline: `DriverConfig::timing`
+        // records a duration per planned *step*, and queries have no steps —
+        // `miku build --verbose` and `miku dev` print that list. The epic's
+        // answer is to re-home timing on a salsa event hook, which reports
+        // query names instead of step names; that is a visible change to what
+        // those two commands print, so it is its own change rather than a
+        // side effect of this one. Until then a timed run pays for the
+        // pipeline, and every other invocation does not.
+        if self.config.timing.is_some() {
+            return Ok(Compilation::adopt_in_session(
+                pipeline.run(input),
+                label,
+                &self.reporter,
+                &self.db,
+                file,
+                self.files,
+                shape,
+            ));
+        }
+
+        Ok(Compilation::in_session(
+            input,
+            label,
             &self.reporter,
             &self.db,
             file,
             self.files,
-            self.shape(),
+            shape,
         ))
     }
 
@@ -208,10 +231,19 @@ impl<'p> Session<'p> {
             // and there is no program-level MIR lowering to ask.
             Target::Hir | Target::Complexity | Target::Mir | Target::Linted => Stage::Hir,
         };
+        // Through the same merge the planner applies, not
+        // `self.config.params` raw: `merge_manifest_lints` ORs the
+        // manifest's `[lint] pedantic/nursery` into the CLI's, and it
+        // returns a *copy*, so the session's own config never sees them. A
+        // project that switches a group on in `Miku.toml` would otherwise
+        // have it silently ignored — which is what
+        // `test_honors_manifest_lint_groups_like_check` caught.
+        let merged = crate::driver::merge_manifest_lints(self.project, &self.config);
         RunShape {
             stage,
-            lints: (self.config.target == Target::Linted).then_some(self.config.params.lints),
-            stop_at: self.config.params.stop_on_diagnostics,
+            lints: (merged.target == Target::Linted).then_some(merged.params.lints),
+            stop_at: merged.params.stop_on_diagnostics,
+            opt: merged.params.opt,
         }
     }
 
@@ -334,7 +366,9 @@ fn register_project_files(
 /// Borrowed from the [`Session`] that produced it, so a front-end holds one
 /// of these for as long as it is still reporting on the file.
 pub struct Compilation<'a> {
-    run: Run<'a>,
+    /// The pipeline run, for an adopted compilation. `None` for a session
+    /// compilation, which answers from queries and never plans one.
+    run: Option<Run<'a>>,
     text: Arc<str>,
     label: String,
     reporter: &'a Reporter,
@@ -348,6 +382,15 @@ pub struct Compilation<'a> {
     db: Option<(&'a leek_db::LeekDb, leek_db::SourceFile)>,
     /// The session's file set, for the whole-program queries.
     files: Option<leek_db::WorkspaceFiles>,
+    /// The entry's `Input`, kept rather than read off the run: a session
+    /// compilation has no run to read it from.
+    input: Input,
+    /// Query answers behind the reference-returning accessors. Each holds
+    /// an `Arc`, so the cache is a pointer rather than a copy of the tree.
+    hir_cache: OnceLock<Option<Arc<HirFile>>>,
+    mir_cache: OnceLock<Option<Arc<MirProgram>>>,
+    complexity_cache: OnceLock<Option<Arc<Vec<Complexity>>>>,
+    diagnostics_cache: OnceLock<Arc<Vec<Diagnostic>>>,
     /// How far the run's target reaches, and whether a parse error stops
     /// it — everything [`query_diagnostics`](Self::query_diagnostics)
     /// needs to reproduce this run's stream.
@@ -364,6 +407,8 @@ struct RunShape {
     /// `RecipeParams::stop_on_diagnostics` — the severity at which the
     /// parse aborts the run.
     stop_at: Option<Severity>,
+    /// The optimization level the recipe planned with.
+    opt: leek_pipeline::OptLevel,
 }
 
 impl<'a> Compilation<'a> {
@@ -377,19 +422,33 @@ impl<'a> Compilation<'a> {
     pub fn adopt(run: Run<'a>, file_label: String, reporter: &'a Reporter) -> Self {
         Self {
             text: Arc::clone(&run.input().text),
-            run,
+            input: run.input().clone(),
+            run: Some(run),
             label: file_label,
             reporter,
             sources: OnceLock::new(),
             db: None,
             files: None,
             shape: None,
+            hir_cache: OnceLock::new(),
+            mir_cache: OnceLock::new(),
+            complexity_cache: OnceLock::new(),
+            diagnostics_cache: OnceLock::new(),
         }
     }
 
-    /// [`adopt`](Self::adopt), for a run a [`Session`] drove: the
-    /// compilation also carries the session's database and this file's
-    /// input in it.
+    /// A compilation a [`Session`] produced: no run at all, every answer
+    /// from the session's database.
+    ///
+    /// The pipeline is not planned and not driven. Serving one accessor
+    /// from a query while another read a run would pay for both — a run
+    /// planned for a late target has already computed everything on the
+    /// way there — which is why the move is all-or-nothing rather than
+    /// consumer by consumer.
+    /// A [`Session`] compilation that also drove the pipeline, for the
+    /// timing path — see `Session::compile`. Answers from the run, exactly
+    /// as before, while still carrying the database so `db_handle` and the
+    /// query accessors work.
     #[must_use]
     fn adopt_in_session(
         run: Run<'a>,
@@ -405,6 +464,33 @@ impl<'a> Compilation<'a> {
             files: Some(files),
             shape: Some(shape),
             ..Self::adopt(run, file_label, reporter)
+        }
+    }
+
+    #[must_use]
+    fn in_session(
+        input: Input,
+        file_label: String,
+        reporter: &'a Reporter,
+        db: &'a leek_db::LeekDb,
+        file: leek_db::SourceFile,
+        files: leek_db::WorkspaceFiles,
+        shape: RunShape,
+    ) -> Self {
+        Self {
+            text: Arc::clone(&input.text),
+            input,
+            run: None,
+            label: file_label,
+            reporter,
+            sources: OnceLock::new(),
+            db: Some((db, file)),
+            files: Some(files),
+            shape: Some(shape),
+            hir_cache: OnceLock::new(),
+            mir_cache: OnceLock::new(),
+            complexity_cache: OnceLock::new(),
+            diagnostics_cache: OnceLock::new(),
         }
     }
 
@@ -428,18 +514,39 @@ impl<'a> Compilation<'a> {
     /// both frontend and backend diagnostics build it once.
     #[must_use]
     pub fn sources(&self) -> &Sources {
-        self.sources
-            .get_or_init(|| run_sources(&self.run, &self.text, &self.label))
+        self.sources.get_or_init(|| {
+            if let Some(run) = &self.run {
+                return run_sources(run, &self.text, &self.label);
+            }
+            let mut sources = Sources::single(self.input.source, &self.label, &*self.text);
+            let graph = self.with_program(|db, files, file, version| {
+                leek_db::queries::include_graph(db, files, file, version)
+            });
+            if let (Some((db, _)), Some(graph)) = (self.db, graph) {
+                for inc in graph.includes() {
+                    sources.push(
+                        inc.source,
+                        inc.path.display().to_string(),
+                        &**inc.file.text(db),
+                    );
+                }
+            }
+            sources
+        })
     }
 
     #[must_use]
     pub fn input(&self) -> &Input {
-        self.run.input()
+        &self.input
     }
 
     #[must_use]
     pub fn diagnostics(&self) -> &[Diagnostic] {
-        self.run.diagnostics()
+        if let Some(run) = &self.run {
+            return run.diagnostics();
+        }
+        self.diagnostics_cache
+            .get_or_init(|| self.query_diagnostics().unwrap_or_default())
     }
 
     /// Any artifact the planned pipeline produced. The escape hatch for the
@@ -448,25 +555,99 @@ impl<'a> Compilation<'a> {
     /// apply.
     #[must_use]
     pub fn get<A: Artifact>(&self) -> Option<&A> {
-        self.run.get::<A>()
+        self.run.as_ref()?.get::<A>()
+    }
+
+    /// The entry's green tree.
+    ///
+    /// A named accessor because [`get`](Self::get) reads the run's
+    /// artifact bag, and a session compilation has no run. Parsed under
+    /// the *program's* class set, which is what the include-aware pipeline
+    /// parsed the entry under.
+    #[must_use]
+    pub fn green_tree(&self) -> Option<leek_syntax::language::GreenNode> {
+        if let Some(run) = &self.run {
+            return run
+                .get::<leek_parser::pipeline::GreenTreeArtifact>()
+                .map(|g| g.0.clone());
+        }
+        self.with_program(|db, files, file, version| {
+            let classes = leek_db::queries::program_classes(db, files, file, version);
+            leek_db::queries::parse_query(db, file, classes).green
+        })
     }
 
     /// The lowered HIR, when the target reached it.
+    ///
+    /// From `lower_program` for a session compilation, from the run for an
+    /// adopted one. Cached because the signature hands out a reference and
+    /// a tracked query returns a value; the `Arc` inside makes the cache a
+    /// pointer, not a copy of the tree.
     #[must_use]
     pub fn hir(&self) -> Option<&HirFile> {
-        self.run.get::<HirArtifact>().map(|a| a.0.as_ref())
+        if let Some(run) = &self.run {
+            return run.get::<HirArtifact>().map(|a| a.0.as_ref());
+        }
+        self.hir_cache
+            .get_or_init(|| {
+                self.with_program(|db, files, file, version| {
+                    leek_db::queries::lower_program(db, files, file, version, self.opt()).hir
+                })
+            })
+            .as_deref()
     }
 
     /// The lowered MIR, when the target reached it.
     #[must_use]
     pub fn mir(&self) -> Option<&MirProgram> {
-        self.run.get::<MirArtifact>().map(|a| a.0.as_ref())
+        if let Some(run) = &self.run {
+            return run.get::<MirArtifact>().map(|a| a.0.as_ref());
+        }
+        self.mir_cache
+            .get_or_init(|| {
+                self.with_program(|db, files, file, version| {
+                    leek_db::queries::lower_program_mir(db, files, file, version, self.opt())
+                        .program
+                })
+            })
+            .as_deref()
     }
 
     /// The per-function complexity rows, when the target asked for them.
     #[must_use]
     pub fn complexity(&self) -> Option<&[Complexity]> {
-        self.run.get::<ComplexityArtifact>().map(|a| a.0.as_slice())
+        if let Some(run) = &self.run {
+            return run.get::<ComplexityArtifact>().map(|a| a.0.as_slice());
+        }
+        self.complexity_cache
+            .get_or_init(|| {
+                self.with_program(|db, files, file, version| {
+                    leek_db::queries::program_complexity(db, files, file, version).0
+                })
+            })
+            .as_deref()
+            .map(Vec::as_slice)
+    }
+
+    /// The optimization level this compilation's target asked for.
+    fn opt(&self) -> leek_pipeline::OptLevel {
+        self.shape.map_or(leek_pipeline::OptLevel::O0, |s| s.opt)
+    }
+
+    /// Run `f` against this compilation's program key, when it has one.
+    fn with_program<T>(
+        &self,
+        f: impl FnOnce(
+            &leek_db::LeekDb,
+            leek_db::WorkspaceFiles,
+            leek_db::SourceFile,
+            leek_syntax::Version,
+        ) -> T,
+    ) -> Option<T> {
+        let (db, file) = self.db?;
+        let files = self.files?;
+        let version = leek_syntax::pipeline::version_from_byte(file.version_byte(db));
+        Some(f(db, files, file, version))
     }
 
     /// Render this compilation's diagnostics through the session's reporter

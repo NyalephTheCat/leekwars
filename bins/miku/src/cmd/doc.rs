@@ -27,7 +27,6 @@ use anyhow::{Context, Result};
 use leek_complexity::Complexity;
 use leek_ide::doc::{directives_enabled, doc_and_directives_before, doc_comment_before};
 use leek_ide::signature::signature_for;
-use leek_parser::pipeline::GreenTreeArtifact;
 use leek_session::{DriverConfig, Session, Target};
 use leek_span::SourceId;
 use leek_syntax::{SyntaxKind, SyntaxNode};
@@ -82,10 +81,10 @@ pub fn run(args: &Doc, manifest_path: Option<&Path>, quiet: bool) -> Result<Exit
             }
             continue;
         };
-        let Some(parse) = compiled.get::<GreenTreeArtifact>() else {
+        let Some(green) = compiled.green_tree() else {
             continue;
         };
-        let root = SyntaxNode::new_root(parse.0.clone());
+        let root = SyntaxNode::new_root(green);
 
         let items = collect_items(&root, source_id, compiled.text(), report);
         let relative = project.relative(path);

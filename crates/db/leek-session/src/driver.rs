@@ -268,7 +268,7 @@ fn build_with(
 /// Merge the manifest's opt-in lint groups into `config`'s params.
 /// OR semantics: a group runs if either the CLI flags or `Miku.toml`'s
 /// `[lint]` table asks for it.
-fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfig {
+pub(crate) fn merge_manifest_lints(project: &Project, config: &DriverConfig) -> DriverConfig {
     let mut config = config.clone();
     config.params.lints.pedantic |= project.manifest.lint.pedantic;
     config.params.lints.nursery |= project.manifest.lint.nursery;
