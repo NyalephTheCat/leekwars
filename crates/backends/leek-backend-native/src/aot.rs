@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use leek_hir::HirFile;
 use leek_runtime::Value;
 
-use crate::translate::{self, Lang};
+use crate::translate;
 use crate::{NativeArtifact, NativeError, NativeOptions};
 
 /// The scalar shape of the program's `main`, so the C harness can declare
@@ -127,28 +127,19 @@ pub unsafe fn aot_finish_ref(ptr: *mut Value) -> Value {
 
 /// Compute the scalar return shape of the program's `main` without emitting
 /// code — used to declare the C harness's `leek_main` signature.
+///
+/// [`compile_to_executable`] does not go through here: it lowers once and calls
+/// [`main_ret_of`] on that lowering. This is the entry point for a caller that
+/// holds only the HIR.
 pub fn main_ret(hir: &HirFile, opts: &NativeOptions) -> Result<MainRet, NativeError> {
-    let (mut program, errs) = leek_mir::lower_file(hir);
-    if let Some(first) = errs.first() {
-        return Err(NativeError::compile(format!(
-            "MIR lowering failed: {}",
-            first.message
-        )));
-    }
-    let main_idx = program
-        .functions
-        .iter()
-        .position(|f| f.kind == leek_mir::ir::FunctionKind::Main)
-        .ok_or_else(|| NativeError::compile("no main function"))?;
-    let lang = Lang {
-        version: opts.version,
-        strict: opts.strict,
-    };
-    let _ = translate::append_ctor_thunks(&mut program, opts.version);
-    translate::specialize_param_types(&mut program, lang);
-    let main = &program.functions[main_idx];
-    let fn_rets = translate::compute_fn_rets(&program, lang);
-    let sig = translate::function_sig(main, lang, &fn_rets, &program)?;
+    main_ret_of(&crate::lower(hir, opts)?)
+}
+
+/// [`main_ret`] over an already-lowered program, so the harness's `leek_main`
+/// declaration is derived from the same program the object is emitted from.
+pub(crate) fn main_ret_of(lowered: &crate::Lowered) -> Result<MainRet, NativeError> {
+    let main = &lowered.program.functions[lowered.main_idx];
+    let sig = translate::function_sig(main, lowered.lang, &lowered.fn_rets, &lowered.program)?;
     Ok(match sig.ret {
         translate::ValTy::Int => MainRet::Int,
         translate::ValTy::Real => MainRet::Real,
@@ -164,6 +155,14 @@ pub fn compile_object(hir: &HirFile, opts: &NativeOptions) -> Result<NativeArtif
 
 /// Whether `program` uses a construct AOT can't yet compile into a *standalone*
 /// binary. Returns a human description of the first such construct, or `None`.
+///
+/// `program` is the **specialized** program — the [`crate::lower`] output the
+/// object is emitted from, with parameter types pinned and constructor thunks
+/// appended — not a fresh, unspecialized `lower_file`. That is deliberate: the
+/// guard and the emitter must read the same program, or the guard can pass a
+/// construct the emitter then meets. (Today a thunk's `new` only ever
+/// accompanies the `classes` this rejects outright, so the verdict is the same
+/// either way — but nothing kept the two lowerings in step.)
 ///
 /// Two distinct blockers, both rooted in the native backend being JIT-first:
 /// 1. **Compile-time pointer baking** — a constant `Value` boxed in the
@@ -237,6 +236,13 @@ pub fn compile_to_executable(
         ));
     }
 
+    // One lowering for the whole AOT path. The guard below, the `leek_main`
+    // signature the generated C declares, and the object emitted further down
+    // all read this exact program — each used to re-lower the HIR itself, and
+    // the guard's copy was the *unspecialized* one, so it could disagree with
+    // what the emitter was handed.
+    let lowered = crate::lower(hir, opts)?;
+
     // Reject constructs that would bake a compiler-process heap pointer
     // (lambdas, classes, builtins used as values, …) into the standalone binary
     // — they segfault at runtime. String and null literals are *not* among them
@@ -244,15 +250,14 @@ pub fn compile_to_executable(
     // See [`aot_unsupported_reason`]. (The dispatch-table metadata below is in
     // place for when the backend stops baking pointers; today it only ever
     // carries empty tables for the AOT-able subset.)
-    let (program, _) = leek_mir::lower_file(hir);
-    if let Some(what) = aot_unsupported_reason(&program) {
+    if let Some(what) = aot_unsupported_reason(&lowered.program) {
         return Err(NativeError::unsupported(format!(
             "AOT (compile-to-executable) does not yet support {what}; \
              run it on the JIT instead — `miku run` or `leekc --emit native`"
         )));
     }
 
-    let ret = main_ret(hir, opts)?;
+    let ret = main_ret_of(&lowered)?;
 
     // Scratch dir for the object + generated C, removed when `tmp` drops — so a
     // failed link (or an error emitting the object) leaves nothing behind.
@@ -261,7 +266,7 @@ pub fn compile_to_executable(
     // Emit the program object (with externally linkable `leek_uniform_{idx}`
     // symbols) and the dispatch-table metadata the harness reinstalls at startup.
     let obj = tmp.join("program.o");
-    let meta = crate::compile_object_with_meta(hir, opts, &obj)?;
+    let meta = crate::emit_object_with_meta(&lowered, opts, &obj)?;
     let blob = meta.to_blob()?;
 
     // Generate the C entry point and link everything with cc.
@@ -710,13 +715,16 @@ mod tests {
     use leek_span::SourceId;
     use leek_syntax::{SyntaxNode, Version};
 
+    /// The reason the AOT path would report for `src` — over the same
+    /// specialized lowering `compile_to_executable` emits from, not a bare
+    /// `leek_mir::lower_file`.
     fn reason(src: &str) -> Option<&'static str> {
         let source = SourceId::new(1).unwrap();
         let parsed = parse_with_features(src, source, Version::V4, ParseFeatures::default());
         let sf = SourceFile::cast(SyntaxNode::new_root(parsed.green)).unwrap();
         let hir = lower_file_versioned(&sf, source, 4).0;
-        let (program, _) = leek_mir::lower_file(&hir);
-        aot_unsupported_reason(&program)
+        let lowered = crate::lower(&hir, &NativeOptions::default()).expect("lowering");
+        aot_unsupported_reason(&lowered.program)
     }
 
     #[test]
