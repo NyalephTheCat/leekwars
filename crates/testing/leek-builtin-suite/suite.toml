@@ -561,3 +561,41 @@ id = "redefining_a_builtin_is_refused_at_v4"
 version = 4
 source = "abs = 2 return abs"
 expect = "error"
+
+# --- Dead code after a construct that cannot fall through. ---
+
+# A `do` body runs at least once, so one that always returns ends the
+# enclosing block too.
+[[tests]]
+id = "dead_code_after_a_returning_do_while"
+version = 3
+source = "var t = 0 do { t++ return t } while (t < 5) return 2"
+expect = "error"
+
+# …but a `break` in that body lands after the loop, so flow carries on.
+[[tests]]
+id = "a_do_while_that_breaks_out_still_falls_through"
+version = 3
+source = "function f(x) { do { if (x == 1) break } while (x > 5) return 2 } return f(1)"
+expect = { equals = "2" }
+
+# A switch with a `default` whose every arm returns cannot be skipped.
+[[tests]]
+id = "dead_code_after_an_exhaustive_switch"
+version = 3
+source = "function f(x) { switch (x) { case 1: return 1 default: return 2 } return 3 } return f(1)"
+expect = "error"
+
+# Without the `default` the switch can be skipped entirely.
+[[tests]]
+id = "a_switch_without_a_default_falls_through"
+version = 3
+source = "function f(x) { switch (x) { case 1: return 1 } return 3 } return f(2)"
+expect = { equals = "3" }
+
+# A `break` belonging to a nested loop is not the switch's own.
+[[tests]]
+id = "a_nested_loops_break_does_not_escape_the_switch_arm"
+version = 3
+source = "function f(x) { switch (x) { case 1: for (var i = 0; i < 3; i++) { if (x == 1) break } return 1 default: return 2 } return 3 } return f(1)"
+expect = "error"

@@ -251,6 +251,25 @@ impl Resolver {
             return;
         }
 
+        // `t.name()` where the class declares both a private *field* and a
+        // method called `name`: the call names the method, and method
+        // privacy is `emit_method_privacy`'s job. Without this the field
+        // shadows its own accessor and a public method becomes unreachable.
+        if is_call_callee(f)
+            && let Some(class_name) = self
+                .var_class_typed_of(base_text)
+                .or_else(|| self.var_class_of(base_text))
+            && self
+                .walk_class_chain(&class_name, |c| {
+                    self.class_method_arities
+                        .get(c)
+                        .is_some_and(|m| m.contains_key(field_text))
+                })
+                .is_some()
+        {
+            return;
+        }
+
         // `C x = new C(...)` (explicit type) followed by `x.private_field`.
         if let Some(class_name) = self.var_class_typed_of(base_text)
             && Some(&class_name) != self.current_class.as_ref()
@@ -513,4 +532,12 @@ fn expr_is_super(e: &Expr) -> bool {
         .filter_map(rowan::NodeOrToken::into_token)
         .find(|t| !t.kind().is_trivia())
         .is_some_and(|t| t.kind() == SyntaxKind::KwSuper)
+}
+
+/// Whether this field expression is the callee of a call — `t.m()` rather
+/// than a bare `t.m` read.
+fn is_call_callee(f: &ast::FieldExpr) -> bool {
+    f.syntax()
+        .parent()
+        .is_some_and(|p| p.kind() == SyntaxKind::CallExpr)
 }

@@ -19,6 +19,17 @@ use crate::util::{
 /// block: `return`, `break`, `continue`, `throw`. Used to detect
 /// dead-code-after-terminator.
 pub(crate) fn is_block_terminator(stmt: &Stmt) -> bool {
+    terminates(stmt, false)
+}
+
+/// Whether control can reach the statement *after* `stmt` in its block.
+///
+/// `break_escapes` says where a bare `break` at this level lands: inside the
+/// body of a loop or switch it jumps to just after that construct, so flow
+/// carries on and the body does not terminate; anywhere else it leaves the
+/// block, which does. `continue` reads the same way — in a `do` body it
+/// jumps to the condition, from which the loop may exit normally.
+fn terminates(stmt: &Stmt, break_escapes: bool) -> bool {
     match stmt {
         // `return? expr` is a soft return — flow can continue if the
         // condition isn't met, so don't treat it as a terminator.
@@ -27,9 +38,59 @@ pub(crate) fn is_block_terminator(stmt: &Stmt) -> bool {
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .any(|t| t.kind() == SyntaxKind::Question),
-        Stmt::Break(_) | Stmt::Continue(_) => true,
+        Stmt::Break(_) | Stmt::Continue(_) => !break_escapes,
+        Stmt::Block(b) => b.stmts().any(|s| terminates(&s, break_escapes)),
+        // Only a two-armed `if` can terminate: with no `else`, the false
+        // branch falls straight through.
+        Stmt::If(i) => match (i.then_branch(), i.else_branch()) {
+            (Some(then), Some(alt)) => {
+                terminates(&then, break_escapes) && terminates(&alt, break_escapes)
+            }
+            _ => false,
+        },
+        // A `do` body runs at least once, so a body that always returns
+        // ends the enclosing block too. Its own `break`/`continue` land
+        // after the loop, hence `break_escapes`.
+        Stmt::DoWhile(d) => d.body().is_some_and(|b| terminates(&b, true)),
+        // A `switch` terminates when it cannot be skipped (it has a
+        // `default`) and no arm falls out of it. A `break` inside is the
+        // switch's own, so it escapes.
+        Stmt::Switch(sw) => switch_terminates(sw),
+        // `while` / `for` / `foreach` may run zero times.
         _ => false,
     }
+}
+
+/// [`terminates`] for a `switch`: every case group ends the switch, and a
+/// `default` is there so the switch cannot be skipped altogether.
+fn switch_terminates(sw: &leek_parser::ast::SwitchStmt) -> bool {
+    let mut has_default = false;
+    let mut groups = 0;
+    let mut terminating = 0;
+    for case in sw
+        .syntax()
+        .children()
+        .filter(|c| c.kind() == SyntaxKind::SwitchCase)
+    {
+        if case
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|t| t.kind() == SyntaxKind::KwDefault)
+        {
+            has_default = true;
+        }
+        let stmts: Vec<Stmt> = case.children().filter_map(Stmt::cast).collect();
+        // An empty group falls through into the next one, so it neither
+        // terminates nor lets flow out on its own.
+        if stmts.is_empty() {
+            continue;
+        }
+        groups += 1;
+        if stmts.iter().any(|s| terminates(s, true)) {
+            terminating += 1;
+        }
+    }
+    has_default && groups > 0 && groups == terminating
 }
 
 impl Resolver {
@@ -360,10 +421,28 @@ impl Resolver {
             }
             Stmt::Switch(s) => {
                 self.breakable_depth += 1;
+                // A second `default:` compiles to a duplicate Java label,
+                // which javac rejects from inside generated code. Upstream
+                // raises it as an analyze error instead.
+                let mut default_seen = false;
                 for child in s.syntax().children() {
                     if let Some(e) = Expr::cast(child.clone()) {
                         self.resolve_expr(&e);
                     } else if child.kind() == SyntaxKind::SwitchCase {
+                        for tok in child
+                            .children_with_tokens()
+                            .filter_map(rowan::NodeOrToken::into_token)
+                            .filter(|t| t.kind() == SyntaxKind::KwDefault)
+                        {
+                            if default_seen {
+                                self.err(
+                                    codes::SWITCH_DUPLICATE_DEFAULT,
+                                    self.span_of(&tok),
+                                    "a switch may have only one `default` case".to_string(),
+                                );
+                            }
+                            default_seen = true;
+                        }
                         for cc in child.children() {
                             if let Some(e) = Expr::cast(cc.clone()) {
                                 self.resolve_expr(&e);
@@ -589,6 +668,19 @@ impl Resolver {
         self.pop_scope();
     }
 
+    /// Whether a `for (name in …)` binding with no `var` names a field of
+    /// the class whose method is being resolved, its own or inherited.
+    fn iterator_shadows_field(&self, name: &str) -> bool {
+        self.current_class.as_ref().is_some_and(|class_name| {
+            self.walk_class_chain(class_name, |c| {
+                self.class_fields_all
+                    .get(c)
+                    .is_some_and(|s| s.contains(name))
+            })
+            .is_some()
+        })
+    }
+
     fn resolve_foreach(&mut self, fe: &ForeachStmt) {
         self.push_scope();
         // Collect the names of any new loop bindings (those preceded
@@ -643,6 +735,26 @@ impl Resolver {
                         }
                         let _ = self.declare(&t, SymbolKind::Local);
                         pending_var = false;
+                    }
+                    // A binding with no `var` and no type reuses an existing
+                    // name — but inside a class method, a name that is a
+                    // field (its own or an ancestor's) is not one it can
+                    // reuse: upstream emits a bare `u_<name>` for the loop
+                    // variable, which no local declares, and raises
+                    // UNKNOWN_VARIABLE_OR_FUNCTION rather than generating
+                    // Java that will not compile (issue #4268). `for (var
+                    // cell in …)` is a declaration and stays fine.
+                    SyntaxKind::Ident if !seen_in && self.iterator_shadows_field(t.text()) => {
+                        self.err(
+                            codes::UNKNOWN_VARIABLE,
+                            self.span_of(&t),
+                            format!(
+                                "`{}` is a class field, not a variable this loop can bind — \
+                                 use `var {}`",
+                                t.text(),
+                                t.text(),
+                            ),
+                        );
                     }
                     _ => {}
                 },

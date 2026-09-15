@@ -45,6 +45,7 @@ resolver:
   - { id: E0265, name: DuplicatedConstructor, severity: error }
   - { id: E0266, name: CantAddInstructionAfterBreak, severity: error }
   - { id: E0267, name: UnknownMethod, severity: error }
+  - { id: E0268, name: SwitchDuplicateDefault, severity: error }
   - { id: E0270, name: AiNotExisting, severity: error }
   - { id: E0271, name: CircularInclude, severity: error }
   - { id: E0272, name: IncludeNotFound, severity: error }

@@ -167,12 +167,20 @@ impl Resolver {
         }
         // Inside a class method (not constructor), a bare assignment
         // to a name that matches a final field is an implicit
-        // `this.field = …`.
+        // `this.field = …` — or, in a static method, an implicit
+        // `Class.field = …` when the name is a `static final`. Both are
+        // writes to something declared `final`.
         if self.in_class
             && !self.in_constructor
             && let Some(class_name) = self.current_class.clone()
-            && let Some(finals) = self.class_final_fields.get(&class_name)
-            && finals.contains(&name)
+            && (self
+                .class_final_fields
+                .get(&class_name)
+                .is_some_and(|f| f.contains(&name))
+                || self
+                    .class_static_final_fields
+                    .get(&class_name)
+                    .is_some_and(|f| f.contains(&name)))
         {
             self.err(
                 codes::CANNOT_ASSIGN_FINAL_FIELD,
