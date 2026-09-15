@@ -8,7 +8,6 @@
 //! CST via [`enclosing_class_name`](crate::handlers::enclosing_class_name).
 
 use leek_resolver::SymbolKind;
-use leek_session::Target;
 use tower_lsp::lsp_types as lsp;
 
 use crate::workspace::Workspace;
@@ -18,16 +17,9 @@ pub fn handle(ws: &Workspace, query: &str) -> Option<Vec<lsp::SymbolInformation>
     let mut out: Vec<lsp::SymbolInformation> = Vec::new();
 
     for target in ws.analysis_targets() {
-        // Recipe planning can fail; skip this target rather than crash.
-        let Some(run) = crate::pipeline::run_on_file(ws, target.source_file, Target::Resolved)
-        else {
-            continue;
-        };
-        let Some(art) = run.get::<leek_resolver::pipeline::ResolveArtifact>() else {
-            continue;
-        };
+        let resolved = crate::analysis::resolved(&ws.db, target.source_file);
         let root = crate::analysis::syntax_root(&ws.db, target.source_file);
-        for sym in &art.table.symbols {
+        for sym in &resolved.table.symbols {
             if !sym.name.to_ascii_lowercase().contains(&lower) {
                 continue;
             }

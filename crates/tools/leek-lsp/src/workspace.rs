@@ -403,6 +403,24 @@ impl Workspace {
         &self.targets
     }
 
+    /// The position map of the workspace file `source_file` names.
+    ///
+    /// The line table behind it is built once per workspace mutation and
+    /// held by the [`AnalysisTarget`], so a program-wide scan that asks
+    /// here pays a lookup per file instead of re-scanning every line of
+    /// every file it touches. `None` for a file the workspace does not
+    /// hold — the caller decides whether that is worth a table of its
+    /// own.
+    pub fn pos_map_for(
+        &self,
+        source_file: SourceFile,
+    ) -> Option<crate::util::position::PosMap<'_>> {
+        self.targets
+            .iter()
+            .find(|target| target.source_file == source_file)
+            .map(AnalysisTarget::pos_map)
+    }
+
     /// The include folder for this workspace revision: open buffers
     /// shadow indexed contents, and disk is the fallback for a file that
     /// is neither. Built alongside [`Workspace::analysis_targets`].

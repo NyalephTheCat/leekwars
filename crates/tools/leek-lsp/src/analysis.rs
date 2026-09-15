@@ -10,10 +10,15 @@
 //! the recipe catalogue between a handler and the cache it actually
 //! wants.
 //!
-//! The tree questions no longer go that way: every handler that wants a
-//! syntax root or a green tree calls [`syntax_root`] or [`green_tree`]
-//! here. The other four still reach their artifact through a
-//! [`crate::pipeline`] run, which is why that module stays.
+//! The tree questions no longer go that way, and neither does name
+//! resolution: every handler that wants a green tree, a syntax root or
+//! a resolve table calls [`green_tree`], [`syntax_root`] or [`resolved`]
+//! here, and the handlers that wanted a resolve table *and* a deeper
+//! artifact in one run take both halves from here. What still plans a
+//! run is a handler reaching for a type table, HIR or complexity report
+//! on its own, plus the two paths no accessor covers — include-aware
+//! diagnostics and options-carrying formatting — which is why
+//! [`crate::pipeline`] stays.
 //!
 //! This module is the direct route: one function per question, each a
 //! single [`leek_db::queries`] call. `leek-db` is the façade that knows
@@ -96,6 +101,22 @@ pub fn syntax_root(db: &dyn Db, file: SourceFile) -> SyntaxNode {
 /// diagnostics.
 ///
 /// Replaces `run.get::<leek_resolver::pipeline::ResolveArtifact>()`.
+///
+/// The one whose fan-out paid for the accessors. The helpers behind
+/// references, rename, document highlight, the two hierarchies,
+/// workspace symbols and cross-file completion ask this once per file
+/// in the program scope, and each of those calls used to plan a
+/// [`Pipeline`](leek_pipeline::Pipeline) — a `RecipePlan` plus its
+/// boxed steps — for one table.
+///
+/// It also settles, for the handlers that moved, the question
+/// `a_later_targets_run_parses_to_the_same_green_tree` below has to
+/// argue: [`resolve_query`](queries::resolve_query) reads its AST from
+/// `parse_query(db, file, ProgramClasses::none(db))`, which is
+/// [`green_tree`] exactly. A handler that takes its root from
+/// [`syntax_root`] and its table from here therefore reads both against
+/// one parse by construction, rather than against two that are shown to
+/// agree.
 pub fn resolved(db: &dyn Db, file: SourceFile) -> queries::ResolveArtifact {
     queries::resolve_query(db, file)
 }

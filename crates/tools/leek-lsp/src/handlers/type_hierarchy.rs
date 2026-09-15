@@ -8,7 +8,6 @@
 //! reports its parent; `subtypes` finds every class whose parent is it.
 
 use leek_hir::Def;
-use leek_hir::pipeline::HirArtifact;
 use leek_pipeline::salsa::SourceFile;
 use leek_resolver::SymbolKind;
 use leek_span::{LineTable, Span};
@@ -24,8 +23,8 @@ pub fn prepare(
 ) -> Option<Vec<lsp::TypeHierarchyItem>> {
     let doc = ws.doc(uri)?;
     let offset = doc.pos_map().to_offset(pos)?;
-    let run = crate::pipeline::run(ws, uri, leek_session::Target::Resolved)?;
-    let table = &run.get::<leek_resolver::pipeline::ResolveArtifact>()?.table;
+    let resolved = crate::analysis::resolved(&ws.db, doc.source_file);
+    let table = &resolved.table;
 
     // 1. Resolve locally — the cursor is on a class declared in this file
     //    (or a reference to one).
@@ -108,21 +107,10 @@ struct ClassInfo {
 fn program_classes(ws: &Workspace, home_uri: &lsp::Url) -> Vec<ClassInfo> {
     let mut out: Vec<ClassInfo> = Vec::new();
     for file in crate::handlers::program_scope::program_scope(ws, home_uri) {
-        let Some(run) =
-            crate::pipeline::run_on_file(ws, file.source_file, leek_session::Target::Hir)
-        else {
-            continue;
-        };
-        let Some(table) = run
-            .get::<leek_resolver::pipeline::ResolveArtifact>()
-            .map(|a| &a.table)
-        else {
-            continue;
-        };
-        let Some(hir) = run.get::<HirArtifact>() else {
-            continue;
-        };
-        for def in &hir.0.defs {
+        let resolved = crate::analysis::resolved(&ws.db, file.source_file);
+        let table = &resolved.table;
+        let hir = crate::analysis::hir(&ws.db, file.source_file);
+        for def in &hir.hir.defs {
             let Def::Class(c) = def else { continue };
             let Some(sym) = table
                 .symbols
