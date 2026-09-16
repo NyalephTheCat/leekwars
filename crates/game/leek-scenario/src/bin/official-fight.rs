@@ -44,6 +44,7 @@ fn harness_leek(id: i64, name: &str) -> Fighter {
 fn harness_pistol() -> WeaponSpec {
     WeaponSpec {
         id: 37,
+        template: 1,
         cost: 3,
         min_range: 1,
         max_range: 7,
@@ -70,6 +71,7 @@ fn harness_pistol() -> WeaponSpec {
 fn harness_venom() -> ChipSpec {
     ChipSpec {
         id: 1001,
+        template: 1001,
         cost: 2,
         min_range: 1,
         max_range: 7,
@@ -97,6 +99,7 @@ fn harness_venom() -> ChipSpec {
 fn harness_protein() -> ChipSpec {
     ChipSpec {
         id: 1002,
+        template: 1002,
         cost: 0,
         min_range: 0,
         max_range: 0,
@@ -125,6 +128,7 @@ fn harness_protein() -> ChipSpec {
 fn harness_magnet() -> ChipSpec {
     ChipSpec {
         id: 1003,
+        template: 1003,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -153,6 +157,7 @@ fn harness_magnet() -> ChipSpec {
 fn harness_glove() -> ChipSpec {
     ChipSpec {
         id: 1004,
+        template: 1004,
         cost: 2,
         min_range: 1,
         max_range: 10,
@@ -191,6 +196,7 @@ fn harness_glove() -> ChipSpec {
 fn harness_plague() -> ChipSpec {
     ChipSpec {
         id: 1005,
+        template: 1005,
         cost: 3,
         min_range: 1,
         max_range: 7,
@@ -229,6 +235,7 @@ fn harness_plague() -> ChipSpec {
 fn harness_blink() -> ChipSpec {
     ChipSpec {
         id: 1006,
+        template: 1006,
         cost: 2,
         min_range: 1,
         max_range: 12,
@@ -257,6 +264,7 @@ fn harness_blink() -> ChipSpec {
 fn harness_hook() -> ChipSpec {
     ChipSpec {
         id: 1007,
+        template: 1007,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -284,6 +292,7 @@ fn harness_hook() -> ChipSpec {
 fn harness_laser() -> ChipSpec {
     ChipSpec {
         id: 1008,
+        template: 1008,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -311,6 +320,7 @@ fn harness_laser() -> ChipSpec {
 fn harness_storm() -> ChipSpec {
     ChipSpec {
         id: 1009,
+        template: 1009,
         cost: 2,
         min_range: 0,
         max_range: 0,
@@ -338,6 +348,7 @@ fn harness_storm() -> ChipSpec {
 fn harness_blessing() -> ChipSpec {
     ChipSpec {
         id: 1010,
+        template: 1010,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -365,6 +376,7 @@ fn harness_blessing() -> ChipSpec {
 fn harness_cure() -> ChipSpec {
     ChipSpec {
         id: 1011,
+        template: 1011,
         cost: 2,
         min_range: 0,
         max_range: 6,
@@ -393,6 +405,7 @@ fn harness_cure() -> ChipSpec {
 fn harness_regen() -> ChipSpec {
     ChipSpec {
         id: 1012,
+        template: 1012,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -420,6 +433,7 @@ fn harness_regen() -> ChipSpec {
 fn harness_wall() -> ChipSpec {
     ChipSpec {
         id: 1013,
+        template: 1013,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -448,6 +462,7 @@ fn harness_wall() -> ChipSpec {
 fn harness_mirror() -> ChipSpec {
     ChipSpec {
         id: 1014,
+        template: 1014,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -475,6 +490,7 @@ fn harness_mirror() -> ChipSpec {
 fn harness_ice() -> ChipSpec {
     ChipSpec {
         id: 1015,
+        template: 1015,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -502,6 +518,7 @@ fn harness_ice() -> ChipSpec {
 fn harness_mud() -> ChipSpec {
     ChipSpec {
         id: 1016,
+        template: 1016,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -529,6 +546,7 @@ fn harness_mud() -> ChipSpec {
 fn harness_armor() -> ChipSpec {
     ChipSpec {
         id: 1017,
+        template: 1017,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -556,6 +574,7 @@ fn harness_armor() -> ChipSpec {
 fn harness_swap() -> ChipSpec {
     ChipSpec {
         id: 1018,
+        template: 1018,
         cost: 1,
         min_range: 1,
         max_range: 10,
@@ -583,6 +602,7 @@ fn harness_swap() -> ChipSpec {
 fn harness_spring() -> ChipSpec {
     ChipSpec {
         id: 1019,
+        template: 1019,
         cost: 2,
         min_range: 1,
         max_range: 7,
@@ -620,6 +640,7 @@ fn harness_spring() -> ChipSpec {
 fn harness_fortress() -> ChipSpec {
     ChipSpec {
         id: 1020,
+        template: 1020,
         cost: 2,
         min_range: 0,
         max_range: 0,
@@ -647,6 +668,7 @@ fn harness_fortress() -> ChipSpec {
 fn harness_reflex() -> ChipSpec {
     ChipSpec {
         id: 1021,
+        template: 1021,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -674,6 +696,7 @@ fn harness_reflex() -> ChipSpec {
 fn harness_haste() -> ChipSpec {
     ChipSpec {
         id: 1022,
+        template: 1022,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -701,6 +724,7 @@ fn harness_haste() -> ChipSpec {
 fn harness_focus() -> ChipSpec {
     ChipSpec {
         id: 1023,
+        template: 1023,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -728,6 +752,7 @@ fn harness_focus() -> ChipSpec {
 fn harness_sage() -> ChipSpec {
     ChipSpec {
         id: 1024,
+        template: 1024,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -755,6 +780,7 @@ fn harness_sage() -> ChipSpec {
 fn harness_brick() -> ChipSpec {
     ChipSpec {
         id: 1025,
+        template: 1025,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -782,6 +808,7 @@ fn harness_brick() -> ChipSpec {
 fn harness_weaken() -> ChipSpec {
     ChipSpec {
         id: 1026,
+        template: 1026,
         cost: 1,
         min_range: 1,
         max_range: 8,
@@ -809,6 +836,7 @@ fn harness_weaken() -> ChipSpec {
 fn harness_numb() -> ChipSpec {
     ChipSpec {
         id: 1027,
+        template: 1027,
         cost: 1,
         min_range: 1,
         max_range: 8,
@@ -836,6 +864,7 @@ fn harness_numb() -> ChipSpec {
 fn harness_dull() -> ChipSpec {
     ChipSpec {
         id: 1028,
+        template: 1028,
         cost: 1,
         min_range: 1,
         max_range: 8,
@@ -863,6 +892,7 @@ fn harness_dull() -> ChipSpec {
 fn harness_hush() -> ChipSpec {
     ChipSpec {
         id: 1029,
+        template: 1029,
         cost: 1,
         min_range: 1,
         max_range: 8,
@@ -890,6 +920,7 @@ fn harness_hush() -> ChipSpec {
 fn harness_cleanse() -> ChipSpec {
     ChipSpec {
         id: 1030,
+        template: 1030,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -927,6 +958,7 @@ fn harness_cleanse() -> ChipSpec {
 fn harness_unravel() -> ChipSpec {
     ChipSpec {
         id: 1031,
+        template: 1031,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -955,6 +987,7 @@ fn harness_unravel() -> ChipSpec {
 fn harness_javelin() -> ChipSpec {
     ChipSpec {
         id: 1032,
+        template: 1032,
         cost: 2,
         min_range: 2,
         max_range: 7,
@@ -982,6 +1015,7 @@ fn harness_javelin() -> ChipSpec {
 fn harness_comet() -> ChipSpec {
     ChipSpec {
         id: 1033,
+        template: 1033,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -1009,6 +1043,7 @@ fn harness_comet() -> ChipSpec {
 fn harness_statue() -> ChipSpec {
     ChipSpec {
         id: 1034,
+        template: 1034,
         cost: 1,
         min_range: 1,
         max_range: 8,
@@ -1037,6 +1072,7 @@ fn harness_statue() -> ChipSpec {
 fn harness_ghost() -> ChipSpec {
     ChipSpec {
         id: 1035,
+        template: 1035,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -1064,6 +1100,7 @@ fn harness_ghost() -> ChipSpec {
 fn harness_curse() -> ChipSpec {
     ChipSpec {
         id: 1036,
+        template: 1036,
         cost: 1,
         min_range: 1,
         max_range: 8,
@@ -1092,6 +1129,7 @@ fn harness_curse() -> ChipSpec {
 fn harness_toxin() -> ChipSpec {
     ChipSpec {
         id: 1037,
+        template: 1037,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -1130,6 +1168,7 @@ fn harness_toxin() -> ChipSpec {
 fn harness_reaper() -> ChipSpec {
     ChipSpec {
         id: 1038,
+        template: 1038,
         cost: 2,
         min_range: 1,
         max_range: 7,
@@ -1168,6 +1207,7 @@ fn harness_reaper() -> ChipSpec {
 fn harness_leech() -> ChipSpec {
     ChipSpec {
         id: 1039,
+        template: 1039,
         cost: 2,
         min_range: 1,
         max_range: 7,
@@ -1205,6 +1245,7 @@ fn harness_leech() -> ChipSpec {
 fn harness_cataclysm() -> ChipSpec {
     ChipSpec {
         id: 1040,
+        template: 1040,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -1243,6 +1284,7 @@ fn harness_cataclysm() -> ChipSpec {
 fn harness_doom() -> ChipSpec {
     ChipSpec {
         id: 1041,
+        template: 1041,
         cost: 4,
         min_range: 1,
         max_range: 6,
@@ -1270,6 +1312,7 @@ fn harness_doom() -> ChipSpec {
 fn harness_mutation() -> ChipSpec {
     ChipSpec {
         id: 1042,
+        template: 1042,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -1323,6 +1366,7 @@ fn harness_mutation() -> ChipSpec {
 fn harness_clarity() -> ChipSpec {
     ChipSpec {
         id: 1043,
+        template: 1043,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -1368,6 +1412,7 @@ fn harness_clarity() -> ChipSpec {
 fn harness_bulwark() -> ChipSpec {
     ChipSpec {
         id: 1044,
+        template: 1044,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -1421,6 +1466,7 @@ fn harness_bulwark() -> ChipSpec {
 fn harness_rupture() -> ChipSpec {
     ChipSpec {
         id: 1045,
+        template: 1045,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -1458,6 +1504,7 @@ fn harness_rupture() -> ChipSpec {
 fn harness_purge() -> ChipSpec {
     ChipSpec {
         id: 1046,
+        template: 1046,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -1486,6 +1533,7 @@ fn harness_purge() -> ChipSpec {
 fn harness_transfusion() -> ChipSpec {
     ChipSpec {
         id: 1047,
+        template: 1047,
         cost: 1,
         min_range: 0,
         max_range: 0,
@@ -1526,6 +1574,7 @@ fn harness_transfusion() -> ChipSpec {
 fn harness_spawn() -> ChipSpec {
     ChipSpec {
         id: 1048,
+        template: 1048,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -1559,6 +1608,10 @@ fn harness_spawn() -> ChipSpec {
 fn harness_revive() -> ChipSpec {
     ChipSpec {
         id: 84,
+        // `Harness.registerChips` re-registers 84 with `template: 84`,
+        // replacing the catalog's resurrection (template 49): the harness's
+        // chips are what the golden fights run on.
+        template: 84,
         cost: 3,
         min_range: 1,
         max_range: 8,
@@ -1589,6 +1642,7 @@ fn harness_revive() -> ChipSpec {
 fn harness_colossus() -> ChipSpec {
     ChipSpec {
         id: 1049,
+        template: 1049,
         cost: 2,
         min_range: 0,
         max_range: 0,

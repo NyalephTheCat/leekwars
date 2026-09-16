@@ -75,6 +75,7 @@ fn weapons() -> &'static [WeaponSpec] {
                 let item = catalog::int32(w, "item", 0);
                 WeaponSpec {
                     id: item,
+                    template: catalog::int32(w, "template", 0),
                     cost: catalog::int32(w, "cost", 0),
                     min_range: catalog::int32(w, "min_range", 0),
                     max_range: catalog::int32(w, "max_range", 0),
@@ -99,6 +100,7 @@ fn chips() -> &'static [ChipSpec] {
                 let item = catalog::int32(c, "id", 0);
                 ChipSpec {
                     id: item,
+                    template: catalog::int32(c, "template", 0),
                     cost: catalog::int32(c, "cost", 0),
                     min_range: catalog::int32(c, "min_range", 0),
                     max_range: catalog::int32(c, "max_range", 0),

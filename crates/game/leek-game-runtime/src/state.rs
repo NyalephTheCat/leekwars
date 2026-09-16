@@ -678,7 +678,13 @@ pub const USE_MAX_USES: i32 = -7;
 /// `attack/Attack.java` accessors).
 #[derive(Debug, Clone)]
 pub struct WeaponSpec {
+    /// `Item.getId()` — the *item* id an AI names (`WEAPON_PISTOL` is 37)
+    /// and `getWeapon()` answers with.
     pub id: i32,
+    /// `Item.getTemplate()` — the catalog's own key for the weapon, which is
+    /// a different number from the item id and is what the action log
+    /// carries (`ActionSetWeapon`). The pistol is item 37, template 1.
+    pub template: i32,
     pub cost: i32,
     pub min_range: i32,
     pub max_range: i32,
@@ -707,7 +713,11 @@ pub struct WeaponSpec {
 /// (`chips/Chip.java` + `attack/Attack.java` accessors).
 #[derive(Debug, Clone)]
 pub struct ChipSpec {
+    /// `Item.getId()` — the *item* id an AI names (`CHIP_SHOCK` is 1).
     pub id: i32,
+    /// `Item.getTemplate()` — the catalog's own key, which the action log
+    /// carries (`ActionUseChip`). Shock is item 1, template 6.
+    pub template: i32,
     pub cost: i32,
     pub min_range: i32,
     pub max_range: i32,
@@ -1631,8 +1641,11 @@ impl State {
         }
         self.fighters[fid].weapon = Some(weapon);
         self.fighters[fid].use_tp(1);
+        // The action carries the weapon's *template*, not the item id the AI
+        // named — `ActionSetWeapon` is built from `weapon.getTemplate()`.
         self.actions.log(Action::SetWeapon {
-            weapon_template: weapon,
+            weapon_template: crate::official_items::weapon_spec(weapon)
+                .map_or(weapon, |w| w.template),
         });
         true
     }
@@ -1931,7 +1944,7 @@ impl State {
         let critical = self.generate_critical(fid);
         let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
         self.actions.log(Action::UseChip {
-            chip_template: spec.id,
+            chip_template: spec.template,
             cell: target_cell as i32,
             success: result,
         });
@@ -2028,7 +2041,7 @@ impl State {
         let critical = self.generate_critical(fid);
         let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
         self.actions.log(Action::UseChip {
-            chip_template: spec.id,
+            chip_template: spec.template,
             cell: target_cell as i32,
             success: result,
         });
@@ -2209,7 +2222,7 @@ impl State {
         let critical = self.generate_critical(fid);
         let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
         self.actions.log(Action::UseChip {
-            chip_template: spec.id,
+            chip_template: spec.template,
             cell: target_cell as i32,
             success: result,
         });
@@ -2469,6 +2482,7 @@ mod tests {
     fn weapon_37() -> WeaponSpec {
         WeaponSpec {
             id: 37,
+            template: 1,
             cost: 3,
             min_range: 1,
             max_range: 7,

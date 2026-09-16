@@ -113,6 +113,7 @@ for (var k = 0; k < 20000; k++) {{
 fn pistol() -> WeaponSpec {
     WeaponSpec {
         id: 37,
+        template: 1,
         cost: 3,
         min_range: 1,
         max_range: 7,
@@ -131,6 +132,7 @@ fn pistol() -> WeaponSpec {
 fn spawn_chip() -> ChipSpec {
     ChipSpec {
         id: SPAWN_CHIP,
+        template: SPAWN_CHIP,
         cost: 2,
         min_range: 1,
         max_range: 8,
