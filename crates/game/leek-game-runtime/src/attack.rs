@@ -737,15 +737,16 @@ impl State {
                 // caster. A critical hit carries on the distance too, with
                 // the factor and the rounding of every other effect (×1.3):
                 // the sun spear then repels by 5 cells instead of 4.
-                let distance = java_round(
-                    params.value1 * if critical { CRITICAL_FACTOR } else { 1.0 },
-                );
+                let distance =
+                    java_round(params.value1 * if critical { CRITICAL_FACTOR } else { 1.0 });
                 for &fid in &target_entities {
                     if fid == caster || self.fighters[fid].is_dead() {
                         continue;
                     }
                     if let Some(cell) = self.fighters[fid].cell {
-                        let dest = self.map.repel_last_available_cell(cell, launch_cell, distance);
+                        let dest = self
+                            .map
+                            .repel_last_available_cell(cell, launch_cell, distance);
                         self.slide_entity(fid, dest, caster);
                     }
                 }

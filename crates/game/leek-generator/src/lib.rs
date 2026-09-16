@@ -291,6 +291,9 @@ fn fight_loop<'a>(
     // `StartOrder.compute`, drawn once before the fight and kept for every
     // turn, like the reference's `Order`.
     let order = fight_start_order(&fight.borrow());
+    // The fight keeps it too, so `getNextPlayer` / `getPreviousPlayer` answer
+    // from the order actually being played.
+    fight.borrow_mut().set_turn_order(order.clone());
     for turn in 1..=max_turns {
         fight.borrow_mut().set_turn(i64::from(turn));
         for &id in &order {

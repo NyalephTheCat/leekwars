@@ -670,6 +670,54 @@ impl Order {
         false
     }
 
+    /// `Order.getNextPlayer()` — who plays after the current entity, wrapping
+    /// around the round. `None` only when the order is empty.
+    #[must_use]
+    pub fn next_player(&self) -> Option<usize> {
+        if self.fids.is_empty() {
+            return None;
+        }
+        let p = (self.position + 1).rem_euclid(self.fids.len() as i32);
+        Some(self.fids[p as usize])
+    }
+
+    /// `Order.getPreviousPlayer()` — who played before the current entity.
+    ///
+    /// The modulo is taken the robust way: `position` can be `-1` in the
+    /// transient window after the current entity was removed (see
+    /// [`Self::remove_entity`]), and the old single `if (p < 0) p += size`
+    /// only corrected once — `-2` stayed negative when the order was down to
+    /// one entity, and Java went out of bounds.
+    #[must_use]
+    pub fn previous_player(&self) -> Option<usize> {
+        if self.fids.is_empty() {
+            return None;
+        }
+        let p = (self.position - 1).rem_euclid(self.fids.len() as i32);
+        Some(self.fids[p as usize])
+    }
+
+    /// `Order.getNextPlayer(entity)` — who plays after a *named* entity, or
+    /// `None` when it is not in the order (dead, or never in it).
+    #[must_use]
+    pub fn next_player_of(&self, fid: usize) -> Option<usize> {
+        let index = self.fids.iter().position(|&f| f == fid)?;
+        Some(self.fids[(index + 1) % self.fids.len()])
+    }
+
+    /// `Order.getPreviousPlayer(entity)` — the counterpart of
+    /// [`Self::next_player_of`].
+    #[must_use]
+    pub fn previous_player_of(&self, fid: usize) -> Option<usize> {
+        let index = self.fids.iter().position(|&f| f == fid)?;
+        let p = if index == 0 {
+            self.fids.len() - 1
+        } else {
+            index - 1
+        };
+        Some(self.fids[p])
+    }
+
     /// `Order.getEntities()`.
     #[must_use]
     pub fn fids(&self) -> &[usize] {
@@ -2884,6 +2932,32 @@ mod tests {
         assert_eq!(o.current(), Some(2));
     }
 
+    /// `getNextPlayer` / `getPreviousPlayer` wrap around the round, and the
+    /// backwards one survives the transient `position == -1` window left by
+    /// removing the current entity — where the old single `if (p < 0)`
+    /// correction went out of bounds on a one-entity order.
+    #[test]
+    fn order_neighbours_wrap_both_ways() {
+        let mut o = order_of(&[1, 2, 3]);
+        assert_eq!(o.next_player(), Some(2));
+        assert_eq!(o.previous_player(), Some(3)); // wraps to the end
+        o.next();
+        assert_eq!(o.next_player(), Some(3));
+        assert_eq!(o.previous_player(), Some(1));
+
+        // Named entities, independent of whose turn it is.
+        assert_eq!(o.next_player_of(3), Some(1));
+        assert_eq!(o.previous_player_of(1), Some(3));
+        assert_eq!(o.next_player_of(99), None, "not in the order");
+
+        // The removal window: position -1 on a single-entity order.
+        let mut one = order_of(&[1, 2]);
+        one.remove_entity(1);
+        assert_eq!(one.position(), -1);
+        assert_eq!(one.previous_player(), Some(2));
+        assert_eq!(one.next_player(), Some(2));
+    }
+
     /// Removing an entity *after* the current position leaves it alone.
     #[test]
     fn remove_after_position_no_fixup() {
@@ -2986,6 +3060,84 @@ mod tests {
         s.add_entity(1, b);
         s.weapon_specs.insert(37, weapon_37());
         s
+    }
+
+    /// A summon is charged with what is left of the initial cooldowns,
+    /// counted from the start of the *fight*: a chip with an initial cooldown
+    /// of 2 is unavailable until fight turn 3, whoever holds it: a bulb born
+    /// on turn 1 waits the whole span, one born on turn 3 casts at once.
+    /// Team cooldowns are left alone — the team already carries them.
+    #[test]
+    fn a_summon_inherits_what_is_left_of_the_initial_cooldowns() {
+        fn chip(id: i32, initial: i32, team: bool) -> super::ChipSpec {
+            super::ChipSpec {
+                id,
+                template: id,
+                cost: 1,
+                min_range: 0,
+                max_range: 8,
+                launch_type: 7,
+                needs_los: false,
+                max_uses: -1,
+                area: Area::SingleCell,
+                effects: Vec::new(),
+                cooldown: 0,
+                team_cooldown: team,
+                initial_cooldown: initial,
+                level: 1,
+            }
+        }
+        fn bulb() -> super::BulbTemplate {
+            super::BulbTemplate {
+                id: 1,
+                name: "bulb".into(),
+                life: (10, 10),
+                strength: (0, 0),
+                wisdom: (0, 0),
+                agility: (0, 0),
+                resistance: (0, 0),
+                science: (0, 0),
+                magic: (0, 0),
+                tp: (4, 4),
+                mp: (0, 0),
+                chips: Vec::new(),
+                states: Vec::new(),
+                zone: 0,
+            }
+        }
+
+        let mut s = mini_state();
+        // `mini_state` leaves the play order empty; the turn counter is what
+        // this reads, and it only moves through the order.
+        s.order.add_entity(0);
+        s.order.add_entity(1);
+        s.chip_specs.insert(900, chip(900, 2, false));
+        s.chip_specs.insert(901, chip(901, 0, false));
+        s.chip_specs.insert(902, chip(902, 2, true));
+        s.bulb_templates.insert(1, bulb());
+        s.place_entity(0, 300);
+
+        // Turn 1: the whole span, plus the tick the summon is about to take at
+        // its own start of turn — it plays later in this same turn.
+        let early = s.create_summon(0, 1, 301, 1, false, None);
+        assert_eq!(s.chip_cooldown(early, 900), 3);
+        assert_eq!(s.chip_cooldown(early, 901), 0, "no initial cooldown");
+        assert_eq!(s.chip_cooldown(early, 902), 0, "team cooldown left alone");
+
+        // Turn 2: one turn of the span already gone.
+        while s.order.turn() < 2 {
+            s.order.next();
+        }
+        let mid = s.create_summon(0, 1, 302, 1, false, None);
+        assert_eq!(s.chip_cooldown(mid, 900), 2);
+
+        // Turn 3 is the turn the chip becomes available, for a leek that has
+        // been ticking since the start and for a bulb born right now alike.
+        while s.order.turn() < 3 {
+            s.order.next();
+        }
+        let late = s.create_summon(0, 1, 303, 1, false, None);
+        assert_eq!(s.chip_cooldown(late, 900), 0, "castable at once");
     }
 
     /// True if any system-log entry for `farmer` carries the given key (the

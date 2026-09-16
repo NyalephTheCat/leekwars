@@ -25,6 +25,12 @@ pub trait GameHost {
     }
     /// All entity ids, or only living ones when `alive_only`.
     fn entities(&self, alive_only: bool) -> Vec<i64>;
+    /// The play order — entity ids in the order they take their turns, as
+    /// `StartOrder.compute` drew it. Empty for a host that has not been given
+    /// one, in which case `getNextPlayer`/`getPreviousPlayer` have no answer.
+    fn turn_order(&self) -> &[i64] {
+        &[]
+    }
     fn life(&self, entity: i64) -> Option<i64>;
     fn max_life(&self, entity: i64) -> Option<i64>;
     fn cell(&self, entity: i64) -> Option<i64>;

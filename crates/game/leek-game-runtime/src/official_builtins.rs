@@ -18,7 +18,7 @@ use crate::state::{
     FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
     FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED, FARMER_LOG_LOADOUT_NOT_FOUND,
     FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, Fighter,
-    LOG_SSTANDARD, LOG_SWARNING, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_CORES,
+    LOG_SSTANDARD, LOG_SWARNING, Order, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_CORES,
     STAT_DAMAGE_RETURN, STAT_FREQUENCY, STAT_LIFE, STAT_MAGIC, STAT_MP, STAT_POWER, STAT_RAM,
     STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM,
     State, USE_RESURRECT_INVALID_ENTITY,
@@ -69,6 +69,23 @@ pub fn call_official_builtin(
         // `Effect.effects.length`. The array has one slot per id, the
         // passive-only types included, so its length grows with the catalog.
         "getAllEffects" => int_array(1..=crate::attack::EFFECT_COUNT),
+        // `FightClass.getNextPlayer` / `getPreviousPlayer` — the play order
+        // around the current entity, or around a named one. `null` for an
+        // argument that names no entity, or one that has left the order.
+        #[allow(clippy::cast_possible_wrap)]
+        "getNextPlayer" => order_neighbour(
+            state,
+            args.first(),
+            Order::next_player,
+            Order::next_player_of,
+        ),
+        #[allow(clippy::cast_possible_wrap)]
+        "getPreviousPlayer" => order_neighbour(
+            state,
+            args.first(),
+            Order::previous_player,
+            Order::previous_player_of,
+        ),
         "getNearestEnemy" => Value::Int(nearest_enemy(state, current)),
         // `FightClass.getNearestAlly` — `getNearestEnemy`'s twin, over the
         // caller's own team and skipping the caller itself. Same squared
@@ -964,6 +981,31 @@ fn stats_map(fighter: &Fighter) -> Value {
 
 /// A LeekScript array of ids — the shape every array-returning getter here
 /// builds (`new ArrayLeekValue(ai)` then one `push` per element).
+/// The shared body of `getNextPlayer` / `getPreviousPlayer`: no argument (or
+/// `null`) asks about the entity whose turn it is, a number asks about that
+/// entity. An entity that is not in the play order — dead, or never in it —
+/// answers `null`, as does an argument that names nothing.
+#[allow(clippy::cast_possible_wrap)]
+fn order_neighbour(
+    state: &State,
+    arg: Option<&Value>,
+    current: fn(&Order) -> Option<usize>,
+    named: fn(&Order, usize) -> Option<usize>,
+) -> Value {
+    let fid = match arg {
+        None | Some(Value::Null) => None,
+        Some(v) => match usize::try_from(v.to_long()) {
+            Ok(fid) if fid < state.fighters.len() => Some(fid),
+            _ => return Value::Null,
+        },
+    };
+    let answer = match fid {
+        Some(fid) => named(&state.order, fid),
+        None => current(&state.order),
+    };
+    answer.map_or(Value::Null, |f| Value::Int(f as i64))
+}
+
 fn int_array(ids: impl Iterator<Item = i64>) -> Value {
     Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
         ids.map(Value::Int).collect(),

@@ -57,6 +57,12 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         // `Effect.effects.length`. Fight-independent: the same catalog the
         // official dispatcher answers with.
         "getAllEffects" => int_array((1..=crate::attack::EFFECT_COUNT).collect()),
+        // `FightClass.getNextPlayer` / `getPreviousPlayer` — the play order
+        // around the given entity (the current one with no argument),
+        // wrapping around the round. `null` when the entity is not in the
+        // order, or when the host was never handed one.
+        "getNextPlayer" => opt_int(order_neighbour(host, entity_arg(0), true)),
+        "getPreviousPlayer" => opt_int(order_neighbour(host, entity_arg(0), false)),
         "getEntities" => int_array(host.entities(false)),
         "getAliveEntities" => int_array(host.entities(true)),
         "getEnemies" => int_array(team_filter(host, current, false)),
@@ -189,6 +195,8 @@ pub fn is_game_builtin(name: &str) -> bool {
         "getEntity"
             | "getTurn"
             | "getAllEffects"
+            | "getNextPlayer"
+            | "getPreviousPlayer"
             | "getEntities"
             | "getAliveEntities"
             | "getEnemies"
@@ -901,6 +909,18 @@ fn opt_int(v: Option<i64>) -> Value {
 
 fn string_val(s: String) -> Value {
     Value::String(Rc::new(s))
+}
+
+/// The entity one place `forward` (or backward) from `entity` in the play
+/// order, wrapping around it. `None` when the host has no order, or `entity`
+/// is not in it.
+fn order_neighbour(host: &dyn GameHost, entity: i64, forward: bool) -> Option<i64> {
+    let order = host.turn_order();
+    let index = order.iter().position(|&e| e == entity)?;
+    let len = order.len();
+    // `+ len - 1` rather than `- 1`: the step stays inside `usize`.
+    let step = if forward { 1 } else { len - 1 };
+    order.get((index + step) % len).copied()
 }
 
 fn int_array(ids: Vec<i64>) -> Value {
