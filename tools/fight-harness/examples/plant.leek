@@ -11,14 +11,21 @@
 // own, and the once-per-turn-per-entity awakening rule (entering, leaving and
 // re-entering in one turn is worth one awakening).
 //
-// The plant's AI is an empty closure: the mechanic is what is under test, and
-// its actions would drown it.
+// The plant itself fires its laser at whoever woke it: `getPlantTrigger()` is
+// the entity that just walked in, and the awakening handed the plant its TP
+// back, so it can shoot on every awakening — including twice in one turn if
+// two entities walk in.
 //
 // getPlantType / getAwakeningZone / getPlantTrigger are checked through
 // behaviour rather than debug(), which this engine does not route to the
 // farmer log: a wrong answer changes the movement budget and the fight
 // diverges from the second turn.
 function plantAI() {
+	var who = getPlantTrigger();
+	if (who == -1) {
+		return null;
+	}
+	useChip(1008, who); // laser: line launch, silently misses unaligned
 	return null;
 }
 

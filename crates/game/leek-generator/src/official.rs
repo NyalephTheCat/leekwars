@@ -40,17 +40,108 @@ use leek_game_runtime::state::{
 use leek_hir::{Def, DefId, HirFile};
 use leek_runtime::{Function, Value};
 
+/// What a plant needs to play: the compiled-module cache, the AIs by fid and
+/// the fight's options. Shared by every [`OfficialRuntime`] of a fight so an
+/// awakening can run from wherever it is triggered.
+struct Awakenings {
+    programs: Rc<RefCell<AiPrograms>>,
+    ais: Rc<HashMap<usize, std::sync::Arc<HirFile>>>,
+    opts: NativeOptions,
+    /// Operations each plant spent on its awakenings, folded into the
+    /// fight's totals at the end (`plant.addOperations`).
+    ops: RefCell<HashMap<usize, u64>>,
+}
+
 /// Bridges the native backend's game hook to the official builtins: every
 /// fight function the running AI calls is dispatched against the shared
 /// [`State`] with `current` as the acting entity (`ai.getEntity()`).
 struct OfficialRuntime {
     state: Rc<RefCell<State>>,
     current: usize,
+    awakenings: Rc<Awakenings>,
 }
 
 impl leek_backend_native::GameRuntime for OfficialRuntime {
     fn call(&mut self, name: &str, args: &[Value]) -> Value {
-        call_official_builtin(&mut self.state.borrow_mut(), self.current, name, args)
+        let mut result =
+            call_official_builtin(&mut self.state.borrow_mut(), self.current, name, args);
+
+        // A builtin that moved somebody may have woken a plant. The plant
+        // plays here, with the state borrow released — and before the AI that
+        // moved gets its answer back, so its next statement already sees
+        // whatever the plant did.
+        let pending = self.state.borrow().awakening_pending();
+        if pending {
+            self.play_awakenings();
+            // The walk may have been cut short at the plant's zone and only
+            // finished once it had played, so the distance the builtin
+            // returned was the first leg alone.
+            let walked = self.state.borrow_mut().take_walk_result();
+            if let Some(cells) = walked
+                && matches!(result, Value::Int(_))
+            {
+                result = Value::Int(cells);
+            }
+        }
+        result
+    }
+}
+
+impl OfficialRuntime {
+    /// Play every plant waiting to act, resuming the walk that woke them
+    /// between each — a later leg of the same path can wake another plant.
+    fn play_awakenings(&self) {
+        loop {
+            // Each borrow ends on its own line: the plant's AI borrows the
+            // state again, from the bottom of this call.
+            let next = self.state.borrow_mut().next_awakening();
+            if let Some((plant, trigger)) = next {
+                self.run_plant_ai(plant, trigger);
+                self.state.borrow_mut().finish_awakening(plant);
+                continue;
+            }
+            let more = self.state.borrow_mut().resume_walk();
+            if !more {
+                return;
+            }
+        }
+    }
+
+    /// `Fight.runPlantAwakening` — the plant plays the closure its summoner
+    /// handed to `summon()`, with the entity that woke it as the argument.
+    ///
+    /// Same execution as a turn (its own operation counter, its errors caught
+    /// and logged), except that it happens inside somebody else's: an AI that
+    /// has spent its turn's budget must not kill its own plant with a
+    /// `TOO_MUCH_OPERATIONS`, so the awakening gets a full budget and the
+    /// interrupted run is charged what the plant spent (the backend's
+    /// `restore_run_state` does that half).
+    fn run_plant_ai(&self, plant: usize, trigger: usize) {
+        let summon = {
+            let s = self.state.borrow();
+            s.fighters[plant]
+                .summoner
+                .zip(s.summon_ais.get(&plant).cloned())
+        };
+        let Some((owner, ai_fn)) = summon else {
+            return; // no AI function: the plant just wakes (BULB_WITHOUT_AI)
+        };
+        let Some(hir) = self.awakenings.ais.get(&owner).cloned() else {
+            return;
+        };
+        let opts = self.awakenings.opts.clone();
+        let compiled = self.awakenings.programs.borrow_mut().get(&hir, &opts);
+        let result = compiled.and_then(|program| {
+            let _guard = RuntimeGuard::install(OfficialRuntime {
+                state: Rc::clone(&self.state),
+                current: plant,
+                awakenings: Rc::clone(&self.awakenings),
+            });
+            #[allow(clippy::cast_possible_wrap)]
+            program.run_call(&opts, &ai_fn, vec![Value::Int(trigger as i64)])
+        });
+        let ops = harvest_run(&self.state, plant, owner, &result);
+        *self.awakenings.ops.borrow_mut().entry(plant).or_default() += ops;
     }
 }
 
@@ -65,15 +156,17 @@ const HOOK_OPS_BONUS: u64 = 1_000_000;
 /// escaping. See [`harvest_run`] for which ops count.
 fn run_entity_ai(
     state: &Rc<RefCell<State>>,
-    programs: &mut AiPrograms,
+    awakenings: &Rc<Awakenings>,
     fid: usize,
     hir: &HirFile,
     opts: &NativeOptions,
 ) -> u64 {
-    let result = programs.get(hir, opts).and_then(|program| {
+    let compiled = awakenings.programs.borrow_mut().get(hir, opts);
+    let result = compiled.and_then(|program| {
         let _guard = RuntimeGuard::install(OfficialRuntime {
             state: Rc::clone(state),
             current: fid,
+            awakenings: Rc::clone(awakenings),
         });
         program.run(opts)
     });
@@ -127,7 +220,7 @@ fn harvest_run(
 /// `ActionAIError` names the bulb.
 fn run_bulb_ai(
     state: &Rc<RefCell<State>>,
-    programs: &mut AiPrograms,
+    awakenings: &Rc<Awakenings>,
     fid: usize,
     owner: usize,
     ai_fn: &Value,
@@ -148,10 +241,12 @@ fn run_bulb_ai(
     // `opts`: `op_limit` is armed per run by `run_call` and is deliberately no
     // part of `CodegenKey`, and keying on a budget that shrinks every turn
     // would compile a fresh module per bulb turn again (#112).
-    let result = programs.get(hir, opts).and_then(|program| {
+    let compiled = awakenings.programs.borrow_mut().get(hir, opts);
+    let result = compiled.and_then(|program| {
         let _guard = RuntimeGuard::install(OfficialRuntime {
             state: Rc::clone(state),
             current: fid,
+            awakenings: Rc::clone(awakenings),
         });
         program.run_call(&run_opts, ai_fn, Vec::new())
     });
@@ -224,7 +319,7 @@ fn find_hook(hir: &HirFile, name: &str) -> Option<Value> {
 /// stopping the other hooks or the fight.
 fn run_hooks(
     state: &Rc<RefCell<State>>,
-    programs: &mut AiPrograms,
+    awakenings: &Rc<Awakenings>,
     ais: &HashMap<usize, std::sync::Arc<HirFile>>,
     opts: &NativeOptions,
     phase: HookPhase,
@@ -244,10 +339,12 @@ fn run_hooks(
         // A distinct module from the turn one: `hook_roots` is part of the
         // codegen key, so the turn module's code stays byte-identical to what
         // it was before hooks existed as a separate compile.
-        let result = programs.get(hir, &hook_opts).and_then(|program| {
+        let compiled = awakenings.programs.borrow_mut().get(hir, &hook_opts);
+        let result = compiled.and_then(|program| {
             let _guard = RuntimeGuard::install(OfficialRuntime {
                 state: Rc::clone(state),
                 current: fid,
+                awakenings: Rc::clone(awakenings),
             });
             program.run_call(&hook_opts, &hook_fn, Vec::new())
         });
@@ -279,8 +376,15 @@ pub fn run_official_fight(
 ) -> serde_json::Value {
     let state = Rc::new(RefCell::new(state));
     // One compiled module per (AI, codegen options) for the whole fight — the
-    // turn loop below runs each AI up to `MAX_TURNS` times.
-    let mut programs = AiPrograms::default();
+    // turn loop below runs each AI up to `MAX_TURNS` times. Shared (rather
+    // than owned by the loop) because a plant waking mid-turn compiles and
+    // runs its owner's module from inside another AI's builtin call.
+    let awakenings = Rc::new(Awakenings {
+        programs: Rc::new(RefCell::new(AiPrograms::default())),
+        ais: Rc::new(ais.clone()),
+        opts: opts.clone(),
+        ops: RefCell::new(HashMap::new()),
+    });
     // Total operations per fid, reported once at the end like
     // `Actions.addOpsAndTimes(state.statistics)`.
     let mut total_ops: HashMap<usize, u64> = HashMap::new();
@@ -297,7 +401,7 @@ pub fn run_official_fight(
     // in the report's max-life / displayed stats.
     run_hooks(
         &state,
-        &mut programs,
+        &awakenings,
         ais,
         opts,
         HookPhase::BeforeFight,
@@ -331,16 +435,8 @@ pub fn run_official_fight(
                 if let Some((owner, ai_fn)) = summon {
                     if let (Some(ai_fn), Some(hir)) = (ai_fn, ais.get(&owner)) {
                         let spent = turn_ops.get(&owner).copied().unwrap_or(0);
-                        let ops = run_bulb_ai(
-                            &state,
-                            &mut programs,
-                            fid,
-                            owner,
-                            &ai_fn,
-                            hir,
-                            opts,
-                            spent,
-                        );
+                        let ops =
+                            run_bulb_ai(&state, &awakenings, fid, owner, &ai_fn, hir, opts, spent);
                         *total_ops.entry(owner).or_insert(0) += ops;
                         // The bulb's ops stay on the owner's turn counter: a
                         // second bulb of the same owner gets what these leave.
@@ -352,7 +448,7 @@ pub fn run_official_fight(
                     // this is the reset the bulbs above spend against.
                     turn_ops.insert(fid, 0);
                     if let Some(hir) = ais.get(&fid) {
-                        let ops = run_entity_ai(&state, &mut programs, fid, hir, opts);
+                        let ops = run_entity_ai(&state, &awakenings, fid, hir, opts);
                         *total_ops.entry(fid).or_insert(0) += ops;
                         turn_ops.insert(fid, ops);
                     }
@@ -379,6 +475,11 @@ pub fn run_official_fight(
         }
     }
 
+    // `plant.addOperations(ai.operations())`: what a plant spent on its
+    // awakenings is charged to the plant.
+    for (&fid, &ops) in awakenings.ops.borrow().iter() {
+        *total_ops.entry(fid).or_insert(0) += ops;
+    }
     {
         let mut s = state.borrow_mut();
         for (&fid, &ops) in &total_ops {
@@ -397,7 +498,7 @@ pub fn run_official_fight(
     // `afterFight()` hooks run after the winner is computed.
     run_hooks(
         &state,
-        &mut programs,
+        &awakenings,
         ais,
         opts,
         HookPhase::AfterFight,

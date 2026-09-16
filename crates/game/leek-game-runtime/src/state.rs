@@ -872,6 +872,18 @@ impl BulbTemplate {
     }
 }
 
+/// A walk in progress: the path an entity asked for, how much of it has been
+/// covered, and the zoned plants it might wake on the way. It outlives a
+/// single `move_entity` call only when a plant wakes mid-path.
+#[derive(Debug, Clone)]
+struct Walk {
+    fid: usize,
+    path: Vec<usize>,
+    plants: Vec<usize>,
+    done: usize,
+    start: usize,
+}
+
 /// `BulbTemplate.base(base, bonus, coeff, multiplier)` — the bulb stat
 /// formula: `(int) ((min + Math.floor((max - min) * coeff)) * multiplier)`.
 /// The cast truncates toward zero like Java's `(int)`.
@@ -971,6 +983,18 @@ pub struct State {
     pub restat_potions_available: HashMap<i64, i32>,
     /// `State.mRestatPotionsConsumed` — restat potions spent, per farmer.
     pub restat_potions_consumed: HashMap<i64, i32>,
+    /// A walk in progress, kept while a plant it woke plays (see
+    /// [`State::walk_on`]). `None` the rest of the time, which is all of the
+    /// time in a fight without plants.
+    walk: Option<Walk>,
+    /// The distance the last walk covered, read back by the runner once every
+    /// awakening has played.
+    walk_result: Option<i64>,
+    /// Awakenings waiting for their plant's AI to run. `awake_plant` does the
+    /// mechanical half and queues the plant here, because running an AI needs
+    /// the state borrow its caller is holding; the runner drains this between
+    /// builtin calls.
+    pending_awakenings: std::collections::VecDeque<(usize, usize)>,
     /// `State.awakeningPlant` — the plant whose awakening is running right
     /// now. It acts precisely *outside* its turn, so it is this field and not
     /// the play order that lets it use its chips (see [`State::can_act`]). It
@@ -1013,6 +1037,9 @@ impl State {
             win_team: -1,
             restat_potions_available: HashMap::new(),
             restat_potions_consumed: HashMap::new(),
+            walk: None,
+            walk_result: None,
+            pending_awakenings: std::collections::VecDeque::new(),
             awakening_plant: None,
             batch: false,
         }
@@ -1558,39 +1585,90 @@ impl State {
         // is a question of chronology, not of distance.
         self.fighters[fid].use_mp(size);
 
-        // Walking into a plant's zone wakes it, even without stopping there.
-        // The path is therefore cut at every cell of entry, so the plant
-        // strikes the passer-by where it passes and not from its arrival
-        // cell, which is often out of range. With no plant to cross — the
-        // common case — the loop only stops at the last cell and the move
-        // stays one `ActionMove`.
-        let plants = self.awakening_plants(Some(fid));
-        let mut done = 0usize;
-        for i in 0..path.len() {
-            let from = if i == 0 { start } else { path[i - 1] };
-            let to = path[i];
-            if i < path.len() - 1 && !self.enters_awakening_zone(&plants, fid, from, to) {
+        self.walk = Some(Walk {
+            fid,
+            path: path.to_vec(),
+            // Every cell of entry into a plant's zone is a place the walk may
+            // have to stop at; with no plant to cross — the common case —
+            // this is empty and the walk is one `ActionMove`.
+            plants: self.awakening_plants(Some(fid)),
+            done: 0,
+            start,
+        });
+        self.walk_on()
+    }
+
+    /// Walk the suspended path until it ends or a plant wakes.
+    ///
+    /// Walking into a plant's zone wakes it, even without stopping there, so
+    /// the path is cut at every cell of entry: the plant strikes the
+    /// passer-by where it passes and not from its arrival cell, which is
+    /// often out of range. An awakening leaves the rest of the path here and
+    /// returns, because running the plant's AI needs the state borrow the
+    /// caller is holding; [`State::resume_walk`] picks it up once the plant
+    /// has played.
+    // A path length and the cell ids along it, all bounded by the board
+    // (613 cells), plus the usual `fid as i64` for the action record.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn walk_on(&mut self) -> i64 {
+        let Some(mut walk) = self.walk.take() else {
+            return 0;
+        };
+        let size = walk.path.len() as i32;
+        for i in walk.done..walk.path.len() {
+            let from = if i == 0 { walk.start } else { walk.path[i - 1] };
+            let to = walk.path[i];
+            if i < walk.path.len() - 1
+                && !self.enters_awakening_zone(&walk.plants, walk.fid, from, to)
+            {
                 continue;
             }
-            let step = &path[done..=i];
+            let step = &walk.path[walk.done..=i];
             self.actions.log(Action::Move {
-                entity_id: fid as i64,
+                entity_id: walk.fid as i64,
                 end_cell: to as i32,
                 path: step.iter().map(|&c| c as i32).collect(),
             });
-            self.place_entity(fid, to);
-            done = i + 1;
+            self.place_entity(walk.fid, to);
+            walk.done = i + 1;
 
-            self.check_plant_triggers(fid, Some(from), Some(to));
+            self.check_plant_triggers(walk.fid, Some(from), Some(to));
 
-            // An ambush: a plant that kills the passer-by stops the move
+            // An ambush: a plant that kills the passer-by stops the walk
             // dead. The MP are lost, but the distance counted is the one
             // actually covered.
-            if self.fighters[fid].is_dead() {
+            if self.fighters[walk.fid].is_dead() {
+                self.walk_result = Some(walk.done as i64);
+                return walk.done as i64;
+            }
+            if !self.pending_awakenings.is_empty() {
+                // A plant is about to play. Keep the rest of the path; the
+                // runner comes back through `resume_walk`.
+                let done = walk.done;
+                self.walk = Some(walk);
                 return done as i64;
             }
         }
+        self.walk_result = Some(i64::from(size));
         i64::from(size)
+    }
+
+    /// Continue a walk a plant's awakening interrupted. Returns `true` while
+    /// there is still path left to cover.
+    pub fn resume_walk(&mut self) -> bool {
+        if self.walk.is_none() {
+            return false;
+        }
+        self.walk_on();
+        self.walk.is_some()
+    }
+
+    /// The distance the last walk actually covered, once every awakening it
+    /// set off has played. `None` when no walk has finished since the last
+    /// read — the caller keeps whatever the builtin already returned.
+    pub fn take_walk_result(&mut self) -> Option<i64> {
+        self.walk = None;
+        self.walk_result.take()
     }
 
     /// `State.moveToward(entity, leek_id, pm_to_use)` — path to a living
@@ -2436,44 +2514,95 @@ impl State {
         }
     }
 
-    /// `State.awakePlant(plant, trigger)` — the plant gets all its TP back,
-    /// its cooldowns drop a notch, and then its AI plays with the entering
-    /// entity as its argument. A given entity wakes a given plant only once
-    /// per turn: entering, leaving and re-entering within one turn is worth
-    /// one awakening.
+    /// `State.awakePlant(plant, trigger)` — queue an awakening. A given
+    /// entity wakes a given plant only once per turn: entering, leaving and
+    /// re-entering within one turn is worth one awakening.
     ///
-    /// The AI is not run here. Upstream, `Fight` hands `State` the closure
-    /// that does it, and where nothing is plugged in — a `State` driven
-    /// outside a fight — "the awakening reduces to its mechanical effect,
-    /// without AI", which is exactly what this does. Running the plant's AI
-    /// needs the runner to re-enter a compiled program from inside a builtin
-    /// call that already holds the state borrow, which this crate's runtime
-    /// seam does not allow today; `PLANT_ASLEEP` closes the bracket either
-    /// way, as it does upstream when the hook is null.
-    // `fid as i64` for an action-log record: a fid is an index into
-    // `fighters` (a fight holds tens of entities, not billions).
-    #[allow(clippy::cast_possible_wrap)]
+    /// Nothing else happens here, because the plant playing means running an
+    /// AI, and that needs the state borrow this call is holding. The runner
+    /// drains the queue between builtin calls, opening each awakening with
+    /// [`State::next_awakening`]. A `State` driven outside a fight never
+    /// drains it, and the awakening is then a no-op rather than upstream's
+    /// mechanical half — the two differ only for a caller that never plays
+    /// the plant.
     fn awake_plant(&mut self, plant: usize, trigger: usize) {
         if self.fighters[plant].awakened_by.contains(&trigger) {
             return;
         }
         self.fighters[plant].awakened_by.insert(trigger);
 
-        // A plant's time is counted in awakenings: this, and nowhere else, is
-        // where its cooldowns turn (`start_turn` skips them for it). A big
-        // chip on a cooldown of 3 therefore comes back one awakening in
-        // three, not one turn in three.
-        self.fighters[plant].apply_cooldown();
-        self.fighters[plant].refill_tp();
+        self.pending_awakenings.push_back((plant, trigger));
+    }
 
-        // The TP travel with the action: the client cannot guess them, and
-        // without them the plant would show negative TP from its second
-        // awakening of the turn.
-        self.actions.log(Action::PlantAwake {
-            plant_id: plant as i64,
-            trigger_id: trigger as i64,
-            tp: i64::from(self.fighters[plant].tp()),
-        });
+    /// Is there an awakening to play, or a walk waiting on one? The runner
+    /// asks after every builtin call, so this is the cheap check that a fight
+    /// without plants pays.
+    ///
+    /// False while a plant is already playing: one awakening never starts
+    /// another, and the queue it would have drained is the very queue the
+    /// runner is working through one entry above.
+    #[must_use]
+    pub fn awakening_pending(&self) -> bool {
+        self.awakening_plant.is_none()
+            && (!self.pending_awakenings.is_empty() || self.walk.is_some())
+    }
+
+    /// Open the next queued awakening: the plant gets all its TP back, its
+    /// cooldowns drop a notch, `PLANT_AWAKE` is logged, and it becomes the
+    /// entity allowed to act out of turn ([`State::can_act`]), knowing who
+    /// woke it ([`Fighter::awakening_trigger`]).
+    ///
+    /// Everything but the queueing happens here so that two plants woken by
+    /// the same step still play one after the other — `PLANT_AWAKE` belongs
+    /// to the moment the plant starts playing, not to the moment it was
+    /// noticed. A plant that died in between does not play at all.
+    ///
+    /// `None` when the queue is empty. Pair every `Some` with
+    /// [`State::finish_awakening`].
+    // `fid as i64` for an action-log record: a fid is an index into
+    // `fighters` (a fight holds tens of entities, not billions).
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn next_awakening(&mut self) -> Option<(usize, usize)> {
+        loop {
+            let (plant, trigger) = self.pending_awakenings.pop_front()?;
+            if self.fighters[plant].is_dead() {
+                continue;
+            }
+
+            // A plant's time is counted in awakenings: this, and nowhere
+            // else, is where its cooldowns turn (`start_turn` skips them for
+            // it). A big chip on a cooldown of 3 therefore comes back one
+            // awakening in three, not one turn in three.
+            self.fighters[plant].apply_cooldown();
+            self.fighters[plant].refill_tp();
+
+            // The TP travel with the action: the client cannot guess them,
+            // and without them the plant would show negative TP from its
+            // second awakening of the turn.
+            self.actions.log(Action::PlantAwake {
+                plant_id: plant as i64,
+                trigger_id: trigger as i64,
+                tp: i64::from(self.fighters[plant].tp()),
+            });
+            self.awakening_plant = Some(plant);
+            self.fighters[plant].awakening_trigger = Some(trigger);
+            return Some((plant, trigger));
+        }
+    }
+
+    /// Close the awakening opened by [`State::next_awakening`].
+    ///
+    /// `PLANT_ASLEEP` closes the bracket whatever happened in between,
+    /// including when there was no AI to run: a `SAY` or a `USE_CHIP` does
+    /// not carry the acting entity — the client infers it from the last
+    /// `LEEK_TURN` — so without the closing bound the plant would talk and
+    /// shoot in the passer-by's name.
+    // `fid as i64` for an action-log record: a fid is an index into
+    // `fighters` (a fight holds tens of entities, not billions).
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn finish_awakening(&mut self, plant: usize) {
+        self.awakening_plant = None;
+        self.fighters[plant].awakening_trigger = None;
         self.actions.log(Action::PlantAsleep {
             plant_id: plant as i64,
         });
@@ -3138,6 +3267,118 @@ mod tests {
         }
         let late = s.create_summon(0, 1, 303, 1, false, None);
         assert_eq!(s.chip_cooldown(late, 900), 0, "castable at once");
+    }
+
+    /// A plant wakes once per entity per turn, on the step that takes that
+    /// entity *into* its zone — being in the zone already is not entering it
+    /// — and every awakening hands it all its TP back and ticks its cooldowns
+    /// one notch. Its own turn never does either: a plant's time is counted
+    /// in awakenings.
+    #[test]
+    fn a_plant_wakes_once_per_entity_per_turn() {
+        let mut s = mini_state();
+        s.order.add_entity(0);
+        s.order.add_entity(1);
+        s.chip_specs.insert(910, plant_chip());
+        s.bulb_templates.insert(2, plant_template());
+        s.place_entity(0, 300);
+
+        let plant = s.create_summon(0, 2, 301, 1, false, None);
+        s.apply_summon_states(plant);
+        assert!(s.is_plant(plant), "a ROOTED template makes a plant");
+        assert_eq!(s.awakening_zone(plant), 3);
+        let plant_cell = s.fighters[plant].cell.expect("placed");
+
+        // Two cells at known distances from the plant: one outside its zone,
+        // one inside.
+        let outside = (0..s.map.cells.len())
+            .find(|&c| s.map.get_cell_distance(c, plant_cell) == 5)
+            .expect("a cell 5 away");
+        let inside = (0..s.map.cells.len())
+            .find(|&c| s.map.get_cell_distance(c, plant_cell) == 2)
+            .expect("a cell 2 away");
+
+        // The plant starts its life with the chip on its initial cooldown and
+        // some TP spent, so both halves of the awakening are visible.
+        s.fighters[plant].cooldowns.insert(910, 2);
+        let full = s.fighters[plant].tp();
+        s.fighters[plant].use_tp(full);
+        assert_eq!(s.fighters[plant].tp(), 0);
+
+        // Standing still inside the zone is not entering it.
+        s.check_plant_triggers(1, Some(inside), Some(inside));
+        assert!(!s.awakening_pending(), "already inside: no entry");
+
+        // Crossing in wakes it.
+        s.check_plant_triggers(1, Some(outside), Some(inside));
+        let (woken, trigger) = s.next_awakening().expect("an awakening");
+        assert_eq!((woken, trigger), (plant, 1));
+        assert_eq!(s.fighters[plant].tp(), 4, "all its TP back");
+        assert_eq!(s.chip_cooldown(plant, 910), 1, "one notch per awakening");
+        s.finish_awakening(plant);
+
+        // The same entity crossing again in the same turn is worth nothing.
+        s.check_plant_triggers(1, Some(outside), Some(inside));
+        assert!(s.next_awakening().is_none(), "once per entity per turn");
+
+        // Another entity crossing is its own awakening.
+        s.check_plant_triggers(0, Some(outside), Some(inside));
+        assert_eq!(s.next_awakening(), Some((plant, 0)));
+        assert_eq!(s.chip_cooldown(plant, 910), 0, "a second notch");
+        s.finish_awakening(plant);
+
+        // Its own turn ticks nothing: `start_turn` skips the cooldowns of a
+        // zoned plant, and `begin_turn` gives it no AI to run.
+        s.fighters[plant].cooldowns.insert(910, 2);
+        while s.order.current() != Some(plant) {
+            s.order.next();
+        }
+        assert!(matches!(s.begin_turn(), super::BeginTurn::Upkeep(p) if p == plant));
+        assert_eq!(s.chip_cooldown(plant, 910), 2, "not a turn, an awakening");
+
+        // A new turn for entity 1 lets it wake the plant again.
+        s.clear_plant_triggers(1);
+        s.check_plant_triggers(1, Some(outside), Some(inside));
+        assert!(s.next_awakening().is_some(), "its turn came round again");
+    }
+
+    fn plant_chip() -> super::ChipSpec {
+        super::ChipSpec {
+            id: 910,
+            template: 910,
+            cost: 1,
+            min_range: 1,
+            max_range: 8,
+            launch_type: 7,
+            needs_los: false,
+            max_uses: -1,
+            area: Area::SingleCell,
+            effects: Vec::new(),
+            cooldown: 2,
+            team_cooldown: false,
+            initial_cooldown: 0,
+            level: 1,
+        }
+    }
+
+    /// Corn's shape: ROOTED (`EntityState` ordinal 9) with a zone of 3.
+    fn plant_template() -> super::BulbTemplate {
+        super::BulbTemplate {
+            id: 2,
+            name: "corn".into(),
+            life: (100, 100),
+            strength: (0, 0),
+            wisdom: (0, 0),
+            agility: (0, 0),
+            resistance: (0, 0),
+            science: (0, 0),
+            magic: (0, 0),
+            tp: (4, 4),
+            mp: (0, 0),
+            chips: vec![910],
+            states: vec![9],
+            zone: 3,
+        }
     }
 
     /// True if any system-log entry for `farmer` carries the given key (the
