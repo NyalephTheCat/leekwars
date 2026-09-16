@@ -390,28 +390,49 @@ pub(crate) fn arena_allocated_bytes() -> usize {
     })
 }
 
-/// Reclaim every value handle allocated during the current run. Call once the
+/// Reclaim every value handle allocated during the current run, arena
+/// included — [`free_run_boxes_from`] over the whole list. Only the unit
+/// tests below reach for it: a real run goes through `run_entry`, which knows
+/// whether it is the outermost one and passes its own checkpoint.
+#[cfg(test)]
+pub fn free_run_boxes() {
+    free_run_boxes_from(0, true);
+}
+
+/// How many boxed handles are live — the mark a nested run takes on entry so
+/// it can release only what it allocated.
+#[must_use]
+pub fn box_checkpoint() -> usize {
+    BOX_STATE.with(|s| s.borrow().boxes.len())
+}
+
+/// Reclaim the value handles allocated since `checkpoint`. Call it once the
 /// run's result has been read out (cloned) — see [`read_handle`] — so the
-/// result `Value` and anything reachable from it (held by its own `Rc` clones)
-/// survives.
+/// result `Value` and anything reachable from it (held by its own `Rc`
+/// clones) survives.
 ///
 /// Each handle's storage lives in the bump arena held by [`BOX_STATE`];
-/// bumpalo doesn't run
-/// destructors, so we `drop_in_place` each value exactly once here (releasing
-/// the `Rc`-backed array/map/string storage it holds — no other code frees a
-/// handle, so there is no double-free), then `reset` the arena to reclaim all
-/// its memory at once while retaining capacity for the next run.
-pub fn free_run_boxes() {
+/// bumpalo doesn't run destructors, so each value is `drop_in_place`d exactly
+/// once here (releasing the `Rc`-backed array/map/string storage it holds —
+/// no other code frees a handle, so there is no double-free).
+///
+/// `reset_arena` then reclaims the arena's memory in one go while retaining
+/// capacity for the next run. Only the *outermost* run may do that: a nested
+/// one (a plant waking inside another AI's turn) shares the arena with the
+/// run it interrupted, whose handles are still live — the outer run's own
+/// sweep reclaims the lot.
+pub fn free_run_boxes_from(checkpoint: usize, reset_arena: bool) {
     BOX_STATE.with(|s| {
         let s = &mut *s.borrow_mut();
-        for p in s.boxes.drain(..) {
+        let from = checkpoint.min(s.boxes.len());
+        for p in s.boxes.drain(from..) {
             // SAFETY: `p` is a unique, still-live value in the arena, produced
             // by `handle` and dropped exactly once (reads clone, never free).
             unsafe { std::ptr::drop_in_place(p) };
         }
         // All values are dropped; release their bump storage in one shot.
         // `reset` keeps the largest chunk so subsequent runs reuse it.
-        if let Some(arena) = s.arena.as_mut() {
+        if reset_arena && let Some(arena) = s.arena.as_mut() {
             arena.reset();
         }
     });

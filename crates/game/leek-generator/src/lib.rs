@@ -27,6 +27,7 @@
 pub mod official;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use leek_game_runtime::order::fight_start_order;
@@ -62,12 +63,18 @@ pub use leek_game_runtime::{ActiveEffect, Entity, Fight, FightRef, chips, shared
 /// still record one error per turn (see [`Outcome::errors`]).
 #[derive(Default)]
 pub struct AiPrograms {
-    by_key: HashMap<(usize, leek_backend_native::CodegenKey), Result<CompiledProgram, NativeError>>,
+    by_key:
+        HashMap<(usize, leek_backend_native::CodegenKey), Result<Rc<CompiledProgram>, NativeError>>,
 }
 
 impl AiPrograms {
     /// The module for `hir` under `opts`, compiling it if this fight hasn't
     /// already.
+    ///
+    /// Handed back behind an [`Rc`] rather than borrowed from the cache: a
+    /// plant waking mid-turn runs an AI from *inside* another AI's builtin
+    /// call, and a borrow held for the length of a run would make the cache
+    /// unreachable for the nested one.
     ///
     /// # Errors
     /// A clone of the compile error, every time it is asked for.
@@ -75,16 +82,12 @@ impl AiPrograms {
         &mut self,
         hir: &HirFile,
         opts: &NativeOptions,
-    ) -> Result<&CompiledProgram, NativeError> {
+    ) -> Result<Rc<CompiledProgram>, NativeError> {
         let key = (std::ptr::from_ref(hir) as usize, opts.codegen_key());
-        match self
-            .by_key
+        self.by_key
             .entry(key)
-            .or_insert_with(|| leek_backend_native::compile_program(hir, opts))
-        {
-            Ok(p) => Ok(p),
-            Err(e) => Err(e.clone()),
-        }
+            .or_insert_with(|| leek_backend_native::compile_program(hir, opts).map(Rc::new))
+            .clone()
     }
 }
 
@@ -314,7 +317,7 @@ fn fight_loop<'a>(
             if let Some((hir, opts)) = get_ai(id)
                 && let Err(e) = programs
                     .get(hir, opts)
-                    .and_then(|p| run_ai_program(fight, p, opts))
+                    .and_then(|p| run_ai_program(fight, &p, opts))
             {
                 // A cached compile failure is replayed every turn, exactly as a
                 // per-turn recompile used to fail every turn.

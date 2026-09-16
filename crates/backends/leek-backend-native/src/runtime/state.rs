@@ -423,3 +423,99 @@ pub fn set_lambda_fns(map: HashMap<usize, (*const u8, usize)>) {
 pub fn set_lambda_byref(map: HashMap<usize, Vec<bool>>) {
     DISPATCH.with(|c| c.borrow_mut().lambda_byref = map);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-entrant runs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Everything a JIT run arms for itself, saved so a *nested* run can arm its
+/// own and hand it back.
+///
+/// A run is normally the outermost thing on the thread, so it clears the
+/// globals, reseeds the PRNG, publishes its module's dispatch tables and
+/// resets the op counter — all thread-locals. One fight breaks that: a plant
+/// waking runs its AI from inside another entity's turn, i.e. from inside a
+/// builtin call made by a run that is still going. Without this save/restore
+/// the interrupted run would come back to cleared globals, another module's
+/// dispatch tables and a spent op budget.
+///
+/// Opaque on purpose: the fields are the runtime's own per-run thread-locals,
+/// and the only supported use is [`save_run_state`] followed by
+/// [`restore_run_state`].
+pub struct RunState {
+    globals: HashMap<String, *mut Value>,
+    static_fields: HashMap<(u32, String), *mut Value>,
+    static_init: HashMap<(u32, String), usize>,
+    static_field_owner: HashMap<u32, HashMap<String, u32>>,
+    class_parent: HashMap<u32, Option<(u32, String)>>,
+    class_ctor_thunk: HashMap<u32, usize>,
+    class_string_method: HashMap<u32, usize>,
+    class_reflect: HashMap<u32, HashMap<String, Vec<String>>>,
+    dispatch: super::DispatchTables,
+    rng: Rng,
+    runtime_error: Option<String>,
+    abort: bool,
+    call_depth: u32,
+    max_call_depth: u32,
+    stack_floor: usize,
+    strict: bool,
+    op_count: u64,
+    op_limit: u64,
+    display_version: u8,
+}
+
+/// Take the per-run thread-local state, leaving each slot at its default so
+/// the nested run starts clean. See [`RunState`].
+#[must_use]
+pub fn save_run_state() -> RunState {
+    RunState {
+        globals: GLOBALS.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        static_fields: STATIC_FIELDS.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        static_init: STATIC_INIT.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        static_field_owner: STATIC_FIELD_OWNER.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_parent: CLASS_PARENT.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_ctor_thunk: CLASS_CTOR_THUNK.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_string_method: CLASS_STRING_METHOD.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_reflect: CLASS_REFLECT.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        dispatch: DISPATCH.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        rng: NATIVE_RNG.with(|r| std::mem::replace(&mut *r.borrow_mut(), Rng::new())),
+        runtime_error: RUNTIME_ERROR.with(|e| e.borrow_mut().take()),
+        abort: super::ABORT.with(std::cell::Cell::get),
+        call_depth: super::CALL_DEPTH.with(std::cell::Cell::get),
+        max_call_depth: super::MAX_CALL_DEPTH.with(std::cell::Cell::get),
+        stack_floor: super::STACK_FLOOR.with(std::cell::Cell::get),
+        strict: STRICT.with(std::cell::Cell::get),
+        op_count: OP_COUNT.with(std::cell::Cell::get),
+        op_limit: OP_LIMIT.with(std::cell::Cell::get),
+        display_version: leek_runtime::DISPLAY_VERSION.with(std::cell::Cell::get),
+    }
+}
+
+/// Put back what [`save_run_state`] took.
+///
+/// The operations the nested run charged are added to the interrupted run's
+/// counter rather than discarded: upstream does the same
+/// (`previousOperations + ai.operations()`), so an AI still pays for what the
+/// closure it handed to `summon()` spends.
+pub fn restore_run_state(saved: RunState) {
+    let nested_ops = OP_COUNT.with(std::cell::Cell::get);
+    GLOBALS.with(|g| *g.borrow_mut() = saved.globals);
+    STATIC_FIELDS.with(|g| *g.borrow_mut() = saved.static_fields);
+    STATIC_INIT.with(|g| *g.borrow_mut() = saved.static_init);
+    STATIC_FIELD_OWNER.with(|g| *g.borrow_mut() = saved.static_field_owner);
+    CLASS_PARENT.with(|g| *g.borrow_mut() = saved.class_parent);
+    CLASS_CTOR_THUNK.with(|g| *g.borrow_mut() = saved.class_ctor_thunk);
+    CLASS_STRING_METHOD.with(|g| *g.borrow_mut() = saved.class_string_method);
+    CLASS_REFLECT.with(|g| *g.borrow_mut() = saved.class_reflect);
+    DISPATCH.with(|g| *g.borrow_mut() = saved.dispatch);
+    NATIVE_RNG.with(|r| *r.borrow_mut() = saved.rng);
+    RUNTIME_ERROR.with(|e| *e.borrow_mut() = saved.runtime_error);
+    super::ABORT.with(|a| a.set(saved.abort));
+    super::CALL_DEPTH.with(|c| c.set(saved.call_depth));
+    super::MAX_CALL_DEPTH.with(|c| c.set(saved.max_call_depth));
+    super::STACK_FLOOR.with(|c| c.set(saved.stack_floor));
+    STRICT.with(|s| s.set(saved.strict));
+    OP_COUNT.with(|c| c.set(saved.op_count.saturating_add(nested_ops)));
+    OP_LIMIT.with(|c| c.set(saved.op_limit));
+    leek_runtime::DISPLAY_VERSION.with(|c| c.set(saved.display_version));
+}

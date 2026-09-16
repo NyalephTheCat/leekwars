@@ -1,4 +1,5 @@
-//! Reentrancy: the same `HirFile` compiled and run repeatedly in one process.
+//! Reentrancy: the same `HirFile` compiled and run repeatedly in one process,
+//! and one run started from inside another.
 //!
 //! This is how the fight generator drives an AI — `run` per turn and `run_call`
 //! per hook, all against one `HirFile` — so every run must start from the same
@@ -7,9 +8,18 @@
 //! runtime's thread-locals (op counter, globals, dispatch tables, recorded
 //! error) live on, so a missed reset shows up only on the *second* run — which
 //! no other test in this crate performs.
+//!
+//! One fight goes further and *nests* runs: a plant waking runs its AI from
+//! inside a builtin call made by the entity whose turn it interrupted. There
+//! the same resets must not happen — the outer run is still using what they
+//! would clear — so the nested run takes that state aside and hands it back.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use leek_backend_native::ids::fn_id;
-use leek_backend_native::{NativeOptions, ops_used, run, run_call};
+use leek_backend_native::set_game_runtime;
+use leek_backend_native::{GameRuntime, NativeError, NativeOptions, ops_used, run, run_call};
 use leek_hir::{Def, DefId, HirFile};
 use leek_parser::{ParseFeatures, ast::AstNode, ast::SourceFile, parse_with_features};
 use leek_runtime::{Function, Value};
@@ -169,4 +179,78 @@ fn a_run_that_trips_the_op_budget_does_not_poison_the_next_run() {
             .to_string(),
         "2"
     );
+}
+
+/// A game runtime that runs a whole second program from inside one builtin
+/// call — what a fight does when a plant wakes in the middle of another
+/// entity's turn. The nested program runs on a *tight* op budget of its own,
+/// as an awakening does.
+struct Reentrant {
+    inner: HirFile,
+    opts: NativeOptions,
+    ran: Rc<RefCell<Option<Result<Value, NativeError>>>>,
+}
+
+/// The innermost runtime: a plant's own builtins have to find something
+/// installed, because `dispatch` moves the current runtime out for the
+/// duration of the call it is serving.
+struct Inert;
+
+impl GameRuntime for Inert {
+    fn call(&mut self, _name: &str, _args: &[Value]) -> Value {
+        Value::Null
+    }
+}
+
+impl GameRuntime for Reentrant {
+    fn call(&mut self, _name: &str, _args: &[Value]) -> Value {
+        set_game_runtime(Some(Box::new(Inert)));
+        let out = run(&self.inner, &self.opts);
+        set_game_runtime(None);
+        *self.ran.borrow_mut() = Some(out);
+        Value::Int(7)
+    }
+}
+
+/// A run nested inside another run leaves the outer one standing: the outer
+/// program keeps its own op budget, its arrays stay readable (the nested run
+/// must not sweep the box arena they live in) and its value comes out whole.
+///
+/// The budgets are what make this observable. The nested run is given a tiny
+/// one — enough for itself, nowhere near enough for the loop the outer run
+/// still has to get through — so an unrestored `OP_LIMIT` ends the outer run
+/// in `TOO_MUCH_OPERATIONS` instead of a value.
+#[test]
+fn a_nested_run_leaves_the_outer_run_standing() {
+    let base = opts().with_link_game(true);
+    let ran = Rc::new(RefCell::new(None));
+    let inner = hir_v4("var s = 0 for (var i = 0; i < 3; i++) { s += i } return s");
+    set_game_runtime(Some(Box::new(Reentrant {
+        inner,
+        opts: base.clone().with_op_limit(400),
+        ran: Rc::clone(&ran),
+    })));
+    // `kept` is an array built before the builtin call and read after it; the
+    // loop after the call costs far more than the nested run was allowed.
+    let outer = run(
+        &hir_v4(
+            "var kept = [10, 20, 30] \
+             var mid = getLife() \
+             var acc = 0 \
+             for (var i = 0; i < 200; i++) { acc += i } \
+             return kept[0] + kept[1] + kept[2] + mid",
+        ),
+        &base.clone().with_op_limit(100_000),
+    );
+    set_game_runtime(None);
+
+    assert!(
+        matches!(&*ran.borrow(), Some(Ok(Value::Int(3)))),
+        "the nested run produced {:?}",
+        ran.borrow()
+    );
+    match outer {
+        Ok(Value::Int(67)) => {} // 10 + 20 + 30 + 7
+        other => panic!("outer run came back {other:?}"),
+    }
 }

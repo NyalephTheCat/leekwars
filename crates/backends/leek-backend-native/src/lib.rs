@@ -143,6 +143,7 @@ pub use options::{
     OptLevel,
 };
 pub use runtime::ops_used;
+pub use runtime::{RunState, restore_run_state, save_run_state};
 
 use std::collections::HashMap;
 
@@ -173,6 +174,13 @@ thread_local! {
     /// on this thread. Set at the end of the [`NativeEmit::Jit`] path.
     static LAST_JIT_SPLIT: std::cell::Cell<Option<(std::time::Duration, std::time::Duration)>> =
         const { std::cell::Cell::new(None) };
+
+    /// JIT runs currently on this thread's stack. Zero everywhere but inside a
+    /// run that another run started — which one fight does on purpose: a
+    /// plant waking runs its AI from inside the builtin call of the AI whose
+    /// turn it interrupted. Read by `CompiledProgram::run_entry` to decide
+    /// whether it owns the per-run thread-local state or is borrowing it.
+    static RUN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// The (JIT-compile, execute) durations of the most recent successful JIT run
@@ -545,6 +553,31 @@ impl CompiledProgram {
     }
 
     fn run_entry(&self, opts: &NativeOptions, entry: JitEntry<'_>) -> Result<Value, NativeError> {
+        // A run inside a run — a plant waking mid-turn runs its AI from
+        // inside a builtin call the interrupted AI is still in. Everything
+        // below arms thread-locals for "the" run, so a nested one takes the
+        // outer run's state aside first and hands it back at the end; the
+        // outermost run behaves exactly as it always has.
+        let nested = RUN_DEPTH.with(std::cell::Cell::get) > 0;
+        let saved = nested.then(runtime::save_run_state);
+        let boxes = runtime::box_checkpoint();
+        RUN_DEPTH.with(|d| d.set(d.get() + 1));
+        let result = self.run_entry_inner(opts, entry);
+        RUN_DEPTH.with(|d| d.set(d.get() - 1));
+        // The outer run's handles are still live, so a nested run releases
+        // only its own and leaves the shared arena alone.
+        runtime::free_run_boxes_from(boxes, !nested);
+        if let Some(saved) = saved {
+            runtime::restore_run_state(saved);
+        }
+        result
+    }
+
+    fn run_entry_inner(
+        &self,
+        opts: &NativeOptions,
+        entry: JitEntry<'_>,
+    ) -> Result<Value, NativeError> {
         // Publish this module's dispatch tables (another program may have run
         // since — see `RuntimeTables`).
         self.tables.install();
@@ -623,13 +656,15 @@ impl CompiledProgram {
             }
         };
         LAST_JIT_SPLIT.with(|c| c.set(Some((self.compile_dur.take(), t_exec.elapsed()))));
-        // Reclaim every boxed `Value` handle this run allocated. The result
-        // was cloned out above (`read_handle`), so it and its reachable data
-        // survive; all intermediate boxes — including the ones the global
-        // store held — are freed here instead of leaking until process exit.
-        // The module's *constants* live in a separate arena (`_consts`) and are
-        // untouched, so the next run still reads live values.
-        runtime::free_run_boxes();
+        // The boxed `Value` handles this run allocated are reclaimed by
+        // `run_entry`, which knows whether this run is the outermost one. The
+        // result was cloned out above (`read_handle`), so it and its
+        // reachable data survive; all intermediate boxes — including the ones
+        // the global store held — are freed there instead of leaking until
+        // process exit. The module's *constants* live in a separate arena
+        // (`_consts`) and are untouched, so the next run still reads live
+        // values.
+        //
         // A runtime fault recorded by a shim during the run (e.g. a
         // v4-strict out-of-bounds array write) takes precedence over the
         // computed value: the program errored.
