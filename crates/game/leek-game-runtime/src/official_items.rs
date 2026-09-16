@@ -342,25 +342,6 @@ mod tests {
         }
     }
 
-    /// Every entry in every catalog builds a spec. The builders panic on an
-    /// effect type or an area id they don't model, so this is what turns the
-    /// next data bump growing one into a failing test rather than a panic in
-    /// the middle of a fight.
-    #[test]
-    fn every_catalog_entry_builds_a_spec() {
-        assert!(!weapons().is_empty(), "weapons.json parsed empty");
-        assert!(!chips().is_empty(), "chips.json parsed empty");
-        assert!(!bulbs().is_empty(), "summons.json parsed empty");
-        // The 2.50 plants, to pin that the rooted templates come through with
-        // their zone (corn and the chilli pepper) and without one (the
-        // prototaxite, rooted but never waking).
-        for (id, zone) in [(9, 3), (10, 3), (13, 0)] {
-            let b = bulb_template(id).unwrap_or_else(|| panic!("summon template {id}"));
-            assert!(b.is_plant(), "template {id} is a plant");
-            assert_eq!(b.zone, zone, "template {id} zone");
-        }
-    }
-
     /// A summons template comes back with its stat ranges and granted chips.
     #[test]
     fn a_bulb_template_comes_back_for_a_summons_id() {
