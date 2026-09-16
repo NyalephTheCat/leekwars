@@ -864,6 +864,12 @@ pub struct State {
     pub restat_potions_available: HashMap<i64, i32>,
     /// `State.mRestatPotionsConsumed` — restat potions spent, per farmer.
     pub restat_potions_consumed: HashMap<i64, i32>,
+    /// `State.batch` — this fight is one of a *lot* run back to back
+    /// (`Scenario.batch`, set by `Generator` before the fight starts), which
+    /// `isBatchFight()` reports so an AI can go quiet for the run. Nothing
+    /// else distinguishes the two: a batched fight has the same type and the
+    /// same context as one launched on its own.
+    pub batch: bool,
 }
 
 impl State {
@@ -894,6 +900,7 @@ impl State {
             win_team: -1,
             restat_potions_available: HashMap::new(),
             restat_potions_consumed: HashMap::new(),
+            batch: false,
         }
     }
 

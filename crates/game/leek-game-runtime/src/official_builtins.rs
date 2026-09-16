@@ -152,11 +152,11 @@ pub fn call_official_builtin(
             Value::Int(state.move_away_from_cell(current, int_arg(0), pm))
         }
         "getWinner" => Value::Int(i64::from(state.win_team)),
-        // `FightClass.isBatchFight` — `State.isBatch()`, true only for a
-        // fight the *server* runs as part of a batch (a tournament round,
-        // a garden batch). Nothing drives this engine that way, so it is
-        // the constant an offline fight is.
-        "isBatchFight" => Value::Bool(false),
+        // `FightClass.isBatchFight` — `State.isBatch()`, true for a fight run
+        // as one of a lot rather than on its own. It is carried, not derived:
+        // a batched fight has the same type and the same context as a single
+        // one, so the scenario is the only thing that knows.
+        "isBatchFight" => Value::Bool(state.batch),
         "setLoadout" => Value::Bool(set_loadout(state, current, args)),
 
         // ---- FieldClass ----
@@ -1696,12 +1696,18 @@ mod tests {
 
     /// A fight this engine runs is never one of the server's batch runs.
     #[test]
-    fn is_batch_fight_is_false_offline() {
+    fn is_batch_fight_reports_the_state_flag() {
         let mut state = two_leeks();
         assert_value(
             &call(&mut state, "isBatchFight", &[]),
             &Value::Bool(false),
-            "isBatchFight()",
+            "isBatchFight() off a single fight",
+        );
+        state.batch = true;
+        assert_value(
+            &call(&mut state, "isBatchFight", &[]),
+            &Value::Bool(true),
+            "isBatchFight() inside a lot",
         );
     }
 

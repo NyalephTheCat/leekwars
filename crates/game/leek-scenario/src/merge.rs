@@ -42,6 +42,9 @@ impl Scenario {
         if patch.strict.is_some() {
             self.strict = patch.strict;
         }
+        if patch.batch.is_some() {
+            self.batch = patch.batch;
+        }
         if patch.map.is_some() {
             self.map.clone_from(&patch.map);
         }
@@ -67,6 +70,9 @@ pub fn overlay_scenario(base: &mut Scenario, child: &Scenario) {
     }
     if child.strict.is_some() {
         base.strict = child.strict;
+    }
+    if child.batch.is_some() {
+        base.batch = child.batch;
     }
     if child.map.is_some() {
         base.map.clone_from(&child.map);

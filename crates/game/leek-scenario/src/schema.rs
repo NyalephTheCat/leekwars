@@ -35,6 +35,13 @@ pub struct Scenario {
     /// upstream effect types is rejected at load instead of skipped with a
     /// fight-log warning).
     pub strict: Option<bool>,
+    /// Run this fight as one of a *lot* (default false) — what `isBatchFight()`
+    /// reports. A lot measures one AI over several fights in a row, and an AI
+    /// may want to go quiet for it (logging costs operations) or switch off
+    /// what it keeps for real fights. Nothing else distinguishes the two: a
+    /// batched fight has the same type and the same context as a single one,
+    /// so it has to be said here (`Scenario.batch` upstream).
+    pub batch: Option<bool>,
     /// The arena.
     pub map: Option<MapSpec>,
     /// Farmer metadata (owners that group leeks; labels only).
@@ -147,6 +154,8 @@ pub struct ScenarioPatch {
     pub version: Option<u8>,
     #[serde(default)]
     pub strict: Option<bool>,
+    #[serde(default)]
+    pub batch: Option<bool>,
     #[serde(default)]
     pub map: Option<MapSpec>,
     #[serde(default)]
@@ -287,6 +296,8 @@ struct RawScenario {
     #[serde(default)]
     strict: Option<bool>,
     #[serde(default)]
+    batch: Option<bool>,
+    #[serde(default)]
     map: Option<MapSpec>,
     #[serde(default)]
     farmers: Vec<FarmerSpec>,
@@ -339,6 +350,7 @@ impl From<RawScenario> for Scenario {
             max_ops_per_turn: r.max_ops_per_turn,
             version: r.version,
             strict: r.strict,
+            batch: r.batch,
             map: r.map,
             farmers: r.farmers,
             teams: r.teams,

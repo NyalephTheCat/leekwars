@@ -90,15 +90,14 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         "isAlive" => Value::Bool(host.life(entity_arg(0)).is_some_and(|l| l > 0)),
         "isDead" => Value::Bool(host.life(entity_arg(0)).is_none_or(|l| l <= 0)),
         // ---- 2.50 plants / batch fights ----
-        // A [`GameHost`] has no entity *types* and no batch scheduling, so
-        // every one of these is the constant its sentinel describes: no
-        // entity is a plant (`-1`), none has an awakening zone (`0` — it
-        // plays its own turn), nothing ever wakes one (`-1`), and a fight
-        // driven through this runtime is never part of a server batch.
+        // A [`GameHost`] has no entity *types*, so the plant queries are the
+        // constants their sentinels describe: no entity is a plant (`-1`),
+        // none has an awakening zone (`0` — it plays its own turn) and
+        // nothing ever wakes one (`-1`).
         "getPlantType" => opt_int(host.life(entity_arg(0)).map(|_| -1)),
         "getAwakeningZone" => opt_int(host.life(entity_arg(0)).map(|_| 0)),
         "getPlantTrigger" => Value::Int(-1),
-        "isBatchFight" => Value::Bool(false),
+        "isBatchFight" => Value::Bool(host.is_batch_fight()),
 
         // ---- Map / geometry ----
         "getCellX" => opt_int(host.cell_x(int_arg(0))),
@@ -958,5 +957,22 @@ mod tests {
         assert_eq!(content(&mut fight, 22), catalog("CELL_OBSTACLE"));
         assert_eq!(content(&mut fight, 33), catalog("CELL_ENTITY"));
         assert_eq!(content(&mut fight, 5), catalog("CELL_EMPTY"));
+    }
+
+    /// `isBatchFight()` reports the flag the fight was set up with, not a
+    /// constant: a lot and a single fight are otherwise indistinguishable, so
+    /// an AI that goes quiet for a lot needs this to be carried through.
+    #[test]
+    fn is_batch_fight_reports_the_fights_flag() {
+        let mut fight = Fight::new(10, 10, 1).with_entity(Entity::new(1, "Bot", 0, 0));
+        assert!(matches!(
+            call_game_builtin(&mut fight, "isBatchFight", &[]),
+            Value::Bool(false)
+        ));
+        fight.set_batch(true);
+        assert!(matches!(
+            call_game_builtin(&mut fight, "isBatchFight", &[]),
+            Value::Bool(true)
+        ));
     }
 }
