@@ -34,8 +34,8 @@ fn harness_leek(id: i64, name: &str) -> Fighter {
     let mut f = Fighter::new(0, id, name.to_string(), 0, stats);
     f.level = 10;
     f.weapons = vec![37];
-    f.chips = (1001..=1049).collect();
-    f.chips.insert(84); // CHIP_RESURRECTION — exactly 50/50 RAM
+    f.chips = (1001..=1050).collect();
+    f.chips.insert(84); // CHIP_RESURRECTION — exactly 52 chips in 52 RAM
     f
 }
 
@@ -1704,6 +1704,59 @@ fn harness_bulb() -> BulbTemplate {
     }
 }
 
+/// `Harness.registerChips` — synthetic chip 1050 "plant": TYPE_SUMMON →
+/// plant template 1002, the 2.50 rooted summons. Same ladder as "spawn", but
+/// what comes out is ROOTED with an awakening zone: it leaves the turn order,
+/// and walking into its zone wakes it where the passer-by stands.
+fn harness_plant_chip() -> ChipSpec {
+    ChipSpec {
+        id: 1050,
+        template: 1050,
+        cost: 2,
+        min_range: 1,
+        max_range: 8,
+        launch_type: 7,
+        needs_los: true,
+        max_uses: -1,
+        area: Area::SingleCell,
+        effects: vec![EffectParams {
+            effect: EffectType::Summon,
+            value1: 1002.0,
+            value2: 0.0,
+            turns: 0,
+            targets: EffectTargets::all(),
+            modifiers: EffectModifiers::empty(),
+        }],
+        cooldown: 3,
+        team_cooldown: false,
+        initial_cooldown: 0,
+        level: 1,
+    }
+}
+
+/// `Harness.registerChips` — plant template 1002 "harness_plant": ROOTED
+/// (`EntityState` ordinal 9) with an awakening zone of 3, the shape corn and
+/// the chilli pepper have in `data/summons.json`. Zero MP: a rooted summon
+/// never walks.
+fn harness_plant() -> BulbTemplate {
+    BulbTemplate {
+        id: 1002,
+        name: "harness_plant".to_string(),
+        life: (100, 400),
+        strength: (50, 200),
+        wisdom: (0, 100),
+        agility: (0, 0),
+        resistance: (0, 0),
+        science: (0, 100),
+        magic: (0, 0),
+        tp: (4, 8),
+        mp: (0, 0),
+        chips: vec![1008],
+        states: vec![9],
+        zone: 3,
+    }
+}
+
 fn run() -> Result<serde_json::Value> {
     let args: Vec<String> = std::env::args().collect();
     let (ai1, ai2) = match args.as_slice() {
@@ -1780,7 +1833,9 @@ fn run() -> Result<serde_json::Value> {
     state.chip_specs.insert(1048, harness_spawn());
     state.chip_specs.insert(84, harness_revive());
     state.chip_specs.insert(1049, harness_colossus());
+    state.chip_specs.insert(1050, harness_plant_chip());
     state.bulb_templates.insert(1001, harness_bulb());
+    state.bulb_templates.insert(1002, harness_plant());
 
     let mut ais = HashMap::new();
     for (fid, path) in [(0_usize, &ai1), (1, &ai2)] {

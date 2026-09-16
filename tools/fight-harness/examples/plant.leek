@@ -1,0 +1,47 @@
+// plant corpus — the 2.50 rooted summons, which never play a turn of their
+// own: they wake when an entity ENTERS their zone (radius 3), where the
+// passer-by stands and not from its arrival cell.
+//
+// Turn 1 each leek plants one behind itself (chip 1050 → template 1002,
+// ROOTED + zone 3); chip cooldown 3 keeps it to one plant every few turns.
+// Then both leeks close in, so each walks through the other's zone and the
+// plant fires — pinning PLANT_AWAKE/PLANT_ASLEEP, the path cut at the entry
+// cell (one ActionMove per leg instead of one for the whole walk), the plant
+// keeping its slot in the order for start-of-turn upkeep with no turn of its
+// own, and the once-per-turn-per-entity awakening rule (entering, leaving and
+// re-entering in one turn is worth one awakening).
+//
+// The plant's AI is an empty closure: the mechanic is what is under test, and
+// its actions would drown it.
+//
+// getPlantType / getAwakeningZone / getPlantTrigger are checked through
+// behaviour rather than debug(), which this engine does not route to the
+// farmer log: a wrong answer changes the movement budget and the fight
+// diverges from the second turn.
+function plantAI() {
+	return null;
+}
+
+var e = getNearestEnemy();
+if (getTurn() == 1) {
+	setWeapon(WEAPON_PISTOL);
+}
+var my = getCell();
+var back = getCellFromXY(getCellX(my) - 1, getCellY(my));
+if (back != null && !isObstacle(back)) {
+	summon(1050, back, plantAI);
+}
+// A rooted summon reports its template through getPlantType and its radius
+// through getAwakeningZone; both are -1 / 0 for everything else.
+var pets = getSummons();
+var planted = count(pets) > 0
+	&& getPlantType(pets[0]) == 1002      // the plant's template id
+	&& getAwakeningZone(pets[0]) == 3     // its radius
+	&& getType(pets[0]) == ENTITY_PLANT   // a rooted summon is not a bulb
+	&& getPlantType(getEntity()) == -1    // a leek is not a plant,
+	&& getAwakeningZone(getEntity()) == 0 // has no zone,
+	&& getType(getEntity()) == ENTITY_LEEK
+	&& getPlantTrigger() == -1;           // and wakes nothing from here
+moveToward(e, planted ? 7 : 2);
+useWeapon(e);
+useWeapon(e);

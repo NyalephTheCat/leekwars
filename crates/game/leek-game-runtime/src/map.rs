@@ -732,6 +732,32 @@ impl Map {
         self.slide_walk(entity, target, dx, dy)
     }
 
+    /// `Map.getRepelLastAvailableCell(entity, caster, distance)` — push the
+    /// entity a *fixed* number of cells straight away from the caster,
+    /// stopping at the first cell that is off-map or unavailable. Unlike the
+    /// push and attract walks there is no target to reach and no direction
+    /// check: the direction is the caster→entity axis, and an entity on the
+    /// caster's own cell has none, so it does not move.
+    #[must_use]
+    pub fn repel_last_available_cell(&self, entity: usize, caster: usize, distance: i32) -> usize {
+        let dx = (self.cells[entity].x - self.cells[caster].x).signum();
+        let dy = (self.cells[entity].y - self.cells[caster].y).signum();
+        if dx == 0 && dy == 0 {
+            return entity; // same cell: no direction
+        }
+        let mut current = entity;
+        for _ in 0..distance {
+            let Some(next) = self.get_next_cell(current, dx, dy) else {
+                break;
+            };
+            if !self.cell_available(next) {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
+
     /// The shared `while (current != target)` walk of the push/attract cell
     /// finders: last available cell before the first blocked one.
     fn slide_walk(&self, start: usize, target: usize, dx: i32, dy: i32) -> usize {

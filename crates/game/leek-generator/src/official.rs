@@ -361,6 +361,14 @@ pub fn run_official_fight(
                 s.end_entity_turn(fid);
                 s.end_turn();
             }
+            // A zoned plant plays on waking and nowhere else, so no AI runs
+            // on its turn; its slot in the order is only what gets it the
+            // start-of-turn upkeep.
+            BeginTurn::Upkeep(fid) => {
+                let mut s = state.borrow_mut();
+                s.end_entity_turn(fid);
+                s.end_turn();
+            }
             BeginTurn::Skip => state.borrow_mut().end_turn(),
             BeginTurn::NoCurrent => {}
         }

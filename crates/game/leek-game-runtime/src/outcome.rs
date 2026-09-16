@@ -47,7 +47,7 @@ pub fn entity_snapshot(f: &Fighter, critical: bool) -> Value {
         "name": f.name,
         "cellPos": f.cell.map_or(Value::Null, |c| json!(c)),
         "farmer": f.farmer,
-        "type": i32::from(f.is_summon()), // TYPE_LEEK (0) / TYPE_BULB (1)
+        "type": f.entity_type, // TYPE_LEEK (0) / TYPE_BULB (1) / TYPE_PLANT (5)
         "orientation": -1,
         "summon": f.is_summon(),
     });

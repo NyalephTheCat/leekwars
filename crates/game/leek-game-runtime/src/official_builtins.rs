@@ -65,6 +65,10 @@ pub fn call_official_builtin(
     match name {
         // ---- FightClass ----
         "getTurn" => Value::Int(i64::from(state.order.turn())),
+        // `FightClass.getAllEffects` — every effect id in the game, `1` to
+        // `Effect.effects.length`. The array has one slot per id, the
+        // passive-only types included, so its length grows with the catalog.
+        "getAllEffects" => int_array(1..=crate::attack::EFFECT_COUNT),
         "getNearestEnemy" => Value::Int(nearest_enemy(state, current)),
         // `FightClass.getNearestAlly` — `getNearestEnemy`'s twin, over the
         // caller's own team and skipping the caller itself. Same squared
@@ -462,30 +466,43 @@ pub fn call_official_builtin(
             None => Value::Null,
         },
 
+        // `EntityClass.getType` — `Entity.getType() + 1`, so the answer is
+        // the `ENTITY_*` catalog value (leek 1, bulb 2, plant 6) and not the
+        // engine's internal `TYPE_*`.
+        "getType" => match resolve_entity(state, current, args.first()) {
+            Some(fid) => Value::Int(i64::from(state.fighters[fid].entity_type) + 1),
+            None => Value::Null,
+        },
+
         // ---- EntityClass (plants) ----
-        // The 2.50 rooted summons. This engine has no entity *types* at all
-        // — every fighter is a leek or a bulb — so no entity is a plant and
-        // none carries an awakening zone. Both getters keep the shape that
-        // matters to an AI: the sentinel for an entity that resolves, and
-        // `null` for an argument that doesn't.
+        // The 2.50 rooted summons. A plant is defined by the `ROOTED` state
+        // on its bulb template, not by a hard-coded id list.
         //
-        // `getPlantType` answers `-1` for a non-plant, exactly as
-        // `getMobType`/`getBulbType` do for a non-mob/non-bulb.
+        // `getPlantType` is the plant's skin — its bulb template id — and
+        // `-1` for a non-plant, exactly as `getMobType`/`getBulbType` answer
+        // for a non-mob/non-bulb. `null` for an argument that resolves to no
+        // entity at all.
         "getPlantType" => match resolve_entity(state, current, args.first()) {
+            Some(fid) if state.is_plant(fid) => Value::Int(i64::from(state.fighters[fid].skin)),
             Some(_) => Value::Int(-1),
             None => Value::Null,
         },
         // `getAwakeningZone` is the radius in cells of the entity's
-        // awakening zone, and `0` means "this entity plays its own turn
-        // like everyone else" — which is every entity here.
+        // awakening zone; `0` means "this entity plays its own turn like
+        // everyone else", which covers every leek, every bulb, and the
+        // rooted-but-zoneless prototaxite.
         "getAwakeningZone" => match resolve_entity(state, current, args.first()) {
-            Some(_) => Value::Int(0),
+            Some(fid) => Value::Int(i64::from(state.awakening_zone(fid))),
             None => Value::Null,
         },
         // `getPlantTrigger` is the entity whose move into the zone woke the
-        // plant up, and `-1` outside an awakening. No entity ever wakes a
-        // plant here, so it is always `-1`. Takes no argument upstream.
-        "getPlantTrigger" => Value::Int(-1),
+        // running plant, and `-1` everywhere else — outside an awakening, and
+        // for anything that is not a zoned plant. Takes no argument upstream.
+        "getPlantTrigger" => Value::Int(
+            state.fighters[current]
+                .awakening_trigger
+                .map_or(-1, |fid| fid as i64),
+        ),
 
         // ---- EntityClass (communication) ----
         // `say(message)` — 1 TP, at most `SAY_LIMIT_TURN` logged per turn.
@@ -996,6 +1013,13 @@ fn summon(state: &mut State, current: usize, args: &[Value]) -> i64 {
         && let Some(bulb) = bulb
     {
         state.summon_ais.insert(bulb, ai_fn);
+        // After the AI is attached, or a woken plant would have nothing to
+        // run. A summon coming out of the ground inside a plant's zone wakes
+        // it; and a plant that has just been planted is woken by whatever
+        // stands around it.
+        let cell = state.fighters[bulb].cell;
+        state.check_plant_triggers(bulb, None, cell);
+        state.check_plant_planted(bulb);
     }
     i64::from(result)
 }

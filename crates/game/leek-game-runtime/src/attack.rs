@@ -95,6 +95,12 @@ pub enum EffectType {
     Superinfection = 64,
 }
 
+/// `Effect.effects.length` — one slot per effect id, the passive-only types
+/// (which have no `Effect` subclass upstream, and sit at a `null` slot)
+/// included. It is also the number of effects in the game, which is what
+/// `getAllEffects()` enumerates.
+pub const EFFECT_COUNT: i64 = EffectType::Superinfection as i64;
+
 impl EffectType {
     /// The official wire id (`Effect.getId()`).
     #[must_use]
@@ -698,8 +704,15 @@ impl State {
             // from their LIVE cells; the matching Attract/Push effect line
             // still falls through to the generic branch below (where the base
             // `Effect.apply` keeps its value at 0, so nothing is stored).
+            //
+            // A target killed by an EARLIER effect of the same hit (the sun
+            // spear: damage, then repel) has no cell left, so moving it is
+            // skipped — as the client does.
             if params.effect == EffectType::Attract {
                 for &fid in &target_entities {
+                    if self.fighters[fid].is_dead() {
+                        continue;
+                    }
                     if let Some(cell) = self.fighters[fid].cell {
                         let dest =
                             self.map
@@ -709,10 +722,30 @@ impl State {
                 }
             } else if params.effect == EffectType::Push {
                 for &fid in &target_entities {
+                    if self.fighters[fid].is_dead() {
+                        continue;
+                    }
                     if let Some(cell) = self.fighters[fid].cell {
                         let dest =
                             self.map
                                 .push_last_available_cell(cell, target_cell, launch_cell);
+                        self.slide_entity(fid, dest, caster);
+                    }
+                }
+            } else if params.effect == EffectType::Repel {
+                // A fixed number of cells (`value1`) straight away from the
+                // caster. A critical hit carries on the distance too, with
+                // the factor and the rounding of every other effect (×1.3):
+                // the sun spear then repels by 5 cells instead of 4.
+                let distance = java_round(
+                    params.value1 * if critical { CRITICAL_FACTOR } else { 1.0 },
+                );
+                for &fid in &target_entities {
+                    if fid == caster || self.fighters[fid].is_dead() {
+                        continue;
+                    }
+                    if let Some(cell) = self.fighters[fid].cell {
+                        let dest = self.map.repel_last_available_cell(cell, launch_cell, distance);
                         self.slide_entity(fid, dest, caster);
                     }
                 }
@@ -861,6 +894,17 @@ impl State {
     /// uses Java `Math.round`, the stats round on the absolute value and
     /// re-apply the sign).
     fn reduce_effect(&mut self, ei: usize, percent: f64) {
+        // `EffectAddState.reduce` — a state is binary: you cannot take 40% of
+        // one off. Scaling it scaled the state *identifier*: a 40% release on
+        // STERILE gave round(12 × 0.6) = 7, the magnetised state, and the
+        // state vanished from the fight's display. Only a total reduction
+        // removes it.
+        if self.effects[ei].effect == EffectType::AddState {
+            if percent >= 1.0 {
+                self.effects[ei].value = 0;
+            }
+            return;
+        }
         let reduction = (1.0 - percent).max(0.0);
         let target = self.effects[ei].target;
         self.effects[ei].value = java_round(f64::from(self.effects[ei].value) * reduction);
@@ -1299,7 +1343,7 @@ impl State {
     // effect value — truncation toward zero is the behaviour being ported, not
     // an accident.
     #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
-    fn create_effect(
+    pub(crate) fn create_effect(
         &mut self,
         params: &EffectParams,
         aoe: f64,
@@ -1323,6 +1367,12 @@ impl State {
         if critical {
             erosion_rate += EROSION_CRITICAL_BONUS;
         }
+
+        // An ADD_STATE's value is the *identifier* of the state, not a
+        // quantity: it always replaces and never stacks. Merging used to add
+        // the identifiers up (invincible + invincible = 6, a state that does
+        // not exist), which froze the client's replay for want of an icon.
+        let stackable = stackable && params.effect != EffectType::AddState;
 
         // Remove the previous effect of the same type (when not stackable).
         if params.turns != 0 && !stackable {
@@ -1568,10 +1618,10 @@ impl State {
             // these keep the base no-op `Effect.apply` (value stays 0, so
             // nothing merges or stores).
             EffectType::Attract | EffectType::Push => {}
-            // `EffectRepel` is an EMPTY class in the reference generator —
-            // base no-op `apply`, no `Attack.java` pre-block either (unlike
-            // attract/push). A repel line is dead: it moves nothing, logs
-            // nothing, stores nothing.
+            // `EffectRepel` is an EMPTY class in the reference generator, so
+            // as an effect it is a no-op: nothing logs, nothing stores. The
+            // movement is done by the pre-block in `apply_on_cell` above,
+            // like attract and push.
             EffectType::Repel => {}
             // The passive-only types. None of them has an `Effect` subclass
             // upstream, so as an *active* line each inherits the base no-op
@@ -1965,8 +2015,9 @@ impl State {
             other => panic!("effect type {other:?} not ported yet (corpus-first)"),
         }
 
-        // Stack onto a previous effect with the same characteristics.
-        if inst.value > 0 {
+        // Stack onto a previous effect with the same characteristics — never
+        // for an ADD_STATE, whose value is a state id (see above).
+        if inst.value > 0 && params.effect != EffectType::AddState {
             let same = self.fighters[target].effects.iter().copied().find(|&ei| {
                 let e = &self.effects[ei];
                 e.item_id == item_id
@@ -2137,6 +2188,25 @@ impl State {
                 * critical_power,
         )
         .max(0);
+        // "Unhealable" blocks the life *given back*, not the gauge: vitality
+        // still grows the max life, it no longer fills it. This was the last
+        // gain of current life that slipped past the state (heal, raw heal,
+        // life steal and vampirism all respect it), and a lot slipped: vitality
+        // hands back as much life as it grants max life.
+        //
+        // An unhealable target therefore gets exactly a nova vitality — same
+        // effect, and the client already knows how to replay that action
+        // without touching current life. Replaying a `VITALITY` shorn of its
+        // heal would desync the health bar of the rendered fight, which adds
+        // the value to both.
+        if self.fighters[inst.target].has_state(EntityState::Unhealable) {
+            self.actions.log(Action::NovaVitality {
+                target_id: inst.target as i64,
+                life: inst.value,
+            });
+            self.fighters[inst.target].total_life += inst.value;
+            return;
+        }
         self.actions.log(Action::Vitality {
             target_id: inst.target as i64,
             life: inst.value,

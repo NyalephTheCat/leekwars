@@ -53,6 +53,10 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         // ---- Entity & roster queries ----
         "getEntity" => Value::Int(current),
         "getTurn" => Value::Int(host.turn()),
+        // `FightClass.getAllEffects` — every effect id in the game, `1` to
+        // `Effect.effects.length`. Fight-independent: the same catalog the
+        // official dispatcher answers with.
+        "getAllEffects" => int_array((1..=crate::attack::EFFECT_COUNT).collect()),
         "getEntities" => int_array(host.entities(false)),
         "getAliveEntities" => int_array(host.entities(true)),
         "getEnemies" => int_array(team_filter(host, current, false)),
@@ -87,6 +91,10 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         "getChips" => int_array(host.chips(entity_arg(0))),
         // getCooldown(item, [entity]).
         "getCooldown" => Value::Int(host.cooldown(entity_arg(1), int_arg(0))),
+        // `EntityClass.getType` — `Entity.getType() + 1`, the `ENTITY_*`
+        // catalog value. A [`GameHost`] has no entity types beyond leek, so
+        // everything that resolves is `ENTITY_LEEK`.
+        "getType" => opt_int(host.life(entity_arg(0)).map(|_| 1)),
         "isAlive" => Value::Bool(host.life(entity_arg(0)).is_some_and(|l| l > 0)),
         "isDead" => Value::Bool(host.life(entity_arg(0)).is_none_or(|l| l <= 0)),
         // ---- 2.50 plants / batch fights ----
@@ -180,6 +188,7 @@ pub fn is_game_builtin(name: &str) -> bool {
         name,
         "getEntity"
             | "getTurn"
+            | "getAllEffects"
             | "getEntities"
             | "getAliveEntities"
             | "getEnemies"
@@ -217,6 +226,7 @@ pub fn is_game_builtin(name: &str) -> bool {
             | "getCooldown"
             | "isAlive"
             | "isDead"
+            | "getType"
             | "getPlantType"
             | "getAwakeningZone"
             | "getPlantTrigger"
