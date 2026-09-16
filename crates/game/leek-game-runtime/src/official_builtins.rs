@@ -523,15 +523,22 @@ pub fn call_official_builtin(
 
         // ---- EntityClass (communication) ----
         // `say(message)` — 1 TP, at most `SAY_LIMIT_TURN` logged per turn.
-        // Deliberately *not* behind `deny_during_hook`: `EntityClass.say`
-        // carries no `denyDuringHook` call, so talking from `beforeFight()`
-        // or `afterFight()` is legal and logs normally.
+        //
+        // Denied inside a hook, as of the generator's `e6ba441`: it spends TP
+        // and emits an action carrying no entity, which the client attributes
+        // to whoever's turn it is — and during `beforeFight()` /
+        // `afterFight()` nobody's is.
         //
         // Java returns a real boolean here — `false` when the entity is out
         // of TP or has already used its says for the turn — so this arm
         // forwards `State::say`'s answer rather than the unconditional
         // `true` `builtins.rs` gives.
-        "say" => Value::Bool(state.say(current, &message_text(args.first()))),
+        "say" => {
+            if deny_during_hook(state, current, "say") {
+                return Value::Bool(false);
+            }
+            Value::Bool(state.say(current, &message_text(args.first())))
+        }
 
         // ---- UtilClass (debug marks) ----
         // `mark`, `markText` and `clearMarks` write to `ai.getLogs()` —
@@ -2515,18 +2522,21 @@ mod tests {
         );
     }
 
-    /// `say` is NOT a combat action: `EntityClass.say` has no
-    /// `denyDuringHook`, so an AI can talk from `beforeFight()` and the
-    /// message reaches the report. That difference is what makes the hook
-    /// transcripts carry says at all.
+    /// `say` is refused inside a hook, and warns like any other denied
+    /// action. It spends TP and emits an action carrying no entity, which the
+    /// client attributes to whoever's turn it is — and during `beforeFight()`
+    /// / `afterFight()` nobody's is, so the line would be put in the mouth of
+    /// an undefined leek. (It used to be allowed; the generator closed it in
+    /// `e6ba441`.)
     #[test]
-    fn say_is_allowed_during_a_hook() {
+    fn say_is_denied_during_a_hook() {
         for phase in [HookPhase::BeforeFight, HookPhase::AfterFight] {
             let mut state = one_leek();
             state.hook_phase = phase;
             let got = call_official_builtin(&mut state, 0, "say", &[rt_str("hi from the hook")]);
-            assert_value(&got, &Value::Bool(true), &format!("say during {phase:?}"));
-            assert_eq!(say_count(&state), 1, "say during {phase:?} is logged");
+            assert_value(&got, &Value::Bool(false), &format!("say during {phase:?}"));
+            assert_eq!(say_count(&state), 0, "say during {phase:?} logs nothing");
+            assert_eq!(state.fighters[0].says_turn, 0, "no TP, no cap counter");
         }
     }
 

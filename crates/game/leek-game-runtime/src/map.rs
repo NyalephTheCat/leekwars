@@ -75,12 +75,16 @@ pub const DIR_WEST: u8 = 3;
 pub fn obstacle_size(id: i32) -> Option<i32> {
     match id {
         // size 1
-        5 | 20 | 21 | 22 | 32 | 38 | 40 | 41 | 42 | 48 | 50 | 53 | 55 | 57 | 59 | 62 | 63 | 66
-        | 31 => Some(1),
-        // size 2
-        11 | 17 | 18 | 34 | 43 | 44 | 45 | 46 | 47 | 49 | 52 | 54 | 56 | 58 | 61 | 64 | 65 => {
-            Some(2)
+        5 | 20 | 21 | 22 | 32 | 38 | 40 | 41 | 42 | 48 | 50 | 53 | 55 | 57 | 59 | 62 | 63 | 66 => {
+            Some(1)
         }
+        // size 2. The generator's 3.00 data pass lined this list up with the
+        // client's own rendering table (`ground.ts`): twelve ids it had been
+        // treating as size 1 — 31 among them — are drawn as 2×2 walls, and
+        // three of their four cells stayed walkable on the fixed maps and the
+        // boss arenas.
+        2 | 4 | 10 | 11 | 12 | 14 | 15 | 17 | 18 | 19 | 23 | 25 | 31 | 33 | 34 | 37 | 43 | 44
+        | 45 | 46 | 47 | 49 | 52 | 54 | 56 | 58 | 61 | 64 | 65 => Some(2),
         // size 3
         51 => Some(3),
         // size 4
