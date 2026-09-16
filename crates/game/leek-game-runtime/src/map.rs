@@ -416,71 +416,61 @@ impl Map {
 
     // ── Connected components (composantes connexes) ──────────────────────────
 
-    /// `Map.computeComposantes()` — label walkable/obstacle regions.
+    /// `Map.COMPOSANTE_NEIGHBORS` — the four steps the flood fill takes.
+    const COMPOSANTE_NEIGHBORS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+    /// `Map.computeComposantes()` — number the connected components: two
+    /// cells carry the same number if and only if you can walk from one to
+    /// the other crossing only cells of the same nature (all walkable, or all
+    /// obstacle).
     ///
-    /// Port is a verbatim translation of the Java nested-loop union-find.
-    /// The resulting `cell.composante` values are used to check whether two
-    /// entities can reach each other.
+    /// Call it again after any change to walkability (obstacles cleared
+    /// around a turret, say): the numbers are what map generation asks
+    /// whether the two sides can reach each other, and a stale one accepts or
+    /// rejects a map on the wrong answer.
+    ///
+    /// A flood fill, as upstream's is since the 3.00 rewrite. The scanline
+    /// pass it replaced merged an equivalence only across the rows it had
+    /// already seen, so one component could keep two numbers — on seed 5,
+    /// cell 263 came out unreachable from cell 1 with a clear path between
+    /// them.
     // Same extents and offsets as `Map::new`: `max - min + 1` is positive
     // and `c.x - min_x` is non-negative because `min_x` is the minimum.
     #[allow(clippy::cast_sign_loss)]
     pub fn compute_composantes(&mut self) {
         let sx = (self.max_x - self.min_x + 1) as usize;
         let sy = (self.max_y - self.min_y + 1) as usize;
+        // 0 = not yet visited.
+        let mut connexe: Vec<Vec<i32>> = vec![vec![0_i32; sy]; sx];
 
-        // connexe[x][y] = component label, or -1 for empty (no cell here)
-        let mut connexe: Vec<Vec<i32>> = vec![vec![-1_i32; sy]; sx];
-        let mut ni: i32 = 1;
+        let at = |c: usize, cells: &[Cell], min_x: i32, min_y: i32| {
+            ((cells[c].x - min_x) as usize, (cells[c].y - min_y) as usize)
+        };
 
-        for x in 0..sx {
-            for y in 0..sy {
-                // Is there a cell here?
-                let c_id = match self.coord[x][y] {
-                    Some(id) => id,
-                    None => continue,
-                };
-                let c_walkable = self.cells[c_id].walkable;
-
-                let mut cur_number: i32 = 0;
-
-                // Check left neighbour
-                if x > 0 {
-                    if let Some(left_id) = self.coord[x - 1][y] {
-                        if self.cells[left_id].walkable == c_walkable {
-                            cur_number = connexe[x - 1][y];
-                        }
+        let mut ni = 0;
+        let mut stack: Vec<usize> = Vec::new();
+        for start in 0..self.cells.len() {
+            let (x, y) = at(start, &self.cells, self.min_x, self.min_y);
+            if connexe[x][y] != 0 {
+                continue;
+            }
+            ni += 1;
+            connexe[x][y] = ni;
+            stack.push(start);
+            while let Some(cell) = stack.pop() {
+                for (dx, dy) in Self::COMPOSANTE_NEIGHBORS {
+                    let Some(next) = self.get_next_cell(cell, dx, dy) else {
+                        continue;
+                    };
+                    if self.cells[next].walkable != self.cells[start].walkable {
+                        continue;
                     }
-                }
-
-                // Check above neighbour
-                if y > 0 {
-                    if let Some(above_id) = self.coord[x][y - 1] {
-                        if self.cells[above_id].walkable == c_walkable {
-                            let above_num = connexe[x][y - 1];
-                            if cur_number == 0 {
-                                cur_number = above_num;
-                            } else if cur_number != above_num {
-                                // Merge: replace all occurrences of above_num with cur_number
-                                let target_number = above_num;
-                                // Java: for (x2 = 0; x2 < connexe.length; x2++)
-                                //           for (y2 = 0; y2 <= y; y2++)
-                                for x2 in 0..sx {
-                                    for y2 in 0..=y {
-                                        if connexe[x2][y2] == target_number {
-                                            connexe[x2][y2] = cur_number;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    let (nx, ny) = at(next, &self.cells, self.min_x, self.min_y);
+                    if connexe[nx][ny] != 0 {
+                        continue;
                     }
-                }
-
-                if cur_number == 0 {
-                    connexe[x][y] = ni;
-                    ni += 1;
-                } else {
-                    connexe[x][y] = cur_number;
+                    connexe[nx][ny] = ni;
+                    stack.push(next);
                 }
             }
         }
@@ -623,11 +613,16 @@ impl Map {
                 // else: null (id == nb_cells or out of range) → no draws
             }
 
-            map.compute_composantes();
-
             // Place two entities (team 0 left side, team 1 right side)
             team0_cell = map.get_random_cell_in_part(rng, 1);
             team1_cell = map.get_random_cell_in_part(rng, 4);
+
+            // Only once the map is final: a turret clears the obstacles around
+            // it as it is placed, and numbering before that would answer the
+            // reachability check below from a map that no longer exists.
+            // (Nothing placed here clears obstacles yet — this is one leek a
+            // side — but the order is upstream's.)
+            map.compute_composantes();
 
             // Check connectivity
             valid = match (team0_cell, team1_cell) {
