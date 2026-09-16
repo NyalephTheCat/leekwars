@@ -325,7 +325,11 @@ fn run_hooks(
     phase: HookPhase,
     hook_name: &str,
 ) {
-    let fids = state.borrow().order.fids().to_vec();
+    // The boot order, not the play order: deterministic like it, but it keeps
+    // the dead. `afterFight()` has to run for a leek that fell, or its
+    // registers and debug are silently dropped — or worse, the hook runs for
+    // the wrong leek (#4170).
+    let fids = state.borrow().initial_order.clone();
     let hook_opts = opts
         .clone()
         .with_hook_roots(vec![hook_name.to_string()])
@@ -407,6 +411,11 @@ pub fn run_official_fight(
         HookPhase::BeforeFight,
         "beforeFight",
     );
+
+    // A `setLoadout()` in `beforeFight()` may have changed a frequency, and
+    // the play order follows the kit fought with rather than the one worn
+    // through the door.
+    state.borrow_mut().refresh_start_order_after_hooks();
 
     state.borrow_mut().record_initial_state();
 

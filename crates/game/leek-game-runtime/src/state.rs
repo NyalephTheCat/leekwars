@@ -983,6 +983,10 @@ pub struct State {
     pub restat_potions_available: HashMap<i64, i32>,
     /// `State.mRestatPotionsConsumed` — restat potions spent, per farmer.
     pub restat_potions_consumed: HashMap<i64, i32>,
+    /// The frequency each entity had when the play order was drawn, so a
+    /// `setLoadout()` in a `beforeFight()` hook can be seen to have made it
+    /// stale (`State.startOrderFrequencies`).
+    start_order_frequencies: HashMap<usize, i64>,
     /// A walk in progress, kept while a plant it woke plays (see
     /// [`State::walk_on`]). `None` the rest of the time, which is all of the
     /// time in a fight without plants.
@@ -1037,6 +1041,7 @@ impl State {
             win_team: -1,
             restat_potions_available: HashMap::new(),
             restat_potions_consumed: HashMap::new(),
+            start_order_frequencies: HashMap::new(),
             walk: None,
             walk_result: None,
             pending_awakenings: std::collections::VecDeque::new(),
@@ -1229,28 +1234,7 @@ impl State {
             self.place_entity(self.teams[1].fighters[0], cell);
         }
 
-        // StartOrder.compute — teams of (fid, frequency).
-        #[allow(clippy::cast_possible_wrap)]
-        let start_teams: Vec<Vec<(i64, i64)>> = self
-            .teams
-            .iter()
-            .map(|t| {
-                t.fighters
-                    .iter()
-                    .map(|&f| (f as i64, i64::from(self.fighters[f].stat(STAT_FREQUENCY))))
-                    .collect()
-            })
-            .collect();
-        // `compute_start_order` is handed our own fids and gives them back in
-        // turn order, so each `i64` is the `usize` index it started as.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        for fid in crate::order::compute_start_order(&start_teams, &mut self.rng) {
-            let fid = fid as usize;
-            if !self.fighters[fid].is_dead() {
-                self.order.add_entity(fid);
-            }
-            self.initial_order.push(fid);
-        }
+        self.compute_start_order();
 
         // Cooldowns initiaux — every registered chip with an initial cooldown
         // starts charged for every entity, at `initialCooldown + 1` (the +1
@@ -2640,6 +2624,68 @@ impl State {
             .collect();
         for chip in &initial {
             self.add_chip_cooldown(summon, chip, chip.initial_cooldown + 2 - turn);
+        }
+    }
+
+    /// `State.computeStartOrder()` — draw the play order from the entities'
+    /// current frequencies and fill both `order` (the living) and
+    /// `initial_order` (everyone, in the order they were drawn). The
+    /// frequencies used are remembered, so
+    /// [`State::refresh_start_order_after_hooks`] can tell whether they still
+    /// hold.
+    // `compute_start_order` is handed our own fids and gives them back in
+    // turn order, so each `i64` is the `usize` index it started as.
+    #[allow(
+        clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn compute_start_order(&mut self) {
+        self.order = Order::new();
+        self.initial_order.clear();
+        self.start_order_frequencies.clear();
+
+        let start_teams: Vec<Vec<(i64, i64)>> = self
+            .teams
+            .iter()
+            .map(|t| {
+                t.fighters
+                    .iter()
+                    .map(|&f| (f as i64, i64::from(self.fighters[f].stat(STAT_FREQUENCY))))
+                    .collect()
+            })
+            .collect();
+        for team in &start_teams {
+            for &(fid, frequency) in team {
+                self.start_order_frequencies.insert(fid as usize, frequency);
+            }
+        }
+
+        for fid in crate::order::compute_start_order(&start_teams, &mut self.rng) {
+            let fid = fid as usize;
+            if !self.fighters[fid].is_dead() {
+                self.order.add_entity(fid);
+            }
+            self.initial_order.push(fid);
+        }
+    }
+
+    /// `State.refreshStartOrderAfterHooks()` — redraw the play order if a
+    /// `beforeFight()` hook changed any entity's frequency, which a
+    /// `setLoadout()` onto a kit with different components does. Frequency
+    /// decides nothing but the order of play: without this a leek entered
+    /// with its frequency-carrying components, was drawn a slot with them,
+    /// then switched to its real kit and kept the slot.
+    ///
+    /// Conditional so that the fight's randomness is only spent in that case:
+    /// a fight where no frequency moved stays identical, seed for seed.
+    pub fn refresh_start_order_after_hooks(&mut self) {
+        let changed = self.teams.iter().flat_map(|t| t.fighters.iter()).any(|&f| {
+            self.start_order_frequencies.get(&f)
+                != Some(&i64::from(self.fighters[f].stat(STAT_FREQUENCY)))
+        });
+        if changed {
+            self.compute_start_order();
         }
     }
 

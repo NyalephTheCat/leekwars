@@ -85,7 +85,15 @@ pub(crate) fn num(entry: &Value, field: &str) -> f64 {
 
 /// A field read as a boolean, or `default` when the entry omits it.
 pub(crate) fn flag(entry: &Value, field: &str, default: bool) -> bool {
-    entry.get(field).and_then(Value::as_bool).unwrap_or(default)
+    // A boolean, or the integer one older snapshots wrote it as. Upstream
+    // reads it the same way (`isBoolean() ? booleanValue() : intValue() != 0`)
+    // since the 3.00 data reformat; taking only the boolean would silently
+    // fall back to the default on an old entry, and a `"los": 0` weapon read
+    // as `true` shoots through walls.
+    entry.get(field).map_or(default, |v| {
+        v.as_bool()
+            .unwrap_or_else(|| v.as_i64().is_some_and(|n| n != 0))
+    })
 }
 
 /// A field read as an owned string, empty when the entry omits it.
