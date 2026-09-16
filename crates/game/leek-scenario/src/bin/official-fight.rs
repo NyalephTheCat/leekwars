@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow};
 use leek_generator::official::{
     Area, BulbTemplate, ChipSpec, EffectModifiers, EffectParams, EffectTargets, EffectType,
     Fighter, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE, STAT_MP, STAT_RESISTANCE, STAT_STRENGTH,
-    STAT_TP, STAT_WISDOM, State, Stats, WeaponSpec, run_official_fight,
+    STAT_TP, STAT_WISDOM, State, Stats, WeaponSpec, official_items, run_official_fight,
 };
 
 /// `Harness.defaultLeek` — the stock fight-harness leek with the synthetic
@@ -39,9 +39,25 @@ fn harness_leek(id: i64, name: &str) -> Fighter {
     f
 }
 
-/// `Harness.registerPistol` — synthetic pistol 37, one instant-damage effect
-/// (15 + 5×jet).
+/// `Harness.registerPistol` — weapon 37.
+///
+/// The harness's first line is `if (Weapons.getWeapon(PISTOL_WEAPON_ID) !=
+/// null) return;`, and `Generator.loadWeapons` keys the catalog by the entry's
+/// `item`, so item 37 is the real pistol and the synthetic one below never
+/// gets registered against the official data. Mirroring the early return
+/// matters because the catalog's pistol is not frozen: the generator bump
+/// widened its launch type from LINE to CIRCLE and capped it at four uses a
+/// turn, and a hand-copied spec would have gone on refusing every diagonal
+/// shot.
+///
+/// The synthetic pistol — one instant-damage effect (15 + 5×jet) — stays as
+/// the fallback for a data snapshot that has no weapon 37 at all.
 fn harness_pistol() -> WeaponSpec {
+    official_items::weapon_spec(37).unwrap_or_else(synthetic_pistol)
+}
+
+/// The spec `Harness.registerPistol` builds when the catalog has no weapon 37.
+fn synthetic_pistol() -> WeaponSpec {
     WeaponSpec {
         id: 37,
         template: 1,

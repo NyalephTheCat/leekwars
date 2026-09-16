@@ -20,6 +20,7 @@ use std::rc::Rc;
 pub use leek_game_runtime::attack::{
     Area, EffectModifiers, EffectParams, EffectTargets, EffectType,
 };
+pub use leek_game_runtime::official_items;
 pub use leek_game_runtime::state::{
     BulbTemplate, ChipSpec, FightLoadout, Fighter, STAT_AGILITY, STAT_FREQUENCY, STAT_LIFE,
     STAT_MP, STAT_RESISTANCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM, State, Stats, Team, WeaponSpec,
