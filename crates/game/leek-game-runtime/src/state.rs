@@ -592,8 +592,14 @@ impl Order {
     }
 
     /// `Order.removeEntity(leek)` — remove a dead entity, fixing up the
-    /// position (and rolling the turn back when the current entity at
-    /// position 0 is removed, since `next()` will re-increment it).
+    /// position.
+    ///
+    /// Removing the *current* entity (index 0, position 0) leaves the
+    /// position at `-1`; the next `next()` moves it to 0 without wrapping,
+    /// so the turn counter is untouched. The generator used to roll the turn
+    /// back here and let a synthetic wrap in `next()` pay it back, which got
+    /// the fight's duration wrong whenever it ended on that death and ran one
+    /// `applyCoolDown` too many.
     pub fn remove_entity(&mut self, fid: usize) {
         let Some(index) = self.fids.iter().position(|&f| f == fid) else {
             return;
@@ -602,10 +608,6 @@ impl Order {
             self.position -= 1;
         }
         self.fids.remove(index);
-        if self.position == -1 {
-            self.position = self.fids.len() as i32 - 1;
-            self.turn -= 1;
-        }
     }
 
     /// `Order.current()` — `None` when the order is empty / out of range.
@@ -1677,9 +1679,10 @@ impl State {
                 self.map
                     .get_first_entity(caster_cell, target_cell, min_range, max_range)
         {
-            if cell == target_cell {
-                return false;
-            }
+            // Aiming straight at the entity's own cell used to be refused
+            // here while aiming one cell behind it went through — the
+            // generator dropped that check in `bf5b089`. The wall check is
+            // still done by the full `verify_los` just below.
             ignored.push(cell);
         }
         self.map
@@ -2396,18 +2399,19 @@ mod tests {
         assert_eq!(o.position(), 0);
     }
 
-    /// Removing the current entity at position 0 rolls back to the end of
-    /// the previous round (turn decremented; `next()` re-increments).
+    /// Removing the current entity at position 0 leaves the position at -1
+    /// and the turn counter alone: the next `next()` lands on 0 without
+    /// wrapping, so the round does not restart and no cooldown ticks twice.
     #[test]
-    fn remove_current_at_position_zero_rolls_back_turn() {
+    fn remove_current_at_position_zero_keeps_the_turn() {
         let mut o = order_of(&[1, 2, 3]);
         assert_eq!(o.turn(), 1);
         o.remove_entity(1); // current, index 0
-        // After removal: fids = [2, 3], position = -1 → len-1 = 1, turn 0.
-        assert_eq!(o.position(), 1);
-        assert_eq!(o.current(), Some(3));
-        assert_eq!(o.turn(), 0);
-        assert!(o.next()); // wraps → turn 1, position 0
+        // After removal: fids = [2, 3], position = -1, turn still 1.
+        assert_eq!(o.position(), -1);
+        assert_eq!(o.current(), None);
+        assert_eq!(o.turn(), 1);
+        assert!(!o.next()); // no wrap → still turn 1, position 0
         assert_eq!(o.turn(), 1);
         assert_eq!(o.current(), Some(2));
     }
