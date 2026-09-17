@@ -209,8 +209,18 @@ pub fn finish(
     mut hir: HirFile,
     fold: &HashMap<String, crate::ir::Literal>,
     opt: OptLevel,
+    version: Version,
 ) -> Arc<HirFile> {
     crate::transform::fold_constants(&mut hir, fold);
+    // Neither of these is gated on the optimization level: upstream's
+    // `ConstantFolder` runs on every compile, and what a program costs in
+    // operations is part of what it *is*. They run in order — inlining the
+    // constants is what lets a debug guard's body reduce to nothing, which
+    // is what lets its calls go.
+    crate::transform::rebind_assigned_functions(&mut hir, version.as_u32());
+    crate::transform::inline_static_final_literals(&mut hir);
+    crate::transform::mark_constant_conditions(&mut hir);
+    crate::transform::eliminate_constant_calls(&mut hir, version.as_u32());
     if opt.optimizes() {
         crate::transform::optimize_hir(&mut hir);
     }
@@ -419,6 +429,14 @@ pub(crate) struct PendingSignature {
 
 #[derive(Default)]
 pub(crate) struct ClassCtx {
+    /// The class being lowered. Names the class *lexically*, which is what a
+    /// static member resolves against: static storage and static dispatch are
+    /// not virtual, so `class.x` inside an instance method reaches the same
+    /// box `A.x` does, while a bare `class` stays the runtime class.
+    pub(crate) class_def: Option<DefId>,
+    /// The immediate parent class, for the same reason — `super.x` on a
+    /// static member names the class that inherits it, not the receiver.
+    pub(crate) parent_def: Option<DefId>,
     pub(crate) field_names: std::collections::HashSet<String>,
     pub(crate) static_field_names: std::collections::HashSet<String>,
     pub(crate) method_names: std::collections::HashSet<String>,
@@ -450,7 +468,10 @@ impl Lowerer {
         Self {
             source,
             version,
-            out: HirFile::default(),
+            out: HirFile {
+                version: u8::from(version),
+                ..HirFile::default()
+            },
             diagnostics: Vec::new(),
             source_text: String::new(),
             // Pure default; the public `lower_file*` entries set this (from env

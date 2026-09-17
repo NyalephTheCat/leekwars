@@ -66,7 +66,11 @@ pub fn compute_start_order(teams: &[Vec<(i64, i64)>], rng: &mut OfficialRng) -> 
         for i in 0..remaining.len() {
             let team = remaining[i];
             let p = probas[team];
-            if v <= p {
+            // The last one standing is the fallback: without it a floating
+            // -point rounding — `v` a hair above the probabilities' sum —
+            // picks no team at all and leaves the order shorter than the
+            // number of teams.
+            if v <= p || i == remaining.len() - 1 {
                 team_order.push(team);
                 remaining.remove(i);
                 psum -= p;
@@ -90,7 +94,9 @@ pub fn compute_start_order(teams: &[Vec<(i64, i64)>], rng: &mut OfficialRng) -> 
             order.push(queues[team][cursors[team]].0);
             cursors[team] += 1;
         }
-        current = (current + 1) % queues.len();
+        // Around the *drawn* order, which a short draw could make shorter
+        // than the team list.
+        current = (current + 1) % team_order.len();
     }
     order
 }

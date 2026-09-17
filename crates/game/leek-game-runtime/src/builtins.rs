@@ -53,6 +53,16 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         // ---- Entity & roster queries ----
         "getEntity" => Value::Int(current),
         "getTurn" => Value::Int(host.turn()),
+        // `FightClass.getAllEffects` — every effect id in the game, `1` to
+        // `Effect.effects.length`. Fight-independent: the same catalog the
+        // official dispatcher answers with.
+        "getAllEffects" => int_array((1..=crate::attack::EFFECT_COUNT).collect()),
+        // `FightClass.getNextPlayer` / `getPreviousPlayer` — the play order
+        // around the given entity (the current one with no argument),
+        // wrapping around the round. `null` when the entity is not in the
+        // order, or when the host was never handed one.
+        "getNextPlayer" => opt_int(order_neighbour(host, entity_arg(0), true)),
+        "getPreviousPlayer" => opt_int(order_neighbour(host, entity_arg(0), false)),
         "getEntities" => int_array(host.entities(false)),
         "getAliveEntities" => int_array(host.entities(true)),
         "getEnemies" => int_array(team_filter(host, current, false)),
@@ -87,8 +97,21 @@ pub fn call_game_builtin(host: &mut dyn GameHost, name: &str, args: &[Value]) ->
         "getChips" => int_array(host.chips(entity_arg(0))),
         // getCooldown(item, [entity]).
         "getCooldown" => Value::Int(host.cooldown(entity_arg(1), int_arg(0))),
+        // `EntityClass.getType` — `Entity.getType() + 1`, the `ENTITY_*`
+        // catalog value. A [`GameHost`] has no entity types beyond leek, so
+        // everything that resolves is `ENTITY_LEEK`.
+        "getType" => opt_int(host.life(entity_arg(0)).map(|_| 1)),
         "isAlive" => Value::Bool(host.life(entity_arg(0)).is_some_and(|l| l > 0)),
         "isDead" => Value::Bool(host.life(entity_arg(0)).is_none_or(|l| l <= 0)),
+        // ---- 2.50 plants / batch fights ----
+        // A [`GameHost`] has no entity *types*, so the plant queries are the
+        // constants their sentinels describe: no entity is a plant (`-1`),
+        // none has an awakening zone (`0` — it plays its own turn) and
+        // nothing ever wakes one (`-1`).
+        "getPlantType" => opt_int(host.life(entity_arg(0)).map(|_| -1)),
+        "getAwakeningZone" => opt_int(host.life(entity_arg(0)).map(|_| 0)),
+        "getPlantTrigger" => Value::Int(-1),
+        "isBatchFight" => Value::Bool(host.is_batch_fight()),
 
         // ---- Map / geometry ----
         "getCellX" => opt_int(host.cell_x(int_arg(0))),
@@ -171,6 +194,9 @@ pub fn is_game_builtin(name: &str) -> bool {
         name,
         "getEntity"
             | "getTurn"
+            | "getAllEffects"
+            | "getNextPlayer"
+            | "getPreviousPlayer"
             | "getEntities"
             | "getAliveEntities"
             | "getEnemies"
@@ -208,6 +234,11 @@ pub fn is_game_builtin(name: &str) -> bool {
             | "getCooldown"
             | "isAlive"
             | "isDead"
+            | "getType"
+            | "getPlantType"
+            | "getAwakeningZone"
+            | "getPlantTrigger"
+            | "isBatchFight"
             | "getCellX"
             | "getCellY"
             | "getCellFromXY"
@@ -347,7 +378,7 @@ fn use_weapon(host: &mut dyn GameHost, attacker: i64, target: i64) -> Value {
     let Some(weapon) = weapons::lookup(item) else {
         return Value::Int(USE_FAILED); // weapon not modeled
     };
-    use_effects(host, attacker, target, weapon, weapon.effects)
+    use_effects(host, attacker, target, weapon, &weapon.effects)
 }
 
 /// `useChip(chip, target)`: cast one of the caster's own chips onto the
@@ -361,7 +392,7 @@ fn use_chip(host: &mut dyn GameHost, caster: i64, chip_item: i64, target: i64) -
     let Some(chip) = chips::lookup(chip_item) else {
         return Value::Int(USE_FAILED); // chip not modeled
     };
-    use_effects(host, caster, target, chip, chip.effects)
+    use_effects(host, caster, target, chip, &chip.effects)
 }
 
 /// The use-rule stats shared by weapons and chips.
@@ -880,6 +911,18 @@ fn string_val(s: String) -> Value {
     Value::String(Rc::new(s))
 }
 
+/// The entity one place `forward` (or backward) from `entity` in the play
+/// order, wrapping around it. `None` when the host has no order, or `entity`
+/// is not in it.
+fn order_neighbour(host: &dyn GameHost, entity: i64, forward: bool) -> Option<i64> {
+    let order = host.turn_order();
+    let index = order.iter().position(|&e| e == entity)?;
+    let len = order.len();
+    // `+ len - 1` rather than `- 1`: the step stays inside `usize`.
+    let step = if forward { 1 } else { len - 1 };
+    order.get((index + step) % len).copied()
+}
+
 fn int_array(ids: Vec<i64>) -> Value {
     Value::Array(Rc::new(RefCell::new(
         ids.into_iter().map(Value::Int).collect(),
@@ -944,5 +987,22 @@ mod tests {
         assert_eq!(content(&mut fight, 22), catalog("CELL_OBSTACLE"));
         assert_eq!(content(&mut fight, 33), catalog("CELL_ENTITY"));
         assert_eq!(content(&mut fight, 5), catalog("CELL_EMPTY"));
+    }
+
+    /// `isBatchFight()` reports the flag the fight was set up with, not a
+    /// constant: a lot and a single fight are otherwise indistinguishable, so
+    /// an AI that goes quiet for a lot needs this to be carried through.
+    #[test]
+    fn is_batch_fight_reports_the_fights_flag() {
+        let mut fight = Fight::new(10, 10, 1).with_entity(Entity::new(1, "Bot", 0, 0));
+        assert!(matches!(
+            call_game_builtin(&mut fight, "isBatchFight", &[]),
+            Value::Bool(false)
+        ));
+        fight.set_batch(true);
+        assert!(matches!(
+            call_game_builtin(&mut fight, "isBatchFight", &[]),
+            Value::Bool(true)
+        ));
     }
 }

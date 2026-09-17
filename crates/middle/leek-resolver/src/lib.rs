@@ -325,6 +325,11 @@ pub(crate) struct Resolver {
     pub(crate) class_parent: HashMap<String, String>,
     /// Classes whose constructor was declared `private` / `protected`.
     pub(crate) class_private_constructor: std::collections::HashSet<String>,
+    /// Classes whose `private` constructor can be called with no arguments.
+    /// Only those block a subclass: a child with no constructor of its own
+    /// emits an implicit zero-argument `super()`, and a private constructor
+    /// that *needs* arguments is not what that call reaches.
+    pub(crate) class_private_zero_arg_constructor: std::collections::HashSet<String>,
     pub(crate) class_protected_constructor: std::collections::HashSet<String>,
     pub(crate) class_private_fields: HashMap<String, std::collections::HashSet<String>>,
     pub(crate) class_protected_fields: HashMap<String, std::collections::HashSet<String>>,
@@ -371,6 +376,10 @@ pub(crate) struct Resolver {
     /// True inside a class constructor body — constructors are
     /// permitted to assign to `final` fields via `this`.
     pub(crate) in_constructor: bool,
+    /// Whether the body being resolved is a `static` class method — there is
+    /// no `this` there, which is what makes `super.<instance field>` a cast
+    /// that cannot succeed.
+    pub(crate) in_static_method: bool,
 
     // ---- Multi-file context ----
     /// Armed for a multi-file resolve with an include graph. Turns
@@ -414,6 +423,7 @@ impl Resolver {
             class_has_unknown_parent: std::collections::HashSet::new(),
             class_parent: HashMap::new(),
             class_private_constructor: std::collections::HashSet::new(),
+            class_private_zero_arg_constructor: std::collections::HashSet::new(),
             class_protected_constructor: std::collections::HashSet::new(),
             class_private_fields: HashMap::new(),
             class_protected_fields: HashMap::new(),
@@ -429,6 +439,7 @@ impl Resolver {
             in_class: false,
             current_class: None,
             in_constructor: false,
+            in_static_method: false,
             include_expander: None,
             terminated_at: None,
         }

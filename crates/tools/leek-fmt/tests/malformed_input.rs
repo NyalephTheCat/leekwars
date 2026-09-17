@@ -101,6 +101,14 @@ fn subscript_without_a_range_is_still_a_subscript() {
     assert!(out.contains("t[0][1]"), "{out:?}");
 }
 
+/// `a?[i]` is a different operator from `a[i]` — it answers null for a null
+/// base instead of faulting — so the `?` has to survive formatting.
+#[test]
+fn an_optional_subscript_keeps_its_question_mark() {
+    let out = fmt_safe("var t = [1, 2]\nreturn t?[0]\n");
+    assert!(out.contains("t?[0]"), "{out:?}");
+}
+
 #[test]
 fn an_unclosed_subscript_invents_nothing() {
     let out = fmt_safe("var y = a[0\n");

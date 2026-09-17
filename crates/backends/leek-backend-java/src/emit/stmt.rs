@@ -360,6 +360,21 @@ impl Emitter<'_> {
         // A soft return (`return? x`) compiles its truthiness check without the
         // per-`if` op tick (the reference uses a bare `if (bool(r)) return r;`),
         // so the condition is emitted unwrapped.
+        // A condition `leek_hir::transform::mark_constant_conditions` decided
+        // is not emitted at all — neither the test nor the dead arm, which is
+        // how upstream's `ConstantFolder` makes it free and how javac is kept
+        // from calling the dead side unreachable.
+        if let Some(taken) = i.const_taken {
+            let branch = if taken {
+                Some(&i.then_branch)
+            } else {
+                i.else_branch.as_ref()
+            };
+            if let Some(branch) = branch {
+                self.emit_stmt_or_block(branch);
+            }
+            return;
+        }
         let cond = if i.soft {
             self.expr_to_bool(&i.cond)
         } else {

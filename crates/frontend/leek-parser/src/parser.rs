@@ -338,6 +338,39 @@ impl<'t> Parser<'t> {
         Span::new(self.source, end, end)
     }
 
+    /// Whether the n-th and (n+1)-th non-trivia tokens touch in the source,
+    /// with nothing — not even a space — between them.
+    ///
+    /// `a?[i]` is an optional index and `a ? [i] : [j]` a ternary whose
+    /// branches are array literals, and the `?` being glued to the `[` is
+    /// what upstream uses to tell them apart.
+    pub(crate) fn nth_adjacent(&self, n: usize) -> bool {
+        match (self.nth_span(n), self.nth_span(n + 1)) {
+            (Some(a), Some(b)) => a.end == b.start,
+            _ => false,
+        }
+    }
+
+    /// Span of the n-th upcoming non-trivia token.
+    fn nth_span(&self, n: usize) -> Option<leek_span::Span> {
+        let mut idx = self.pos;
+        let mut remaining = n;
+        loop {
+            match self.tokens.get(idx) {
+                None => return None,
+                Some(t) if t.kind == SyntaxKind::Eof => return None,
+                Some(t) if t.kind.is_trivia() => idx += 1,
+                Some(t) => {
+                    if remaining == 0 {
+                        return Some(t.span);
+                    }
+                    remaining -= 1;
+                    idx += 1;
+                }
+            }
+        }
+    }
+
     /// Source text of the current non-trivia token (empty at EOF).
     pub(crate) fn current_text(&self) -> &'t str {
         self.nth_text(0)

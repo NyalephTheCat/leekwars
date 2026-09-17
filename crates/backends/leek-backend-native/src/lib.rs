@@ -143,6 +143,7 @@ pub use options::{
     OptLevel,
 };
 pub use runtime::ops_used;
+pub use runtime::{RunState, restore_run_state, save_run_state};
 
 use std::collections::HashMap;
 
@@ -173,6 +174,13 @@ thread_local! {
     /// on this thread. Set at the end of the [`NativeEmit::Jit`] path.
     static LAST_JIT_SPLIT: std::cell::Cell<Option<(std::time::Duration, std::time::Duration)>> =
         const { std::cell::Cell::new(None) };
+
+    /// JIT runs currently on this thread's stack. Zero everywhere but inside a
+    /// run that another run started — which one fight does on purpose: a
+    /// plant waking runs its AI from inside the builtin call of the AI whose
+    /// turn it interrupted. Read by `CompiledProgram::run_entry` to decide
+    /// whether it owns the per-run thread-local state or is borrowing it.
+    static RUN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// The (JIT-compile, execute) durations of the most recent successful JIT run
@@ -440,6 +448,8 @@ struct RuntimeTables {
     class_ctor_thunk: HashMap<u32, usize>,
     class_string_method: HashMap<u32, usize>,
     class_reflect: HashMap<u32, HashMap<String, Vec<String>>>,
+    static_field_owner: HashMap<u32, HashMap<String, u32>>,
+    static_method_resolve: HashMap<u32, HashMap<String, usize>>,
 }
 
 impl RuntimeTables {
@@ -454,6 +464,8 @@ impl RuntimeTables {
         runtime::set_class_ctor_thunk(self.class_ctor_thunk.clone());
         runtime::set_class_string_method(self.class_string_method.clone());
         runtime::set_class_reflect(self.class_reflect.clone());
+        runtime::set_static_field_owner(self.static_field_owner.clone());
+        runtime::set_static_method_resolve(self.static_method_resolve.clone());
     }
 }
 
@@ -541,6 +553,31 @@ impl CompiledProgram {
     }
 
     fn run_entry(&self, opts: &NativeOptions, entry: JitEntry<'_>) -> Result<Value, NativeError> {
+        // A run inside a run — a plant waking mid-turn runs its AI from
+        // inside a builtin call the interrupted AI is still in. Everything
+        // below arms thread-locals for "the" run, so a nested one takes the
+        // outer run's state aside first and hands it back at the end; the
+        // outermost run behaves exactly as it always has.
+        let nested = RUN_DEPTH.with(std::cell::Cell::get) > 0;
+        let saved = nested.then(runtime::save_run_state);
+        let boxes = runtime::box_checkpoint();
+        RUN_DEPTH.with(|d| d.set(d.get() + 1));
+        let result = self.run_entry_inner(opts, entry);
+        RUN_DEPTH.with(|d| d.set(d.get() - 1));
+        // The outer run's handles are still live, so a nested run releases
+        // only its own and leaves the shared arena alone.
+        runtime::free_run_boxes_from(boxes, !nested);
+        if let Some(saved) = saved {
+            runtime::restore_run_state(saved);
+        }
+        result
+    }
+
+    fn run_entry_inner(
+        &self,
+        opts: &NativeOptions,
+        entry: JitEntry<'_>,
+    ) -> Result<Value, NativeError> {
         // Publish this module's dispatch tables (another program may have run
         // since — see `RuntimeTables`).
         self.tables.install();
@@ -619,13 +656,15 @@ impl CompiledProgram {
             }
         };
         LAST_JIT_SPLIT.with(|c| c.set(Some((self.compile_dur.take(), t_exec.elapsed()))));
-        // Reclaim every boxed `Value` handle this run allocated. The result
-        // was cloned out above (`read_handle`), so it and its reachable data
-        // survive; all intermediate boxes — including the ones the global
-        // store held — are freed here instead of leaking until process exit.
-        // The module's *constants* live in a separate arena (`_consts`) and are
-        // untouched, so the next run still reads live values.
-        runtime::free_run_boxes();
+        // The boxed `Value` handles this run allocated are reclaimed by
+        // `run_entry`, which knows whether this run is the outermost one. The
+        // result was cloned out above (`read_handle`), so it and its
+        // reachable data survive; all intermediate boxes — including the ones
+        // the global store held — are freed there instead of leaking until
+        // process exit. The module's *constants* live in a separate arena
+        // (`_consts`) and are untouched, so the next run still reads live
+        // values.
+        //
         // A runtime fault recorded by a shim during the run (e.g. a
         // v4-strict out-of-bounds array write) takes precedence over the
         // computed value: the program errored.
@@ -785,6 +824,7 @@ fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProg
             (c.def_id.0, parent)
         })
         .collect();
+    let (static_fields, static_methods) = translate::static_member_tables(&lw.program);
     let tables = RuntimeTables {
         lambda_fns,
         lambda_byref,
@@ -802,6 +842,10 @@ fn build_jit_program(hir: &HirFile, opts: &NativeOptions) -> Result<CompiledProg
         class_string_method,
         // Per-class reflection name tables for runtime `x.class.fields` etc.
         class_reflect: translate::reflect_name_tables(&lw.program),
+        // Where each class's static members live, for a `ClassRef` value met
+        // at runtime (`class.x` / `class.m()` inside an instance method).
+        static_field_owner: static_fields,
+        static_method_resolve: static_methods,
     };
     JIT_COMPILES.with(|c| c.set(c.get().saturating_add(1)));
     Ok(CompiledProgram {
@@ -1343,11 +1387,24 @@ fn define_program<M: Module>(
     // uniform-ABI functions invoked dynamically (via `dispatch_call_value`
     // or `leek_static_get`).
     lambda_funcs.extend(method_funcs);
-    // User-fn values whose target is a method (has an owning class) require
-    // exact arity when invoked indirectly (see `dispatch_call_value`).
+    // A user-fn value whose target is an *instance* method requires exact
+    // arity when invoked indirectly (see `dispatch_call_value`): its first
+    // parameter is the receiver, so binding a missing one to null would
+    // silently call the method on nothing. A *static* method has no receiver
+    // and behaves like a plain function — a higher-order call pads what it
+    // does not supply and drops what it does not need (#11714).
+    let static_method_fns: std::collections::HashSet<usize> = program
+        .classes
+        .iter()
+        .flat_map(|c| c.methods.iter())
+        .filter(|m| m.is_static)
+        .map(|m| m.function_idx)
+        .collect();
     let exact_arity: std::collections::HashSet<u32> = user_fn_idx
         .iter()
-        .filter(|(_, idx)| program.functions[**idx].owning_class.is_some())
+        .filter(|(_, idx)| {
+            program.functions[**idx].owning_class.is_some() && !static_method_fns.contains(idx)
+        })
         .map(|(def, _)| *def)
         .collect();
     Ok((

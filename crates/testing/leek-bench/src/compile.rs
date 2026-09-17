@@ -51,6 +51,7 @@ pub fn compile_hir(input: &Input) -> Result<(CompiledHir, Vec<leek_diagnostics::
             lowered.hir.as_ref().clone(),
             &leek_hir::fold::fold_map(leek_prelude::active_fold_set()),
             OptLevel::O1,
+            leek_syntax::Version::LATEST,
         )
     });
 

@@ -30,6 +30,8 @@ pub struct AotMeta {
     class_parent: Vec<(u32, Option<(u32, String)>)>,
     class_ctor_thunk: Vec<(u32, usize)>,
     class_reflect: Vec<(u32, Vec<(String, Vec<String>)>)>,
+    static_field_owner: Vec<(u32, Vec<(String, u32)>)>,
+    static_method_resolve: Vec<(u32, Vec<(String, usize)>)>,
     /// `(function index, total param count incl. captures)` for every uniform-ABI
     /// function (lambda / thunk / value-method). The harness registers each by
     /// taking the address of `leek_uniform_{idx}`.
@@ -101,6 +103,16 @@ impl AotMeta {
                 .map(|(k, v)| (k, v.into_iter().collect()))
                 .collect();
 
+        let (owner_map, static_methods) = crate::translate::static_member_tables(program);
+        let static_field_owner: Vec<(u32, Vec<(String, u32)>)> = owner_map
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+        let static_method_resolve: Vec<(u32, Vec<(String, usize)>)> = static_methods
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
         let lambda_entries: Vec<(usize, usize)> = lambda_funcs
             .iter()
             .map(|(&idx, &(_, arity))| (idx, arity))
@@ -119,6 +131,8 @@ impl AotMeta {
             class_parent,
             class_ctor_thunk: class_thunks.iter().map(|(&k, &v)| (k, v)).collect(),
             class_reflect,
+            static_field_owner,
+            static_method_resolve,
             lambda_entries,
         }
     }
@@ -163,6 +177,18 @@ impl AotMeta {
         runtime::set_class_ctor_thunk(self.class_ctor_thunk.iter().map(|&(k, v)| (k, v)).collect());
         runtime::set_class_reflect(
             self.class_reflect
+                .iter()
+                .map(|(k, v)| (*k, v.iter().cloned().collect()))
+                .collect(),
+        );
+        runtime::set_static_field_owner(
+            self.static_field_owner
+                .iter()
+                .map(|(k, v)| (*k, v.iter().cloned().collect()))
+                .collect(),
+        );
+        runtime::set_static_method_resolve(
+            self.static_method_resolve
                 .iter()
                 .map(|(k, v)| (*k, v.iter().cloned().collect()))
                 .collect(),
@@ -256,6 +282,8 @@ mod tests {
             class_parent: vec![(9, Some((7, "C".into()))), (7, None)],
             class_ctor_thunk: vec![(7, 10)],
             class_reflect: vec![(7, vec![("m".into(), vec!["x".into(), "y".into()])])],
+            static_field_owner: vec![(9, vec![("count".into(), 7)])],
+            static_method_resolve: vec![(9, vec![("sm".into(), 11)])],
             lambda_entries: vec![(3, 2), (4, 1), (10, 0)],
         }
     }
@@ -274,6 +302,8 @@ mod tests {
         assert_eq!(back.class_parent, meta.class_parent);
         assert_eq!(back.class_ctor_thunk, meta.class_ctor_thunk);
         assert_eq!(back.class_reflect, meta.class_reflect);
+        assert_eq!(back.static_field_owner, meta.static_field_owner);
+        assert_eq!(back.static_method_resolve, meta.static_method_resolve);
         assert_eq!(back.lambda_entries(), meta.lambda_entries());
     }
 

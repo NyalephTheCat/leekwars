@@ -189,6 +189,7 @@ fn a_cached_compile_failure_is_reported_every_turn() {
 fn pistol() -> WeaponSpec {
     WeaponSpec {
         id: 37,
+        template: 1,
         cost: 3,
         min_range: 1,
         max_range: 7,
@@ -197,6 +198,7 @@ fn pistol() -> WeaponSpec {
         max_uses: -1,
         area: Area::SingleCell,
         effects: Vec::new(),
+        passive_effects: Vec::new(),
         forgotten: false,
     }
 }

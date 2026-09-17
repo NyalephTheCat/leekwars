@@ -629,7 +629,10 @@ fn type_from_parts(name: &str, args: &[SyntaxNode]) -> Type {
     match lower.as_str() {
         "integer" | "int" => Type::Integer,
         "real" | "number" | "float" | "double" => Type::Real,
-        "big_integer" => Type::BigInteger,
+        // `BigInteger` is upstream's system class for the type, and naming
+        // it in a declaration names the type — `static BigInteger b` is a
+        // `big_integer` field, not an instance of a user class.
+        "big_integer" | "biginteger" => Type::BigInteger,
         "boolean" | "bool" => Type::Boolean,
         "string" => Type::String,
         "null" => Type::Null,
@@ -711,7 +714,10 @@ pub(crate) fn type_from_name(name: &str) -> Type {
     match name.to_ascii_lowercase().as_str() {
         "integer" | "int" => Type::Integer,
         "real" | "number" | "float" | "double" => Type::Real,
-        "big_integer" => Type::BigInteger,
+        // `BigInteger` is upstream's system class for the type, and naming
+        // it in a declaration names the type — `static BigInteger b` is a
+        // `big_integer` field, not an instance of a user class.
+        "big_integer" | "biginteger" => Type::BigInteger,
         "boolean" | "bool" => Type::Boolean,
         "string" => Type::String,
         "null" => Type::Null,

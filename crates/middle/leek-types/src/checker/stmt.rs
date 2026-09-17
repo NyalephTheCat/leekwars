@@ -155,6 +155,35 @@ impl Checker {
                 self.declare(name.text(), ty.clone());
             }
         }
+        // A scalar declaration initialised with a container is an
+        // assignment upstream's analysis refuses — `boolean b = [1, 2]` is a
+        // bare Java cast its emitter cannot write, so it is reported rather
+        // than compiled. Not gated on strict: upstream reports it either way.
+        if let Some(declared) = &declared
+            && matches!(
+                declared,
+                Type::Boolean | Type::Integer | Type::Real | Type::String | Type::BigInteger
+            )
+        {
+            for ((name, _), init_ty) in decls.iter().zip(&init_tys) {
+                if matches!(
+                    init_ty,
+                    Some(Type::Array(_) | Type::Map(..) | Type::Set(_) | Type::Object)
+                ) {
+                    self.err(
+                        codes::ASSIGNMENT_INCOMPATIBLE_TYPE,
+                        self.span_of(name),
+                        format!(
+                            "cannot initialise `{}` of type {} with {}",
+                            name.text(),
+                            type_name(declared),
+                            type_name(init_ty.as_ref().unwrap_or(&Type::Any)),
+                        ),
+                    );
+                }
+            }
+        }
+
         // Track `x = []` / `x = [:]` (empty-literal initializers)
         // for the strict-v4 index-assign check.
         if declared.is_none() && self.opts.strict && self.version == Version::V4 {

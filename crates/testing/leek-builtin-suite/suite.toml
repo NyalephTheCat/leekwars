@@ -457,3 +457,686 @@ builtin = "indexOf"
 version = 4
 source = "return [indexOf('héllo', 'z'), indexOf('héllo', 'z', 0), indexOf('héllo', 'l', 9)]"
 expect = { equals = "[null, -1, -1]" }
+
+# --- 2.50 bit builtins (`NumberClass.bitLength` / `setBit` / `testBit`). ---
+
+# `64 - Long.numberOfLeadingZeros(x)`: 0 for 0, and 64 for any negative
+# number (its sign bit is set) — NOT BigInteger's sign-excluding reading.
+[[tests]]
+id = "bit_length_counts_significant_bits"
+builtin = "bitLength"
+version = 4
+source = "return [bitLength(0), bitLength(1), bitLength(255), bitLength(256), bitLength(-1)]"
+expect = { equals = "[0, 1, 8, 9, 64]" }
+
+# `1L << pos`, so bit 63 is reachable and lands on the sign bit.
+[[tests]]
+id = "set_bit_sets_and_clears"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0, 3), setBit(255, 0, false), setBit(0, 63), setBit(8, 3, true)]"
+expect = { equals = "[8, 254, -9223372036854775808, 8]" }
+
+# The three-arg form is overloaded on `boolean` and on "non-zero sets".
+[[tests]]
+id = "set_bit_takes_a_number_as_its_flag"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0, 5, 1), setBit(1, 0, 0), setBit(0, 5, 7)]"
+expect = { equals = "[32, 0, 32]" }
+
+# Java's long shift masks the distance to its low six bits, so `pos` 64
+# addresses bit 0 again and a negative `pos` wraps the same way.
+[[tests]]
+id = "set_bit_shift_distance_wraps_at_64"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0, 64), setBit(0, 65), testBit(1, 64)]"
+expect = { equals = "[1, 2, true]" }
+
+[[tests]]
+id = "test_bit_reads_one_bit"
+builtin = "testBit"
+version = 4
+source = "return [testBit(5, 0), testBit(5, 1), testBit(5, 2), testBit(-1, 63)]"
+expect = { equals = "[true, false, true, true]" }
+
+# The same three functions on `big_integer`, where the answers diverge from
+# the fixed-width `long` ones the moment a value needs more than 64 bits.
+# `bitLength` becomes Java's minimal two's-complement length, and `setBit`
+# hands back a `big_integer` even when the result would fit in a long.
+[[tests]]
+id = "bit_length_of_a_big_integer_is_unbounded"
+builtin = "bitLength"
+version = 4
+source = "return [bitLength(255L), bitLength(5L), bitLength(1L << 100)]"
+expect = { equals = "[8, 3, 101]" }
+
+[[tests]]
+id = "set_bit_on_a_big_integer_stays_a_big_integer"
+builtin = "setBit"
+version = 4
+source = "return [setBit(0L, 100) == 1L << 100, setBit(0L, 100) instanceof BigInteger, setBit(5L, 0, false), setBit(0L, 1, true)]"
+expect = { equals = "[true, true, 4, 2]" }
+
+[[tests]]
+id = "test_bit_reads_past_the_64th_bit_of_a_big_integer"
+builtin = "testBit"
+version = 4
+source = "return [testBit(5L, 0), testBit(5L, 1), testBit(1L << 100, 100), testBit(1L << 100, 99)]"
+expect = { equals = "[true, false, true, false]" }
+
+# `bitCount` and `trailingZeros` gained the same `big_integer` overload.
+# `trailingZeros` is `getLowestSetBit` there, so zero answers -1 rather than
+# the long form's 64.
+[[tests]]
+id = "bit_count_and_trailing_zeros_of_a_big_integer"
+builtin = "bitCount"
+version = 4
+source = "return [bitCount(255L), bitCount((1L << 100) - 1L), trailingZeros(8L), trailingZeros(1L << 100), trailingZeros(0L)]"
+expect = { equals = "[8, 100, 3, 100, -1]" }
+
+# --- Redefining a system function (v1–v3 only). ---
+
+# Once a plain assignment has redefined a builtin name, it is an ordinary
+# variable: mutating it is ordinary too. Upstream fixed this in 2026 after a
+# real AI failed to compile on `count = 0; count += 1` inside a function.
+[[tests]]
+id = "a_redefined_builtin_can_then_be_mutated"
+version = 3
+source = "function f() { count = 0; count += 1; count++; return count; } return f()"
+expect = { equals = "2" }
+
+# Mutating one that is still the function reads a function value first, and
+# stays an error at every version.
+[[tests]]
+id = "mutating_a_builtin_that_is_still_a_function_is_refused"
+version = 3
+source = "abs += 1; return 0"
+expect = "error"
+
+# v4 dropped first-class redefinition altogether: even the plain form is out.
+[[tests]]
+id = "redefining_a_builtin_is_refused_at_v4"
+version = 4
+source = "abs = 2 return abs"
+expect = "error"
+
+# --- Dead code after a construct that cannot fall through. ---
+
+# A `do` body runs at least once, so one that always returns ends the
+# enclosing block too.
+[[tests]]
+id = "dead_code_after_a_returning_do_while"
+version = 3
+source = "var t = 0 do { t++ return t } while (t < 5) return 2"
+expect = "error"
+
+# …but a `break` in that body lands after the loop, so flow carries on.
+[[tests]]
+id = "a_do_while_that_breaks_out_still_falls_through"
+version = 3
+source = "function f(x) { do { if (x == 1) break } while (x > 5) return 2 } return f(1)"
+expect = { equals = "2" }
+
+# A switch with a `default` whose every arm returns cannot be skipped.
+[[tests]]
+id = "dead_code_after_an_exhaustive_switch"
+version = 3
+source = "function f(x) { switch (x) { case 1: return 1 default: return 2 } return 3 } return f(1)"
+expect = "error"
+
+# Without the `default` the switch can be skipped entirely.
+[[tests]]
+id = "a_switch_without_a_default_falls_through"
+version = 3
+source = "function f(x) { switch (x) { case 1: return 1 } return 3 } return f(2)"
+expect = { equals = "3" }
+
+# A `break` belonging to a nested loop is not the switch's own.
+[[tests]]
+id = "a_nested_loops_break_does_not_escape_the_switch_arm"
+version = 3
+source = "function f(x) { switch (x) { case 1: for (var i = 0; i < 3; i++) { if (x == 1) break } return 1 default: return 2 } return 3 } return f(1)"
+expect = "error"
+
+# --- The `a?[i]` optional access operator (v3.00). ---
+
+# At run time it is `a[i]`; what it adds is that a null base answers null
+# instead of erroring, and it reads through arrays, maps, strings, objects
+# and slices alike.
+[[tests]]
+id = "optional_index_reads_every_container"
+version = 4
+source = """
+var a = [10, 20, 30]
+var m = ["x": 5]
+var s = "abc"
+return [a?[1], m?["x"], s?[1], a?[0:1], a?[0] + a?[2]]
+"""
+expect = { equals = '[20, 5, "b", [10], 40]' }
+
+[[tests]]
+id = "optional_index_short_circuits_on_null"
+version = 4
+source = "var a = null return [a?[1], a?[0]?[1]]"
+expect = { equals = "[null, null]" }
+
+# The `?` must be glued to the `[`, and must not already own a ternary `:`.
+# Both of these were valid programs before the operator existed and have to
+# stay the ternaries they were.
+[[tests]]
+id = "a_compact_ternary_with_array_branches_stays_a_ternary"
+version = 4
+source = "var c = true var d = false return [c?[1]:[2], d?[1]:[2], c?[1, 2]:[3, 4], c?[1]:9]"
+expect = { equals = "[[1], [2], [1, 2], [1]]" }
+
+# The `:` of a slice sits inside the brackets, so it is not the ternary's.
+[[tests]]
+id = "a_slice_colon_is_not_the_ternarys_colon"
+version = 4
+source = "var c = true var a = [10, 20, 30] return [c?[a[0]]:[a[1]], a?[0:2]]"
+expect = { equals = "[[10], [10, 20]]" }
+
+# Writing through a base that may be null has nowhere to put the value.
+[[tests]]
+id = "an_optional_access_is_not_assignable"
+version = 4
+source = "var a = [1] a?[0] = 5 return a"
+expect = "error"
+
+# --- A primitive parameter whose default is `null`. ---
+
+# Upstream emitted `long u_to = null`, which javac rejects, and now treats
+# such a parameter as untyped: the default really is null, and an explicit
+# real argument keeps its fraction instead of truncating (prod #11872155).
+[[tests]]
+id = "a_null_default_widens_a_primitive_parameter"
+version = 4
+source = """
+function f(integer from, integer to = null) { return [from, to] }
+function g(real r = null) { return r }
+function h(boolean b = null) { return b }
+return [f(1), f(1, 2), f(1, 2.5), g(), h()]
+"""
+expect = { equals = "[[1, null], [1, 2], [1, 2.5], null, null]" }
+
+# A non-null default keeps the primitive type.
+[[tests]]
+id = "a_non_null_default_keeps_the_primitive_type"
+version = 4
+source = "function f(integer to = 3) { return to } return [f(), f(9)]"
+expect = { equals = "[3, 9]" }
+
+# --- `class` is late-bound in an instance method. ---
+
+# An inherited method reports the runtime class of the receiver, not the
+# class the method is written in (#2619). A static method has no receiver,
+# so there it is the declaring class.
+[[tests]]
+id = "class_names_the_runtime_class_in_an_instance_method"
+version = 2
+source = """
+class A { public m() { return class.name } public static s() { return class.name } }
+class B extends A {}
+return [new A().m(), new B().m(), A.s(), B.s()]
+"""
+expect = { equals = '["A", "B", "A", "A"]' }
+
+# --- Compile-time constants and dead branches. ---
+
+# A condition that is already a literal decides the branch at compile time,
+# so upstream emits the taken side alone and charges nothing for the test.
+[[tests]]
+id = "a_constant_condition_costs_nothing"
+version = 4
+source = "if (true) { return 1 } return 2"
+expect = { ops_at_most = 1 }
+
+[[tests]]
+id = "a_constant_condition_takes_the_right_branch"
+version = 4
+source = """
+function t() { if (true) { return 1 } return 2 }
+function f() { if (false) { return 1 } return 2 }
+function n() { if (!false && true) { return 1 } return 2 }
+return [t(), f(), n()]
+"""
+expect = { equals = "[1, 2, 1]" }
+
+# A `static final` field with a literal initializer is inlined, so a
+# `DEBUG` flag costs nothing at all.
+[[tests]]
+id = "a_static_final_literal_is_a_compile_time_constant"
+version = 2
+source = "class A { static final DEBUG = false static final X = 9 } class B extends A {} if (A.DEBUG) { return 0 } return [A.X, B.X]"
+expect = { equals = "[9, 9]" }
+
+# The runtime idiom stays a runtime read: a non-literal initializer is not
+# a constant, and neither is one that reads another field.
+[[tests]]
+id = "a_non_literal_static_final_is_not_inlined"
+version = 2
+source = "function tune() { return 40 + 2 } class A { static final X = tune() static final Y = A.X } return [A.X, A.Y]"
+expect = { equals = "[42, 42]" }
+
+# Inlining mirrors the runtime's access levels exactly: a read the runtime
+# would deny answers null there, so folding it would leak the value.
+[[tests]]
+id = "inlining_a_static_final_respects_its_access_level"
+version = 2
+source = """
+class A { private static final S = 42 static m() { return S } }
+class P { protected static final X = 9 }
+class B extends P { static m() { return X } }
+return [A.S, A.m(), P.X, B.m()]
+"""
+expect = { equals = "[null, 42, null, 9]" }
+
+# A call to a function that does nothing, or that only returns a literal, is
+# worth exactly that — which is what makes a debug guard free rather than
+# merely cheap.
+[[tests]]
+id = "an_empty_or_constant_call_costs_nothing"
+version = 2
+source = "class C { static final PROFILE = false } function guard(x) { if (C.PROFILE) { debug(x) } } function two() { return 2 } guard(1) return two()"
+expect = { ops_at_most = 0 }
+
+# A guard that returns early reduces the same way: everything after the
+# `return` the constant condition selects is dead.
+[[tests]]
+id = "an_early_return_guard_reduces_to_nothing"
+version = 2
+source = "class C { static final P = false } function g(x) { if (!C.P) { return } debug(x) } g(1) return 8"
+expect = { ops_at_most = 0 }
+
+# A bare `O.start(1)` statement of an empty static method leaves nothing.
+[[tests]]
+id = "an_empty_static_method_statement_call_is_dropped"
+version = 2
+source = "class O { private static final P = false static start(x) { if (!P) return } } O.start(2) return 4"
+expect = { ops_at_most = 0 }
+
+# A typed function that falls off its end answers the type's default, so
+# that — not null — is what the substituted call is worth.
+[[tests]]
+id = "a_typed_empty_function_substitutes_its_type_default"
+version = 4
+source = "function f() -> integer {} function s() -> string {} return [f(), s()]"
+expect = { equals = "[0, \"\"]" }
+
+# Nothing observable may go with the call: an impure argument is the
+# caller's to evaluate, an index can raise, and an impure parameter default
+# is the callee's.
+[[tests]]
+id = "an_impure_argument_or_default_keeps_the_call"
+version = 2
+source = """
+global c = 0
+global g = 0
+var i = 0
+function foo(x) {}
+function f(x = c++) {}
+var a = [1]
+foo(i++) foo(g = 5) foo(a[0]) f()
+return [i, g, c]
+"""
+expect = { equals = "[1, 5, 1]" }
+
+# Upstream decides which conditions are constant before it substitutes
+# calls, so a call in a condition keeps its branch — and the operation that
+# branch charges — while a condition that was constant all along is free.
+[[tests]]
+id = "a_constant_condition_is_free_but_a_constant_call_in_one_is_not"
+version = 2
+source = "class A { static final D = false } function f() { return true } if (A.D && f()) { return 0 } return 1"
+expect = { ops_at_most = 0 }
+
+[[tests]]
+id = "a_call_in_a_condition_still_pays_for_its_branch"
+version = 2
+source = "function no() { return false } if (no()) { return 1 } return 2"
+expect = { equals = "2" }
+
+# A static field lives in a box that starts null, so a numeric or boolean
+# one is initialized explicitly; an instance field is a real slot and
+# already reads back zero. Types that accept null keep it on both sides —
+# a static `Set` field is meant to read back null.
+[[tests]]
+id = "a_typed_static_field_starts_at_its_types_value"
+version = 4
+source = "class Z { public static integer i public static real r public static boolean b public static BigInteger n public static string s } return [Z.i, Z.r, Z.b, Z.n, Z.s]"
+expect = { equals = "[0, 0.0, false, 0, null]" }
+
+[[tests]]
+id = "a_typed_static_field_default_is_inherited"
+version = 4
+source = "class A { public static integer b } class B extends A {} return B.b"
+expect = { equals = "0" }
+
+[[tests]]
+id = "a_nullable_field_keeps_its_null"
+version = 4
+source = "class A { integer | null x } var a = new A() return a.x"
+expect = { equals = "null" }
+
+# `switch` fall-through follows source order, and `default` is an arm like
+# any other — it can sit in the middle of the chain.
+[[tests]]
+id = "a_default_arm_falls_through_in_source_order"
+version = 3
+source = "integer x = 1 var r = '' switch (x) { case 1: r += 'a' default: r += 'd' case 2: r += 'b' } return r"
+expect = { equals = "\"adb\"" }
+
+[[tests]]
+id = "an_unmatched_switch_enters_the_default_where_it_is_written"
+version = 3
+source = "var x = 9 var r = '' switch (x) { case 1: r += 'a' default: r += 'd' case 2: r += 'b' } return r"
+expect = { equals = "\"db\"" }
+
+# `break` leaves the switch, but `continue` belongs to the enclosing loop —
+# a switch is not a loop.
+[[tests]]
+id = "continue_inside_a_switch_continues_the_loop"
+version = 3
+source = "var s = 0 for (var i = 0; i < 3; i++) { switch (i) { case 0: continue default: continue } s += 1 } return s"
+expect = { equals = "0" }
+
+# A switch compares with `eq()`, the loose equality, in every version —
+# `==` narrows at v4 but this does not.
+[[tests]]
+id = "a_switch_label_compares_loosely_even_at_v4"
+version = 4
+source = "var r = '' switch ('1') { case 1: r += 'a' } switch (true) { case 1: r += 'b' } switch ('') { case 0: r += 'c' } return [r, '1' == 1]"
+expect = { equals = "[\"abc\", false]" }
+
+# `class` is late-bound — in an inherited method it names the runtime class —
+# but a *static* member is not virtual, so `class.x`, a bare static name and
+# `super.x` all resolve against the class that declares them.
+[[tests]]
+id = "a_static_member_resolves_against_its_declaring_class"
+version = 4
+source = """
+class A { static integer x = 12 static who() { return 'A' } m() { return [x, class.x, class.who(), class.name] } }
+class B extends A {}
+return new B().m()
+"""
+expect = { equals = "[12, 12, \"A\", \"B\"]" }
+
+[[tests]]
+id = "super_reaches_a_static_field_of_the_parent"
+version = 4
+source = "class A { static integer s = 5 } class B extends A { m() { super.s = 9 return [super.s, A.s] } } return new B().m()"
+expect = { equals = "[9, 9]" }
+
+[[tests]]
+id = "a_bare_static_name_reads_the_class_storage_from_an_instance_method"
+version = 4
+source = "class A { static integer x = 12 m() { integer i = x return i } } return new A().m()"
+expect = { equals = "12" }
+
+# A number literal's truthiness folds like a boolean's, so a constant `if`
+# on one costs nothing. A string's does not, here or upstream.
+[[tests]]
+id = "a_number_condition_folds_but_a_string_one_does_not"
+version = 4
+source = "if (1) {} if (0) {} if (-5) {} if ('') { return 1 } return 2"
+expect = { equals = "2" }
+
+[[tests]]
+id = "a_constant_number_condition_costs_nothing"
+version = 1
+source = "if (1) {}"
+expect = { ops_at_most = 0 }
+
+# Upstream dispatches a switch whose labels are all constants of one kind, on
+# a subject already of that kind, in a single operation however many cases it
+# has — and never calls `eq()`, so a long string label costs nothing to skip.
+[[tests]]
+id = "a_constant_switch_on_a_typed_subject_dispatches_in_one_op"
+version = 3
+source = "integer x = 8 switch (x) { case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: return 1 } return 0"
+expect = { ops_at_most = 3 }
+
+[[tests]]
+id = "a_constant_string_switch_skips_the_per_character_compare"
+version = 3
+source = "string x = 'delta' switch (x) { case 'alpha': case 'bravo': case 'charlie': case 'delta': return 1 } return 0"
+expect = { ops_at_most = 3 }
+
+# A subject only known at run time gets the same dispatch behind a kind
+# test: one operation when the value is of the labels' kind, the loose chain
+# when it is not — and both pick the same arm.
+[[tests]]
+id = "a_dynamic_subject_dispatches_in_one_op_when_its_kind_matches"
+version = 3
+source = "var x = 8 switch (x) { case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: return 1 } return 0"
+expect = { ops_at_most = 3 }
+
+[[tests]]
+id = "a_dynamic_subject_of_another_kind_falls_back_to_the_chain"
+version = 3
+source = "var r = '' switch ('1') { case 1: r += 'a' } switch (1.0) { case 1: r += 'b' } switch (8) { case 8: r += 'c' } return r"
+expect = { equals = "\"abc\"" }
+
+# The dispatch is only a charging shortcut: a duplicate label, a non-constant
+# one, or a subject of another kind keeps the per-case chain — and every one
+# of them still selects the same arm.
+[[tests]]
+id = "a_switch_that_cannot_dispatch_still_selects_the_same_arm"
+version = 3
+source = """
+integer a = 2 var r = ''
+switch (a) { case 1: r += 'a' break case 1 + 1: r += 'b' break default: r += 'c' }
+integer b = 1
+switch (b) { case 1: r += 'x' break case 1: r += 'y' break }
+string s = 'b'
+switch (s) { case 'a': r += 'p' break case 'b': r += 'q' break }
+return r
+"""
+expect = { equals = "\"bxq\"" }
+
+# A typed slot converts what is written to it, whatever path the write takes —
+# a compound assignment and a value only boxed at run time included.
+[[tests]]
+id = "a_typed_field_converts_what_is_written_to_it"
+version = 4
+source = """
+class A { integer i real r boolean b integer | null n }
+var a = new A()
+a.i = null a.r = null a.b = 1 a.n = 2.5
+var d = [1, 40.5]
+a.i = d[1]
+return [a.i, a.r, a.b, a.n]
+"""
+expect = { equals = "[40, 0.0, true, 2]" }
+
+[[tests]]
+id = "a_compound_assignment_converts_through_the_field_type"
+version = 4
+source = "class A { integer i = 3 real r = 10.0 } var a = new A() a.i += 0.5 a.r \\= 3 return [a.i, a.r]"
+expect = { equals = "[3, 3.0]" }
+
+# A conversion that cannot be done leaves the slot with what it had: upstream
+# compiles the write to a Java cast, which fails, logs, and stores nothing.
+[[tests]]
+id = "an_impossible_conversion_leaves_the_slot_alone"
+version = 4
+source = """
+class A {}
+class B { string s = 'a'  A? a }
+var b = new B()
+b.s = 12
+b.a = 5
+return [b.s, b.a]
+"""
+expect = { equals = "[\"a\", null]" }
+
+[[tests]]
+id = "a_static_field_and_a_global_convert_the_same_way"
+version = 4
+source = "class Z { public static BigInteger b = 10L } global integer g = 10 Z.b /= 4 g *= (false ? 1 : 0.5) return [Z.b, g]"
+expect = { equals = "[2, 5]" }
+
+# A declared return type converts what leaves the function, the way a typed
+# slot converts what is written into it — and a class method declares its
+# return type before its name, not after an arrow.
+[[tests]]
+id = "a_declared_return_type_converts_what_leaves_the_function"
+version = 4
+source = "function i() -> integer { return 2.5 } function r() -> real { return 2 } class S { public integer m() { return 2.5 } } return [i(), r(), new S().m()]"
+expect = { equals = "[2, 2.0, 2]" }
+
+[[tests]]
+id = "a_typed_function_that_returns_nothing_answers_its_types_value"
+version = 4
+source = "function f() -> integer { return null } function g() -> integer {} return [f(), g()]"
+expect = { equals = "[0, 0]" }
+
+# A return whose conversion cannot be done answers null rather than handing
+# the caller a value of the wrong type (#11741953).
+[[tests]]
+id = "an_impossible_return_conversion_answers_null"
+version = 4
+source = "class T { public boolean b = true } class C { public T build() { return new T() } } class S { public T foo(C c) { return c.build().b } } return new S().foo(new C())"
+expect = { equals = "null" }
+
+# A static method reference behaves like a plain function in a higher-order
+# call: surplus arguments are dropped and missing ones padded with null. An
+# *instance* method read the same way keeps its exact arity — its first
+# parameter is the receiver (#11714).
+[[tests]]
+id = "a_static_method_reference_pads_and_drops_like_a_function"
+version = 4
+source = "class A { public static m1(n) { return n + 1 } public static m4(a, b, c, d) { return [a, d] } } return [arrayMap([1, 2], A.m1), arrayMap([1, 2], A.m4)]"
+expect = { equals = "[[2, 3], [[1, null], [2, null]]]" }
+
+# A `big_integer` operation whose result would exceed the size cap is refused
+# before it runs — the allocation being guarded against is the one the
+# operation itself would make. Reasonable arithmetic is untouched.
+[[tests]]
+id = "a_runaway_big_integer_power_is_refused"
+version = 4
+source = "return 2L ** 100000000"
+expect = { runtime_error = "OUT_OF_MEMORY" }
+
+[[tests]]
+id = "a_runaway_big_integer_shift_is_refused"
+version = 4
+source = "return 1L << 2000000"
+expect = { runtime_error = "OUT_OF_MEMORY" }
+
+[[tests]]
+id = "a_right_shift_by_a_negative_amount_grows_and_is_refused"
+version = 4
+source = "return 1L >> -2000000"
+expect = { runtime_error = "OUT_OF_MEMORY" }
+
+[[tests]]
+id = "successive_squaring_pays_for_what_it_costs"
+version = 4
+source = "big_integer n = 100000L for (var i in [0..100]) { n *= n } return n"
+expect = "error"
+
+[[tests]]
+id = "ordinary_big_integer_arithmetic_is_untouched"
+version = 4
+source = "big_integer n = 2L for (var i = 0; i < 1000; i++) n *= 2 return [bitLength(n), 1L << 8, 3L ** 5]"
+expect = { equals = "[1002, 256, 243]" }
+
+# A parameter declared with a container or class type is a cast: a value of
+# another kind fails it, and the failure reaches the player as a runtime
+# error rather than a silently wrong value.
+[[tests]]
+id = "a_reference_typed_parameter_refuses_another_kind"
+version = 4
+source = "function vide(Array a) {} var x = 5 vide(x) return 1"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+[[tests]]
+id = "a_default_of_the_wrong_type_fails_like_the_argument_would"
+version = 4
+source = "function f(integer a, Set<integer> s = [1, 2]) { return a } return f(1)"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+# …so such a call is never eliminated, however empty the body: dropping it
+# would drop the error with it.
+[[tests]]
+id = "a_call_whose_conversion_can_throw_is_never_eliminated"
+version = 4
+source = "function vide(Array a) {} any x = 5 vide(x) return 1"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+# A conversion that takes any value keeps the call eliminable.
+[[tests]]
+id = "a_scalar_typed_parameter_never_throws_and_stays_eliminable"
+version = 4
+source = "function vide(integer a) {} vide(5) return 3"
+expect = { ops_at_most = 0 }
+
+# A scalar declaration initialised with a container is refused by the
+# analysis: upstream's emitter cannot write that cast at all.
+[[tests]]
+id = "a_scalar_declaration_refuses_a_container_initialiser"
+version = 4
+source = "boolean b = [1, 2]; return b"
+expect = "error"
+
+# v1 leaves a declaration with no initialiser at null whatever its type;
+# from v2 a typed slot takes its type's own value. Reaching an element of
+# the v1 one faults, because upstream gets there through a cast.
+[[tests]]
+id = "a_typed_declaration_takes_its_types_value_from_v2"
+version = 2
+source = "Map m m['a'] = 7 integer i Array a return [m['a'], i, a]"
+expect = { equals = "[7, 0, []]" }
+
+[[tests]]
+id = "writing_an_element_of_a_null_container_faults"
+version = 1
+source = "Map m m['a'] = 7 return m['a']"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+[[tests]]
+id = "writing_an_element_of_a_null_global_container_faults"
+version = 1
+source = "global Map m m['a'] = 7 return m['a']"
+expect = { runtime_error = "IMPOSSIBLE_CAST" }
+
+# A function called as a *value* fills its parameter defaults like a direct
+# call does: the calling convention tells the body how many arguments it was
+# actually given, not how many slots it has.
+[[tests]]
+id = "a_function_value_fills_its_parameter_defaults"
+version = 4
+source = "function f(a, b = 5) { return b } var h = f function g(Function<integer => integer> k) { return k(1) } return [f(1), h(1), g(f)]"
+expect = { equals = "[5, 5, 5]" }
+
+[[tests]]
+id = "a_bound_method_value_fills_its_parameter_defaults"
+version = 4
+source = "class A { m(a, b = 7) { return b } } var o = new A() var h = o.m return [o.m(1), h(1)]"
+expect = { equals = "[7, 7]" }
+
+# Below v4 a function name is a mutable binding: assigning to it takes, and
+# later calls through the name see what was assigned. A reference taken
+# before the assignment keeps the function it named.
+[[tests]]
+id = "a_function_name_is_mutable_below_v4"
+version = 2
+source = "function f() { return 1 } function g() { return 2 } var k = f f = g return [k(), f()]"
+expect = { equals = "[1, 2]" }
+
+[[tests]]
+id = "a_function_can_be_redefined_from_inside_another"
+version = 3
+source = "function f(x) { return x + 1 } function h() { f = function(x) { return x * 2 } } h() return f(5)"
+expect = { equals = "10" }
+
+# A global with no declared type still has one in strict mode: whatever every
+# write to it agrees on. A global written two different kinds keeps neither.
+[[tests]]
+id = "a_global_written_two_kinds_stays_untyped"
+version = 4
+source = "global x = 10 x = 'a' return x"
+expect = { equals = "\"a\"" }

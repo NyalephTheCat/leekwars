@@ -318,6 +318,7 @@ impl Tx<'_, '_> {
                 }
                 let (v, vt) = self.rvalue(rv)?;
                 let v = self.coerce(v, vt, ValTy::Ref)?;
+                let v = self.static_convert(owner, name, &field.ty.clone(), v)?;
                 return self.static_field_set(owner, name, v);
             }
             return Err(self.unsupported("class reference index assignment"));
@@ -353,6 +354,17 @@ impl Tx<'_, '_> {
             }
         }
         let (arr, _) = self.local_value(base)?;
+        // Writing an element of a declared container reaches it through a
+        // cast in upstream's generated code, so a slot holding null faults
+        // there rather than swallowing the write. Only a v1 declaration with
+        // no initialiser gets there — from v2 a typed slot is never null.
+        if let Some(tag) = self.slot_base_tag(base)
+            && crate::runtime::slot::is_reference(tag)
+        {
+            let check = self.imports.rt("leek_check_container")?;
+            let tagv = self.b.ins().iconst(types::I64, tag);
+            self.b.ins().call(check, &[arr, tagv]);
+        }
         let (i, it) = self.operand(idx)?;
         let (mut v, mut vt) = self.rvalue(rv)?;
         // A typed numeric array coerces the written element to its element
@@ -420,6 +432,7 @@ impl Tx<'_, '_> {
             }
             let (v, vt) = self.rvalue(rv)?;
             let v = self.coerce(v, vt, ValTy::Ref)?;
+            let v = self.static_convert(owner, name, &field.ty.clone(), v)?;
             return self.static_field_set(owner, name, v);
         }
         if self.var_tys[base.0 as usize] != ValTy::Ref {
@@ -441,7 +454,17 @@ impl Tx<'_, '_> {
             v = self.coerce(v, vt, ft)?;
             vt = ft;
         }
-        let val = self.coerce(v, vt, ValTy::Ref)?;
+        let mut val = self.coerce(v, vt, ValTy::Ref)?;
+        // A boxed value goes through the same conversion at run time, where
+        // its kind is known: `a.x = null` on an `integer x` stores 0, and a
+        // conversion that cannot be done — `a.x = 12` on a `string x` — leaves
+        // the field with what it had.
+        if let Some(tag) = self.field_slot_tag(base, name) {
+            let convert = self.imports.rt("leek_field_convert")?;
+            let tagv = self.b.ins().iconst(types::I64, tag);
+            let inst = self.b.ins().call(convert, &[base_h, ptr, lenv, val, tagv]);
+            val = self.b.inst_results(inst)[0];
+        }
         let ver = self
             .b
             .ins()
@@ -480,18 +503,30 @@ impl Tx<'_, '_> {
             vt = gt;
         }
         let mut val = self.coerce(v, vt, ValTy::Ref)?;
-        // A `big_integer`-declared global coerces every store, like a local.
-        let global_is_bigint = self.program.globals.iter().any(|g| {
-            g.name == name
-                && match &g.ty {
-                    Type::BigInteger => true,
-                    Type::Nullable(t) => matches!(t.as_ref(), Type::BigInteger),
-                    _ => false,
-                }
-        });
-        if global_is_bigint {
-            let f = self.imports.rt("leek_to_bigint")?;
-            let inst = self.b.ins().call(f, &[val]);
+        // A boxed store goes through the declared type at run time, where its
+        // kind is known — a typed global is a typed slot like a typed field,
+        // so `global integer g` truncates a real written into it.
+        if let Some(tag) = self
+            .program
+            .globals
+            .iter()
+            .find(|g| g.name == name)
+            .and_then(|g| {
+                super::slot_tag(&g.ty).or_else(|| {
+                    // Strict mode commits an untyped global to the type every
+                    // write to it agrees on, and converts through that — the
+                    // same rule it applies to an untyped local.
+                    self.lang
+                        .strict
+                        .then(|| g.inferred_ty.as_ref().and_then(super::slot_tag))
+                        .flatten()
+                })
+            })
+        {
+            let convert = self.imports.rt("leek_global_convert")?;
+            let (ptr, lenv) = self.const_str_bytes(name);
+            let tagv = self.b.ins().iconst(types::I64, tag);
+            let inst = self.b.ins().call(convert, &[ptr, lenv, val, tagv]);
             val = self.b.inst_results(inst)[0];
         }
         self.b.ins().call(set, &[key, val]);
@@ -512,7 +547,20 @@ impl Tx<'_, '_> {
             };
             let (v, vt) = self.operand(op)?;
             let target = self.var_tys[param.0 as usize];
-            let v = self.coerce(v, vt, target)?;
+            let mut v = self.coerce(v, vt, target)?;
+            // A default value lands in the parameter through the same
+            // declared type an explicit argument does, so it fails the same
+            // way: `f(integer a, Set<integer> s = [1, 2])` called as `f(1)`
+            // is the cast `f(1, [1, 2])` would have been.
+            if target == ValTy::Ref
+                && let Some(tag) = super::slot_tag(&self.mir_locals[param.0 as usize].ty)
+                && crate::runtime::slot::is_reference(tag)
+            {
+                let check = self.imports.rt("leek_check_param")?;
+                let tagv = self.b.ins().iconst(types::I64, tag);
+                let inst = self.b.ins().call(check, &[v, tagv]);
+                v = self.b.inst_results(inst)[0];
+            }
             if self.cell_locals.contains(&param) {
                 let cell = self.b.use_var(self.vars[param.0 as usize]);
                 let set = self.imports.rt("leek_cell_set")?;
@@ -592,7 +640,16 @@ impl Tx<'_, '_> {
                     }
                     _ => self.operand(op)?,
                 };
-                let v = self.coerce(v, ty, self.ret_ty)?;
+                let mut v = self.coerce(v, ty, self.ret_ty)?;
+                // A declared return type converts what leaves the function,
+                // the way a typed slot converts what is written into it — a
+                // conversion that cannot be done answers null rather than
+                // handing the caller a value of the wrong type.
+                if let Some(tag) = self.ret_tag
+                    && self.ret_ty == ValTy::Ref
+                {
+                    v = self.convert_to_slot(v, tag)?;
+                }
                 self.flush_charge()?;
                 self.emit_leave_frame();
                 self.b.ins().return_(&[v]);
@@ -604,10 +661,16 @@ impl Tx<'_, '_> {
                 self.flush_charge()?;
                 self.emit_leave_frame();
                 let z = match self.ret_ty {
+                    // A typed function that falls off its end answers its
+                    // type's own value, not null — `-> integer {}` is 0.
                     ValTy::Ref => {
                         let null = self.imports.rt("leek_box_null")?;
                         let inst = self.b.ins().call(null, &[]);
-                        self.b.inst_results(inst)[0]
+                        let n = self.b.inst_results(inst)[0];
+                        match self.ret_tag {
+                            Some(tag) => self.convert_to_slot(n, tag)?,
+                            None => n,
+                        }
                     }
                     ValTy::Real => self.b.ins().f64const(0.0),
                     _ => self.b.ins().iconst(types::I64, 0),

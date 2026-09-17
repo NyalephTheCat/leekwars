@@ -76,6 +76,13 @@ pub struct Fight {
     /// The seed the fight was set up with, kept alongside the (mutating) RNG
     /// state so order-of-play draws can start from their own stream.
     seed: u64,
+    /// Whether this fight is one of a lot run back to back (`isBatchFight()`).
+    /// Carried rather than derived: nothing else tells a batched fight from a
+    /// single one.
+    batch: bool,
+    /// The play order (`StartOrder.compute`), drawn once by the runner and
+    /// handed over so the order queries can answer. Empty until then.
+    turn_order: Vec<i64>,
 }
 
 impl Fight {
@@ -93,6 +100,8 @@ impl Fight {
             warned: HashSet::new(),
             rng: DEFAULT_SEED,
             seed: DEFAULT_SEED,
+            batch: false,
+            turn_order: Vec::new(),
         }
     }
 
@@ -133,6 +142,18 @@ impl Fight {
     /// Set the current turn number (the orchestrator's turn loop advances it).
     pub fn set_turn(&mut self, turn: i64) {
         self.turn = turn;
+    }
+
+    /// Mark this fight as one of a lot run back to back — what
+    /// `isBatchFight()` reports.
+    pub fn set_batch(&mut self, batch: bool) {
+        self.batch = batch;
+    }
+
+    /// Hand the fight the play order the runner drew, so `getNextPlayer` and
+    /// `getPreviousPlayer` can answer from it.
+    pub fn set_turn_order(&mut self, order: Vec<i64>) {
+        self.turn_order = order;
     }
 
     /// Reset an entity's MP/TP to their (buff-adjusted) maxima
@@ -217,6 +238,12 @@ impl GameHost for Fight {
     }
     fn turn(&self) -> i64 {
         self.turn
+    }
+    fn is_batch_fight(&self) -> bool {
+        self.batch
+    }
+    fn turn_order(&self) -> &[i64] {
+        &self.turn_order
     }
     fn entities(&self, alive_only: bool) -> Vec<i64> {
         self.entities

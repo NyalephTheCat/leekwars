@@ -1,0 +1,33 @@
+// plant corpus, displacement half — an awakening set off by a displacement
+// the entity did not walk.
+//
+// Each leek plants one two cells behind itself (chip 1050, ROOTED + zone 3)
+// and then swaps places with the enemy (1018, permutation, range 1–10, no
+// LoS). The enemy lands two cells from the plant having taken no step of its
+// own, which wakes it; a permutation is also the one displacement a ROOTED
+// entity itself suffers, so a plant can be repotted into another's zone.
+//
+// Both halves of the swap are checked (`checkPlantTriggers` runs for the
+// caster and for the target), and the awakening fires from the middle of the
+// chip's effect loop rather than from a move.
+function plantAI() {
+	var who = getPlantTrigger();
+	if (who == -1) {
+		return null;
+	}
+	useChip(1008, who); // laser
+	return null;
+}
+
+var e = getNearestEnemy();
+if (getTurn() == 1) {
+	setWeapon(WEAPON_PISTOL);
+}
+var my = getCell();
+var back = getCellFromXY(getCellX(my) - 2, getCellY(my));
+if (back != null && getCellContent(back) == CELL_EMPTY) {
+	summon(1050, back, plantAI);
+}
+moveToward(e, 3);
+useChip(1018, e); // swap: the enemy arrives where we stood, by our plants
+useWeapon(e);

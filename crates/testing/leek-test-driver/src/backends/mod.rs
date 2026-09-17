@@ -1066,7 +1066,16 @@ fn normalize_native_skip(e: &leek_backend_native::NativeError) -> String {
 fn is_runtime_error_code(code: &str) -> bool {
     matches!(
         code,
-        "TOO_MUCH_OPERATIONS" | "OUT_OF_MEMORY" | "ARRAY_OUT_OF_BOUND" | "STACK_OVERFLOW"
+        // IMPOSSIBLE_CAST is here because upstream compiles a conversion to a
+        // reference type as a Java cast: what refuses the value is the cast
+        // failing at run time, not the analysis. Upstream's own cases say so
+        // — a default parameter of the wrong type is "the same runtime error
+        // as passing that argument explicitly".
+        "TOO_MUCH_OPERATIONS"
+            | "OUT_OF_MEMORY"
+            | "ARRAY_OUT_OF_BOUND"
+            | "STACK_OVERFLOW"
+            | "IMPOSSIBLE_CAST"
     )
 }
 

@@ -28,6 +28,7 @@ impl<'a> ProgramCtx<'a> {
     }
 
     pub(crate) fn lower(&mut self) {
+        let inferred = infer_global_tys(self.hir);
         // First pass: register globals so functions lowered next
         // can resolve `NameRef::Global` references.
         // A `Global` def's `DefId` is its index in `defs` (the HIR doesn't
@@ -41,6 +42,11 @@ impl<'a> ProgramCtx<'a> {
                     def_id,
                     name: g.name.clone(),
                     ty: g.ty.clone().unwrap_or(Type::Any),
+                    inferred_ty: g
+                        .ty
+                        .is_none()
+                        .then(|| inferred.get(&def_id).cloned())
+                        .flatten(),
                     span: g.span,
                 });
             }
@@ -136,6 +142,9 @@ impl<'a> ProgramCtx<'a> {
             if let Some(ctx) = &task.method_ctx {
                 fl.method_ctx = Some(MethodCtx {
                     this_local: Some(id),
+                    // A lambda body is not the constructor itself even when
+                    // one encloses it: by the time it runs, `this` is made.
+                    is_constructor: false,
                     class_def_id: ctx.class_def_id,
                     class_name: ctx.class_name.clone(),
                     parent_class: ctx.parent_class.clone(),
@@ -312,7 +321,21 @@ impl<'a> ProgramCtx<'a> {
         // these on demand (per-instance for instance fields, lazily
         // on first access for static).
         for f in &c.fields {
-            let init_fn = f.init.as_ref().map(|init_expr| {
+            // A typed field with no initializer starts at its type's own
+            // value rather than null — upstream's "typed slots are never
+            // null" rule, the same one a typed local follows. Synthesizing
+            // the initializer here means one lowering path, so the default
+            // is stored (and read back) exactly like a written one.
+            let default = f
+                .init
+                .is_none()
+                .then(|| {
+                    f.ty.as_ref()
+                        .and_then(|ty| default_init_expr(ty, f.span, f.is_static))
+                })
+                .flatten();
+            let init_expr = f.init.as_ref().or(default.as_ref());
+            let init_fn = init_expr.map(|init_expr| {
                 self.lower_field_init(
                     init_expr,
                     f.span,
@@ -396,7 +419,7 @@ impl<'a> ProgramCtx<'a> {
         class_def_id: DefId,
         class_name: String,
         parent_class: Option<String>,
-        _is_constructor: bool,
+        is_constructor: bool,
     ) -> usize {
         let function_idx = self.program.functions.len();
         // Reserve the slot so any nested lambdas push to later
@@ -435,6 +458,7 @@ impl<'a> ProgramCtx<'a> {
 
         fl.method_ctx = Some(MethodCtx {
             this_local,
+            is_constructor,
             class_def_id,
             class_name,
             parent_class,
@@ -524,6 +548,10 @@ impl<'a> ProgramCtx<'a> {
         };
         fl.method_ctx = Some(MethodCtx {
             this_local,
+            // A field initializer runs while the object is still being
+            // built, so `class` there is the declaring class, like in a
+            // constructor.
+            is_constructor: true,
             class_def_id,
             class_name,
             parent_class,
@@ -578,4 +606,71 @@ impl<'a> ProgramCtx<'a> {
         fl.close_with_implicit_return(main_span);
         fl.finish()
     }
+}
+
+/// The initializer a typed field with none of its own gets.
+///
+/// Upstream's rule, and its reason: an instance field is a real Java field,
+/// so a numeric or boolean one already reads back as `0` / `0.0` / `false`;
+/// a *static* field lives in a box that starts null, so the same four
+/// scalar types — `big_integer` among them, since its box is what would be
+/// unwrapped — are initialized explicitly. Every type that accepts null
+/// (`string`, `Array`, a class, a nullable) keeps it, on either side: a
+/// static `Set<integer>` field is meant to read back null, and upstream has
+/// a test pinning the error that produces.
+fn default_init_expr(ty: &Type, span: Span, is_static: bool) -> Option<Expr> {
+    use leek_hir::{ExprKind, Literal};
+    let kind = match ty {
+        Type::Integer => ExprKind::Literal(Literal::Int(0)),
+        Type::Real => ExprKind::Literal(Literal::Real(0.0)),
+        Type::Boolean => ExprKind::Literal(Literal::Bool(false)),
+        Type::BigInteger if is_static => ExprKind::Literal(Literal::BigInt("0".into())),
+        _ => return None,
+    };
+    Some(Expr {
+        kind,
+        ty: ty.clone(),
+        span,
+    })
+}
+
+/// The type every write to each global agrees on, for the globals that have
+/// no declared one.
+///
+/// Both the declaration's initialiser and every plain `=` to the name count,
+/// and they must all infer to the same simple type — a global written an
+/// integer here and a string there is untyped, and narrowing it would refuse
+/// a write upstream accepts. A compound assignment (`x /= v`) is a *read* of
+/// the type, not a claim about it, so it is not counted.
+fn infer_global_tys(hir: &HirFile) -> HashMap<DefId, Type> {
+    let mut seen: HashMap<DefId, Option<Type>> = HashMap::new();
+    let mut note = |def: DefId, ty: Option<Type>| {
+        seen.entry(def)
+            .and_modify(|cur| {
+                if cur.as_ref() != ty.as_ref() {
+                    *cur = None;
+                }
+            })
+            .or_insert(ty);
+    };
+    leek_hir::walk_file_stmts_deep(hir, &mut |s| {
+        if let Stmt::VarDecl(v) = s
+            && v.is_global
+        {
+            note(
+                v.def,
+                v.init.as_ref().and_then(super::util::infer_simple_init_ty),
+            );
+        }
+    });
+    leek_hir::walk_file_exprs(hir, &mut |e| {
+        if let leek_hir::ExprKind::Binary(leek_hir::BinaryOp::Assign, lhs, rhs) = &e.kind
+            && let leek_hir::ExprKind::Name(leek_hir::NameRef::Global(def)) = &lhs.kind
+        {
+            note(*def, super::util::infer_simple_init_ty(rhs));
+        }
+    });
+    seen.into_iter()
+        .filter_map(|(def, ty)| ty.map(|t| (def, t)))
+        .collect()
 }

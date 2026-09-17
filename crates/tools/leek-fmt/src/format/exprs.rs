@@ -375,9 +375,15 @@ pub(super) fn format_index(node: &SyntaxNode) -> Doc {
             index = Some(fmt_node(&child));
         }
     }
+    // `a?[i]` — the optional form, whose `?` is a token of this node rather
+    // than a child. Dropping it would change what the code means.
+    let optional = node
+        .children_with_tokens()
+        .filter_map(NodeOrToken::into_token)
+        .any(|t| t.kind() == S::Question);
     concat([
         base.unwrap_or_else(|| text("")),
-        text("["),
+        text(if optional { "?[" } else { "[" }),
         index.unwrap_or_else(|| text("")),
         text("]"),
     ])

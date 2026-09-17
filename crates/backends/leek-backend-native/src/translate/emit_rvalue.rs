@@ -215,6 +215,38 @@ impl Tx<'_, '_> {
         Ok(v)
     }
 
+    /// Convert `val` to a static field's declared type before it is stored,
+    /// the way [`Self::set_field`](super::FnTranslator::set_field) does for an
+    /// instance field: a conversion that cannot be done leaves the field with
+    /// what it had.
+    pub(super) fn static_convert(
+        &mut self,
+        owner: DefId,
+        name: &str,
+        ty: &leek_types::Type,
+        val: Value,
+    ) -> Result<Value, NativeError> {
+        let Some(tag) = super::slot_tag(ty) else {
+            return Ok(val);
+        };
+        let convert = self.imports.rt("leek_static_convert")?;
+        let cd = self.b.ins().iconst(types::I64, owner.0 as i64);
+        let (ptr, lenv) = self.const_str_bytes(name);
+        let tagv = self.b.ins().iconst(types::I64, tag);
+        let inst = self.b.ins().call(convert, &[cd, ptr, lenv, val, tagv]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
+    /// Convert a boxed value to a declared type, answering null when the
+    /// conversion cannot be done. For a slot with no previous value to fall
+    /// back on — a `return`.
+    pub(super) fn convert_to_slot(&mut self, val: Value, tag: i64) -> Result<Value, NativeError> {
+        let convert = self.imports.rt("leek_convert_slot")?;
+        let tagv = self.b.ins().iconst(types::I64, tag);
+        let inst = self.b.ins().call(convert, &[val, tagv]);
+        Ok(self.b.inst_results(inst)[0])
+    }
+
     /// Emit a `leek_static_set(owner_def, name, val)`.
     pub(super) fn static_field_set(
         &mut self,
@@ -491,7 +523,7 @@ impl Tx<'_, '_> {
     /// emission.
     pub(super) fn synthetic(&mut self, inner: &Rvalue) -> Result<(Value, ValTy), NativeError> {
         match inner {
-            Rvalue::Binary(op, l, r) => self.binary_uncharged(*op, l, r),
+            Rvalue::Binary(op, l, r) => self.binary_raw(*op, l, r),
             Rvalue::Index(base, idx) => {
                 let (i, it) = self.operand(idx)?;
                 if it == ValTy::Int && !self.classref_locals.contains_key(base) {

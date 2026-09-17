@@ -1,11 +1,145 @@
-5538	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5; switch (x) { case null: return 0; default: return abs(x) }
-5539	line 13: Long u_x = (Long) ops(longintOrNull(null), 1); | Object u_x = longintOrNull(ops(null, 1));	integer | null x = null; switch (x) { case null: return 0; default: return abs(x) }
-5540	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5; switch (x) { case null: return 0; case 5: return abs(x); default: return abs(x) }
-11177	line 24: if (ops(2l == 2l, 2)) { | if (ops(equals_equals(2l, 2l), 2)) {	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 2) { return 99 } case 2: a = 12 case 3: a = 15 } return a
-11179	line 24: if (ops(2l == 3l, 2)) { | if (ops(equals_equals(2l, 3l), 2)) {	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 3) { return 99 } case 2: a = 12 case 3: a = 15 } return a
-11202	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s
-11203	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s
-11212	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: for (var i = 0; i < 3; i++) { s += i } break } return s
-11213	line 23: ops(1);ops(u_s = add_eq(u_s, u_i), 1); | ops(1);ops(u_s = (Object) add(u_s, u_i), 1);	var x = 1 var s = 0 switch (x) { case 1: for (var i = 0; i < 3; i++) { s += i } break } return s
-11220	line 22: ops(1);ops(u_s = add_eq(u_s, 10l), 1); | ops(1);ops(u_s = (Object) add(u_s, 10l), 1);	var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s
-11221	line 22: ops(1);ops(u_s = add_eq(u_s, 10l), 1); | ops(1);ops(u_s = (Object) add(u_s, 10l), 1);	var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s
+4460	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "a"), 1)) __si_0 = 0;	var x = null switch (x) { case 'a': return 'a' default: return 'other' }
+4461	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "a"), 1)) __si_0 = 0;	var x = null switch (x) { case 'a': return 'a' default: return 'other' }
+4462	line 7: public AI_4768() throws LeekRunException { | private Object g_n;	global n = 0 function f() { n++ return 3 } switch (f()) { case 1: case 2: case 3: break } return n
+4463	line 7: public AI_4769() throws LeekRunException { | private Object g_n;	global n = 0 function f() { n++ return 3 } switch (f()) { case 1: case 2: case 3: break } return n
+4464	line 7: public AI_4770() throws LeekRunException { | private Object g_n;	global n = 0 function f() { n++ return 9 } switch (f()) { case 1: case 2: case 3: break } return n
+4465	line 7: public AI_4771() throws LeekRunException { | private Object g_n;	global n = 0 function f() { n++ return 9 } switch (f()) { case 1: case 2: case 3: break } return n
+4466	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 4294967297 switch (x) { case 1: return 'BAD' default: return 'ok' }
+4467	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 4294967297 switch (x) { case 1: return 'BAD' default: return 'ok' }
+4470	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = -4294967295 switch (x) { case 1: return 'BAD' default: return 'ok' }
+4471	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = -4294967295 switch (x) { case 1: return 'BAD' default: return 'ok' }
+4474	line 13: long u_x = ops(4294967297l, 1); | Object u_x = longint(ops(4294967297l, 1));	integer x = 4294967297 switch (x) { case 4294967297: return 'ok' default: return 'no' }
+4475	line 13: long u_x = ops(4294967297l, 1); | Object u_x = longint(ops(4294967297l, 1));	integer x = 4294967297 switch (x) { case 4294967297: return 'ok' default: return 'no' }
+4478	line 13: long u_x = ops(1l, 1); | Object u_x = longint(ops(1l, 1));	integer x = 1 switch (x) { case 1: default: return 'd' }
+4479	line 13: long u_x = ops(1l, 1); | Object u_x = longint(ops(1l, 1));	integer x = 1 switch (x) { case 1: default: return 'd' }
+4488	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = '1' switch (x) { case 1: return 'match' default: return 'no' }
+4489	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = '1' switch (x) { case 1: return 'match' default: return 'no' }
+4490	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "1"), 1)) __si_0 = 0;	var x = 1 switch (x) { case '1': return 'match' default: return 'no' }
+4491	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "1"), 1)) __si_0 = 0;	var x = 1 switch (x) { case '1': return 'match' default: return 'no' }
+4492	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = true switch (x) { case 1: return 'match' default: return 'no' }
+4493	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = true switch (x) { case 1: return 'match' default: return 'no' }
+4494	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 0l), 1)) __si_0 = 0;	var x = false switch (x) { case 0: return 'match' default: return 'no' }
+4495	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 0l), 1)) __si_0 = 0;	var x = false switch (x) { case 0: return 'match' default: return 'no' }
+4496	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1.0 switch (x) { case 1: return 'match' default: return 'no' }
+4497	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1.0 switch (x) { case 1: return 'match' default: return 'no' }
+4498	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 0l), 1)) __si_0 = 0;	var x = '' switch (x) { case 0: return 'match' default: return 'no' }
+4499	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 0l), 1)) __si_0 = 0;	var x = '' switch (x) { case 0: return 'match' default: return 'no' }
+4500	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, -1l), 2)) __si_0 = 0;	var x = -2 switch (x) { case -1: return 'a' case -2: return 'b' default: return 'c' }
+4501	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, -1l), 2)) __si_0 = 0;	var x = -2 switch (x) { case -1: return 'a' case -2: return 'b' default: return 'c' }
+4504	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, -1l), 2)) __si_0 = 0;	var x = 0 switch (x) { case -1: return 'a' case 0: return 'b' default: return 'c' }
+4505	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, -1l), 2)) __si_0 = 0;	var x = 0 switch (x) { case -1: return 'a' case 0: return 'b' default: return 'c' }
+4506	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l) || eq(__sw_0, 3l) || eq(__sw_0, 4l) || eq(__sw_0, 5l) || eq(__sw_0, 6l) || eq(__sw_0, 7l) || eq(__sw_0, 8l), 8)) __si_0 = 0;	var x = 8 switch (x) { case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: return 1 } return 0
+4507	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l) || eq(__sw_0, 3l) || eq(__sw_0, 4l) || eq(__sw_0, 5l) || eq(__sw_0, 6l) || eq(__sw_0, 7l) || eq(__sw_0, 8l), 8)) __si_0 = 0;	var x = 8 switch (x) { case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: return 1 } return 0
+4514	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'nope' switch (x) { case 'hello': return 1 case 'world': return 2 default: return 0 }
+4515	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'nope' switch (x) { case 'hello': return 1 case 'world': return 2 default: return 0 }
+4516	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "a\nb"), 1)) __si_0 = 0;	var x = 'a\nb' switch (x) { case 'a\nb': return 'ok' default: return 'no' }
+4517	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "a\nb"), 1)) __si_0 = 0;	var x = 'a\nb' switch (x) { case 'a\nb': return 'ok' default: return 'no' }
+4518	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, ""), 1)) __si_0 = 0;	var x = '' switch (x) { case '': return 'empty' default: return 'no' }
+4519	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, ""), 1)) __si_0 = 0;	var x = '' switch (x) { case '': return 'empty' default: return 'no' }
+4524	line 13: long u_x = ops(2l, 1); | Object u_x = longint(ops(2l, 1));	integer x = 2 switch (x) { case 1: case 2: return 'first' case 2: return 'second' }
+4525	line 13: long u_x = ops(2l, 1); | Object u_x = longint(ops(2l, 1));	integer x = 2 switch (x) { case 1: case 2: return 'first' case 2: return 'second' }
+4526	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = '' switch (x) { case 1: r += 'a' case 2: r += 'b' case 3: r += 'c' } return r
+4527	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = '' switch (x) { case 1: r += 'a' case 2: r += 'b' case 3: r += 'c' } return r
+4532	line 15: if (true) { | {	var x = 9 var r = '' switch (x) { case 1: r += 'a' default: r += 'd' case 2: r += 'b' } return r
+4533	line 15: if (true) { | {	var x = 9 var r = '' switch (x) { case 1: r += 'a' default: r += 'd' case 2: r += 'b' } return r
+6333	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5; switch (x) { case null: return 0; default: return abs(x) }
+6334	line 13: Long u_x = (Long) ops(longintOrNull(null), 1); | Object u_x = longintOrNull(ops(null, 1));	integer | null x = null; switch (x) { case null: return 0; default: return abs(x) }
+6335	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5; switch (x) { case null: return 0; case 5: return abs(x); default: return abs(x) }
+12038	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5 switch (x) { case null: default: return x ** 2 }
+12039	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5 switch (x) { case null: default: return x ** 2 }
+12040	line 13: Long u_x = (Long) ops(longintOrNull(null), 1); | Object u_x = longintOrNull(ops(null, 1));	integer | null x = null switch (x) { case null: default: return 7 }
+12041	line 13: Long u_x = (Long) ops(longintOrNull(null), 1); | Object u_x = longintOrNull(ops(null, 1));	integer | null x = null switch (x) { case null: default: return 7 }
+12042	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5 switch (x) { case null: return 1 default: return x ** 2 }
+12043	line 13: Long u_x = (Long) ops(longintOrNull(5l), 1); | Object u_x = longintOrNull(ops(5l, 1));	integer | null x = 5 switch (x) { case null: return 1 default: return x ** 2 }
+12044	line 13: Long u_x = (Long) ops(longintOrNull(null), 1); | Object u_x = longintOrNull(ops(null, 1));	integer | null x = null switch (x) { case null: return 1 default: return 2 }
+12045	line 13: Long u_x = (Long) ops(longintOrNull(null), 1); | Object u_x = longintOrNull(ops(null, 1));	integer | null x = null switch (x) { case null: return 1 default: return 2 }
+12046	line 14: if (true) { | {	function f(x) { var a = 7 switch (x) { case 1: a = 8 default: return a } } return f(1)
+12047	line 14: if (true) { | {	function f(x) { var a = 7 switch (x) { case 1: a = 8 default: return a } } return f(1)
+12048	line 14: if (true) { | {	function f(x) { var a = 7 switch (x) { case 1: a = 8 default: return a } } return f(2)
+12049	line 14: if (true) { | {	function f(x) { var a = 7 switch (x) { case 1: a = 8 default: return a } } return f(2)
+12050	line 14: if (true) { | {	var a = 1 switch (a) { case 1: a = 2 default: return a }
+12051	line 14: if (true) { | {	var a = 1 switch (a) { case 1: a = 2 default: return a }
+12052	line 14: if (true) { | {	function f(x) { var a = 7 switch (x) { case 1 + 0: a = 8 default: return a } } return f(1)
+12053	line 14: if (true) { | {	function f(x) { var a = 7 switch (x) { case 1 + 0: a = 8 default: return a } } return f(1)
+12054	line 16: ops(1);if (true) { | ops(1);{	var s = 0 for (var i = 0; i < 3; i++) { switch (i) { case 0: continue default: continue } s += 1 } return s
+12055	line 16: ops(1);if (true) { | ops(1);{	var s = 0 for (var i = 0; i < 3; i++) { switch (i) { case 0: continue default: continue } s += 1 } return s
+12056	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 switch (x) { case 1: return 'one' } return 'none'
+12057	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 switch (x) { case 1: return 'one' } return 'none'
+12058	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 2 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'
+12059	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 2 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'
+12060	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 3 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'
+12061	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 3 switch (x) { case 1: return 'one' case 2: return 'two' } return 'none'
+12062	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r
+12063	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = 'no' switch (x) { case 1: if (true) { r = 'yes' } break case 2: r = 'two' break } return r
+12064	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = 'no' switch (x) { case 1: r = 'a' if (x == 1) { r = 'b' } r = r + 'c' break case 2: r = 'two' break } return r
+12065	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = 'no' switch (x) { case 1: r = 'a' if (x == 1) { r = 'b' } r = r + 'c' break case 2: r = 'two' break } return r
+12066	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 2 var r = 'no' switch (x) { case 1: if (true) { r = 'one' } break case 2: if (true) { r = 'two' } break } return r
+12067	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 2 var r = 'no' switch (x) { case 1: if (true) { r = 'one' } break case 2: if (true) { r = 'two' } break } return r
+12068	line 16: ops(1);if (true) { | ops(1);{	var s = 0 for (var i = 0; i < 3; i++) { switch (i) { case 0: continue default: s += 1 } } return s
+12069	line 16: ops(1);if (true) { | ops(1);{	var s = 0 for (var i = 0; i < 3; i++) { switch (i) { case 0: continue default: s += 1 } } return s
+12070	line 17: if (true) { | {	var s = 0 var i = 0 while (i < 3) { i++ switch (i) { case 1: continue default: s += 1 } } return s
+12071	line 17: if (true) { | {	var s = 0 var i = 0 while (i < 3) { i++ switch (i) { case 1: continue default: s += 1 } } return s
+12074	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 2) { return 99 } case 2: a = 12 case 3: a = 15 } return a
+12075	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 2) { return 99 } case 2: a = 12 case 3: a = 15 } return a
+12076	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 3) { return 99 } case 2: a = 12 case 3: a = 15 } return a
+12077	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var a = 0 var x = 1 switch (x) { case 1: a = 4 if (2 == 3) { return 99 } case 2: a = 12 case 3: a = 15 } return a
+12080	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r
+12081	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r
+12082	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 2 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r
+12083	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 2 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r
+12084	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 3 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r
+12085	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 3 var r = 'none' switch (x) { case 1: r = 'one' break case 2: r = 'two' break } return r
+12086	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;	var x = 2 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'
+12087	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;	var x = 2 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'
+12088	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;	var x = 1 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'
+12089	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;	var x = 1 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'
+12090	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;	var x = 3 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'
+12091	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l) || eq(__sw_0, 2l), 2)) __si_0 = 0;	var x = 3 switch (x) { case 1: case 2: return 'one or two' case 3: return 'three' } return 'none'
+12092	line 16: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	function f(x) { switch (x) { case 1: for (var i = 0; i < 3; i++) { if (x == 1) break } return 'r1' default: return 'r2' } } return f(1)
+12093	line 16: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	function f(x) { switch (x) { case 1: for (var i = 0; i < 3; i++) { if (x == 1) break } return 'r1' default: return 'r2' } } return f(1)
+12094	line 19: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var y = 2 var r = '' switch (x) { case 1: switch (y) { case 1: r = 'x1y1' break case 2: r = 'x1y2' break } break case 2: r = 'x2' break } return r
+12095	line 19: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var y = 2 var r = '' switch (x) { case 1: switch (y) { case 1: r = 'x1y1' break case 2: r = 'x1y2' break } break case 2: r = 'x2' break } return r
+12096	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x == 1) break return 'r1' default: return 'r2' } return 'after' } return f(1)
+12097	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x == 1) break return 'r1' default: return 'r2' } return 'after' } return f(1)
+12098	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x == 1) break return 'r1' default: return 'r2' } } return f(1)
+12099	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x == 1) break return 'r1' default: return 'r2' } } return f(1)
+12100	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x == 1) break return 'r1' default: return 'r2' } } return f(2)
+12101	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x == 1) break return 'r1' default: return 'r2' } } return f(2)
+12102	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x >= 1) { if (x == 1) break } return 'r1' default: return 'r2' } } return f(1)
+12103	line 13: ops(1);if (true) { | ops(1);{	function f(x) { switch (x) { case 1: if (x >= 1) { if (x == 1) break } return 'r1' default: return 'r2' } } return f(1)
+12104	line 19: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var a = 0 var b = 0 switch (x) { case 1: a = 10 b = 20 break case 2: a = 30 b = 40 break } return a + b
+12105	line 19: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var a = 0 var b = 0 switch (x) { case 1: a = 10 b = 20 break case 2: a = 30 b = 40 break } return a + b
+12106	line 8: public u_A() throws LeekRunException { | 	public u_A() throws LeekRunException {	class A { public m(x) { var a = 1 switch (x) { case 1: a = 2 default: return a } } } return new A().m(1)
+12107	line 8: public u_A() throws LeekRunException { | 	public u_A() throws LeekRunException {	class A { public m(x) { var a = 1 switch (x) { case 1: a = 2 default: return a } } } return new A().m(1)
+12108	line 8: public Object v; | 	public Object v;	class A { public v = 0 constructor(x) { switch (x) { case 1: this.v = 2 default: return } } } return new A(1).v
+12109	line 8: public Object v; | 	public Object v;	class A { public v = 0 constructor(x) { switch (x) { case 1: this.v = 2 default: return } } } return new A(1).v
+12110	line 13: Object u_f = ops(new FunctionLeekValue(1) {public Object run(AI ai, Object thiz, Object... values) throws LeekRunException {var u_x = (values.length > 0 ?  values[0] : null); | Object u_f = ops(new FunctionLeekValue(1) {public Object run(AI ai, Object thiz, Object... values) throws LeekRunException {var u_x = (values.length > 0 ?  values[0] : null);ops(1);Object u_a = ops(1l, 1);	var f = function(x) { var a = 1 switch (x) { case 1: a = 2 default: return a } } return f(1)
+12111	line 13: Object u_f = ops(new FunctionLeekValue(1) {public Object run(AI ai, Object thiz, Object... values) throws LeekRunException {var u_x = (values.length > 0 ?  values[0] : null); | Object u_f = ops(new FunctionLeekValue(1) {public Object run(AI ai, Object thiz, Object... values) throws LeekRunException {var u_x = (values.length > 0 ?  values[0] : null);ops(1);Object u_a = ops(1l, 1);	var f = function(x) { var a = 1 switch (x) { case 1: a = 2 default: return a } } return f(1)
+12112	line 16: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	function f(x) { switch (x) { case 1: return 'one' case 2: return 'two' default: return 'other' } } return f(2)
+12113	line 16: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	function f(x) { switch (x) { case 1: return 'one' case 2: return 'two' default: return 'other' } } return f(2)
+12114	line 16: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	function f(x) { switch (x) { case 1: return 'one' case 2: return 'two' default: return 'other' } } return f(5)
+12115	line 16: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	function f(x) { switch (x) { case 1: return 'one' case 2: return 'two' default: return 'other' } } return f(5)
+12116	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s
+12117	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var s = 0 switch (x) { case 1: var i = 0 while (i < 3) { s += i i++ } break } return s
+12120	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 5 switch (x) { case 1: return 'one' default: return 'other' }
+12121	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 5 switch (x) { case 1: return 'one' default: return 'other' }
+12122	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 switch (x) { case 1: return 'one' default: return 'other' }
+12123	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 switch (x) { case 1: return 'one' default: return 'other' }
+12126	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var s = 0 switch (x) { case 1: for (var i = 0; i < 3; i++) { s += i } break } return s
+12127	line 18: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 1 var s = 0 switch (x) { case 1: for (var i = 0; i < 3; i++) { s += i } break } return s
+12128	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'hello' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0
+12129	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'hello' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0
+12130	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'world' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0
+12131	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'world' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0
+12132	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'other' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0
+12133	line 17: if (__sw_0 instanceof String __swv_0) { | if (ops(eq(__sw_0, "hello"), 1)) __si_0 = 0;	var x = 'other' switch (x) { case 'hello': return 1 case 'world': return 2 } return 0
+12134	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 5 switch (x) { case 1: x = 10 }
+return x
+12135	line 17: if (__sw_0 instanceof Long __swv_0) { | if (ops(eq(__sw_0, 1l), 1)) __si_0 = 0;	var x = 5 switch (x) { case 1: x = 10 }
+return x
+12136	line 16: ops(1);if (true) { | ops(1);{	var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s
+12137	line 16: ops(1);if (true) { | ops(1);{	var s = 0 for (var i = 0; i < 5; i++) { switch (i) { case 0: case 1: s += 10 break default: s += 1 break } } return s
+12138	line 15: if (true) { | {	var x = 3 var r = '' switch (x) { case 1: r = 'one' break case 2: r = 'two' break default: r = 'default' break } return r
+12139	line 15: if (true) { | {	var x = 3 var r = '' switch (x) { case 1: r = 'one' break case 2: r = 'two' break default: r = 'default' break } return r
+15255	line 14: ops(1);if (true) { | ops(1);{	function f(x) { do { switch (x) { case 1: continue default: } return 1 } while (x > 5) } return f(1)
+15256	line 14: ops(1);if (true) { | ops(1);{	function f(x) { do { switch (x) { case 1: continue default: } return 1 } while (x > 5) } return f(1)

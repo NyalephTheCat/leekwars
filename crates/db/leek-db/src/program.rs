@@ -142,7 +142,7 @@ pub fn lower_program(
     let flags = FeatureFlags::from_bits(entry.flags_bits(db));
     let Some((entry_file, includes)) = parsed.split_last() else {
         return LowerHirResult {
-            hir: finish(leek_hir::HirFile::default(), &fold, opt),
+            hir: finish(leek_hir::HirFile::default(), &fold, opt, entry_version),
             diagnostics: Vec::new(),
         };
     };
@@ -170,7 +170,7 @@ pub fn lower_program(
         flags,
     );
     LowerHirResult {
-        hir: finish(hir, &fold, opt),
+        hir: finish(hir, &fold, opt, entry_version),
         diagnostics,
     }
 }

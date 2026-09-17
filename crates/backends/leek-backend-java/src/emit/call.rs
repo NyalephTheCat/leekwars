@@ -2,8 +2,9 @@ use leek_hir::{Call, Callee, Def, Expr, ExprKind, Literal, NameRef};
 use leek_types::Type;
 
 use super::{
-    builtin_arity, builtin_arity_strict, is_primitive_number_expr, is_string_expr,
-    needs_v1_3_suffix, receiver_collection_arg_cast, sanitize_ident, takes_function_arg,
+    builtin_arity, builtin_arity_strict, is_boolean_param, is_primitive_number_expr,
+    is_string_expr, needs_v1_3_suffix, receiver_collection_arg_cast, sanitize_ident,
+    takes_function_arg,
 };
 use crate::mangle;
 impl super::Emitter<'_> {
@@ -314,7 +315,7 @@ impl super::Emitter<'_> {
                         } else {
                             c.args.len()
                         };
-                        for a in c.args.iter().take(take) {
+                        for (i, a) in c.args.iter().take(take).enumerate() {
                             buf.push_str(", ");
                             // Null literal in a NumberClass arg
                             // position coerces to a zero of the
@@ -323,7 +324,18 @@ impl super::Emitter<'_> {
                             // v2+ picks the double overload
                             // (display `"0.0"`) — upstream's
                             // version-aware emit matches this.
-                            if class == "NumberClass"
+                            if class == "NumberClass" && is_boolean_param(name, i) {
+                                // A parameter upstream declares
+                                // `boolean`. The call-wide `coerce`
+                                // picked above is right for the
+                                // numeric parameters, but
+                                // `((Number) x).longValue()` throws
+                                // on the `Boolean` this position can
+                                // actually carry, so write it as a
+                                // Java boolean instead — which also
+                                // picks the boolean overload.
+                                buf.push_str(&self.expr_to_bool(a));
+                            } else if class == "NumberClass"
                                 && matches!(&a.kind, ExprKind::Literal(Literal::Null))
                             {
                                 let use_long = coerce == "longValue"

@@ -39,6 +39,7 @@ impl LowerStmt for Lowerer {
                             then_branch: Box::new(Stmt::Return(Some(val))),
                             else_branch: None,
                             soft: true,
+                            const_taken: None,
                             span,
                         });
                     }
@@ -324,6 +325,7 @@ impl Lowerer {
             then_branch,
             else_branch,
             soft: false,
+            const_taken: None,
             span,
         })
     }

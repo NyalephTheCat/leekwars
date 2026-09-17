@@ -133,8 +133,12 @@ pub(super) fn dispatch_call_value(
             // an out-of-bounds load that hard-faults. Pad missing user params
             // with null and drop any surplus, matching upstream's lax
             // arity (the missing `x` binds to null).
+            // The count passed is what the caller actually supplied, not the
+            // padded length: a uniform body with parameter defaults fills the
+            // ones past it, exactly as the direct calling convention does.
+            let provided = argv.len();
             argv.resize_with(nparams, || handle(Value::Null));
-            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), provided as i64)) }
         }
         Value::Function(Function::Builtin(name)) => {
             // A builtin takes its args by value — peel any shared cell first (a
@@ -186,10 +190,11 @@ pub(super) fn dispatch_call_value(
                     ver,
                 )
             });
+            let provided = full.len();
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             let argv: Vec<*mut Value> = full.into_iter().map(handle).collect();
-            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), provided as i64)) }
         }
         // A bound method (`obj['m']` / `obj.m` as a value). Mirrors the
         // upstream: prepend the stored receiver, unless the caller passed
@@ -218,11 +223,14 @@ pub(super) fn dispatch_call_value(
                 v
             };
             // The uniform body loads exactly `nparams` handles from `argv`;
-            // pad missing args with null and drop any surplus.
+            // pad missing args with null and drop any surplus. The count it
+            // is told is the one actually supplied, so parameter defaults
+            // fill the rest.
+            let provided = full.len();
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             let argv: Vec<*mut Value> = full.into_iter().map(handle).collect();
-            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), provided as i64)) }
         }
         // A builtin class invoked as a value (`var c = Array; c(1, 2)`, or a
         // field/object slot holding `Array`/`Map`/…) is constructor sugar —
@@ -242,10 +250,11 @@ pub(super) fn dispatch_call_value(
                 return Value::Null;
             };
             let mut full = args;
+            let provided = full.len();
             full.resize(nparams, Value::Null);
             let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
             let argv: Vec<*mut Value> = full.into_iter().map(handle).collect();
-            unsafe { read_handle(f(argv.as_ptr(), argv.len() as i64)) }
+            unsafe { read_handle(f(argv.as_ptr(), provided as i64)) }
         }
         _ => Value::Null,
     }
@@ -314,9 +323,28 @@ shim! {
                     handles.push(unsafe { *argv.offset(i) });
                 }
                 // Pad missing params with null; truncate any surplus args.
+                let provided = handles.len();
                 handles.resize_with(nparams, || handle(Value::Null));
                 let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
-                return unsafe { f(handles.as_ptr(), handles.len() as i64) };
+                return unsafe { f(handles.as_ptr(), provided as i64) };
+            }
+        }
+        // Static method on a runtime class-reference: `class.m(args)` inside an
+        // instance method, where `class` is the receiver's class. A static
+        // method takes no `this`, so the receiver is not prepended.
+        if let Value::ClassRef(def, _) = unsafe { val(&receiver) } {
+            let class_def = def.0;
+            if let Some((addr, nparams)) = super::objects::static_method_idx(class_def, method)
+                .and_then(|idx| DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied()))
+            {
+                let mut handles: Vec<*mut Value> = Vec::with_capacity(nparams.max(argc as usize));
+                for i in 0..argc as isize {
+                    handles.push(unsafe { *argv.offset(i) });
+                }
+                let provided = handles.len();
+                handles.resize_with(nparams, || handle(Value::Null));
+                let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
+                return unsafe { f(handles.as_ptr(), provided as i64) };
             }
         }
         // Builtin method fallback (an unknown name / non-number receiver yields null,

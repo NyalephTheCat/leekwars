@@ -213,6 +213,37 @@ pub(super) fn aliased_class_locals(f: &MirFunction) -> HashMap<LocalId, String> 
 /// Locals every one of whose assignments is `ClassRef(_, C)` for the *same*
 /// class `C` — covering `var c = C` and the inline `C.staticMethod()` temp.
 /// A local with any other (or conflicting) assignment is dropped.
+/// Locals that hold a *file-level global*, by its name: every assignment to
+/// the local is a read of the same global. Lowering materialises a global
+/// read into a fresh temp, so this is what tells an element write which
+/// declared type its base really has.
+pub(super) fn global_read_locals(f: &MirFunction) -> HashMap<LocalId, String> {
+    let mut acc: HashMap<LocalId, Option<String>> = HashMap::new();
+    for b in &f.blocks {
+        for s in &b.statements {
+            let Statement::Assign(Place::Local(id), rv) = s else {
+                continue;
+            };
+            let this = match rv {
+                Rvalue::GlobalRef(_, name) => Some(name.clone()),
+                _ => None,
+            };
+            acc.entry(*id)
+                .and_modify(|cur| {
+                    let keep =
+                        matches!((cur.as_deref(), this.as_deref()), (Some(a), Some(b)) if a == b);
+                    if !keep {
+                        *cur = None;
+                    }
+                })
+                .or_insert(this);
+        }
+    }
+    acc.into_iter()
+        .filter_map(|(id, name)| name.map(|n| (id, n)))
+        .collect()
+}
+
 pub(super) fn classref_locals(f: &MirFunction) -> HashMap<LocalId, String> {
     // Fixpoint: a local is `ClassRef(C)` if every assignment to it is either
     // a direct `ClassRef(_, C)` or a `Use`/`UseFresh` of a local already

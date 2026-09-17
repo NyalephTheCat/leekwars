@@ -823,6 +823,18 @@ pub(crate) fn is_primitive_number(ty: &Type) -> bool {
     matches!(ty, Type::Integer | Type::Real | Type::Boolean)
 }
 
+/// Whether parameter `index` of the `NumberClass` builtin `name` is declared
+/// `boolean` upstream, rather than `long` / `double`.
+///
+/// The emitter picks one numeric coercion per call (`longValue` /
+/// `doubleValue`), which is right for every parameter of every other
+/// `NumberClass` builtin. `setBit`'s optional third argument is the one that
+/// isn't: upstream overloads it on `boolean` as well as `long`, so an
+/// argument that really is a `Boolean` has to go out as one.
+pub(crate) fn is_boolean_param(name: &str, index: usize) -> bool {
+    matches!((name, index), ("setBit", 2))
+}
+
 /// Like [`is_primitive_number`], but also accepts the syntactic
 /// shape of a numeric literal even when HIR type info has decayed
 /// to `Any`. Recurses through unary `-`/`+` so `-12` (parsed as
@@ -988,12 +1000,12 @@ pub(crate) fn builtin_arity_strict(name: &str) -> Option<usize> {
         // NumberClass — one-arg math functions
         "abs" | "ceil" | "floor" | "round" | "signum" | "sqrt" | "cbrt" | "log" | "log2"
         | "log10" | "exp" | "cos" | "sin" | "tan" | "acos" | "asin" | "atan" | "toRadians"
-        | "toDegrees" | "bitCount" | "trailingZeros" | "leadingZeros" | "bitReverse"
-        | "byteReverse" | "binString" | "hexString" | "realBits" | "bitsToReal" | "isFinite"
-        | "isInfinite" | "isNaN" => 1,
+        | "toDegrees" | "bitCount" | "bitLength" | "trailingZeros" | "leadingZeros"
+        | "bitReverse" | "byteReverse" | "binString" | "hexString" | "realBits" | "bitsToReal"
+        | "isFinite" | "isInfinite" | "isNaN" => 1,
         // NumberClass — two-arg
         "atan2" | "pow" | "hypot" | "randInt" | "randReal" | "rotateLeft" | "rotateRight"
-        | "isPermutation" => 2,
+        | "isPermutation" | "testBit" => 2,
         // NumberClass — zero-arg
         "rand" => 0,
         // StringClass — one-arg

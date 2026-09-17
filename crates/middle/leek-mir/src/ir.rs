@@ -330,6 +330,12 @@ pub struct MirGlobal {
     pub def_id: DefId,
     pub name: String,
     pub ty: Type,
+    /// The type every write to this global agrees on, when it has no declared
+    /// one and they all do. Upstream's strict mode commits an untyped global
+    /// to a type the same way it commits an untyped local, and then converts
+    /// each write through it — `global x = 10` is an `integer`, so `x /= v`
+    /// lands back as one.
+    pub inferred_ty: Option<Type>,
     pub span: Span,
 }
 
@@ -798,6 +804,11 @@ pub enum BinOp {
     Pow,
     Eq,
     Ne,
+    /// Upstream's `eq()` — loose equality with no version in it. `Eq` (`==`)
+    /// narrows at v4, comparing across kinds as false; this does not, and a
+    /// `switch` tests its subject with it whatever the version, so
+    /// `switch ('1') { case 1: … }` matches in v4 as it does in v1.
+    LooseEq,
     IdentityEq,
     IdentityNe,
     Lt,

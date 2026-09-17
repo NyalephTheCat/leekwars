@@ -191,10 +191,13 @@ pub(crate) fn lambda_arity(node: &SyntaxNode) -> (u8, u8) {
 /// obvious non-l-values like literals and arithmetic results.
 pub(crate) fn is_potential_lvalue(e: &Expr) -> bool {
     match e {
-        // An optional access `a?.x` is never assignable (#2272) —
-        // upstream errors with `CANT_ASSIGN_VALUE`.
+        // An optional access — `a?.x`, `a?[i]` — is never assignable
+        // (#2272): upstream errors with `CANT_ASSIGN_VALUE`. Writing
+        // through a base that may be null has nowhere to put the value.
         Expr::Field(f) => !f.is_optional(),
-        Expr::Name(_) | Expr::Index(_) | Expr::Slice(_) | Expr::Paren(_) => true,
+        Expr::Index(i) => !i.is_optional(),
+        Expr::Slice(s) => !s.is_optional(),
+        Expr::Name(_) | Expr::Paren(_) => true,
         _ => false,
     }
 }

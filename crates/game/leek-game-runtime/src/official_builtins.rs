@@ -18,9 +18,10 @@ use crate::state::{
     FARMER_LOG_ACTION_DENIED_IN_HOOK, FARMER_LOG_BULB_WITHOUT_AI,
     FARMER_LOG_LOADOUT_FORGOTTEN_ALREADY_EQUIPPED, FARMER_LOG_LOADOUT_NOT_FOUND,
     FARMER_LOG_SET_LOADOUT_NO_RESTAT_POTION, FARMER_LOG_SET_LOADOUT_OUT_OF_HOOK, Fighter,
-    LOG_SSTANDARD, LOG_SWARNING, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_DAMAGE_RETURN,
-    STAT_MAGIC, STAT_POWER, STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE, STAT_STRENGTH,
-    STAT_WISDOM, State, USE_RESURRECT_INVALID_ENTITY,
+    LOG_SSTANDARD, LOG_SWARNING, Order, STAT_ABSOLUTE_SHIELD, STAT_AGILITY, STAT_CORES,
+    STAT_DAMAGE_RETURN, STAT_FREQUENCY, STAT_LIFE, STAT_MAGIC, STAT_MP, STAT_POWER, STAT_RAM,
+    STAT_RELATIVE_SHIELD, STAT_RESISTANCE, STAT_SCIENCE, STAT_STRENGTH, STAT_TP, STAT_WISDOM,
+    State, USE_RESURRECT_INVALID_ENTITY,
 };
 
 /// Dispatch one official fight function for the entity `current` (the fid
@@ -64,6 +65,27 @@ pub fn call_official_builtin(
     match name {
         // ---- FightClass ----
         "getTurn" => Value::Int(i64::from(state.order.turn())),
+        // `FightClass.getAllEffects` — every effect id in the game, `1` to
+        // `Effect.effects.length`. The array has one slot per id, the
+        // passive-only types included, so its length grows with the catalog.
+        "getAllEffects" => int_array(1..=crate::attack::EFFECT_COUNT),
+        // `FightClass.getNextPlayer` / `getPreviousPlayer` — the play order
+        // around the current entity, or around a named one. `null` for an
+        // argument that names no entity, or one that has left the order.
+        #[allow(clippy::cast_possible_wrap)]
+        "getNextPlayer" => order_neighbour(
+            state,
+            args.first(),
+            Order::next_player,
+            Order::next_player_of,
+        ),
+        #[allow(clippy::cast_possible_wrap)]
+        "getPreviousPlayer" => order_neighbour(
+            state,
+            args.first(),
+            Order::previous_player,
+            Order::previous_player_of,
+        ),
         "getNearestEnemy" => Value::Int(nearest_enemy(state, current)),
         // `FightClass.getNearestAlly` — `getNearestEnemy`'s twin, over the
         // caller's own team and skipping the caller itself. Same squared
@@ -151,6 +173,11 @@ pub fn call_official_builtin(
             Value::Int(state.move_away_from_cell(current, int_arg(0), pm))
         }
         "getWinner" => Value::Int(i64::from(state.win_team)),
+        // `FightClass.isBatchFight` — `State.isBatch()`, true for a fight run
+        // as one of a lot rather than on its own. It is carried, not derived:
+        // a batched fight has the same type and the same context as a single
+        // one, so the scenario is the only thing that knows.
+        "isBatchFight" => Value::Bool(state.batch),
         "setLoadout" => Value::Bool(set_loadout(state, current, args)),
 
         // ---- FieldClass ----
@@ -317,6 +344,15 @@ pub fn call_official_builtin(
         "getAbsoluteShield" => stat_of(state, current, args.first(), STAT_ABSOLUTE_SHIELD),
         "getRelativeShield" => stat_of(state, current, args.first(), STAT_RELATIVE_SHIELD),
         "getDamageReturn" => stat_of(state, current, args.first(), STAT_DAMAGE_RETURN),
+        // `EntityClass.getStats` — every characteristic at once, as a
+        // `STAT_* => value` map in `EntityClass.ALL_STATS` order (a
+        // `MapLeekValue` is insertion-ordered, so the order is observable).
+        // Masked like the single-stat getters: a `beforeFight()` peek at
+        // another entity is `null`, not a map.
+        "getStats" => match resolve_stat_target(state, current, args.first()) {
+            Some(fid) => stats_map(&state.fighters[fid]),
+            None => Value::Null,
+        },
         // The *equipped* weapon (`Entity.weapon`) — `null` when the entity
         // carries none, which is every entity until its first `setWeapon`.
         "getWeapon" => match resolve_stat_target(state, current, args.first()) {
@@ -447,17 +483,62 @@ pub fn call_official_builtin(
             None => Value::Null,
         },
 
+        // `EntityClass.getType` — `Entity.getType() + 1`, so the answer is
+        // the `ENTITY_*` catalog value (leek 1, bulb 2, plant 6) and not the
+        // engine's internal `TYPE_*`.
+        "getType" => match resolve_entity(state, current, args.first()) {
+            Some(fid) => Value::Int(i64::from(state.fighters[fid].entity_type) + 1),
+            None => Value::Null,
+        },
+
+        // ---- EntityClass (plants) ----
+        // The 2.50 rooted summons. A plant is defined by the `ROOTED` state
+        // on its bulb template, not by a hard-coded id list.
+        //
+        // `getPlantType` is the plant's skin — its bulb template id — and
+        // `-1` for a non-plant, exactly as `getMobType`/`getBulbType` answer
+        // for a non-mob/non-bulb. `null` for an argument that resolves to no
+        // entity at all.
+        "getPlantType" => match resolve_entity(state, current, args.first()) {
+            Some(fid) if state.is_plant(fid) => Value::Int(i64::from(state.fighters[fid].skin)),
+            Some(_) => Value::Int(-1),
+            None => Value::Null,
+        },
+        // `getAwakeningZone` is the radius in cells of the entity's
+        // awakening zone; `0` means "this entity plays its own turn like
+        // everyone else", which covers every leek, every bulb, and the
+        // rooted-but-zoneless prototaxite.
+        "getAwakeningZone" => match resolve_entity(state, current, args.first()) {
+            Some(fid) => Value::Int(i64::from(state.awakening_zone(fid))),
+            None => Value::Null,
+        },
+        // `getPlantTrigger` is the entity whose move into the zone woke the
+        // running plant, and `-1` everywhere else — outside an awakening, and
+        // for anything that is not a zoned plant. Takes no argument upstream.
+        "getPlantTrigger" => Value::Int(
+            state.fighters[current]
+                .awakening_trigger
+                .map_or(-1, |fid| fid as i64),
+        ),
+
         // ---- EntityClass (communication) ----
         // `say(message)` — 1 TP, at most `SAY_LIMIT_TURN` logged per turn.
-        // Deliberately *not* behind `deny_during_hook`: `EntityClass.say`
-        // carries no `denyDuringHook` call, so talking from `beforeFight()`
-        // or `afterFight()` is legal and logs normally.
+        //
+        // Denied inside a hook, as of the generator's `e6ba441`: it spends TP
+        // and emits an action carrying no entity, which the client attributes
+        // to whoever's turn it is — and during `beforeFight()` /
+        // `afterFight()` nobody's is.
         //
         // Java returns a real boolean here — `false` when the entity is out
         // of TP or has already used its says for the turn — so this arm
         // forwards `State::say`'s answer rather than the unconditional
         // `true` `builtins.rs` gives.
-        "say" => Value::Bool(state.say(current, &message_text(args.first()))),
+        "say" => {
+            if deny_during_hook(state, current, "say") {
+                return Value::Bool(false);
+            }
+            Value::Bool(state.say(current, &message_text(args.first())))
+        }
 
         // ---- UtilClass (debug marks) ----
         // `mark`, `markText` and `clearMarks` write to `ai.getLogs()` —
@@ -865,8 +946,73 @@ fn stat_of(state: &State, current: usize, arg: Option<&Value>, stat: usize) -> V
     masked_int(state, current, arg, |f| i64::from(f.stat(stat)))
 }
 
+/// `EntityClass.ALL_STATS` — the characteristics `getStats` reports, in the
+/// order it fills its map (`MapLeekValue` keeps insertion order, so this is
+/// the order an AI iterating the result sees).
+const ALL_STATS: [usize; 16] = [
+    STAT_LIFE,
+    STAT_TP,
+    STAT_MP,
+    STAT_STRENGTH,
+    STAT_AGILITY,
+    STAT_FREQUENCY,
+    STAT_WISDOM,
+    STAT_ABSOLUTE_SHIELD,
+    STAT_RELATIVE_SHIELD,
+    STAT_RESISTANCE,
+    STAT_SCIENCE,
+    STAT_MAGIC,
+    STAT_DAMAGE_RETURN,
+    STAT_POWER,
+    STAT_CORES,
+    STAT_RAM,
+];
+
+/// `EntityClass.statsMap` — every [`ALL_STATS`] characteristic of `fighter`
+/// as a `STAT_* => value` map.
+///
+/// The values are `Entity.getStat(id)` (base + buff), so `STAT_LIFE` is the
+/// entity's *maximum* life and `STAT_TP`/`STAT_MP` its totals — not the
+/// remaining life/TP/MP `getLife`/`getTP`/`getMP` answer with.
+fn stats_map(fighter: &Fighter) -> Value {
+    let mut map = leek_runtime::MapData::new();
+    for stat in ALL_STATS {
+        // Every `STAT_*` is a small index into `Stats` (`STAT_COUNT` is 18),
+        // so the key never reaches the sign bit.
+        #[allow(clippy::cast_possible_wrap)]
+        let key = stat as i64;
+        map.insert(Value::Int(key), Value::Int(i64::from(fighter.stat(stat))));
+    }
+    Value::Map(std::rc::Rc::new(std::cell::RefCell::new(map)))
+}
+
 /// A LeekScript array of ids — the shape every array-returning getter here
 /// builds (`new ArrayLeekValue(ai)` then one `push` per element).
+/// The shared body of `getNextPlayer` / `getPreviousPlayer`: no argument (or
+/// `null`) asks about the entity whose turn it is, a number asks about that
+/// entity. An entity that is not in the play order — dead, or never in it —
+/// answers `null`, as does an argument that names nothing.
+#[allow(clippy::cast_possible_wrap)]
+fn order_neighbour(
+    state: &State,
+    arg: Option<&Value>,
+    current: fn(&Order) -> Option<usize>,
+    named: fn(&Order, usize) -> Option<usize>,
+) -> Value {
+    let fid = match arg {
+        None | Some(Value::Null) => None,
+        Some(v) => match usize::try_from(v.to_long()) {
+            Ok(fid) if fid < state.fighters.len() => Some(fid),
+            _ => return Value::Null,
+        },
+    };
+    let answer = match fid {
+        Some(fid) => named(&state.order, fid),
+        None => current(&state.order),
+    };
+    answer.map_or(Value::Null, |f| Value::Int(f as i64))
+}
+
 fn int_array(ids: impl Iterator<Item = i64>) -> Value {
     Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
         ids.map(Value::Int).collect(),
@@ -916,6 +1062,13 @@ fn summon(state: &mut State, current: usize, args: &[Value]) -> i64 {
         && let Some(bulb) = bulb
     {
         state.summon_ais.insert(bulb, ai_fn);
+        // After the AI is attached, or a woken plant would have nothing to
+        // run. A summon coming out of the ground inside a plant's zone wakes
+        // it; and a plant that has just been planted is woken by whatever
+        // stands around it.
+        let cell = state.fighters[bulb].cell;
+        state.check_plant_triggers(bulb, None, cell);
+        state.check_plant_planted(bulb);
     }
     i64::from(result)
 }
@@ -1518,6 +1671,116 @@ mod tests {
             int_vec(&call(&mut state, "getWeapons", &[Value::Int(1)])),
             Vec::<i64>::new(),
             "getWeapons(1)"
+        );
+    }
+
+    /// `getStats` answers with every characteristic at once, in
+    /// `EntityClass.ALL_STATS` order, reading the same buffed numbers the
+    /// single-stat getters do.
+    #[test]
+    fn get_stats_returns_every_characteristic_in_order() {
+        let mut state = two_leeks();
+        let got = call(&mut state, "getStats", &[]);
+        let Value::Map(map) = &got else {
+            panic!("expected a map, got {got:?}");
+        };
+        let pairs: Vec<(i64, i64)> = map
+            .borrow()
+            .entries
+            .iter()
+            .map(|(k, v)| (k.to_long(), v.to_long()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (0, 100), // STAT_LIFE — the characteristic, not `getLife`
+                (1, 10),  // STAT_TP — the total, not the remaining 7
+                (2, 5),   // STAT_MP — likewise, not the remaining 3
+                (3, 111), // STAT_STRENGTH — base 11 + the 100 buff
+                (4, 12),  // STAT_AGILITY
+                (5, 0),   // STAT_FREQUENCY
+                (6, 13),  // STAT_WISDOM
+                (9, 18),  // STAT_ABSOLUTE_SHIELD
+                (10, 19), // STAT_RELATIVE_SHIELD
+                (11, 14), // STAT_RESISTANCE
+                (12, 15), // STAT_SCIENCE
+                (13, 16), // STAT_MAGIC
+                (14, 20), // STAT_DAMAGE_RETURN
+                (15, 17), // STAT_POWER
+                (16, 0),  // STAT_CORES
+                (17, 0),  // STAT_RAM
+            ],
+        );
+
+        // Each entry agrees with the getter for that characteristic.
+        let by_key = |k: i64| {
+            map.borrow()
+                .get(&Value::Int(k))
+                .map(Value::to_long)
+                .expect("key present")
+        };
+        assert_eq!(by_key(3), call(&mut state, "getStrength", &[]).to_long());
+        assert_eq!(by_key(12), call(&mut state, "getScience", &[]).to_long());
+
+        // An entity that doesn't resolve is `null`, like every other
+        // masked getter — and so is another entity during `beforeFight()`.
+        assert_value(
+            &call(&mut state, "getStats", &[Value::Int(99)]),
+            &Value::Null,
+            "getStats(99)",
+        );
+        assert!(
+            !matches!(call(&mut state, "getStats", &[Value::Int(1)]), Value::Null),
+            "getStats(1) outside a hook is readable",
+        );
+        state.hook_phase = HookPhase::BeforeFight;
+        assert_value(
+            &call(&mut state, "getStats", &[Value::Int(1)]),
+            &Value::Null,
+            "getStats(1) in beforeFight",
+        );
+    }
+
+    /// The 2.50 plant getters. No entity here is a plant, so each answers
+    /// its "not one" sentinel — but an argument that doesn't resolve is
+    /// still `null`, and `getPlantTrigger` still takes no argument.
+    #[test]
+    fn the_plant_getters_answer_for_an_engine_without_plants() {
+        let mut state = two_leeks();
+        for (name, want) in [("getPlantType", -1), ("getAwakeningZone", 0)] {
+            assert_value(&call(&mut state, name, &[]), &Value::Int(want), name);
+            assert_value(
+                &call(&mut state, name, &[Value::Int(1)]),
+                &Value::Int(want),
+                &format!("{name}(1)"),
+            );
+            assert_value(
+                &call(&mut state, name, &[Value::Int(99)]),
+                &Value::Null,
+                &format!("{name}(99)"),
+            );
+        }
+        assert_value(
+            &call(&mut state, "getPlantTrigger", &[]),
+            &Value::Int(-1),
+            "getPlantTrigger()",
+        );
+    }
+
+    /// A fight this engine runs is never one of the server's batch runs.
+    #[test]
+    fn is_batch_fight_reports_the_state_flag() {
+        let mut state = two_leeks();
+        assert_value(
+            &call(&mut state, "isBatchFight", &[]),
+            &Value::Bool(false),
+            "isBatchFight() off a single fight",
+        );
+        state.batch = true;
+        assert_value(
+            &call(&mut state, "isBatchFight", &[]),
+            &Value::Bool(true),
+            "isBatchFight() inside a lot",
         );
     }
 
@@ -2259,18 +2522,21 @@ mod tests {
         );
     }
 
-    /// `say` is NOT a combat action: `EntityClass.say` has no
-    /// `denyDuringHook`, so an AI can talk from `beforeFight()` and the
-    /// message reaches the report. That difference is what makes the hook
-    /// transcripts carry says at all.
+    /// `say` is refused inside a hook, and warns like any other denied
+    /// action. It spends TP and emits an action carrying no entity, which the
+    /// client attributes to whoever's turn it is — and during `beforeFight()`
+    /// / `afterFight()` nobody's is, so the line would be put in the mouth of
+    /// an undefined leek. (It used to be allowed; the generator closed it in
+    /// `e6ba441`.)
     #[test]
-    fn say_is_allowed_during_a_hook() {
+    fn say_is_denied_during_a_hook() {
         for phase in [HookPhase::BeforeFight, HookPhase::AfterFight] {
             let mut state = one_leek();
             state.hook_phase = phase;
             let got = call_official_builtin(&mut state, 0, "say", &[rt_str("hi from the hook")]);
-            assert_value(&got, &Value::Bool(true), &format!("say during {phase:?}"));
-            assert_eq!(say_count(&state), 1, "say during {phase:?} is logged");
+            assert_value(&got, &Value::Bool(false), &format!("say during {phase:?}"));
+            assert_eq!(say_count(&state), 0, "say during {phase:?} logs nothing");
+            assert_eq!(state.fighters[0].says_turn, 0, "no TP, no cap counter");
         }
     }
 

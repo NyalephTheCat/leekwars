@@ -86,6 +86,9 @@ pub(super) fn is_generic_builtin(name: &str) -> bool {
             | "arraySort"
             // Pure bit / number operations (scalar in, scalar out).
             | "bitCount"
+            | "bitLength"
+            | "setBit"
+            | "testBit"
             | "leadingZeros"
             | "trailingZeros"
             | "bitReverse"

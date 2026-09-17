@@ -337,6 +337,24 @@ impl IndexExpr {
     pub fn index(&self) -> Option<Expr> {
         self.0.children().filter_map(Expr::cast).nth(1)
     }
+    /// True for the optional form `a?[i]` — the node carries the `?`
+    /// token between the base and the `[`.
+    pub fn is_optional(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|t| t.kind() == S::Question)
+    }
+}
+
+impl SliceExpr {
+    /// True for the optional form `a?[i:j]`, like [`IndexExpr::is_optional`].
+    pub fn is_optional(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|t| t.kind() == S::Question)
+    }
 }
 
 impl FieldExpr {

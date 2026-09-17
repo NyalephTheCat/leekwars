@@ -60,6 +60,7 @@ pub fn build_world(scn: &Scenario) -> Result<World> {
 
     let first_id = scn.entities.first().and_then(|e| e.id).unwrap_or(0);
     let mut fight = Fight::new(map.width, map.height, first_id);
+    fight.set_batch(scn.batch.unwrap_or(false));
     if let Some(seed) = scn.seed {
         fight = fight.with_seed(seed);
     }

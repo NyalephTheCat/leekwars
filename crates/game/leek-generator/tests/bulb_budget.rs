@@ -113,6 +113,7 @@ for (var k = 0; k < 20000; k++) {{
 fn pistol() -> WeaponSpec {
     WeaponSpec {
         id: 37,
+        template: 1,
         cost: 3,
         min_range: 1,
         max_range: 7,
@@ -121,6 +122,7 @@ fn pistol() -> WeaponSpec {
         max_uses: -1,
         area: Area::SingleCell,
         effects: Vec::new(),
+        passive_effects: Vec::new(),
         forgotten: false,
     }
 }
@@ -130,6 +132,7 @@ fn pistol() -> WeaponSpec {
 fn spawn_chip() -> ChipSpec {
     ChipSpec {
         id: SPAWN_CHIP,
+        template: SPAWN_CHIP,
         cost: 2,
         min_range: 1,
         max_range: 8,
@@ -167,6 +170,8 @@ fn bulb_template() -> BulbTemplate {
         tp: (4, 8),
         mp: (3, 6),
         chips: Vec::new(),
+        states: Vec::new(),
+        zone: 0,
     }
 }
 

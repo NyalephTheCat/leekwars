@@ -157,11 +157,33 @@ def kind(t):
 # sources, where <expr> is a numeric literal OR another `Class.FIELD`
 # reference (alias chains like `Fight.MAX_TURNS = State.MAX_TURNS`).
 field_init = {}
+# `SimpleEnum.MEMBER -> ordinal` for every plain (constant-only) enum, so a
+# `EntityState.ROOTED.ordinal()` in FightConstants resolves to its number.
+# `STATE_*` is written that way, and an unresolved value leaves the constant
+# unfoldable *and* unavailable at run time.
+enum_ordinal = {}
 for dirpath, _dirs, files in os.walk(gensrc):
     for fn in files:
         if not fn.endswith(".java"):
             continue
         src = open(os.path.join(dirpath, fn), encoding="utf-8").read()
+        em = re.search(r'\benum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}', src)
+        if em:
+            members = []
+            for entry in em.group(2).split(','):
+                entry = re.sub(r'//.*', '', entry)
+                entry = re.sub(r'/\*.*?\*/', '', entry, flags=re.S).strip()
+                mm = re.match(r'([A-Z][A-Z0-9_]*)\s*$', entry)
+                if mm:
+                    members.append(mm.group(1))
+                elif entry:
+                    # Not a constant-only enum (a member with arguments or a
+                    # body): ordinals are still positional, but anything we
+                    # cannot parse cleanly is skipped rather than guessed.
+                    members = []
+                    break
+            for i, member in enumerate(members):
+                enum_ordinal[f"{em.group(1)}.{member}"] = i
         tm = re.search(r'\b(?:class|enum|interface)\s+([A-Za-z_][A-Za-z0-9_]*)', src)
         if not tm:
             continue
@@ -182,6 +204,11 @@ def resolve(expr, seen=None):
         return str(int(expr))
     if re.fullmatch(r'-?\d+\.\d+', expr):
         return expr  # real literal, kept verbatim
+    # `Enum.MEMBER.ordinal()` — its position in the declaration.
+    om = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_]*\.[A-Z][A-Z0-9_]*)\.ordinal\(\)', expr)
+    if om:
+        ordinal = enum_ordinal.get(om.group(1))
+        return None if ordinal is None else str(ordinal)
     # A `Class.FIELD` reference — resolve transitively (guard cycles).
     seen = seen or set()
     if expr in seen or expr not in field_init:

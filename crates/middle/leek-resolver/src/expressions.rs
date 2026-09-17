@@ -14,6 +14,11 @@ use crate::codes;
 use crate::scope::{FnMeta, SymbolKind};
 use crate::util::{REMOVED_BUILTINS, first_ident, is_assignment_binary};
 
+/// The methods `AI.NativeObjectLeekValue` declares, which every user class
+/// inherits whether or not it names a parent — so `super.<name>()` reaches
+/// them even when no ancestor in the source declares one.
+const NATIVE_OBJECT_METHODS: &[&str] = &["keys"];
+
 impl Resolver {
     pub(crate) fn resolve_expr(&mut self, expr: &Expr) {
         match expr {
@@ -162,12 +167,20 @@ impl Resolver {
         }
         // Inside a class method (not constructor), a bare assignment
         // to a name that matches a final field is an implicit
-        // `this.field = …`.
+        // `this.field = …` — or, in a static method, an implicit
+        // `Class.field = …` when the name is a `static final`. Both are
+        // writes to something declared `final`.
         if self.in_class
             && !self.in_constructor
             && let Some(class_name) = self.current_class.clone()
-            && let Some(finals) = self.class_final_fields.get(&class_name)
-            && finals.contains(&name)
+            && (self
+                .class_final_fields
+                .get(&class_name)
+                .is_some_and(|f| f.contains(&name))
+                || self
+                    .class_static_final_fields
+                    .get(&class_name)
+                    .is_some_and(|f| f.contains(&name)))
         {
             self.err(
                 codes::CANNOT_ASSIGN_FINAL_FIELD,
@@ -176,15 +189,22 @@ impl Resolver {
             );
         }
         if let Some(kind) = self.lookup(&name) {
-            // Compound assignment (`f += 1`, `abs *= 2`) requires
-            // reading the prior value, which on a function name is
-            // nonsense — error at all versions. Plain `f = 1` is
-            // only banned at v4, where functions stop being
-            // first-class values reassignable as variables.
+            // Plain `f = 1` is only banned at v4, where functions stop
+            // being first-class values reassignable as variables.
+            //
+            // A compound assignment (`abs += 1`, `abs *= 2`) reads the
+            // prior value first, which on a name that is *still* the
+            // function is nonsense — so it is banned at every version
+            // too. But once a plain assignment has redefined the name,
+            // it is an ordinary variable and mutating it is ordinary:
+            // `count = 0; count += 1` is a v1–v3 program upstream runs
+            // (the redefined function lives in its own `rfunction_<name>`
+            // box, and the mutation operators reach it).
             let compound = b.op().is_some_and(|o| o.kind() != SyntaxKind::Eq);
+            let redefined = self.reassigned_names.contains(&name);
             match kind {
                 SymbolKind::Function | SymbolKind::Builtin
-                    if compound || self.version >= Version::V4 =>
+                    if self.version >= Version::V4 || (compound && !redefined) =>
                 {
                     self.err(
                         codes::CANNOT_REDEFINE_FUNCTION,
@@ -238,6 +258,8 @@ impl Resolver {
                         self.span_of(&class_tok),
                         format!("constructor of class `{class_name}` is protected"),
                     );
+                } else {
+                    self.check_inherited_private_constructor(&class_name, &class_tok);
                 }
             }
         }
@@ -246,6 +268,39 @@ impl Resolver {
                 self.resolve_expr(&e);
             }
         }
+    }
+
+    /// `new B()` where an *ancestor* declares a `private` zero-argument
+    /// constructor.
+    ///
+    /// A class with no constructor of its own still runs one: the implicit
+    /// `super()` chain reaches the ancestor's, private or not, so upstream
+    /// flags it (#2760). Only a zero-argument private constructor blocks —
+    /// one that takes parameters is not what the implicit call reaches —
+    /// and a `protected` one is exactly what a subclass may use.
+    ///
+    /// Real AIs shipped with this, so upstream keeps it a warning outside
+    /// `// @strict` rather than breaking them.
+    fn check_inherited_private_constructor(&mut self, class_name: &str, class_tok: &SyntaxToken) {
+        let Some(parent) = self.class_parent.get(class_name).cloned() else {
+            return;
+        };
+        let Some(owner) = self.walk_class_chain(&parent, |c| {
+            self.class_private_zero_arg_constructor.contains(c)
+        }) else {
+            return;
+        };
+        let severity = if self.opts.strict {
+            leek_diagnostics::Severity::Error
+        } else {
+            leek_diagnostics::Severity::Warning
+        };
+        self.diagnostics.push(leek_diagnostics::Diagnostic::new(
+            codes::PRIVATE_CONSTRUCTOR,
+            severity,
+            self.span_of(class_tok),
+            format!("constructor of class `{owner}` is private"),
+        ));
     }
 
     fn resolve_lambda(&mut self, l: &leek_parser::ast::LambdaExpr) {
@@ -521,6 +576,13 @@ impl Resolver {
             return;
         }
         let method = field_tok.text().to_string();
+        // Every user class extends `NativeObjectLeekValue`, which carries
+        // exactly one `u_`-prefixed method of its own — so `super.keys()`
+        // emits `super.u_keys()` and resolves, on a base class no
+        // `class_method_arities` table describes.
+        if NATIVE_OBJECT_METHODS.contains(&method.as_str()) {
+            return;
+        }
         let resolved = self
             .walk_class_chain(&parent, |c| {
                 self.class_method_arities

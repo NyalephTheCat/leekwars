@@ -116,15 +116,19 @@ impl Resolver {
                     }
                 }
                 SyntaxKind::ClassConstructor => {
-                    if is_private {
-                        self.class_private_constructor.insert(class_name.into());
-                    } else if is_protected {
-                        self.class_protected_constructor.insert(class_name.into());
-                    }
                     // v4: overlapping-arity constructors are a hard
                     // error (matches the DUPLICATED_METHOD rule for
                     // regular methods).
                     let (lo, hi) = fn_arity(&member);
+                    if is_private {
+                        self.class_private_constructor.insert(class_name.into());
+                        if lo == 0 {
+                            self.class_private_zero_arg_constructor
+                                .insert(class_name.into());
+                        }
+                    } else if is_protected {
+                        self.class_protected_constructor.insert(class_name.into());
+                    }
                     if self.version == Version::V4
                         && c.ctor_arities
                             .iter()
@@ -291,6 +295,60 @@ impl Resolver {
                 .get(c)
                 .is_some_and(|s| s.contains(field))
         })
+    }
+
+    /// The ancestor that declares `field` as a `private` **static** field,
+    /// if any. A private static *method* of the same name is somebody else's
+    /// diagnostic (`PRIVATE_STATIC_METHOD`, from the call path), so it is
+    /// excluded here.
+    pub(crate) fn lookup_private_static_field_owner(
+        &self,
+        start: &str,
+        field: &str,
+    ) -> Option<String> {
+        self.walk_class_chain(start, |c| {
+            self.declares_static_field(c, field)
+                && self
+                    .class_private_fields
+                    .get(c)
+                    .is_some_and(|s| s.contains(field))
+                && !self
+                    .class_private_static_methods
+                    .get(c)
+                    .is_some_and(|s| s.contains(field))
+        })
+    }
+
+    /// [`Self::lookup_private_static_field_owner`] for `protected`.
+    pub(crate) fn lookup_protected_static_field_owner(
+        &self,
+        start: &str,
+        field: &str,
+    ) -> Option<String> {
+        self.walk_class_chain(start, |c| {
+            self.declares_static_field(c, field)
+                && self
+                    .class_protected_fields
+                    .get(c)
+                    .is_some_and(|s| s.contains(field))
+                && !self
+                    .class_protected_static_methods
+                    .get(c)
+                    .is_some_and(|s| s.contains(field))
+        })
+    }
+
+    /// Whether `class_name` itself declares `field` as a static member.
+    fn declares_static_field(&self, class_name: &str, field: &str) -> bool {
+        self.class_static_members
+            .get(class_name)
+            .is_some_and(|s| s.contains(field))
+    }
+
+    /// Whether code compiling inside `here` may read `owner`'s `protected`
+    /// members — `owner` itself, or anything that descends from it.
+    pub(crate) fn inherits_from(&self, here: &str, owner: &str) -> bool {
+        self.walk_class_chain(here, |c| c == owner).is_some()
     }
 
     pub(crate) fn lookup_private_method_owner(&self, start: &str, method: &str) -> Option<String> {

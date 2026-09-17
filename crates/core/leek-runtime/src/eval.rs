@@ -766,6 +766,16 @@ pub fn eq_for_version(l: &Value, r: &Value, version: u8) -> bool {
     eq_legacy(l, r)
 }
 
+/// Upstream `AI.eq` — loose equality with no version in it.
+///
+/// `==` narrows at v4 ([`eq_for_version`]), but `eq()` does not, and a
+/// `switch` compares its subject to every label with `eq()` whatever the
+/// version: `switch ('1') { case 1: … }` matches in v4 just as it does in
+/// v1.
+pub fn loose_eq_any(l: &Value, r: &Value) -> Value {
+    Value::Bool(eq_legacy(l, r))
+}
+
 fn eq_legacy(l: &Value, r: &Value) -> bool {
     match (l, r) {
         (Value::Bool(b), Value::String(s)) | (Value::String(s), Value::Bool(b)) => {

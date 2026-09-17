@@ -73,25 +73,48 @@ about values. Read them accordingly:
   and `leek-backend-java`'s parity tests — neither of which is wired into this
   corpus yet (#70).
 
-## Why all three columns look the same
+## Why `pipeline` and `java-emit` read the same
 
-Every column currently reads `total = 11005, pass = 10153,
-pass_expected_error = 828`, with zero failures and zero unknown skips. That is
-a real result, not a baseline saved while the backends shared a code path — a
-run on today's HEAD reproduces the numbers recorded three months ago exactly,
-column for column.
+`pipeline` and `java-emit` currently read `total = 12254, pass = 12212,
+fail = 0, skipped = 18` — the same numbers, and that is the *expected* shape
+rather than a baseline saved while the two shared a code path: a case that
+compiles for `pipeline` emits for `java-emit`, so the two columns can only
+diverge once the emitter itself breaks on HIR the frontend accepted. Do not
+read identical columns as "the baseline is broken", and do not add a check
+that requires them to differ — that is a check that requires the compiler to
+be broken. What separates the columns is their check *logic*, pinned in
+`leek-test-driver/tests/safety_net_honesty.rs`.
 
-It is also the *expected* shape while `native` is at 100%: a case native
-compiles, runs and value-checks necessarily compiles for `pipeline` and emits
-for `java-emit`, so the three columns can only diverge once something fails.
-Do not read identical columns as "the baseline is broken", and do not add a
-check that requires them to differ — that is a check that requires the
-compiler to be broken. What separates the columns is their check *logic*,
-pinned in `leek-test-driver/tests/safety_net_honesty.rs`.
+`native` carries the value check, so it is the column that moves on its own:
+`fail = 0, skipped = 30` today. Its skips are constructs outside the compiled
+subset, not wrong answers.
 
-The corollary is that these summaries carry no per-backend signal today. The
-numbers that would carry it — a real JVM value check for the Java backend —
-live outside this corpus (see `java-emit` above, and #70).
+The corollary is that the `pipeline` / `java-emit` summaries carry no
+per-backend signal. The numbers that would carry it — a real JVM value check
+for the Java backend — live outside this corpus (see `java-emit` above, and #70).
+
+### What the baseline holds now
+
+Nothing: every case every backend runs, passes, so `baseline.toml` records
+only skips. That is what makes it a ratchet rather than a scoreboard — the
+next change cannot add a failure without the file moving.
+
+It arrived there from the `official-generator` bump to `v3.00`, which moved
+the nested `leekscript` submodule with it and grew the extracted suite from
+11005 cases to 12254. That landed 141 compile-gate and 159 native failures at
+once, none of them regressions — every one was a case this toolchain had
+never run. Working them off is what the branch that bumped the generator did,
+feature by feature: the `a?[b]` optional access operator; the diagnostics
+v3.00 added (function redefinition, duplicate globals, a foreach iterator
+shadowing a class field, duplicate `switch` defaults, dead code after a
+returning `switch`, `big_integer` DoS guards, `final` static-field
+assignment, incompatible default-parameter types); upstream's `ConstantFolder`
+and its switch optimizer; passive weapon effects; and the typed-slot
+conversions a declared type performs on every write, parameter and return.
+
+Skips are the remaining honest gap: a case the driver cannot model
+(`skipped_unknown`) or one upstream itself disables (`skipped_disabled`).
+They are not failures, and they are not passes either — nothing checks them.
 
 ## Formatter ratchet
 

@@ -16,10 +16,10 @@ use leek_types::Type;
 
 use crate::ir::{
     BinaryOp, Block, Callee, Def, DefId, Expr, ExprKind, HirFile, LambdaBody, Literal, NameRef,
-    PostfixOp, Stmt, UnaryOp,
+    Param, PostfixOp, Stmt, UnaryOp, Visibility,
 };
 use crate::visit::{
-    Flow, VisitMut, VisitableMut, walk_expr_children, walk_expr_children_mut,
+    Flow, Visit, VisitMut, Visitable, VisitableMut, walk_expr_children, walk_expr_children_mut,
     walk_stmt_child_exprs, walk_stmt_child_exprs_mut, walk_stmt_child_stmts,
     walk_stmt_child_stmts_mut,
 };
@@ -129,6 +129,871 @@ pub fn optimize_hir(hir: &mut HirFile) -> usize {
         }
     }
     total
+}
+
+/// Replace every read of a `static final` field with a literal initializer
+/// by that literal. Returns the number of substitutions made.
+///
+/// Upstream's `ConstantFolder` inlines these at codegen, exactly as it does
+/// the engine's own constants, which is what lets `if (A.DEBUG)` fold away
+/// to nothing. Three things keep it honest:
+///
+/// * only `static final` counts — a plain `static` is mutable, and an
+///   instance field belongs to an object;
+/// * only a *literal* initializer counts. The runtime idiom
+///   `static final X = tune()` stays a runtime read, and so does a
+///   field-to-field one (`static final Y = A.X`), whose value would depend
+///   on class initialization order;
+/// * the read is matched by the class the field is declared on or by any
+///   descendant (`class B extends A {} B.X`), and inside the class itself
+///   `class.X` and the bare `X` both reach it.
+///
+/// This runs on every compile, not just an optimizing one: it is part of
+/// what a program *costs*, and the op budget is the game's own currency.
+pub fn inline_static_final_literals(hir: &mut HirFile) -> usize {
+    // (class, field) -> (literal, visibility), for the classes that declare
+    // one. The visibility is the runtime's, mirrored: a read the runtime
+    // would deny answers null there, so inlining it would leak the value.
+    let mut declared: HashMap<(String, String), (Literal, Visibility)> = HashMap::new();
+    let mut parents: HashMap<String, String> = HashMap::new();
+    for def in &hir.defs {
+        let Def::Class(c) = def else { continue };
+        if let Some(parent) = &c.parent {
+            parents.insert(c.name.clone(), parent.clone());
+        }
+        for field in &c.fields {
+            if !(field.is_static && field.is_final) {
+                continue;
+            }
+            if let Some(Expr {
+                kind: ExprKind::Literal(lit),
+                ..
+            }) = &field.init
+            {
+                declared.insert(
+                    (c.name.clone(), field.name.clone()),
+                    (lit.clone(), field.visibility),
+                );
+            }
+        }
+    }
+    if declared.is_empty() {
+        return 0;
+    }
+    // Class names by `DefId`, so a `ClassName.X` read can name its class.
+    let class_names: HashMap<u32, String> = hir
+        .defs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| match d {
+            Def::Class(c) => Some((
+                u32::try_from(i).expect("def index fits a DefId"),
+                c.name.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    let mut inliner = StaticFinalInliner {
+        declared,
+        parents,
+        class_names,
+        here: None,
+        count: 0,
+    };
+    for i in 0..hir.defs.len() {
+        // The enclosing class is what `class.X` and a bare `X` resolve
+        // against, so it is set around each class's own bodies.
+        let here = match &hir.defs[i] {
+            Def::Class(c) => Some(c.name.clone()),
+            _ => None,
+        };
+        inliner.here = here;
+        match &mut hir.defs[i] {
+            Def::Function(f) => {
+                // Parameter defaults are code the callee runs, so a constant
+                // reaches them the same way it reaches the body.
+                for d in f.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                    let _ = d.walk_mut(&mut inliner);
+                }
+                if let Some(b) = &mut f.body {
+                    let _ = b.walk_mut(&mut inliner);
+                }
+            }
+            Def::Class(c) => {
+                for field in &mut c.fields {
+                    if let Some(e) = &mut field.init {
+                        let _ = e.walk_mut(&mut inliner);
+                    }
+                }
+                for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
+                    for d in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                        let _ = d.walk_mut(&mut inliner);
+                    }
+                    if let Some(b) = &mut m.body {
+                        let _ = b.walk_mut(&mut inliner);
+                    }
+                }
+            }
+            Def::Global(g) => {
+                if let Some(e) = &mut g.init {
+                    let _ = e.walk_mut(&mut inliner);
+                }
+            }
+            Def::Local(_) => {}
+        }
+    }
+    inliner.here = None;
+    for s in &mut hir.main {
+        let _ = s.walk_mut(&mut inliner);
+    }
+    inliner.count
+}
+
+/// The walker behind [`inline_static_final_literals`].
+struct StaticFinalInliner {
+    declared: HashMap<(String, String), (Literal, Visibility)>,
+    parents: HashMap<String, String>,
+    class_names: HashMap<u32, String>,
+    /// The class whose body is being walked, for `class.X` and bare `X`.
+    here: Option<String>,
+    count: usize,
+}
+
+impl StaticFinalInliner {
+    /// The literal `field` has on `class_name` or on the nearest ancestor
+    /// that declares it — when the code being walked may actually read it.
+    ///
+    /// The visibility check mirrors the runtime exactly: a `private` field
+    /// is readable only inside the class that declares it (not from a
+    /// subclass), a `protected` one anywhere in its subtree, and a denied
+    /// read answers null rather than the value. Inlining one the runtime
+    /// would deny would leak the constant.
+    fn lookup(&self, class_name: &str, field: &str) -> Option<&Literal> {
+        let mut cur = class_name.to_string();
+        // A malformed `extends` cycle would loop; the chain is short, so a
+        // simple depth bound is enough to make that impossible.
+        for _ in 0..64 {
+            if let Some((lit, visibility)) = self.declared.get(&(cur.clone(), field.to_string())) {
+                return self.may_read(&cur, *visibility).then_some(lit);
+            }
+            cur = self.parents.get(&cur)?.clone();
+        }
+        None
+    }
+
+    /// Whether the body being walked may read a member of `owner` declared
+    /// with `visibility`.
+    fn may_read(&self, owner: &str, visibility: Visibility) -> bool {
+        match visibility {
+            Visibility::Public => true,
+            Visibility::Private => self.here.as_deref() == Some(owner),
+            Visibility::Protected => self
+                .here
+                .as_deref()
+                .is_some_and(|here| self.descends_from(here, owner)),
+        }
+    }
+
+    /// Whether `here` is `owner` or one of its descendants.
+    fn descends_from(&self, here: &str, owner: &str) -> bool {
+        let mut cur = here.to_string();
+        for _ in 0..64 {
+            if cur == owner {
+                return true;
+            }
+            match self.parents.get(&cur) {
+                Some(parent) => cur = parent.clone(),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The class a field read's base names, if it names one at all.
+    fn base_class(&self, base: &Expr) -> Option<String> {
+        match &base.kind {
+            ExprKind::Name(NameRef::Class(def)) => self.class_names.get(&def.0).cloned(),
+            ExprKind::Name(NameRef::Class_) => self.here.clone(),
+            _ => None,
+        }
+    }
+}
+
+impl VisitMut<Expr> for StaticFinalInliner {
+    fn visit_mut(&mut self, e: &mut Expr) -> Flow {
+        if let ExprKind::Field(base, name, _) = &e.kind
+            && let Some(class_name) = self.base_class(base)
+            && let Some(lit) = self.lookup(&class_name, name)
+        {
+            e.kind = ExprKind::Literal(lit.clone());
+            self.count += 1;
+            return Flow::Skip; // a literal has no children to recurse into
+        }
+        Flow::Walk
+    }
+}
+
+impl VisitMut<Block> for StaticFinalInliner {}
+impl VisitMut<Stmt> for StaticFinalInliner {}
+
+/// Rebind every function whose *name* is assigned somewhere in the file to a
+/// global slot, so the assignment takes and later calls see it. Returns the
+/// number of functions rebound.
+///
+/// Below v4 a function name is a mutable binding: `function f() { return 1 }
+/// function g() { return 2 } f = g return f()` answers 2. Name resolution
+/// binds `f` to the function it declares, which is right for the common case
+/// and wrong the moment the name is written to — the assignment had nowhere
+/// to land and the call went straight to the original body.
+///
+/// A file-level global is exactly the storage that binding needs: it is
+/// initialised with the function's own value before the main block runs, a
+/// write to the name writes the slot, and a call through the name becomes the
+/// indirect call it always was below v4. Only names actually assigned are
+/// moved, so every other program compiles calls directly as before.
+///
+/// v4 rejects the assignment outright, so there is nothing to rebind there.
+pub fn rebind_assigned_functions(hir: &mut HirFile, version: u32) -> usize {
+    if version >= 4 {
+        return 0;
+    }
+    let assigned = assigned_function_defs(hir);
+    if assigned.is_empty() {
+        return 0;
+    }
+    // One global per assigned function, named after it. Declared first so the
+    // rewrite below can see every one of them.
+    let mut slots: HashMap<DefId, (DefId, String)> = HashMap::new();
+    for def in &assigned {
+        let Some(Def::Function(f)) = hir.defs.get(def.0 as usize) else {
+            continue;
+        };
+        let (name, span) = (f.name.clone(), f.span);
+        let id = DefId(u32::try_from(hir.defs.len()).expect("def index fits a DefId"));
+        hir.defs.push(Def::Global(crate::ir::Global {
+            name: name.clone(),
+            ty: None,
+            init: None,
+            span,
+        }));
+        slots.insert(*def, (id, name));
+    }
+    if slots.is_empty() {
+        return 0;
+    }
+
+    let mut rewriter = FunctionRebinder { slots, count: 0 };
+    for i in 0..hir.defs.len() {
+        match &mut hir.defs[i] {
+            Def::Function(f) => {
+                if let Some(b) = &mut f.body {
+                    let _ = b.walk_mut(&mut rewriter);
+                }
+            }
+            Def::Class(c) => {
+                for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
+                    if let Some(b) = &mut m.body {
+                        let _ = b.walk_mut(&mut rewriter);
+                    }
+                }
+            }
+            Def::Global(_) | Def::Local(_) => {}
+        }
+    }
+    for st in &mut hir.main {
+        let _ = st.walk_mut(&mut rewriter);
+    }
+
+    // Seed each slot with its function, ahead of everything the main block
+    // does — the function values themselves are registered before it runs.
+    let seeds: Vec<Stmt> = rewriter
+        .slots
+        .iter()
+        .map(|(def, (global, name))| {
+            let span = hir.defs[global.0 as usize].span();
+            Stmt::VarDecl(crate::ir::VarDecl {
+                def: *global,
+                name: name.clone(),
+                ty: None,
+                init: Some(Expr {
+                    kind: ExprKind::Name(NameRef::Function(*def)),
+                    ty: Type::Function,
+                    span,
+                }),
+                is_global: true,
+                span,
+            })
+        })
+        .collect();
+    let count = seeds.len();
+    hir.main.splice(0..0, seeds);
+    count
+}
+
+struct FunctionRebinder {
+    slots: HashMap<DefId, (DefId, String)>,
+    count: usize,
+}
+
+impl VisitMut<Expr> for FunctionRebinder {
+    fn visit_mut(&mut self, e: &mut Expr) -> Flow {
+        match &mut e.kind {
+            ExprKind::Name(NameRef::Function(def)) => {
+                if let Some((global, _)) = self.slots.get(def) {
+                    e.kind = ExprKind::Name(NameRef::Global(*global));
+                    self.count += 1;
+                }
+            }
+            // A direct call becomes an indirect one through the slot, which
+            // is what a mutable name means.
+            ExprKind::Call(call) => {
+                if let Callee::Function(NameRef::Function(def)) = &call.callee
+                    && let Some((global, _)) = self.slots.get(def)
+                {
+                    call.callee = Callee::Expr(Expr {
+                        kind: ExprKind::Name(NameRef::Global(*global)),
+                        ty: Type::Function,
+                        span: call.callee_span,
+                    });
+                    self.count += 1;
+                }
+            }
+            _ => {}
+        }
+        Flow::Walk
+    }
+}
+
+impl VisitMut<Block> for FunctionRebinder {}
+impl VisitMut<Stmt> for FunctionRebinder {}
+
+/// Record, on every `if` whose condition is decidable at compile time, the
+/// branch it takes. Returns the number of `if`s marked.
+///
+/// The second of upstream's `ConstantFolder` jobs. A marked `if` is not
+/// merely cheap but *free*: codegen emits the taken arm alone, so neither
+/// the condition test nor the dead arm costs anything, which is what makes
+/// `if (DEBUG && expensive())` free rather than one operation.
+///
+/// It marks rather than rewrites so the `if` survives in the tree for
+/// everything that reads HIR as source — the `constant-condition` lint
+/// wants to *report* exactly what this pass finds, and would have nothing
+/// left to look at.
+///
+/// Order matters, and is upstream's: this runs *before*
+/// [`eliminate_constant_calls`], so a condition that is only constant once
+/// a call has been substituted — `if (no())` for a `no()` that returns
+/// `false` — goes unmarked, stays a real branch and keeps charging for its
+/// test. Upstream's pinned op counts distinguish the two cases.
+pub fn mark_constant_conditions(hir: &mut HirFile) -> usize {
+    let mut marker = ConditionMarker { count: 0 };
+    for def in &mut hir.defs {
+        match def {
+            Def::Function(f) => {
+                if let Some(b) = &mut f.body {
+                    let _ = b.walk_mut(&mut marker);
+                }
+            }
+            Def::Class(c) => {
+                for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
+                    if let Some(b) = &mut m.body {
+                        let _ = b.walk_mut(&mut marker);
+                    }
+                }
+            }
+            Def::Global(_) | Def::Local(_) => {}
+        }
+    }
+    for st in &mut hir.main {
+        let _ = st.walk_mut(&mut marker);
+    }
+    marker.count
+}
+
+struct ConditionMarker {
+    count: usize,
+}
+
+impl VisitMut<Stmt> for ConditionMarker {
+    fn visit_mut(&mut self, s: &mut Stmt) -> Flow {
+        if let Stmt::If(i) = s
+            && let Some(taken) = const_condition(&i.cond)
+        {
+            i.const_taken = Some(taken);
+            self.count += 1;
+        }
+        Flow::Walk
+    }
+}
+
+impl VisitMut<Block> for ConditionMarker {}
+impl VisitMut<Expr> for ConditionMarker {}
+
+/// Replace calls to functions that do nothing, or that only return a
+/// literal, with what they amount to. Returns the number of call sites
+/// rewritten.
+///
+/// The third of upstream's `ConstantFolder` jobs, and the one that pays for
+/// the other two: the point of folding `if (DEBUG)` away is that
+/// `guard(x) { if (DEBUG) { debug(x) } }` then has an empty body, so the
+/// `guard(1)` sprinkled through an AI costs nothing at all.
+///
+/// A call is only touched when nothing observable is lost:
+///
+/// * the callee is a statically-resolved user function, never one whose
+///   name is assigned anywhere (below v4 a function can be redefined, and
+///   then the name is not the function);
+/// * every argument is pure — a literal, a plain name, or a static field
+///   read. `foo(i++)`, `foo(g = 5)` and `foo(a[0])` all keep their call,
+///   the last because an index can raise;
+/// * so is every parameter default, which the callee evaluates.
+///
+/// v1 is excluded: upstream does not fold there, and its op counts say so.
+pub fn eliminate_constant_calls(hir: &mut HirFile, version: u32) -> usize {
+    if version < 2 {
+        return 0;
+    }
+    let assigned = assigned_function_defs(hir);
+    let mut shapes: HashMap<DefId, CallShape> = HashMap::new();
+    let mut statics: HashSet<(String, String)> = HashSet::new();
+    let mut class_names: HashMap<u32, String> = HashMap::new();
+    for (index, def) in hir.defs.iter().enumerate() {
+        match def {
+            Def::Function(f) => {
+                // A function's `DefId` is its index in `defs` — the same
+                // identity `NameRef::Function` carries at a call site.
+                let id = DefId(u32::try_from(index).expect("def index fits a DefId"));
+                if assigned.contains(&id) {
+                    continue;
+                }
+                if let Some(shape) = classify(&f.params, f.return_type.as_ref(), f.body.as_ref()) {
+                    shapes.insert(id, shape);
+                }
+            }
+            Def::Class(c) => {
+                class_names.insert(
+                    u32::try_from(index).expect("def index fits a DefId"),
+                    c.name.clone(),
+                );
+                for m in &c.methods {
+                    // Only a *public static* method, and only an empty one:
+                    // an instance method dispatches virtually, and upstream
+                    // leaves even a constant static call alone in expression
+                    // position. What it does drop is the bare `O.start(1)`
+                    // statement, handled in `VisitMut<Stmt>` below.
+                    if !m.is_static || m.visibility != Visibility::Public {
+                        continue;
+                    }
+                    if let Some(CallShape::Empty) =
+                        classify(&m.params, m.return_type.as_ref(), m.body.as_ref())
+                    {
+                        statics.insert((c.name.clone(), m.name.clone()));
+                    }
+                }
+            }
+            Def::Global(_) | Def::Local(_) => {}
+        }
+    }
+    if shapes.is_empty() && statics.is_empty() {
+        return 0;
+    }
+    let mut rewriter = CallEliminator {
+        shapes,
+        statics,
+        class_names,
+        count: 0,
+    };
+    for def in &mut hir.defs {
+        match def {
+            Def::Function(f) => {
+                if let Some(b) = &mut f.body {
+                    let _ = b.walk_mut(&mut rewriter);
+                }
+            }
+            Def::Class(c) => {
+                for field in &mut c.fields {
+                    if let Some(e) = &mut field.init {
+                        let _ = e.walk_mut(&mut rewriter);
+                    }
+                }
+                for m in c.methods.iter_mut().chain(c.constructors.iter_mut()) {
+                    if let Some(b) = &mut m.body {
+                        let _ = b.walk_mut(&mut rewriter);
+                    }
+                }
+            }
+            Def::Global(g) => {
+                if let Some(e) = &mut g.init {
+                    let _ = e.walk_mut(&mut rewriter);
+                }
+            }
+            Def::Local(_) => {}
+        }
+    }
+    for st in &mut hir.main {
+        let _ = st.walk_mut(&mut rewriter);
+    }
+    rewriter.count
+}
+
+/// What a call to a function amounts to, when it amounts to anything simple.
+#[derive(Debug, Clone)]
+enum CallShape {
+    /// The body does nothing observable; the call is worth `null`.
+    Empty,
+    /// The call is worth this literal: the body is a single
+    /// `return <literal>`, or it returns nothing and the signature declares
+    /// a type whose default value that literal is.
+    Constant(Literal),
+}
+
+/// [`CallShape`] of a callable, or `None` when calling it does real work.
+///
+/// A parameter default the callee would evaluate is part of the call, so a
+/// non-literal one (`f(x = c++)`) disqualifies the whole function.
+fn classify(
+    params: &[Param],
+    return_type: Option<&Type>,
+    body: Option<&Block>,
+) -> Option<CallShape> {
+    let body = body?;
+    // A reference-typed parameter or return is a cast in the generated code,
+    // and a cast can throw — `function vide(Array a) {} vide(5)` raises
+    // IMPOSSIBLE_CAST, so dropping the call would drop the error with it.
+    // A scalar conversion takes anything and never throws.
+    if params.iter().any(|p| p.ty.as_ref().is_some_and(casts)) || return_type.is_some_and(casts) {
+        return None;
+    }
+    if !params.iter().all(|p| {
+        p.default
+            .as_ref()
+            .is_none_or(|d| matches!(d.kind, ExprKind::Literal(_)))
+    }) {
+        return None;
+    }
+    match effect_of(&body.stmts)? {
+        BodyEffect::Nothing | BodyEffect::ReturnsNothing => Some(match return_type {
+            // A typed function that falls off its end answers the type's
+            // default value, so that — not `null` — is what the call is
+            // worth.
+            Some(ty) => match type_default(ty) {
+                Some(lit) => CallShape::Constant(lit),
+                None => CallShape::Empty,
+            },
+            None => CallShape::Empty,
+        }),
+        // A declared return type converts what leaves the function, so the
+        // substituted literal is what the *caller* would have received:
+        // `function f() -> integer { return 2.5 }` is worth 2.
+        BodyEffect::Returns(lit) => match return_type {
+            Some(ty) => converted(&lit, ty).map(CallShape::Constant),
+            None => Some(CallShape::Constant(lit)),
+        },
+    }
+}
+
+/// `lit` as a function with return type `ty` hands it back, or `None` when
+/// the conversion is one this pass will not decide — the call stays, and the
+/// backend converts it at run time.
+fn converted(lit: &Literal, ty: &Type) -> Option<Literal> {
+    #[allow(clippy::cast_possible_truncation)]
+    let out = match (ty, lit) {
+        (Type::Any, _) => lit.clone(),
+        (Type::Integer, Literal::Int(_)) | (Type::Real, Literal::Real(_)) => lit.clone(),
+        (Type::Integer, Literal::Real(f)) => Literal::Int(*f as i64),
+        (Type::Integer, Literal::Bool(b)) => Literal::Int(i64::from(*b)),
+        (Type::Integer, Literal::Null) => Literal::Int(0),
+        #[allow(clippy::cast_precision_loss)]
+        (Type::Real, Literal::Int(n)) => Literal::Real(*n as f64),
+        (Type::Real, Literal::Null) => Literal::Real(0.0),
+        (Type::Boolean, Literal::Bool(_)) => lit.clone(),
+        (Type::Boolean, Literal::Int(n)) => Literal::Bool(*n != 0),
+        (Type::Boolean, Literal::Null) => Literal::Bool(false),
+        (Type::String, Literal::String(_) | Literal::Null) => lit.clone(),
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// Whether converting to `ty` is a cast that can fail at run time. A number,
+/// boolean or string conversion takes any value; a container or class one is
+/// a cast, and what it refuses it raises on.
+fn casts(ty: &Type) -> bool {
+    match ty {
+        Type::Array(_)
+        | Type::Map(..)
+        | Type::Set(_)
+        | Type::Object
+        | Type::ClassInstance(..)
+        | Type::Interval => true,
+        Type::Nullable(inner) => casts(inner),
+        _ => false,
+    }
+}
+
+/// The value a declared return type gives a function that returns nothing,
+/// mirroring upstream's per-type defaults. `None` for the types whose
+/// default is `null` (which is [`CallShape::Empty`] already).
+fn type_default(ty: &Type) -> Option<Literal> {
+    match ty {
+        Type::Integer => Some(Literal::Int(0)),
+        Type::Real => Some(Literal::Real(0.0)),
+        Type::Boolean => Some(Literal::Bool(false)),
+        Type::String => Some(Literal::String(String::new())),
+        _ => None,
+    }
+}
+
+/// What running a statement sequence amounts to.
+enum BodyEffect {
+    /// It runs to the end having done nothing.
+    Nothing,
+    /// It does nothing and then returns without a value.
+    ReturnsNothing,
+    /// It does nothing and then returns this literal.
+    Returns(Literal),
+}
+
+/// [`BodyEffect`] of `stmts`, or `None` when they do real work.
+///
+/// Statements after the first `return` are dead, so a guard body —
+/// `if (!PROFILE) { return } debug(x)`, whose `if` the constant-condition
+/// fold has already reduced to its taken branch — amounts to nothing at all.
+fn effect_of(stmts: &[Stmt]) -> Option<BodyEffect> {
+    for s in stmts {
+        match s {
+            _ if does_nothing(s) => {}
+            Stmt::Return(None) => return Some(BodyEffect::ReturnsNothing),
+            Stmt::Return(Some(Expr {
+                kind: ExprKind::Literal(lit),
+                ..
+            })) => return Some(BodyEffect::Returns(lit.clone())),
+            Stmt::Block(b) => match effect_of(&b.stmts)? {
+                BodyEffect::Nothing => {}
+                other => return Some(other),
+            },
+            Stmt::If(i) => match i.const_taken {
+                Some(true) => match taken_effect(Some(&i.then_branch))? {
+                    BodyEffect::Nothing => {}
+                    other => return Some(other),
+                },
+                Some(false) => match taken_effect(i.else_branch.as_deref())? {
+                    BodyEffect::Nothing => {}
+                    other => return Some(other),
+                },
+                None => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some(BodyEffect::Nothing)
+}
+
+/// [`effect_of`] one statement — the branch a constant condition selects.
+fn taken_effect(branch: Option<&Stmt>) -> Option<BodyEffect> {
+    match branch {
+        None => Some(BodyEffect::Nothing),
+        Some(s) => effect_of(std::slice::from_ref(s)),
+    }
+}
+
+/// Whether a statement is guaranteed to do nothing at run time — an empty
+/// block, or an `if` [marked constant](mark_constant_conditions) whose taken
+/// side is itself nothing. This is what a debug guard reduces to once its
+/// `static final` flag is inlined.
+fn does_nothing(s: &Stmt) -> bool {
+    match s {
+        Stmt::Block(b) => b.stmts.iter().all(does_nothing),
+        Stmt::If(i) => match i.const_taken {
+            Some(true) => does_nothing(&i.then_branch),
+            Some(false) => i.else_branch.as_ref().is_none_or(|e| does_nothing(e)),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// The value of a condition decidable at compile time — boolean, `null` and
+/// number literals (including the ones a `static final` inlined) under `!`,
+/// `&&` and `||`. A string literal is deliberately not folded, matching
+/// upstream. Everything it accepts is side-effect free, so a folded-away
+/// operand is nothing to miss.
+fn const_condition(e: &Expr) -> Option<bool> {
+    match &e.kind {
+        ExprKind::Literal(Literal::Bool(b)) => Some(*b),
+        ExprKind::Literal(Literal::Null) => Some(false),
+        // A number's truthiness is `!= 0` in every version. A *string*'s is
+        // not folded, here or upstream: `if ('')` stays a real test.
+        ExprKind::Literal(Literal::Int(n)) => Some(*n != 0),
+        ExprKind::Literal(Literal::Real(f)) => Some(*f != 0.0),
+        // `-5` is a unary minus on a literal, not a literal — and negating
+        // never changes whether a number is zero.
+        ExprKind::Unary(UnaryOp::Neg, x)
+            if matches!(
+                x.kind,
+                ExprKind::Literal(Literal::Int(_) | Literal::Real(_))
+            ) =>
+        {
+            const_condition(x)
+        }
+        ExprKind::Unary(UnaryOp::Not, x) => const_condition(x).map(|b| !b),
+        ExprKind::Binary(BinaryOp::And, l, r) => match const_condition(l) {
+            Some(false) => Some(false),
+            Some(true) => const_condition(r),
+            None => None,
+        },
+        ExprKind::Binary(BinaryOp::Or, l, r) => match const_condition(l) {
+            Some(true) => Some(true),
+            Some(false) => const_condition(r),
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether evaluating `e` can be skipped without losing anything *and*
+/// without changing what the program is charged.
+///
+/// Only a literal, a plain name and a static field read qualify. An index
+/// can raise and an assignment or increment is a side effect, so those keep
+/// their call; so does an operator — `foo(-5)` is charged for the negation
+/// whether or not the call survives, and upstream's pinned counts say the
+/// call survives with it.
+fn is_pure_argument(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Literal(_) => true,
+        ExprKind::Name(
+            NameRef::Local(_) | NameRef::Global(_) | NameRef::Class(_) | NameRef::This,
+        ) => true,
+        // A static field read — `A.X`. An *instance* field read goes through
+        // a receiver that may be null, so it is not in.
+        ExprKind::Field(base, _, false) => {
+            matches!(
+                base.kind,
+                ExprKind::Name(NameRef::Class(_) | NameRef::Class_)
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Every function whose *name* is assigned somewhere in the file. Below v4
+/// that is legal, and a redefined name no longer names the function the
+/// resolver bound it to, so its calls must not be folded.
+fn assigned_function_defs(hir: &HirFile) -> HashSet<DefId> {
+    let mut finder = AssignedFunctions {
+        found: HashSet::new(),
+    };
+    for def in &hir.defs {
+        match def {
+            Def::Function(f) => {
+                if let Some(b) = &f.body {
+                    let _ = b.walk(&mut finder);
+                }
+            }
+            Def::Class(c) => {
+                for m in c.methods.iter().chain(c.constructors.iter()) {
+                    if let Some(b) = &m.body {
+                        let _ = b.walk(&mut finder);
+                    }
+                }
+            }
+            Def::Global(_) | Def::Local(_) => {}
+        }
+    }
+    for st in &hir.main {
+        let _ = st.walk(&mut finder);
+    }
+    finder.found
+}
+
+struct AssignedFunctions {
+    found: HashSet<DefId>,
+}
+
+impl Visit<Expr> for AssignedFunctions {
+    fn visit(&mut self, e: &Expr) -> Flow {
+        if let ExprKind::Binary(op, lhs, _) = &e.kind
+            && op.is_assignment()
+            && let ExprKind::Name(NameRef::Function(def)) = &lhs.kind
+        {
+            self.found.insert(*def);
+        }
+        Flow::Walk
+    }
+}
+
+impl Visit<Block> for AssignedFunctions {}
+impl Visit<Stmt> for AssignedFunctions {}
+
+struct CallEliminator {
+    shapes: HashMap<DefId, CallShape>,
+    /// `(class, method)` of every empty public static method.
+    statics: HashSet<(String, String)>,
+    class_names: HashMap<u32, String>,
+    count: usize,
+}
+
+impl CallEliminator {
+    /// The class a static call's receiver names, if it names one.
+    fn receiver_class(&self, receiver: &Expr) -> Option<&String> {
+        match &receiver.kind {
+            ExprKind::Name(NameRef::Class(def)) => self.class_names.get(&def.0),
+            _ => None,
+        }
+    }
+}
+
+impl VisitMut<Expr> for CallEliminator {
+    fn visit_mut(&mut self, e: &mut Expr) -> Flow {
+        let ExprKind::Call(call) = &e.kind else {
+            return Flow::Walk;
+        };
+        let Callee::Function(NameRef::Function(def)) = &call.callee else {
+            return Flow::Walk;
+        };
+        let Some(shape) = self.shapes.get(def) else {
+            return Flow::Walk;
+        };
+        if !call.args.iter().all(is_pure_argument) {
+            return Flow::Walk;
+        }
+        e.kind = match shape {
+            CallShape::Empty => ExprKind::Literal(Literal::Null),
+            CallShape::Constant(lit) => ExprKind::Literal(lit.clone()),
+        };
+        self.count += 1;
+        Flow::Skip
+    }
+}
+
+impl VisitMut<Block> for CallEliminator {}
+
+impl VisitMut<Stmt> for CallEliminator {
+    fn visit_mut(&mut self, s: &mut Stmt) -> Flow {
+        // `O.start(1)` as a statement of its own: nothing reads the value, so
+        // an empty static method leaves nothing behind.
+        if let Stmt::Expr(e) = s
+            && let ExprKind::Call(call) = &e.kind
+            && let Callee::Method {
+                receiver,
+                method,
+                optional: false,
+            } = &call.callee
+            && let Some(class) = self.receiver_class(receiver)
+            && self.statics.contains(&(class.clone(), method.clone()))
+            && call.args.iter().all(is_pure_argument)
+        {
+            *s = Stmt::Block(Block {
+                stmts: Vec::new(),
+                span: e.span,
+            });
+            self.count += 1;
+            return Flow::Skip;
+        }
+        Flow::Walk
+    }
 }
 
 /// Evaluate constant sub-expressions to literals, in place, throughout
@@ -1434,6 +2299,7 @@ mod tests {
                 ty: leek_types::Type::Any,
                 span: span(),
             })],
+            ..HirFile::default()
         };
         let n = fold_constants(&mut hir, &values);
         assert_eq!(n, 1);
@@ -1454,6 +2320,7 @@ mod tests {
             defs: Vec::new(),
             items: Vec::new(),
             main: vec![Stmt::Expr(name("SOMETHING"))],
+            ..HirFile::default()
         };
         assert_eq!(fold_constants(&mut hir, &values), 0);
         assert_eq!(hir.main[0], Stmt::Expr(name("SOMETHING")));
@@ -2229,5 +3096,113 @@ mod tests {
         };
         assert_eq!(before, 7, "1, 2, 3, (2*3), 4, two binops's tree = 7 nodes");
         assert_eq!(after, 1, "folds to the single literal 3");
+    }
+
+    // ── upstream's ConstantFolder ───────────────────────────────────────
+
+    /// The statements the main block reduces to, after the three folder
+    /// passes run in the order `finish` runs them.
+    fn folded(src: &str) -> Vec<Stmt> {
+        let mut hir = lower(src);
+        inline_static_final_literals(&mut hir);
+        mark_constant_conditions(&mut hir);
+        eliminate_constant_calls(&mut hir, 4);
+        hir.main.clone()
+    }
+
+    #[test]
+    fn a_constant_condition_is_marked_with_the_branch_it_takes() {
+        // The `if` stays in the tree — the lint still has something to
+        // report — and carries the answer codegen needs.
+        assert!(matches!(
+            folded("if (true) { return 1 } else { return 2 }").as_slice(),
+            [Stmt::If(i)] if i.const_taken == Some(true)
+        ));
+        // `null` is falsy, and an absent `else` means nothing runs.
+        assert!(matches!(
+            folded("if (null) { return 1 }").as_slice(),
+            [Stmt::If(i)] if i.const_taken == Some(false)
+        ));
+        // A real test is left alone.
+        assert!(matches!(
+            folded("var x = 1 if (x) { return 1 }").as_slice(),
+            [_, Stmt::If(i)] if i.const_taken.is_none()
+        ));
+    }
+
+    #[test]
+    fn a_short_circuit_decides_without_its_right_operand() {
+        // `f()` is not constant, but `&&` never reaches it.
+        assert!(matches!(
+            folded(
+                "function f() { return g() } function g() { return 1 } \
+                 if (false && f()) { return 1 }"
+            )
+            .as_slice(),
+            [Stmt::If(i)] if i.const_taken == Some(false)
+        ));
+    }
+
+    #[test]
+    fn an_empty_call_goes_and_a_constant_one_is_substituted() {
+        assert!(matches!(
+            folded("function foo() {} foo() return 1").as_slice(),
+            [
+                Stmt::Expr(Expr {
+                    kind: ExprKind::Literal(Literal::Null),
+                    ..
+                }),
+                _
+            ]
+        ));
+        assert!(matches!(
+            folded("function two() { return 2 } return two()").as_slice(),
+            [Stmt::Return(Some(Expr {
+                kind: ExprKind::Literal(Int(2)),
+                ..
+            }))]
+        ));
+    }
+
+    #[test]
+    fn a_call_that_could_do_something_keeps_it() {
+        // An impure argument is evaluated by the caller, an index can raise,
+        // and an operator is charged either way — all keep the call.
+        for src in [
+            "var i = 0 function foo(x) {} foo(i++) return i",
+            "function foo(x) {} var a = [1] foo(a[0]) return 7",
+            "function foo(x) {} foo(-5) return 1",
+            "global c = 0 function f(x = c++) {} f() return c",
+        ] {
+            assert!(
+                folded(src).iter().any(|s| matches!(
+                    s,
+                    Stmt::Expr(Expr {
+                        kind: ExprKind::Call(_),
+                        ..
+                    })
+                )),
+                "{src} must keep its call",
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_in_a_condition_keeps_the_branch_that_tests_it() {
+        // Upstream decides which conditions are constant *before* it
+        // substitutes calls, so this `if` stays a real test — and keeps
+        // charging for one — even though its value is now known.
+        assert!(matches!(
+            folded("function no() { return false } if (no()) { return 1 } return 2").as_slice(),
+            [Stmt::If(i), _] if matches!(i.cond.kind, ExprKind::Literal(Bool(false)))
+        ));
+    }
+
+    #[test]
+    fn v1_folds_conditions_but_never_calls() {
+        let mut hir = lower("function foo() {} foo() return 1");
+        mark_constant_conditions(&mut hir);
+        assert_eq!(eliminate_constant_calls(&mut hir, 1), 0);
+        assert_eq!(eliminate_constant_calls(&mut hir, 2), 1);
     }
 }

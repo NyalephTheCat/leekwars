@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 
 use crate::actions::{Action, ActionLog};
 use crate::attack::{
-    Area, AttackType, EffectInstance, EffectParams, EffectType, EntityState, java_round,
+    Area, AttackType, EffectInstance, EffectModifiers, EffectParams, EffectTargets, EffectType,
+    EntityState, java_round,
 };
 use crate::map::Map;
 use crate::outcome::{entity_snapshot, map_json};
@@ -263,6 +264,23 @@ pub struct Fighter {
     pub birth_turn: i32,
     /// `mSkin` — bulbs carry their template id; leeks default to 0.
     pub skin: i32,
+    /// `Entity.getType()` — [`TYPE_LEEK`], [`TYPE_BULB`] or [`TYPE_PLANT`].
+    /// Fixed at creation: `Bulb.getType()` reads its template, and a
+    /// template never changes under a summon.
+    pub entity_type: i32,
+    /// `Entity.awakenedBy` — fids that have already woken this plant. An
+    /// entity is in here once, because it only wakes the plant on its
+    /// *first* entry into the zone, and it is cleared at the start of that
+    /// entity's own turn rather than at the start of the fight turn: pushed
+    /// into the zone on someone else's turn, it wakes the plant, and can wake
+    /// it again by walking in on its own.
+    pub awakened_by: BTreeSet<usize>,
+    /// `Entity.awakeningTrigger` — the entity that set off the awakening
+    /// currently running, for as long as the plant's AI runs. Carried by the
+    /// entity rather than its AI: `summon()`'s closure runs under the
+    /// *summoner's* AI, which knows nothing of the plant beyond what
+    /// `getEntity()` says.
+    pub awakening_trigger: Option<usize>,
 
     /// Named loadouts (`mLoadouts`) this entity can switch to with
     /// `setLoadout(name)` during `beforeFight()`. Empty for leeks without
@@ -306,6 +324,9 @@ impl Fighter {
             summoner: None,
             birth_turn: 0,
             skin: 0,
+            entity_type: TYPE_LEEK,
+            awakened_by: BTreeSet::new(),
+            awakening_trigger: None,
             loadouts: HashMap::new(),
         }
     }
@@ -359,6 +380,11 @@ impl Fighter {
     /// `Entity.useMP(n)`.
     pub fn use_mp(&mut self, n: i32) {
         self.used_mp += n;
+    }
+
+    /// `Entity.refillTP()` — all the TP back, as a plant gets on waking.
+    pub fn refill_tp(&mut self) {
+        self.used_tp = 0;
     }
 
     /// `Entity.hasWeapon(id)`.
@@ -592,8 +618,14 @@ impl Order {
     }
 
     /// `Order.removeEntity(leek)` — remove a dead entity, fixing up the
-    /// position (and rolling the turn back when the current entity at
-    /// position 0 is removed, since `next()` will re-increment it).
+    /// position.
+    ///
+    /// Removing the *current* entity (index 0, position 0) leaves the
+    /// position at `-1`; the next `next()` moves it to 0 without wrapping,
+    /// so the turn counter is untouched. The generator used to roll the turn
+    /// back here and let a synthetic wrap in `next()` pay it back, which got
+    /// the fight's duration wrong whenever it ended on that death and ran one
+    /// `applyCoolDown` too many.
     pub fn remove_entity(&mut self, fid: usize) {
         let Some(index) = self.fids.iter().position(|&f| f == fid) else {
             return;
@@ -602,10 +634,6 @@ impl Order {
             self.position -= 1;
         }
         self.fids.remove(index);
-        if self.position == -1 {
-            self.position = self.fids.len() as i32 - 1;
-            self.turn -= 1;
-        }
     }
 
     /// `Order.current()` — `None` when the order is empty / out of range.
@@ -642,6 +670,54 @@ impl Order {
         false
     }
 
+    /// `Order.getNextPlayer()` — who plays after the current entity, wrapping
+    /// around the round. `None` only when the order is empty.
+    #[must_use]
+    pub fn next_player(&self) -> Option<usize> {
+        if self.fids.is_empty() {
+            return None;
+        }
+        let p = (self.position + 1).rem_euclid(self.fids.len() as i32);
+        Some(self.fids[p as usize])
+    }
+
+    /// `Order.getPreviousPlayer()` — who played before the current entity.
+    ///
+    /// The modulo is taken the robust way: `position` can be `-1` in the
+    /// transient window after the current entity was removed (see
+    /// [`Self::remove_entity`]), and the old single `if (p < 0) p += size`
+    /// only corrected once — `-2` stayed negative when the order was down to
+    /// one entity, and Java went out of bounds.
+    #[must_use]
+    pub fn previous_player(&self) -> Option<usize> {
+        if self.fids.is_empty() {
+            return None;
+        }
+        let p = (self.position - 1).rem_euclid(self.fids.len() as i32);
+        Some(self.fids[p as usize])
+    }
+
+    /// `Order.getNextPlayer(entity)` — who plays after a *named* entity, or
+    /// `None` when it is not in the order (dead, or never in it).
+    #[must_use]
+    pub fn next_player_of(&self, fid: usize) -> Option<usize> {
+        let index = self.fids.iter().position(|&f| f == fid)?;
+        Some(self.fids[(index + 1) % self.fids.len()])
+    }
+
+    /// `Order.getPreviousPlayer(entity)` — the counterpart of
+    /// [`Self::next_player_of`].
+    #[must_use]
+    pub fn previous_player_of(&self, fid: usize) -> Option<usize> {
+        let index = self.fids.iter().position(|&f| f == fid)?;
+        let p = if index == 0 {
+            self.fids.len() - 1
+        } else {
+            index - 1
+        };
+        Some(self.fids[p])
+    }
+
     /// `Order.getEntities()`.
     #[must_use]
     pub fn fids(&self) -> &[usize] {
@@ -662,6 +738,15 @@ impl Order {
 // Attack use results  (attack/Attack.java)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `Entity.TYPE_LEEK` — a player's leek.
+pub const TYPE_LEEK: i32 = 0;
+/// `Entity.TYPE_BULB` — a summon that plays its own turn.
+pub const TYPE_BULB: i32 = 1;
+/// `Entity.TYPE_PLANT` — the 2.50 rooted summons. They are invocations but
+/// not bulbs: rooted, they do not play their turn, so they get a type of
+/// their own for an AI to tell them apart.
+pub const TYPE_PLANT: i32 = 5;
+
 /// `Attack.USE_*` result codes, as returned by `useWeapon`/`useChip`.
 pub const USE_CRITICAL: i32 = 2;
 pub const USE_SUCCESS: i32 = 1;
@@ -678,7 +763,13 @@ pub const USE_MAX_USES: i32 = -7;
 /// `attack/Attack.java` accessors).
 #[derive(Debug, Clone)]
 pub struct WeaponSpec {
+    /// `Item.getId()` — the *item* id an AI names (`WEAPON_PISTOL` is 37)
+    /// and `getWeapon()` answers with.
     pub id: i32,
+    /// `Item.getTemplate()` — the catalog's own key for the weapon, which is
+    /// a different number from the item id and is what the action log
+    /// carries (`ActionSetWeapon`). The pistol is item 37, template 1.
+    pub template: i32,
     pub cost: i32,
     pub min_range: i32,
     pub max_range: i32,
@@ -692,6 +783,11 @@ pub struct WeaponSpec {
     pub area: Area,
     /// The attack's effect lines (`Attack.getEffects()`).
     pub effects: Vec<EffectParams>,
+    /// `Attack.getPassiveEffects()` — lines that never fire on use. They fire
+    /// from the *carrier's* hooks instead (took damage, landed a critical,
+    /// killed, was moved), for as long as the weapon is in its inventory. See
+    /// `State::activate_passive`.
+    pub passive_effects: Vec<EffectParams>,
     /// `Weapon.isForgotten()` — a per-farmer unique "forgotten" weapon, which
     /// `apply_loadout` treats specially (stickiness + teammate reservation).
     /// `false` for ordinary weapons.
@@ -702,7 +798,11 @@ pub struct WeaponSpec {
 /// (`chips/Chip.java` + `attack/Attack.java` accessors).
 #[derive(Debug, Clone)]
 pub struct ChipSpec {
+    /// `Item.getId()` — the *item* id an AI names (`CHIP_SHOCK` is 1).
     pub id: i32,
+    /// `Item.getTemplate()` — the catalog's own key, which the action log
+    /// carries (`ActionUseChip`). Shock is item 1, template 6.
+    pub template: i32,
     pub cost: i32,
     pub min_range: i32,
     pub max_range: i32,
@@ -745,6 +845,43 @@ pub struct BulbTemplate {
     /// Chip template ids, in `summons.json` order — `Entity.addChip` caps at
     /// the bulb's RAM (6), so only the first 6 stick.
     pub chips: Vec<i32>,
+    /// `EntityState` ordinals the summon starts with. The 2.50 plants carry
+    /// `ROOTED` (9); a bulb carries none.
+    pub states: Vec<i32>,
+    /// `BulbTemplate.getZone()` — the radius in cells of the summon's
+    /// awakening zone, `0` for one that plays its own turn.
+    pub zone: i32,
+}
+
+impl BulbTemplate {
+    /// `BulbTemplate.isPlant()` — a plant is a *rooted* summon. It is the
+    /// `ROOTED` state that defines one, not a hard-coded id list (corn 9,
+    /// chilli pepper 10, prototaxite 13 today), and it is what makes an AI
+    /// see `ENTITY_PLANT` instead of `ENTITY_BULB`.
+    #[must_use]
+    pub fn is_plant(&self) -> bool {
+        self.states.contains(&(EntityState::Rooted as i32))
+    }
+
+    /// `BulbTemplate.hasAwakening()` — a plant with a zone plays on waking
+    /// and nowhere else: it leaves the turn order and counts its cooldowns in
+    /// awakenings. The prototaxite is rooted *without* a zone.
+    #[must_use]
+    pub fn has_awakening(&self) -> bool {
+        self.zone > 0
+    }
+}
+
+/// A walk in progress: the path an entity asked for, how much of it has been
+/// covered, and the zoned plants it might wake on the way. It outlives a
+/// single `move_entity` call only when a plant wakes mid-path.
+#[derive(Debug, Clone)]
+struct Walk {
+    fid: usize,
+    path: Vec<usize>,
+    plants: Vec<usize>,
+    done: usize,
+    start: usize,
 }
 
 /// `BulbTemplate.base(base, bonus, coeff, multiplier)` — the bulb stat
@@ -770,6 +907,11 @@ pub enum BeginTurn {
     /// The current entity died during its turn start: skip its AI (and its
     /// `ActionEndTurn`), but still run [`State::end_turn`].
     Skip,
+    /// A zoned plant: it does not play a turn — it acts only on its
+    /// awakenings — so run no AI, but still do [`State::end_entity_turn`] +
+    /// [`State::end_turn`]. Its slot in the order is what gets it the
+    /// start-of-turn upkeep [`State::begin_turn`] has just done.
+    Upkeep(usize),
     /// Run this entity's AI, then [`State::end_entity_turn`] +
     /// [`State::end_turn`].
     Act(usize),
@@ -841,6 +983,34 @@ pub struct State {
     pub restat_potions_available: HashMap<i64, i32>,
     /// `State.mRestatPotionsConsumed` — restat potions spent, per farmer.
     pub restat_potions_consumed: HashMap<i64, i32>,
+    /// The frequency each entity had when the play order was drawn, so a
+    /// `setLoadout()` in a `beforeFight()` hook can be seen to have made it
+    /// stale (`State.startOrderFrequencies`).
+    start_order_frequencies: HashMap<usize, i64>,
+    /// A walk in progress, kept while a plant it woke plays (see
+    /// [`State::walk_on`]). `None` the rest of the time, which is all of the
+    /// time in a fight without plants.
+    walk: Option<Walk>,
+    /// The distance the last walk covered, read back by the runner once every
+    /// awakening has played.
+    walk_result: Option<i64>,
+    /// Awakenings waiting for their plant's AI to run. `awake_plant` does the
+    /// mechanical half and queues the plant here, because running an AI needs
+    /// the state borrow its caller is holding; the runner drains this between
+    /// builtin calls.
+    pending_awakenings: std::collections::VecDeque<(usize, usize)>,
+    /// `State.awakeningPlant` — the plant whose awakening is running right
+    /// now. It acts precisely *outside* its turn, so it is this field and not
+    /// the play order that lets it use its chips (see [`State::can_act`]). It
+    /// doubles as the non-reentrancy guard: one awakening cannot set off
+    /// another.
+    pub awakening_plant: Option<usize>,
+    /// `State.batch` — this fight is one of a *lot* run back to back
+    /// (`Scenario.batch`, set by `Generator` before the fight starts), which
+    /// `isBatchFight()` reports so an AI can go quiet for the run. Nothing
+    /// else distinguishes the two: a batched fight has the same type and the
+    /// same context as one launched on its own.
+    pub batch: bool,
 }
 
 impl State {
@@ -871,6 +1041,12 @@ impl State {
             win_team: -1,
             restat_potions_available: HashMap::new(),
             restat_potions_consumed: HashMap::new(),
+            start_order_frequencies: HashMap::new(),
+            walk: None,
+            walk_result: None,
+            pending_awakenings: std::collections::VecDeque::new(),
+            awakening_plant: None,
+            batch: false,
         }
     }
 
@@ -958,31 +1134,55 @@ impl State {
 
     /// `State.slideEntity(entity, cell, caster)` — a forced move (push or
     /// attract). Updates the occupancy only; like Java, it produces NO action
-    /// (the statistics manager is the sole observer there). The `onMoved`
-    /// passives are weapon passive effects — none in the leek scope.
-    pub fn slide_entity(&mut self, fid: usize, cell: usize) {
+    /// (the statistics manager is the sole observer there), but it does fire
+    /// the moved entity's `onMoved` passives.
+    pub fn slide_entity(&mut self, fid: usize, cell: usize, caster: usize) {
         // A STATIC entity cannot be pushed or attracted.
         if self.fighters[fid].has_state(EntityState::Static) {
+            return;
+        }
+        // Nor can a ROOTED one — the 2.50 plants. The difference between the
+        // two states is that a permutation still moves a ROOTED entity.
+        if self.fighters[fid].has_state(EntityState::Rooted) {
             return;
         }
         if self.fighters[fid].cell == Some(cell) {
             return;
         }
+        let start = self.fighters[fid].cell;
         self.place_entity(fid, cell);
+        self.on_moved(fid, caster);
+        if let (Some(start), Some(end)) = (start, self.fighters[fid].cell) {
+            self.check_plant_triggers_along(fid, start, end);
+        }
     }
 
     /// `State.teleportEntity(entity, cell, caster, itemId)` — like a slide,
     /// it only moves the occupancy; statistics-only in Java, no action.
     /// (Unlike the slides, Java has NO STATIC guard here — a static entity
     /// can still teleport.)
-    pub fn teleport_entity(&mut self, fid: usize, cell: usize) {
+    pub fn teleport_entity(&mut self, fid: usize, cell: usize, caster: usize) {
+        let start = self.fighters[fid].cell;
         self.place_entity(fid, cell);
+        // `if (start != cell)` — teleporting onto your own cell moves nobody.
+        if start != Some(cell) {
+            self.on_moved(fid, caster);
+        }
+        self.check_plant_triggers(fid, start, self.fighters[fid].cell);
+    }
+
+    /// `Entity.onMoved(by)` — the displacement passives, skipped when the
+    /// entity moved itself (`by == this`: only a move you *suffer* counts).
+    fn on_moved(&mut self, fid: usize, by: usize) {
+        if fid != by {
+            self.fire_passives(fid, crate::attack::PassiveHook::Moved, 0);
+        }
     }
 
     /// `State.invertEntities(caster, target)` — permutation: swap the two
     /// entities' cells. Occupancy-only like the slides (statistics-only in
-    /// Java, no action logged). The `onMoved` passives are weapon passive
-    /// effects — none in the leek scope.
+    /// Java, no action logged), plus both entities' `onMoved` passives —
+    /// though the caster moved itself, so only the target's can fire.
     pub fn invert_entities(&mut self, a: usize, b: usize) {
         // Java checks ONLY the target for STATIC — a static caster still
         // swaps (and moves itself doing so).
@@ -998,6 +1198,13 @@ impl State {
         self.fighters[b].cell = Some(ca);
         // `map.entity_cells` already holds both cells — the swap doesn't
         // change the set.
+        self.on_moved(b, a);
+        self.on_moved(a, a);
+        // Both entities moved, so each can enter a plant's zone. A plant
+        // repotted by the permutation — the one displacement a ROOTED entity
+        // suffers — can therefore land in another's zone and wake it.
+        self.check_plant_triggers(a, Some(ca), Some(cb));
+        self.check_plant_triggers(b, Some(cb), Some(ca));
     }
 
     /// `State.init()` — draw the obstacle count, generate the map, place the
@@ -1027,28 +1234,7 @@ impl State {
             self.place_entity(self.teams[1].fighters[0], cell);
         }
 
-        // StartOrder.compute — teams of (fid, frequency).
-        #[allow(clippy::cast_possible_wrap)]
-        let start_teams: Vec<Vec<(i64, i64)>> = self
-            .teams
-            .iter()
-            .map(|t| {
-                t.fighters
-                    .iter()
-                    .map(|&f| (f as i64, i64::from(self.fighters[f].stat(STAT_FREQUENCY))))
-                    .collect()
-            })
-            .collect();
-        // `compute_start_order` is handed our own fids and gives them back in
-        // turn order, so each `i64` is the `usize` index it started as.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        for fid in crate::order::compute_start_order(&start_teams, &mut self.rng) {
-            let fid = fid as usize;
-            if !self.fighters[fid].is_dead() {
-                self.order.add_entity(fid);
-            }
-            self.initial_order.push(fid);
-        }
+        self.compute_start_order();
 
         // Cooldowns initiaux — every registered chip with an initial cooldown
         // starts charged for every entity, at `initialCooldown + 1` (the +1
@@ -1102,9 +1288,13 @@ impl State {
         self.actions.log(Action::EntityTurn {
             entity_id: fid as i64,
         });
+        // Its turn starts again, so it can wake every plant once more.
+        self.clear_plant_triggers(fid);
         self.start_turn(fid);
         if self.fighters[fid].is_dead() {
             BeginTurn::Skip
+        } else if self.has_awakening(fid) {
+            BeginTurn::Upkeep(fid)
         } else {
             BeginTurn::Act(fid)
         }
@@ -1114,7 +1304,14 @@ impl State {
     /// effects sitting *on* this entity (poison ticks), then decrement and
     /// expire the effects this entity has *launched*.
     fn start_turn(&mut self, fid: usize) {
-        self.fighters[fid].apply_cooldown();
+        // A zoned plant counts its time in awakenings, never in turns: its
+        // cooldowns are ticked by `awake_plant`. The rest of the start-of-turn
+        // upkeep concerns it like anyone else — this is where the poisons it
+        // suffers land and where the marks it left age. Without that pass a
+        // capsaicin would poison for ever.
+        if !self.has_awakening(fid) {
+            self.fighters[fid].apply_cooldown();
+        }
 
         // Apply start-turn effects on a copy of the list (Java iterates an
         // `ArrayList` copy; ticks can mutate the live list via death).
@@ -1355,23 +1552,107 @@ impl State {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn move_entity(&mut self, fid: usize, path: &[usize]) -> i64 {
         // A STATIC entity cannot move (checked before the size/MP gates —
-        // no log, no MP spent).
-        if self.fighters[fid].has_state(EntityState::Static) {
+        // no log, no MP spent). Nor can a ROOTED one.
+        if self.fighters[fid].has_state(EntityState::Static)
+            || self.fighters[fid].has_state(EntityState::Rooted)
+        {
             return 0;
         }
         let size = path.len() as i32;
         if size == 0 || size > self.fighters[fid].mp() {
             return 0;
         }
-        let end = *path.last().expect("non-empty path");
-        self.actions.log(Action::Move {
-            entity_id: fid as i64,
-            end_cell: end as i32,
-            path: path.iter().map(|&c| c as i32).collect(),
-        });
+        let Some(start) = self.fighters[fid].cell else {
+            return 0;
+        };
+        // The MP are paid for the path that was asked for: the cutting below
+        // is a question of chronology, not of distance.
         self.fighters[fid].use_mp(size);
-        self.place_entity(fid, end);
+
+        self.walk = Some(Walk {
+            fid,
+            path: path.to_vec(),
+            // Every cell of entry into a plant's zone is a place the walk may
+            // have to stop at; with no plant to cross — the common case —
+            // this is empty and the walk is one `ActionMove`.
+            plants: self.awakening_plants(Some(fid)),
+            done: 0,
+            start,
+        });
+        self.walk_on()
+    }
+
+    /// Walk the suspended path until it ends or a plant wakes.
+    ///
+    /// Walking into a plant's zone wakes it, even without stopping there, so
+    /// the path is cut at every cell of entry: the plant strikes the
+    /// passer-by where it passes and not from its arrival cell, which is
+    /// often out of range. An awakening leaves the rest of the path here and
+    /// returns, because running the plant's AI needs the state borrow the
+    /// caller is holding; [`State::resume_walk`] picks it up once the plant
+    /// has played.
+    // A path length and the cell ids along it, all bounded by the board
+    // (613 cells), plus the usual `fid as i64` for the action record.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn walk_on(&mut self) -> i64 {
+        let Some(mut walk) = self.walk.take() else {
+            return 0;
+        };
+        let size = walk.path.len() as i32;
+        for i in walk.done..walk.path.len() {
+            let from = if i == 0 { walk.start } else { walk.path[i - 1] };
+            let to = walk.path[i];
+            if i < walk.path.len() - 1
+                && !self.enters_awakening_zone(&walk.plants, walk.fid, from, to)
+            {
+                continue;
+            }
+            let step = &walk.path[walk.done..=i];
+            self.actions.log(Action::Move {
+                entity_id: walk.fid as i64,
+                end_cell: to as i32,
+                path: step.iter().map(|&c| c as i32).collect(),
+            });
+            self.place_entity(walk.fid, to);
+            walk.done = i + 1;
+
+            self.check_plant_triggers(walk.fid, Some(from), Some(to));
+
+            // An ambush: a plant that kills the passer-by stops the walk
+            // dead. The MP are lost, but the distance counted is the one
+            // actually covered.
+            if self.fighters[walk.fid].is_dead() {
+                self.walk_result = Some(walk.done as i64);
+                return walk.done as i64;
+            }
+            if !self.pending_awakenings.is_empty() {
+                // A plant is about to play. Keep the rest of the path; the
+                // runner comes back through `resume_walk`.
+                let done = walk.done;
+                self.walk = Some(walk);
+                return done as i64;
+            }
+        }
+        self.walk_result = Some(i64::from(size));
         i64::from(size)
+    }
+
+    /// Continue a walk a plant's awakening interrupted. Returns `true` while
+    /// there is still path left to cover.
+    pub fn resume_walk(&mut self) -> bool {
+        if self.walk.is_none() {
+            return false;
+        }
+        self.walk_on();
+        self.walk.is_some()
+    }
+
+    /// The distance the last walk actually covered, once every awakening it
+    /// set off has played. `None` when no walk has finished since the last
+    /// read — the caller keeps whatever the builtin already returned.
+    pub fn take_walk_result(&mut self) -> Option<i64> {
+        self.walk = None;
+        self.walk_result.take()
     }
 
     /// `State.moveToward(entity, leek_id, pm_to_use)` — path to a living
@@ -1599,8 +1880,11 @@ impl State {
         }
         self.fighters[fid].weapon = Some(weapon);
         self.fighters[fid].use_tp(1);
+        // The action carries the weapon's *template*, not the item id the AI
+        // named — `ActionSetWeapon` is built from `weapon.getTemplate()`.
         self.actions.log(Action::SetWeapon {
-            weapon_template: weapon,
+            weapon_template: crate::official_items::weapon_spec(weapon)
+                .map_or(weapon, |w| w.template),
         });
         true
     }
@@ -1632,9 +1916,10 @@ impl State {
                 self.map
                     .get_first_entity(caster_cell, target_cell, min_range, max_range)
         {
-            if cell == target_cell {
-                return false;
-            }
+            // Aiming straight at the entity's own cell used to be refused
+            // here while aiming one cell behind it went through — the
+            // generator dropped that check in `bf5b089`. The wall check is
+            // still done by the full `verify_los` just below.
             ignored.push(cell);
         }
         self.map
@@ -1686,6 +1971,25 @@ impl State {
             entity_id: fid as i64,
             killer_id: killer.map_or(-1, |k| k as i64),
         });
+
+        // The death passives, in Java's order. A summon's death rouses
+        // nobody — only a real teammate's does — and the dead entity itself
+        // is skipped (`fire_passives` would refuse it anyway).
+        if !self.fighters[fid].is_summon() {
+            let team = self.fighters[fid].team;
+            let allies: Vec<usize> = self.teams[team]
+                .fighters
+                .iter()
+                .copied()
+                .filter(|&ally| ally != fid)
+                .collect();
+            for ally in allies {
+                self.fire_passives(ally, crate::attack::PassiveHook::AllyKilled, 0);
+            }
+        }
+        if let Some(killer) = killer {
+            self.fire_passives(killer, crate::attack::PassiveHook::Kill, 0);
+        }
     }
 
     /// `Entity.die()` — zero the life, drop every effect in both directions,
@@ -1733,7 +2037,7 @@ impl State {
     // index is `< 613`, so neither can reach the sign bit.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn use_weapon(&mut self, fid: usize, target_cell: usize) -> i32 {
-        if self.order.current() != Some(fid) {
+        if !self.can_act(fid) {
             return USE_INVALID_TARGET;
         }
         let Some(weapon) = self.fighters[fid].weapon else {
@@ -1769,7 +2073,9 @@ impl State {
             cell: target_cell as i32,
             success: result,
         });
-        // launcher.onCritical(): weapon passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
         self.apply_on_cell(
             fid,
             target_cell,
@@ -1835,7 +2141,7 @@ impl State {
         let Some(spec) = self.chip_specs.get(&chip_id).cloned() else {
             return USE_INVALID_TARGET;
         };
-        if self.order.current() != Some(fid) {
+        if !self.can_act(fid) {
             return USE_INVALID_TARGET;
         }
         if spec.cost > 0 && spec.cost > self.fighters[fid].tp() {
@@ -1878,11 +2184,13 @@ impl State {
         let critical = self.generate_critical(fid);
         let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
         self.actions.log(Action::UseChip {
-            chip_template: spec.id,
+            chip_template: spec.template,
             cell: target_cell as i32,
             success: result,
         });
-        // caster.onCritical(): passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
         self.apply_on_cell(
             fid,
             target_cell,
@@ -1938,7 +2246,7 @@ impl State {
         else {
             return (USE_INVALID_TARGET, None);
         };
-        if self.order.current() != Some(fid) {
+        if !self.can_act(fid) {
             return (USE_INVALID_TARGET, None);
         }
         if spec.cost > self.fighters[fid].tp() {
@@ -1969,15 +2277,23 @@ impl State {
         if self.teams[team].summon_count(&self.fighters) >= SUMMON_LIMIT {
             return (USE_TOO_MANY_SUMMONS, None);
         }
+        // A STERILE entity (the desert sabre) may no longer summon. Last in
+        // the ladder, and `USE_FAILED` rather than a new return code that
+        // existing AIs would not know how to read.
+        if self.fighters[fid].has_state(EntityState::Sterile) {
+            return (USE_FAILED, None);
+        }
 
         let critical = self.generate_critical(fid);
         let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
         self.actions.log(Action::UseChip {
-            chip_template: spec.id,
+            chip_template: spec.template,
             cell: target_cell as i32,
             success: result,
         });
-        // caster.onCritical(): passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
 
         let bulb = self.create_summon(
             fid,
@@ -1997,6 +2313,11 @@ impl State {
             result,
         });
 
+        // The template's permanent states (`ROOTED` for the plants), applied
+        // after the log so the client replays the effect on an entity that
+        // has already appeared.
+        self.apply_summon_states(bulb);
+
         if spec.cooldown != 0 {
             self.add_chip_cooldown(fid, &spec, spec.cooldown);
         }
@@ -2005,6 +2326,437 @@ impl State {
     }
 
     /// `State.createSummon(owner, type, target, level, critical, name)` +
+    /// `State.canAct(entity)` — may this entity act? The one whose turn it
+    /// is, or the plant in the middle of waking up, which plays precisely
+    /// outside its turn. A plant killed during its own awakening (damage
+    /// return) acts no more: the play order has dropped it, but
+    /// `awakening_plant` still names it.
+    #[must_use]
+    pub fn can_act(&self, fid: usize) -> bool {
+        if self.order.current() == Some(fid) {
+            return true;
+        }
+        self.awakening_plant == Some(fid) && !self.fighters[fid].is_dead()
+    }
+
+    // ── Plant awakening (the 2.50 rooted summons) ────────────────────────────
+
+    /// `State.checkPlantTriggers(entity, from, to)` — an entity has just
+    /// changed cell: wake every plant whose zone it *enters*. Entering means
+    /// coming into range while not already in it, and the test is on **one
+    /// step**, not on a whole move: walking through the zone is enough to
+    /// wake the plant, without stopping in it. `from = None` means the entity
+    /// appeared (a summon), which is an entry whatever the cell.
+    pub fn check_plant_triggers(&mut self, entity: usize, from: Option<usize>, to: Option<usize>) {
+        let Some(to) = to else { return };
+        if self.fighters[entity].is_dead() {
+            return;
+        }
+        // Non-reentrancy: the four plant chips move nobody, so no awakening
+        // can set off another. The guard makes the loop impossible rather
+        // than merely unlikely.
+        if self.awakening_plant.is_some() {
+            return;
+        }
+        for plant in self.all_entities_in_team_order() {
+            if plant == entity || !self.has_awakening(plant) || self.fighters[plant].is_dead() {
+                continue;
+            }
+            let Some(plant_cell) = self.fighters[plant].cell else {
+                continue;
+            };
+            let zone = self.awakening_zone(plant);
+            if self.map.get_cell_distance(to, plant_cell) > zone {
+                continue;
+            }
+            if from.is_some_and(|f| self.map.get_cell_distance(f, plant_cell) <= zone) {
+                continue;
+            }
+            self.awake_plant(plant, entity);
+        }
+    }
+
+    /// `State.checkPlantTriggersAlong(entity, start, end)` — a straight-line
+    /// move the entity did not choose (push, attract, repel): every cell
+    /// crossed counts, as when walking. Unlike walking the movement is not
+    /// cut up — a slide is a handful of cells and the entity almost always
+    /// ends within range of the zone it just crossed, so the plant answers
+    /// once the entity has landed.
+    pub fn check_plant_triggers_along(&mut self, entity: usize, start: usize, end: usize) {
+        if start == end {
+            return;
+        }
+        // The same step as `get_push_last_available_cell`: a slide advances
+        // one cell at a time along the sign of the deltas. The line is
+        // rebuilt in full BEFORE anything wakes — if it does not land exactly
+        // on the arrival cell then this move was not a slide and the cells it
+        // visited mean nothing, so we fall back to the arrival cell alone.
+        let dx = (self.map.cells[end].x - self.map.cells[start].x).signum();
+        let dy = (self.map.cells[end].y - self.map.cells[start].y).signum();
+        let mut line = Vec::new();
+        let mut current = start;
+        let mut steps = self.map.get_cell_distance(start, end);
+        while steps > 0 && current != end {
+            let Some(next) = self.map.get_next_cell(current, dx, dy) else {
+                break;
+            };
+            current = next;
+            line.push(next);
+            steps -= 1;
+        }
+        if current != end {
+            self.check_plant_triggers(entity, Some(start), Some(end));
+            return;
+        }
+        let mut from = start;
+        for to in line {
+            self.check_plant_triggers(entity, Some(from), Some(to));
+            from = to;
+        }
+    }
+
+    /// `State.checkPlantPlanted(plant)` — a plant that has just come out of
+    /// the ground: the entities already standing in its zone wake it, each
+    /// once.
+    pub fn check_plant_planted(&mut self, plant: usize) {
+        if !self.has_awakening(plant) || self.fighters[plant].is_dead() {
+            return;
+        }
+        if self.awakening_plant.is_some() {
+            return;
+        }
+        let Some(plant_cell) = self.fighters[plant].cell else {
+            return;
+        };
+        let zone = self.awakening_zone(plant);
+        for entity in self.all_entities_in_team_order() {
+            if entity == plant || self.fighters[entity].is_dead() {
+                continue;
+            }
+            let Some(cell) = self.fighters[entity].cell else {
+                continue;
+            };
+            if self.map.get_cell_distance(cell, plant_cell) > zone {
+                continue;
+            }
+            self.awake_plant(plant, entity);
+        }
+    }
+
+    /// `State.getAwakeningPlants(except)` — the zoned plants still alive, or
+    /// an empty list when there are none, which is the common case where
+    /// `move_entity`'s path cutting must cost nothing.
+    fn awakening_plants(&self, except: Option<usize>) -> Vec<usize> {
+        if self.awakening_plant.is_some() {
+            return Vec::new();
+        }
+        self.all_entities_in_team_order()
+            .into_iter()
+            .filter(|&p| {
+                Some(p) != except
+                    && self.has_awakening(p)
+                    && !self.fighters[p].is_dead()
+                    && self.fighters[p].cell.is_some()
+            })
+            .collect()
+    }
+
+    /// `State.entersAwakeningZone(plants, entity, from, to)` — does this step
+    /// of the path enter the zone of a plant that is going to wake? Tells
+    /// `move_entity` where to cut. A plant this entity already woke this turn
+    /// will not play again, so there is no point cutting the path for it.
+    fn enters_awakening_zone(
+        &self,
+        plants: &[usize],
+        entity: usize,
+        from: usize,
+        to: usize,
+    ) -> bool {
+        plants.iter().any(|&plant| {
+            let Some(plant_cell) = self.fighters[plant].cell else {
+                return false;
+            };
+            if self.fighters[plant].is_dead() {
+                return false;
+            }
+            let zone = self.awakening_zone(plant);
+            self.map.get_cell_distance(to, plant_cell) <= zone
+                && self.map.get_cell_distance(from, plant_cell) > zone
+                && !self.fighters[plant].awakened_by.contains(&entity)
+        })
+    }
+
+    /// `State.clearPlantTriggers(entity)` — `entity`'s turn is starting, so
+    /// it may wake every plant again. The counter belongs to the entity, not
+    /// to the fight turn: otherwise an entity pushed into a zone during the
+    /// other side's turn would lose the awakening it is owed on its own.
+    pub fn clear_plant_triggers(&mut self, entity: usize) {
+        for fid in 0..self.fighters.len() {
+            if self.has_awakening(fid) {
+                self.fighters[fid].awakened_by.remove(&entity);
+            }
+        }
+    }
+
+    /// `State.awakePlant(plant, trigger)` — queue an awakening. A given
+    /// entity wakes a given plant only once per turn: entering, leaving and
+    /// re-entering within one turn is worth one awakening.
+    ///
+    /// Nothing else happens here, because the plant playing means running an
+    /// AI, and that needs the state borrow this call is holding. The runner
+    /// drains the queue between builtin calls, opening each awakening with
+    /// [`State::next_awakening`]. A `State` driven outside a fight never
+    /// drains it, and the awakening is then a no-op rather than upstream's
+    /// mechanical half — the two differ only for a caller that never plays
+    /// the plant.
+    fn awake_plant(&mut self, plant: usize, trigger: usize) {
+        if self.fighters[plant].awakened_by.contains(&trigger) {
+            return;
+        }
+        self.fighters[plant].awakened_by.insert(trigger);
+
+        self.pending_awakenings.push_back((plant, trigger));
+    }
+
+    /// Is there an awakening to play, or a walk waiting on one? The runner
+    /// asks after every builtin call, so this is the cheap check that a fight
+    /// without plants pays.
+    ///
+    /// False while a plant is already playing: one awakening never starts
+    /// another, and the queue it would have drained is the very queue the
+    /// runner is working through one entry above.
+    #[must_use]
+    pub fn awakening_pending(&self) -> bool {
+        self.awakening_plant.is_none()
+            && (!self.pending_awakenings.is_empty() || self.walk.is_some())
+    }
+
+    /// Open the next queued awakening: the plant gets all its TP back, its
+    /// cooldowns drop a notch, `PLANT_AWAKE` is logged, and it becomes the
+    /// entity allowed to act out of turn ([`State::can_act`]), knowing who
+    /// woke it ([`Fighter::awakening_trigger`]).
+    ///
+    /// Everything but the queueing happens here so that two plants woken by
+    /// the same step still play one after the other — `PLANT_AWAKE` belongs
+    /// to the moment the plant starts playing, not to the moment it was
+    /// noticed. A plant that died in between does not play at all.
+    ///
+    /// `None` when the queue is empty. Pair every `Some` with
+    /// [`State::finish_awakening`].
+    // `fid as i64` for an action-log record: a fid is an index into
+    // `fighters` (a fight holds tens of entities, not billions).
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn next_awakening(&mut self) -> Option<(usize, usize)> {
+        loop {
+            let (plant, trigger) = self.pending_awakenings.pop_front()?;
+            if self.fighters[plant].is_dead() {
+                continue;
+            }
+
+            // A plant's time is counted in awakenings: this, and nowhere
+            // else, is where its cooldowns turn (`start_turn` skips them for
+            // it). A big chip on a cooldown of 3 therefore comes back one
+            // awakening in three, not one turn in three.
+            self.fighters[plant].apply_cooldown();
+            self.fighters[plant].refill_tp();
+
+            // The TP travel with the action: the client cannot guess them,
+            // and without them the plant would show negative TP from its
+            // second awakening of the turn.
+            self.actions.log(Action::PlantAwake {
+                plant_id: plant as i64,
+                trigger_id: trigger as i64,
+                tp: i64::from(self.fighters[plant].tp()),
+            });
+            self.awakening_plant = Some(plant);
+            self.fighters[plant].awakening_trigger = Some(trigger);
+            return Some((plant, trigger));
+        }
+    }
+
+    /// Close the awakening opened by [`State::next_awakening`].
+    ///
+    /// `PLANT_ASLEEP` closes the bracket whatever happened in between,
+    /// including when there was no AI to run: a `SAY` or a `USE_CHIP` does
+    /// not carry the acting entity — the client infers it from the last
+    /// `LEEK_TURN` — so without the closing bound the plant would talk and
+    /// shoot in the passer-by's name.
+    // `fid as i64` for an action-log record: a fid is an index into
+    // `fighters` (a fight holds tens of entities, not billions).
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn finish_awakening(&mut self, plant: usize) {
+        self.awakening_plant = None;
+        self.fighters[plant].awakening_trigger = None;
+        self.actions.log(Action::PlantAsleep {
+            plant_id: plant as i64,
+        });
+    }
+
+    /// Every entity, dead ones included, in `getAllEntities` order: team by
+    /// team, and inside a team in the order they joined it.
+    fn all_entities_in_team_order(&self) -> Vec<usize> {
+        self.teams
+            .iter()
+            .flat_map(|t| t.fighters.iter().copied())
+            .collect()
+    }
+
+    /// `State.applyInitialCooldowns(summon)` — charge a fresh summon with
+    /// whatever is left of the initial cooldowns, counted from the start of
+    /// the *fight* and not from the summoning: a chip with an initial
+    /// cooldown of N stays unavailable until fight turn N + 1 whoever holds
+    /// it, so a summon appearing on turn N + 1 or later can cast it at once.
+    ///
+    /// The summon plays in the current turn, right after its summoner, and
+    /// will therefore tick its cooldowns down once before it can act — hence
+    /// the `+ 2 - turn`, the same `+ 1` the entities present at the start of
+    /// the fight get. Without this a bulb was born with an empty cooldown
+    /// table and ignored the attribute outright.
+    fn apply_initial_cooldowns(&mut self, summon: usize) {
+        let turn = self.order.turn();
+        let initial: Vec<ChipSpec> = self
+            .chip_specs
+            .values()
+            // A team cooldown is already tracked on the team, which got it at
+            // the start of the fight: rewriting it here would restart it.
+            .filter(|c| !c.team_cooldown && c.initial_cooldown >= turn)
+            .cloned()
+            .collect();
+        for chip in &initial {
+            self.add_chip_cooldown(summon, chip, chip.initial_cooldown + 2 - turn);
+        }
+    }
+
+    /// `State.computeStartOrder()` — draw the play order from the entities'
+    /// current frequencies and fill both `order` (the living) and
+    /// `initial_order` (everyone, in the order they were drawn). The
+    /// frequencies used are remembered, so
+    /// [`State::refresh_start_order_after_hooks`] can tell whether they still
+    /// hold.
+    // `compute_start_order` is handed our own fids and gives them back in
+    // turn order, so each `i64` is the `usize` index it started as.
+    #[allow(
+        clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn compute_start_order(&mut self) {
+        self.order = Order::new();
+        self.initial_order.clear();
+        self.start_order_frequencies.clear();
+
+        let start_teams: Vec<Vec<(i64, i64)>> = self
+            .teams
+            .iter()
+            .map(|t| {
+                t.fighters
+                    .iter()
+                    .map(|&f| (f as i64, i64::from(self.fighters[f].stat(STAT_FREQUENCY))))
+                    .collect()
+            })
+            .collect();
+        for team in &start_teams {
+            for &(fid, frequency) in team {
+                self.start_order_frequencies.insert(fid as usize, frequency);
+            }
+        }
+
+        for fid in crate::order::compute_start_order(&start_teams, &mut self.rng) {
+            let fid = fid as usize;
+            if !self.fighters[fid].is_dead() {
+                self.order.add_entity(fid);
+            }
+            self.initial_order.push(fid);
+        }
+    }
+
+    /// `State.refreshStartOrderAfterHooks()` — redraw the play order if a
+    /// `beforeFight()` hook changed any entity's frequency, which a
+    /// `setLoadout()` onto a kit with different components does. Frequency
+    /// decides nothing but the order of play: without this a leek entered
+    /// with its frequency-carrying components, was drawn a slot with them,
+    /// then switched to its real kit and kept the slot.
+    ///
+    /// Conditional so that the fight's randomness is only spent in that case:
+    /// a fight where no frequency moved stays identical, seed for seed.
+    pub fn refresh_start_order_after_hooks(&mut self) {
+        let changed = self.teams.iter().flat_map(|t| t.fighters.iter()).any(|&f| {
+            self.start_order_frequencies.get(&f)
+                != Some(&i64::from(self.fighters[f].stat(STAT_FREQUENCY)))
+        });
+        if changed {
+            self.compute_start_order();
+        }
+    }
+
+    /// `Bulb.getTemplate()` — the bulb template a summon was created from
+    /// (`Fighter::skin` carries its id, as `Bulb`'s constructor does), or
+    /// `None` for anything that is not a summon.
+    #[must_use]
+    pub fn summon_template(&self, fid: usize) -> Option<&BulbTemplate> {
+        if !self.fighters[fid].is_summon() {
+            return None;
+        }
+        self.bulb_templates.get(&self.fighters[fid].skin)
+    }
+
+    /// `Bulb.getType() == Entity.TYPE_PLANT` — the summon is a plant.
+    #[must_use]
+    pub fn is_plant(&self, fid: usize) -> bool {
+        self.summon_template(fid)
+            .is_some_and(BulbTemplate::is_plant)
+    }
+
+    /// `Entity.getAwakeningZone()` — the radius in cells of the entity's
+    /// awakening zone; `0` for everything that plays its own turn.
+    #[must_use]
+    pub fn awakening_zone(&self, fid: usize) -> i32 {
+        self.summon_template(fid).map_or(0, |t| t.zone)
+    }
+
+    /// `Entity.hasAwakening()` — the entity is a plant with a zone, so it
+    /// plays on waking rather than on its turn.
+    #[must_use]
+    pub fn has_awakening(&self, fid: usize) -> bool {
+        self.awakening_zone(fid) > 0
+    }
+
+    /// `State.applySummonStates(summon)` — pin the template's permanent
+    /// states (`ROOTED` for the plants) on a fresh summon as an endless,
+    /// irreducible, self-applied `ADD_STATE` effect.
+    ///
+    /// Called *after* the `ActionInvocation` log, so the client replays the
+    /// effect on an entity that has already appeared.
+    pub fn apply_summon_states(&mut self, fid: usize) {
+        let Some(states) = self.summon_template(fid).map(|t| t.states.clone()) else {
+            return;
+        };
+        for ordinal in states {
+            let params = EffectParams {
+                effect: EffectType::AddState,
+                value1: f64::from(ordinal),
+                value2: 0.0,
+                turns: -1,
+                targets: EffectTargets::all(),
+                modifiers: EffectModifiers::IRREDUCTIBLE,
+            };
+            self.create_effect(
+                &params,
+                1.0,
+                false,
+                fid,
+                fid,
+                0,
+                AttackType::Chip,
+                0.0,
+                false,
+                0,
+                1,
+                0,
+            );
+        }
+    }
+
     /// `Bulb.create` / `BulbTemplate.createInvocation` — build the bulb
     /// fighter (stats scaled by the *owner's* level, frequency 0, RAM 6
     /// capping the template chips), insert it into the team / arena / play
@@ -2064,6 +2816,13 @@ impl State {
         fighter.farmer = self.fighters[owner].farmer;
         fighter.ai_name.clone_from(&self.fighters[owner].ai_name);
         fighter.skin = template.id;
+        // `Bulb.getType()` — a rooted template makes a plant, so an AI sees
+        // `ENTITY_PLANT` rather than `ENTITY_BULB`.
+        fighter.entity_type = if template.is_plant() {
+            TYPE_PLANT
+        } else {
+            TYPE_BULB
+        };
         fighter.summoner = Some(owner);
         fighter.birth_turn = self.order.turn();
         // `Entity.addChip` caps at the bulb's RAM (6).
@@ -2076,6 +2835,7 @@ impl State {
         let team = self.fighters[owner].team;
         let fid = self.add_entity(team, fighter);
         self.order.add_summon(owner, fid);
+        self.apply_initial_cooldowns(fid);
         self.place_entity(fid, target_cell);
 
         // `actions.addEntity(invoc, critical)` — appended to `fight.leeks`
@@ -2108,7 +2868,7 @@ impl State {
         let Some(spec) = self.chip_specs.get(&chip_id).cloned() else {
             return USE_INVALID_TARGET;
         };
-        if self.order.current() != Some(fid) {
+        if !self.can_act(fid) {
             return USE_INVALID_TARGET;
         }
         if spec.cost > self.fighters[fid].tp() {
@@ -2152,11 +2912,13 @@ impl State {
         let critical = self.generate_critical(fid);
         let result = if critical { USE_CRITICAL } else { USE_SUCCESS };
         self.actions.log(Action::UseChip {
-            chip_template: spec.id,
+            chip_template: spec.template,
             cell: target_cell as i32,
             success: result,
         });
-        // caster.onCritical(): passive effects — none in leek scope.
+        if critical {
+            self.fire_passives(fid, crate::attack::PassiveHook::Critical, 0);
+        }
 
         self.resurrect(fid, target_entity, target_cell, critical, full_life);
 
@@ -2234,6 +2996,10 @@ impl State {
             life: self.fighters[entity].life,
             max_life: self.fighters[entity].total_life,
         });
+
+        // Death purged every effect, the template's permanent states with
+        // them — a resurrected plant would come back unrooted.
+        self.apply_summon_states(entity);
     }
 
     /// `EntityAI.addSystemLog` → `FarmerLog.addSystemLogString`: buffer a
@@ -2324,20 +3090,47 @@ mod tests {
         assert_eq!(o.position(), 0);
     }
 
-    /// Removing the current entity at position 0 rolls back to the end of
-    /// the previous round (turn decremented; `next()` re-increments).
+    /// Removing the current entity at position 0 leaves the position at -1
+    /// and the turn counter alone: the next `next()` lands on 0 without
+    /// wrapping, so the round does not restart and no cooldown ticks twice.
     #[test]
-    fn remove_current_at_position_zero_rolls_back_turn() {
+    fn remove_current_at_position_zero_keeps_the_turn() {
         let mut o = order_of(&[1, 2, 3]);
         assert_eq!(o.turn(), 1);
         o.remove_entity(1); // current, index 0
-        // After removal: fids = [2, 3], position = -1 → len-1 = 1, turn 0.
-        assert_eq!(o.position(), 1);
-        assert_eq!(o.current(), Some(3));
-        assert_eq!(o.turn(), 0);
-        assert!(o.next()); // wraps → turn 1, position 0
+        // After removal: fids = [2, 3], position = -1, turn still 1.
+        assert_eq!(o.position(), -1);
+        assert_eq!(o.current(), None);
+        assert_eq!(o.turn(), 1);
+        assert!(!o.next()); // no wrap → still turn 1, position 0
         assert_eq!(o.turn(), 1);
         assert_eq!(o.current(), Some(2));
+    }
+
+    /// `getNextPlayer` / `getPreviousPlayer` wrap around the round, and the
+    /// backwards one survives the transient `position == -1` window left by
+    /// removing the current entity — where the old single `if (p < 0)`
+    /// correction went out of bounds on a one-entity order.
+    #[test]
+    fn order_neighbours_wrap_both_ways() {
+        let mut o = order_of(&[1, 2, 3]);
+        assert_eq!(o.next_player(), Some(2));
+        assert_eq!(o.previous_player(), Some(3)); // wraps to the end
+        o.next();
+        assert_eq!(o.next_player(), Some(3));
+        assert_eq!(o.previous_player(), Some(1));
+
+        // Named entities, independent of whose turn it is.
+        assert_eq!(o.next_player_of(3), Some(1));
+        assert_eq!(o.previous_player_of(1), Some(3));
+        assert_eq!(o.next_player_of(99), None, "not in the order");
+
+        // The removal window: position -1 on a single-entity order.
+        let mut one = order_of(&[1, 2]);
+        one.remove_entity(1);
+        assert_eq!(one.position(), -1);
+        assert_eq!(one.previous_player(), Some(2));
+        assert_eq!(one.next_player(), Some(2));
     }
 
     /// Removing an entity *after* the current position leaves it alone.
@@ -2410,6 +3203,7 @@ mod tests {
     fn weapon_37() -> WeaponSpec {
         WeaponSpec {
             id: 37,
+            template: 1,
             cost: 3,
             min_range: 1,
             max_range: 7,
@@ -2418,6 +3212,7 @@ mod tests {
             max_uses: -1,
             area: Area::SingleCell,
             effects: Vec::new(),
+            passive_effects: Vec::new(),
             forgotten: false,
         }
     }
@@ -2440,6 +3235,196 @@ mod tests {
         s.add_entity(1, b);
         s.weapon_specs.insert(37, weapon_37());
         s
+    }
+
+    /// A summon is charged with what is left of the initial cooldowns,
+    /// counted from the start of the *fight*: a chip with an initial cooldown
+    /// of 2 is unavailable until fight turn 3, whoever holds it: a bulb born
+    /// on turn 1 waits the whole span, one born on turn 3 casts at once.
+    /// Team cooldowns are left alone — the team already carries them.
+    #[test]
+    fn a_summon_inherits_what_is_left_of_the_initial_cooldowns() {
+        fn chip(id: i32, initial: i32, team: bool) -> super::ChipSpec {
+            super::ChipSpec {
+                id,
+                template: id,
+                cost: 1,
+                min_range: 0,
+                max_range: 8,
+                launch_type: 7,
+                needs_los: false,
+                max_uses: -1,
+                area: Area::SingleCell,
+                effects: Vec::new(),
+                cooldown: 0,
+                team_cooldown: team,
+                initial_cooldown: initial,
+                level: 1,
+            }
+        }
+        fn bulb() -> super::BulbTemplate {
+            super::BulbTemplate {
+                id: 1,
+                name: "bulb".into(),
+                life: (10, 10),
+                strength: (0, 0),
+                wisdom: (0, 0),
+                agility: (0, 0),
+                resistance: (0, 0),
+                science: (0, 0),
+                magic: (0, 0),
+                tp: (4, 4),
+                mp: (0, 0),
+                chips: Vec::new(),
+                states: Vec::new(),
+                zone: 0,
+            }
+        }
+
+        let mut s = mini_state();
+        // `mini_state` leaves the play order empty; the turn counter is what
+        // this reads, and it only moves through the order.
+        s.order.add_entity(0);
+        s.order.add_entity(1);
+        s.chip_specs.insert(900, chip(900, 2, false));
+        s.chip_specs.insert(901, chip(901, 0, false));
+        s.chip_specs.insert(902, chip(902, 2, true));
+        s.bulb_templates.insert(1, bulb());
+        s.place_entity(0, 300);
+
+        // Turn 1: the whole span, plus the tick the summon is about to take at
+        // its own start of turn — it plays later in this same turn.
+        let early = s.create_summon(0, 1, 301, 1, false, None);
+        assert_eq!(s.chip_cooldown(early, 900), 3);
+        assert_eq!(s.chip_cooldown(early, 901), 0, "no initial cooldown");
+        assert_eq!(s.chip_cooldown(early, 902), 0, "team cooldown left alone");
+
+        // Turn 2: one turn of the span already gone.
+        while s.order.turn() < 2 {
+            s.order.next();
+        }
+        let mid = s.create_summon(0, 1, 302, 1, false, None);
+        assert_eq!(s.chip_cooldown(mid, 900), 2);
+
+        // Turn 3 is the turn the chip becomes available, for a leek that has
+        // been ticking since the start and for a bulb born right now alike.
+        while s.order.turn() < 3 {
+            s.order.next();
+        }
+        let late = s.create_summon(0, 1, 303, 1, false, None);
+        assert_eq!(s.chip_cooldown(late, 900), 0, "castable at once");
+    }
+
+    /// A plant wakes once per entity per turn, on the step that takes that
+    /// entity *into* its zone — being in the zone already is not entering it
+    /// — and every awakening hands it all its TP back and ticks its cooldowns
+    /// one notch. Its own turn never does either: a plant's time is counted
+    /// in awakenings.
+    #[test]
+    fn a_plant_wakes_once_per_entity_per_turn() {
+        let mut s = mini_state();
+        s.order.add_entity(0);
+        s.order.add_entity(1);
+        s.chip_specs.insert(910, plant_chip());
+        s.bulb_templates.insert(2, plant_template());
+        s.place_entity(0, 300);
+
+        let plant = s.create_summon(0, 2, 301, 1, false, None);
+        s.apply_summon_states(plant);
+        assert!(s.is_plant(plant), "a ROOTED template makes a plant");
+        assert_eq!(s.awakening_zone(plant), 3);
+        let plant_cell = s.fighters[plant].cell.expect("placed");
+
+        // Two cells at known distances from the plant: one outside its zone,
+        // one inside.
+        let outside = (0..s.map.cells.len())
+            .find(|&c| s.map.get_cell_distance(c, plant_cell) == 5)
+            .expect("a cell 5 away");
+        let inside = (0..s.map.cells.len())
+            .find(|&c| s.map.get_cell_distance(c, plant_cell) == 2)
+            .expect("a cell 2 away");
+
+        // The plant starts its life with the chip on its initial cooldown and
+        // some TP spent, so both halves of the awakening are visible.
+        s.fighters[plant].cooldowns.insert(910, 2);
+        let full = s.fighters[plant].tp();
+        s.fighters[plant].use_tp(full);
+        assert_eq!(s.fighters[plant].tp(), 0);
+
+        // Standing still inside the zone is not entering it.
+        s.check_plant_triggers(1, Some(inside), Some(inside));
+        assert!(!s.awakening_pending(), "already inside: no entry");
+
+        // Crossing in wakes it.
+        s.check_plant_triggers(1, Some(outside), Some(inside));
+        let (woken, trigger) = s.next_awakening().expect("an awakening");
+        assert_eq!((woken, trigger), (plant, 1));
+        assert_eq!(s.fighters[plant].tp(), 4, "all its TP back");
+        assert_eq!(s.chip_cooldown(plant, 910), 1, "one notch per awakening");
+        s.finish_awakening(plant);
+
+        // The same entity crossing again in the same turn is worth nothing.
+        s.check_plant_triggers(1, Some(outside), Some(inside));
+        assert!(s.next_awakening().is_none(), "once per entity per turn");
+
+        // Another entity crossing is its own awakening.
+        s.check_plant_triggers(0, Some(outside), Some(inside));
+        assert_eq!(s.next_awakening(), Some((plant, 0)));
+        assert_eq!(s.chip_cooldown(plant, 910), 0, "a second notch");
+        s.finish_awakening(plant);
+
+        // Its own turn ticks nothing: `start_turn` skips the cooldowns of a
+        // zoned plant, and `begin_turn` gives it no AI to run.
+        s.fighters[plant].cooldowns.insert(910, 2);
+        while s.order.current() != Some(plant) {
+            s.order.next();
+        }
+        assert!(matches!(s.begin_turn(), super::BeginTurn::Upkeep(p) if p == plant));
+        assert_eq!(s.chip_cooldown(plant, 910), 2, "not a turn, an awakening");
+
+        // A new turn for entity 1 lets it wake the plant again.
+        s.clear_plant_triggers(1);
+        s.check_plant_triggers(1, Some(outside), Some(inside));
+        assert!(s.next_awakening().is_some(), "its turn came round again");
+    }
+
+    fn plant_chip() -> super::ChipSpec {
+        super::ChipSpec {
+            id: 910,
+            template: 910,
+            cost: 1,
+            min_range: 1,
+            max_range: 8,
+            launch_type: 7,
+            needs_los: false,
+            max_uses: -1,
+            area: Area::SingleCell,
+            effects: Vec::new(),
+            cooldown: 2,
+            team_cooldown: false,
+            initial_cooldown: 0,
+            level: 1,
+        }
+    }
+
+    /// Corn's shape: ROOTED (`EntityState` ordinal 9) with a zone of 3.
+    fn plant_template() -> super::BulbTemplate {
+        super::BulbTemplate {
+            id: 2,
+            name: "corn".into(),
+            life: (100, 100),
+            strength: (0, 0),
+            wisdom: (0, 0),
+            agility: (0, 0),
+            resistance: (0, 0),
+            science: (0, 0),
+            magic: (0, 0),
+            tp: (4, 4),
+            mp: (0, 0),
+            chips: vec![910],
+            states: vec![9],
+            zone: 3,
+        }
     }
 
     /// True if any system-log entry for `farmer` carries the given key (the

@@ -16,8 +16,21 @@ pub trait GameHost {
     fn current_entity(&self) -> i64;
     /// The current turn number (1-based).
     fn turn(&self) -> i64;
+    /// Whether this fight is one of a *lot* run back to back rather than a
+    /// fight launched on its own (`isBatchFight()`). Nothing else tells the
+    /// two apart — a batched fight has the same type and the same context —
+    /// so a host that is never driven that way keeps the default.
+    fn is_batch_fight(&self) -> bool {
+        false
+    }
     /// All entity ids, or only living ones when `alive_only`.
     fn entities(&self, alive_only: bool) -> Vec<i64>;
+    /// The play order — entity ids in the order they take their turns, as
+    /// `StartOrder.compute` drew it. Empty for a host that has not been given
+    /// one, in which case `getNextPlayer`/`getPreviousPlayer` have no answer.
+    fn turn_order(&self) -> &[i64] {
+        &[]
+    }
     fn life(&self, entity: i64) -> Option<i64>;
     fn max_life(&self, entity: i64) -> Option<i64>;
     fn cell(&self, entity: i64) -> Option<i64>;

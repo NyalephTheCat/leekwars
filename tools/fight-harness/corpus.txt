@@ -43,4 +43,9 @@ necromancer_s42  necromancer.leek  42
 necromancer_s99  necromancer.leek  99
 colossus_s1    colossus.leek  1
 colossus_s42   colossus.leek  42
+plant_s1       plant.leek     1
+plant_s42      plant.leek     42
+plantpull_s1   plantpull.leek 1
+plantpull_s99  plantpull.leek 99
+plantpull_s12345 plantpull.leek 12345
 error_s42      error.leek     42

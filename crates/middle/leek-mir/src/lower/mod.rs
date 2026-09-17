@@ -136,6 +136,11 @@ pub(crate) struct MethodCtx {
     /// the LocalId of the synthetic first parameter holding
     /// `this`.
     this_local: Option<LocalId>,
+    /// Whether the body is a constructor. `class` is late-bound in an
+    /// instance method but not here: the receiver is still being built
+    /// when the parameter defaults are filled, so reading its runtime
+    /// class would read a half-made object.
+    is_constructor: bool,
     class_def_id: DefId,
     class_name: String,
     parent_class: Option<String>,

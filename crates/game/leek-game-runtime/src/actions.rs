@@ -55,6 +55,10 @@ pub const STACK_EFFECT: i64 = 14;
 pub const CHEST_OPENED: i64 = 15;
 /// `Action.USE_WEAPON = 16`
 pub const USE_WEAPON: i64 = 16;
+/// `Action.PLANT_AWAKE = 17`
+pub const PLANT_AWAKE: i64 = 17;
+/// `Action.PLANT_ASLEEP = 18`
+pub const PLANT_ASLEEP: i64 = 18;
 
 // Buff / damage type ids
 /// `Action.LOST_PT = 100`  (not a DamageType but used in damage context as a stat-drain)
@@ -215,6 +219,30 @@ pub enum Action {
     ///
     /// Java: `retour.add(Action.USE_WEAPON); retour.add(cell); retour.add(success)`
     UseWeapon { cell: i32, success: i32 },
+
+    /// `ActionPlantAwake` — `[17, plant, trigger, tp]`
+    ///
+    /// A plant waking: an entity has just entered its zone, so the plant
+    /// plays. Emitted in the moving entity's turn, right before the plant's
+    /// own actions — the client uses it to bounce the plant, to show who woke
+    /// it, and to know that what follows is played by the plant and not by
+    /// the entity whose turn it is, until [`Action::PlantAsleep`].
+    ///
+    /// The TP are the plant's once the awakening has refilled them.
+    PlantAwake {
+        plant_id: i64,
+        trigger_id: i64,
+        tp: i64,
+    },
+
+    /// `ActionPlantAsleep` — `[18, plant]`
+    ///
+    /// The end of an awakening: the actions that follow are the turn
+    /// holder's again. Closes the bracket [`Action::PlantAwake`] opened — a
+    /// `SAY` or a `USE_CHIP` does not carry the acting entity, the client
+    /// infers it from the last `LEEK_TURN`, so without a closing bound the
+    /// plant would talk and shoot in the passer-by's name.
+    PlantAsleep { plant_id: i64 },
 
     /// `ActionUseChip` — `[12, chip_template, cell, success]`
     ///
@@ -448,6 +476,16 @@ impl Action {
 
             // [16, cell, success]
             Self::UseWeapon { cell, success } => json!([USE_WEAPON, cell, success]),
+
+            // [17, plant, trigger, tp]
+            Self::PlantAwake {
+                plant_id,
+                trigger_id,
+                tp,
+            } => json!([PLANT_AWAKE, plant_id, trigger_id, tp]),
+
+            // [18, plant]
+            Self::PlantAsleep { plant_id } => json!([PLANT_ASLEEP, plant_id]),
 
             // [12, chip_template, cell, success]
             Self::UseChip {

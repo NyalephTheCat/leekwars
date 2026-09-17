@@ -9,8 +9,9 @@
 )]
 
 use super::{
-    CLASS_PARENT, CLASS_REFLECT, DISPATCH, GLOBALS, LambdaFn, STATIC_FIELDS, STATIC_INIT, STRICT,
-    aborting, builtin_name, builtin_name_ref, handle, raise_runtime_error, val,
+    CLASS_PARENT, CLASS_REFLECT, DISPATCH, GLOBALS, LambdaFn, STATIC_FIELD_OWNER, STATIC_FIELDS,
+    STATIC_INIT, STRICT, aborting, builtin_name, builtin_name_ref, handle, raise_runtime_error,
+    val,
 };
 use leek_runtime::{ClassId, Function, Instance, ObjectData, Value};
 use std::cell::RefCell;
@@ -25,28 +26,59 @@ shim! {
         let Some(field) = (unsafe { builtin_name(name) }) else {
             return handle(Value::Null);
         };
-        let key = (class_def as u32, field);
-        if let Some(h) = STATIC_FIELDS.with(|c| c.borrow().get(&key).copied()) {
-            return h;
-        }
-        // Reserve a null sentinel so a recursive init reads null, not garbage.
-        let sentinel = handle(Value::Null);
-        STATIC_FIELDS.with(|c| c.borrow_mut().insert(key.clone(), sentinel));
-        let init = STATIC_INIT.with(|c| c.borrow().get(&key).copied());
-        if let Some(idx) = init
-            && let Some((addr, _)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied())
-        {
-            // SAFETY: `addr` is a finalized body address from the running
-            // module's `lambda_fns` table, so it has the `LambdaFn` ABI; a
-            // static initialiser takes no captures and no arguments, so an
-            // empty `argv` with `argc == 0` is the whole contract.
-            let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
-            let v = unsafe { f(std::ptr::null(), 0) };
-            STATIC_FIELDS.with(|c| c.borrow_mut().insert(key, v));
-            return v;
-        }
-        sentinel
+        static_get(class_def as u32, field)
     }
+}
+
+/// The storage behind `C.staticField`, lazily initialised. `owner` is the
+/// class that *declares* the field, which is not always the one written: a
+/// subclass shares its parent's box.
+pub(super) fn static_get(owner: u32, field: String) -> *mut Value {
+    let key = (owner, field);
+    if let Some(h) = STATIC_FIELDS.with(|c| c.borrow().get(&key).copied()) {
+        return h;
+    }
+    // Reserve a null sentinel so a recursive init reads null, not garbage.
+    let sentinel = handle(Value::Null);
+    STATIC_FIELDS.with(|c| c.borrow_mut().insert(key.clone(), sentinel));
+    let init = STATIC_INIT.with(|c| c.borrow().get(&key).copied());
+    if let Some(idx) = init
+        && let Some((addr, _)) = DISPATCH.with(|c| c.borrow().lambda_fns.get(&idx).copied())
+    {
+        // SAFETY: `addr` is a finalized body address from the running
+        // module's `lambda_fns` table, so it has the `LambdaFn` ABI; a
+        // static initialiser takes no captures and no arguments, so an
+        // empty `argv` with `argc == 0` is the whole contract.
+        let f: LambdaFn = unsafe { std::mem::transmute::<*const u8, LambdaFn>(addr) };
+        let v = unsafe { f(std::ptr::null(), 0) };
+        STATIC_FIELDS.with(|c| c.borrow_mut().insert(key, v));
+        return v;
+    }
+    sentinel
+}
+
+/// Which class declares the static field `name` reachable from `class_def`,
+/// if any. The owner is what [`static_get`] and `leek_static_set` are keyed
+/// on, so a subclass and its parent name one box.
+pub(super) fn static_field_owner(class_def: u32, name: &str) -> Option<u32> {
+    STATIC_FIELD_OWNER.with(|c| {
+        c.borrow()
+            .get(&class_def)
+            .and_then(|m| m.get(name))
+            .copied()
+    })
+}
+
+/// The static method `name` reachable from `class_def`, as its
+/// `program.functions` index.
+pub(super) fn static_method_idx(class_def: u32, name: &str) -> Option<usize> {
+    DISPATCH.with(|c| {
+        c.borrow()
+            .static_method_resolve
+            .get(&class_def)
+            .and_then(|m| m.get(name))
+            .copied()
+    })
 }
 
 shim! {
@@ -56,6 +88,243 @@ shim! {
             return;
         };
         STATIC_FIELDS.with(|c| c.borrow_mut().insert((class_def as u32, field), val));
+    }
+}
+
+/// A declared slot type, as the tag the typed-write shims take.
+///
+/// A typed slot converts what is written to it, and *refuses* what cannot be
+/// converted — upstream compiles `a.x = 12` on a `string x` to a Java cast
+/// that fails, logs, and leaves the field alone. Conversion is between
+/// numbers, booleans and null; everything else keeps its old value.
+pub mod slot {
+    pub const INTEGER: i64 = 1;
+    pub const REAL: i64 = 2;
+    pub const BOOLEAN: i64 = 3;
+    pub const STRING: i64 = 4;
+    pub const BIG_INTEGER: i64 = 5;
+    /// A class instance: only an instance (or null) may be stored.
+    pub const INSTANCE: i64 = 6;
+    pub const ARRAY: i64 = 7;
+    pub const MAP: i64 = 8;
+    pub const SET: i64 = 9;
+    pub const OBJECT: i64 = 10;
+    /// Added to any of the above for a `T?` slot, where `null` stays `null`
+    /// instead of becoming the type's own value.
+    pub const NULLABLE: i64 = 0x10;
+    /// The base type a tag names, with the nullable bit removed.
+    pub const BASE: i64 = 0x0F;
+    /// Whether a tag names a *reference* type — one upstream stores through a
+    /// Java cast, so a value of another kind is a cast failure rather than a
+    /// conversion.
+    #[must_use]
+    pub fn is_reference(tag: i64) -> bool {
+        matches!(tag & BASE, INSTANCE | ARRAY | MAP | SET | OBJECT)
+    }
+}
+
+/// What `value` becomes when stored in a slot declared with `tag`, or `None`
+/// when the conversion is impossible and the slot must keep what it has.
+pub(super) fn convert_for_slot(value: &Value, tag: i64) -> Option<Value> {
+    let nullable = tag & slot::NULLABLE != 0;
+    if nullable && matches!(value, Value::Null) {
+        return Some(Value::Null);
+    }
+    let converted = match tag & slot::BASE {
+        slot::INTEGER => match value {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Real(_) | Value::BigInt(_) => {
+                Value::Int(value.to_long())
+            }
+            _ => return None,
+        },
+        slot::REAL => match value {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Real(_) | Value::BigInt(_) => {
+                Value::Real(value.to_real())
+            }
+            _ => return None,
+        },
+        slot::BOOLEAN => match value {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Real(_) => {
+                Value::Bool(value.is_truthy())
+            }
+            _ => return None,
+        },
+        // A `string` slot holds a string or null — a Java `String` field, so
+        // a number is a cast that fails rather than a conversion.
+        slot::STRING => match value {
+            Value::Null | Value::String(_) => value.clone(),
+            _ => return None,
+        },
+        slot::BIG_INTEGER => match value {
+            Value::BigInt(_) => value.clone(),
+            Value::Null => leek_runtime::coerce_value_to_bigint(&Value::Int(0)),
+            Value::Bool(_) | Value::Int(_) | Value::Real(_) => {
+                leek_runtime::coerce_value_to_bigint(value)
+            }
+            _ => return None,
+        },
+        // A class-typed slot takes an instance or null. A scalar is the
+        // invalid cast upstream logs and drops.
+        slot::INSTANCE => match value {
+            Value::Bool(_)
+            | Value::Int(_)
+            | Value::Real(_)
+            | Value::BigInt(_)
+            | Value::String(_) => return None,
+            _ => value.clone(),
+        },
+        // A container slot takes that container or null — again a Java cast,
+        // so nothing else converts into it.
+        slot::ARRAY => match value {
+            Value::Null | Value::Array(_) => value.clone(),
+            _ => return None,
+        },
+        slot::MAP => match value {
+            Value::Null | Value::Map(_) => value.clone(),
+            _ => return None,
+        },
+        slot::SET => match value {
+            Value::Null | Value::Set(_) => value.clone(),
+            _ => return None,
+        },
+        slot::OBJECT => match value {
+            Value::Null | Value::Object(_) => value.clone(),
+            _ => return None,
+        },
+        _ => value.clone(),
+    };
+    Some(converted)
+}
+
+shim! {
+    /// The value to store into `base.<name>`, converted to the field's
+    /// declared type — or the field's current value when the conversion is
+    /// impossible, so the write lands as a no-op.
+    ///
+    /// # Safety
+    /// `base` and `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_field_convert(
+        base: *mut Value,
+        name_ptr: *const u8,
+        name_len: i64,
+        value: *mut Value,
+        tag: i64,
+    ) -> *mut Value {
+        let name = unsafe { member_name(name_ptr, name_len) };
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            // SAFETY: handle contract on `base`.
+            None => handle(read_member(unsafe { val(&base) }, name, 4)),
+        }
+    }
+}
+
+shim! {
+    /// [`leek_field_convert`] for a static field, whose current value lives in
+    /// the owning class's storage rather than an instance.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_static_convert(
+        owner: i64,
+        name_ptr: *const u8,
+        name_len: i64,
+        value: *mut Value,
+        tag: i64,
+    ) -> *mut Value {
+        let name = unsafe { member_name(name_ptr, name_len) };
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => static_get(owner as u32, name.to_owned()),
+        }
+    }
+}
+
+shim! {
+    /// [`leek_field_convert`] for a file-level global, whose current value
+    /// lives in the globals table.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_global_convert(
+        name_ptr: *const u8,
+        name_len: i64,
+        value: *mut Value,
+        tag: i64,
+    ) -> *mut Value {
+        let name = unsafe { member_name(name_ptr, name_len) };
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => GLOBALS
+                .with(|g| g.borrow().get(name).copied())
+                .unwrap_or_else(|| handle(Value::Null)),
+        }
+    }
+}
+
+shim! {
+    /// [`leek_field_convert`] with nothing to keep: a `return` through a
+    /// declared type, which answers null when the conversion cannot be done.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_convert_slot(value: *mut Value, tag: i64) -> *mut Value {
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => handle(Value::Null),
+        }
+    }
+}
+
+shim! {
+    /// A parameter bound through its declared type. Unlike a field, there is
+    /// no previous value to keep: upstream compiles a reference-typed
+    /// parameter to a Java cast, and a value of another kind makes that cast
+    /// throw, which reaches the player as `IMPOSSIBLE_CAST`.
+    ///
+    /// # Safety
+    /// `value` must satisfy the
+    /// [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_check_param(value: *mut Value, tag: i64) -> *mut Value {
+        // SAFETY: handle contract on `value`.
+        let v = unsafe { val(&value) };
+        match convert_for_slot(v, tag) {
+            Some(converted) => handle(converted),
+            None => {
+                raise_runtime_error("IMPOSSIBLE_CAST");
+                handle(Value::Null)
+            }
+        }
+    }
+}
+
+shim! {
+    /// Fault an indexed write into a slot that holds nothing. A container
+    /// declaration with no initialiser is a box at null in v1, and upstream's
+    /// generated code reaches its elements through a cast that fails there —
+    /// so `Map m  m['a'] = 7` is IMPOSSIBLE_CAST rather than a write into the
+    /// void.
+    ///
+    /// # Safety
+    /// `base` must satisfy the [handle contract](super#handle-safety-contract).
+    pub extern "C" fn leek_check_container(base: *mut Value, tag: i64) {
+        // SAFETY: handle contract on `base`.
+        let v = unsafe { val(&base) };
+        if matches!(v, Value::Null) || convert_for_slot(v, tag).is_none() {
+            raise_runtime_error("IMPOSSIBLE_CAST");
+        }
     }
 }
 
@@ -82,6 +351,24 @@ pub(super) fn member_by_value(base: &Value, idx: &Value, version: u8) -> Value {
                 .map(|n| Value::String(std::rc::Rc::new(n)))
                 .collect(),
         )));
+    }
+    // A static member on a runtime class-reference: `class.x` / `class.m`
+    // inside an instance method, where `class` is the *receiver's* class and
+    // so is only known here. The compile-time `C.x` form is handled in the
+    // translator; this reaches the same storage through the owning class.
+    if let (Value::ClassRef(def, _), Value::String(member)) = (base, idx) {
+        if let Some(owner) = static_field_owner(def.0, member.as_str()) {
+            let h = static_get(owner, member.as_ref().clone());
+            // SAFETY: `static_get` returns a live handle from the static-field
+            // store, which outlives this read.
+            return unsafe { val(&h) }.clone();
+        }
+        if let Some(idx) = static_method_idx(def.0, member.as_str()) {
+            return Value::Function(Function::Lambda(Rc::new(leek_runtime::LambdaCapture {
+                function_idx: idx,
+                captured: RefCell::new(Vec::new()),
+            })));
+        }
     }
     // `instance['name']` resolves to a stored field first, then (like
     // upstream's indexed member read) to a bound method.
@@ -332,6 +619,15 @@ shim! {
         let name = unsafe { member_name(name_ptr, name_len) };
         let v = unsafe { val(&value) }.clone();
         match unsafe { val(&base) } {
+            // `class.x = v` on a runtime class-reference writes the owning
+            // class's static box, like the compile-time `C.x = v` form.
+            Value::ClassRef(def, _)
+                if static_field_owner(def.0, name).is_some() =>
+            {
+                let owner = static_field_owner(def.0, name).unwrap_or(def.0);
+                STATIC_FIELDS
+                    .with(|c| c.borrow_mut().insert((owner, name.to_owned()), handle(v)));
+            }
             Value::Instance(_) | Value::Object(_) => {
                 leek_runtime::set_field(unsafe { val(&base) }, name, v);
             }

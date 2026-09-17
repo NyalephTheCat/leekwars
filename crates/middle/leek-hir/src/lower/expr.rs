@@ -42,8 +42,9 @@ impl LowerExpr for Lowerer {
                 ExprKind::Index(Box::new(base), Box::new(i))
             }
             AstExpr::Field(f) => {
-                let base = self.lower_expr_or_null(f.base(), span);
+                let mut base = self.lower_expr_or_null(f.base(), span);
                 let field = f.field().map(|t| t.text().to_string()).unwrap_or_default();
+                self.bind_class_statically(&mut base, &field);
                 ExprKind::Field(Box::new(base), field, f.is_optional())
             }
             AstExpr::Map(m) => {
@@ -374,8 +375,10 @@ impl Lowerer {
         } else if c.static_field_names.contains(name) || c.static_method_names.contains(name) {
             // Static field or static method — treat a bare reference as
             // `ClassName.x`. The interp returns a `Value::Function` for
-            // static methods so `x == item` works.
-            NameRef::Class_
+            // static methods so `x == item` works. The class is named
+            // *lexically*: statics are not virtual, and `class` on its own
+            // is the late-bound one.
+            lexical_class(c)
         } else if c.method_names.contains(name) {
             // Bare reference to an instance method value — the interp
             // returns a `BoundMethod` so `var f = m; f(args)` works.
@@ -389,6 +392,36 @@ impl Lowerer {
             span,
         };
         ExprKind::Field(Box::new(base), name.clone(), false)
+    }
+
+    /// Rewrite a `class.<member>` / `super.<member>` base to the class that
+    /// declares `member`, when `member` is a static field or method.
+    ///
+    /// `class` on its own is late-bound — it is the receiver's runtime class,
+    /// which is what `class.name` must report in an inherited method (#2619).
+    /// Static members are not virtual, though: `class.x` and `class.m()`
+    /// reach the same storage and the same body `A.x` and `A.m()` do, and
+    /// naming the class here is what lets the backend resolve them at compile
+    /// time, as it already does for the written-out form.
+    fn bind_class_statically(&self, base: &mut Expr, member: &str) {
+        let Some(c) = self.class_ctx.last() else {
+            return;
+        };
+        if !(c.static_field_names.contains(member) || c.static_method_names.contains(member)) {
+            return;
+        }
+        match base.kind {
+            ExprKind::Name(NameRef::Class_) => base.kind = ExprKind::Name(lexical_class(c)),
+            // `super.x` on a static member names the parent class. A static
+            // lives on the class, so there is no parent *instance* to reach
+            // through and this is the only reading that resolves.
+            ExprKind::Name(NameRef::Super) => {
+                if let Some(parent) = c.parent_def {
+                    base.kind = ExprKind::Name(NameRef::Class(parent));
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn lower_binary(&mut self, b: &ast::BinaryExpr) -> ExprKind {
@@ -530,7 +563,7 @@ impl Lowerer {
                             }
                         } else if matches_static {
                             let receiver = Expr {
-                                kind: ExprKind::Name(NameRef::Class_),
+                                kind: ExprKind::Name(lexical_class(ctx)),
                                 ty: Type::Any,
                                 span,
                             };
@@ -550,8 +583,9 @@ impl Lowerer {
                 }
             }
             Some(AstExpr::Field(f)) => {
-                let receiver = self.lower_expr_or_null(f.base(), span);
+                let mut receiver = self.lower_expr_or_null(f.base(), span);
                 let method = f.field().map(|t| t.text().to_string()).unwrap_or_default();
+                self.bind_class_statically(&mut receiver, &method);
                 Callee::Method {
                     receiver,
                     method,
@@ -608,4 +642,11 @@ impl Lowerer {
         self.pop_scope();
         ExprKind::Lambda(LambdaExpr { params, body })
     }
+}
+
+/// The class a [`ClassCtx`] is lowering, named lexically — falling back to
+/// the late-bound `class` when the context has no `DefId` (a class the file
+/// declarations did not register).
+fn lexical_class(c: &crate::lower::ClassCtx) -> NameRef {
+    c.class_def.map_or(NameRef::Class_, NameRef::Class)
 }

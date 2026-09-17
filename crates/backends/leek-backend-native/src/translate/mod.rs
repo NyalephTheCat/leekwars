@@ -56,8 +56,8 @@ pub use analysis::{lambda_body_idxs, method_value_info, needs_cell_semantics};
 mod classes;
 use classes::{
     aliased_class_locals, builtin_ancestor, class_extends_builtin, class_reflect, classref_locals,
-    new_class_locals, object_field_srcs, object_locals, program_writes_global, receiver_class,
-    resolve_instance_method_value, resolve_static_field, resolve_static_method,
+    global_read_locals, new_class_locals, object_field_srcs, object_locals, program_writes_global,
+    receiver_class, resolve_instance_method_value, resolve_static_field, resolve_static_method,
     resolve_static_method_value, static_field_accesses, static_method_value_refs, super_locals,
 };
 // Surface the resolution tables `lib.rs` builds at the `translate::` path.
@@ -845,6 +845,52 @@ pub fn reflect_name_tables(program: &MirProgram) -> HashMap<u32, HashMap<String,
     out
 }
 
+/// Where each class's reachable static members live, for a `ClassRef` value
+/// met at runtime: `class DefId raw → { name → owning class DefId raw }` for
+/// fields, and `→ { name → program.functions index }` for methods.
+///
+/// Both are flattened over inheritance, most-derived first, because that is
+/// what the lookup needs to be a single map read. Static *storage* belongs to
+/// the class that declares the field, so the field table answers with the
+/// owner rather than the class asked — `B.x` and `A.x` name one box.
+///
+/// The compile-time forms (`A.x`, `A.m()`) resolve in the translator; these
+/// serve `class.x` and `class.m()` inside an instance method, where `class` is
+/// the *receiver's* class and so is only known at run time.
+pub fn static_member_tables(
+    program: &MirProgram,
+) -> (
+    HashMap<u32, HashMap<String, u32>>,
+    HashMap<u32, HashMap<String, usize>>,
+) {
+    let mut fields: HashMap<u32, HashMap<String, u32>> = HashMap::new();
+    let mut methods: HashMap<u32, HashMap<String, usize>> = HashMap::new();
+    for c in &program.classes {
+        let mut f = HashMap::new();
+        let mut m = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut cursor = Some(c.name.clone());
+        while let Some(name) = cursor {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            let Some(owner) = program.class_by_name(&name) else {
+                break;
+            };
+            for fld in &owner.static_fields {
+                f.entry(fld.name.clone()).or_insert(owner.def_id.0);
+            }
+            for meth in owner.methods.iter().filter(|m| m.is_static) {
+                m.entry(meth.name.clone()).or_insert(meth.function_idx);
+            }
+            cursor = owner.parent.clone();
+        }
+        fields.insert(c.def_id.0, f);
+        methods.insert(c.def_id.0, m);
+    }
+    (fields, methods)
+}
+
 /// Classes that are *constructed* anywhere reachable (a `new C(…)` in a
 /// reachable body, or a class-ref constructor thunk) AND declare a 0-arg
 /// `string()` method — returned as `(class DefId raw, string() function idx)`.
@@ -1378,6 +1424,24 @@ pub fn translate_function(
                 _ => builder.ins().iconst(types::I64, 0),
             },
         };
+        // A parameter declared with a *reference* type is a Java cast in
+        // upstream's generated code, so a value of another kind makes it
+        // throw — the player sees IMPOSSIBLE_CAST. Scalar parameters convert
+        // through the calling convention above and never throw.
+        let raw = match param_index.get(&lid) {
+            Some(_)
+                if src_ty == ValTy::Ref
+                    && slot_tag(&mir_fn.locals[i].ty)
+                        .is_some_and(crate::runtime::slot::is_reference) =>
+            {
+                let tag = slot_tag(&mir_fn.locals[i].ty).unwrap_or(0);
+                let check = imports.rt("leek_check_param")?;
+                let tagv = builder.ins().iconst(types::I64, tag);
+                let inst = builder.ins().call(check, &[raw, tagv]);
+                builder.inst_results(inst)[0]
+            }
+            _ => raw,
+        };
         let init = if is_cell {
             // A cell local's var holds a shared `Value::Cell` handle. Box
             // the incoming value to a `Ref` first (a captured scalar param
@@ -1453,8 +1517,25 @@ pub fn translate_function(
     // `default_fill` tells the block's terminator to store its value into the
     // param var + jump to the continuation instead of returning.
     let mut default_fill: HashMap<BlockId, (LocalId, Block)> = HashMap::new();
-    if sig.has_defaults && !uniform_abi {
-        let argc = entry_params[sig.params.len()];
+    // The uniform ABI is declared with a dummy signature (its shape is the
+    // same for every function), so whether this body has defaults to fill is
+    // read off the MIR rather than off `sig`.
+    let has_defaults = sig.has_defaults
+        || (uniform_abi
+            && mir_fn
+                .params
+                .iter()
+                .any(|&p| fillable_default(mir_fn, p).is_some()));
+    if has_defaults {
+        // The count the caller supplied: a hidden trailing param on the direct
+        // convention, the uniform one's own second argument. Reading it on
+        // both is what lets a function called as a *value* — `var h = f;
+        // h(1)` — fill its defaults like a direct call does.
+        let argc = if uniform_abi {
+            entry_params[1]
+        } else {
+            entry_params[sig.params.len()]
+        };
         for (i, &param_local) in mir_fn.params.iter().enumerate() {
             // Fillable defaults (a sub-CFG of control-flow + `Return(Some)`
             // exits) are run by the entry chain; an unfillable param is never
@@ -1493,6 +1574,7 @@ pub fn translate_function(
     let new_classes = new_class_locals(mir_fn);
     let aliased_classes = aliased_class_locals(mir_fn);
     let classref_locals = classref_locals(mir_fn);
+    let global_locals = global_read_locals(mir_fn);
     let super_locals = super_locals(mir_fn);
     let object_locals = object_locals(mir_fn);
     let object_field_srcs = object_field_srcs(mir_fn);
@@ -1514,6 +1596,7 @@ pub fn translate_function(
             vars: &vars,
             var_tys: &var_tys,
             ret_ty,
+            ret_tag: slot_tag(&mir_fn.return_ty),
             lang,
             link_game,
             imports: &imports,
@@ -1525,6 +1608,7 @@ pub fn translate_function(
             new_classes: &new_classes,
             aliased_classes: &aliased_classes,
             classref_locals: &classref_locals,
+            global_locals: &global_locals,
             ctor_thunk_classes,
             owning_class: mir_fn.owning_class,
             cell_locals: &cell_locals,
@@ -1635,6 +1719,11 @@ struct Tx<'a, 'b> {
     vars: &'a [Variable],
     var_tys: &'a [ValTy],
     ret_ty: ValTy,
+    /// The declared-slot tag for the function's return type, when it has one.
+    /// A `return` converts through it: the returned value lands in the
+    /// caller's hands as the type the signature promised, and a conversion
+    /// that cannot be done answers null.
+    ret_tag: Option<i64>,
     lang: Lang,
     /// Route unknown builtins to the host game runtime (see `crate::game`).
     link_game: bool,
@@ -1664,6 +1753,9 @@ struct Tx<'a, 'b> {
     /// Locals proven to hold a `ClassRef(C)` — lets `C.staticMethod()`
     /// dispatch to the static method.
     classref_locals: &'a HashMap<LocalId, String>,
+    /// Locals that hold a file-level global, by name — so an element write
+    /// can find the global's declared type behind the temp it reads into.
+    global_locals: &'a HashMap<LocalId, String>,
     /// Raw `DefId`s of classes with a constructor thunk — a class ref of one
     /// of these may flow as a value (it constructs via `dispatch_call_value`);
     /// others keep skipping at the use-as-value sites.
@@ -2062,6 +2154,7 @@ fn rvalue_ty(rv: &Rvalue, tys: &HashMap<LocalId, ValTy>) -> Option<ValTy> {
             Some(match op {
                 BinOp::Eq
                 | BinOp::Ne
+                | BinOp::LooseEq
                 | BinOp::IdentityEq
                 | BinOp::IdentityNe
                 | BinOp::Lt
@@ -2145,6 +2238,11 @@ fn pinned_valty(t: &Type) -> Option<ValTy> {
         // (`Ref` holds null fine, and the store coercion still applies).
         Type::BigInteger => Some(ValTy::Ref),
         Type::Nullable(t) if matches!(t.as_ref(), Type::BigInteger) => Some(ValTy::Ref),
+        // A container or class slot is always a boxed value, so pin it too —
+        // otherwise a declaration with no initialiser (which stores nothing at
+        // v1) leaves inference with nothing to go on and it guesses a scalar.
+        Type::Array(_) | Type::Map(..) | Type::Set(_) | Type::Object => Some(ValTy::Ref),
+        Type::ClassInstance(..) | Type::Interval => Some(ValTy::Ref),
         // A nullable type can hold null, so it isn't a fixed scalar.
         _ => None,
     }
@@ -2198,6 +2296,26 @@ fn scalar_valty(t: &Type) -> Option<ValTy> {
 /// *non-null* value to — looks through `Nullable` (`real? x = 5` stores
 /// `5.0`). Distinct from [`scalar_valty`], which makes nullable types
 /// `Ref` for representation.
+/// The declared-slot tag a typed write converts through, or `None` for a slot
+/// that takes anything. See [`crate::runtime::slot`] for what each tag means.
+fn slot_tag(t: &Type) -> Option<i64> {
+    use crate::runtime::slot;
+    Some(match t {
+        Type::Integer => slot::INTEGER,
+        Type::Real => slot::REAL,
+        Type::Boolean => slot::BOOLEAN,
+        Type::String => slot::STRING,
+        Type::BigInteger => slot::BIG_INTEGER,
+        Type::ClassInstance(..) => slot::INSTANCE,
+        Type::Array(_) => slot::ARRAY,
+        Type::Map(..) => slot::MAP,
+        Type::Set(_) => slot::SET,
+        Type::Object => slot::OBJECT,
+        Type::Nullable(inner) => slot_tag(inner)? | slot::NULLABLE,
+        _ => return None,
+    })
+}
+
 fn coerce_target_ty(t: &Type) -> Option<ValTy> {
     match t {
         Type::Integer => Some(ValTy::Int),

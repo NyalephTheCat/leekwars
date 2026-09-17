@@ -315,6 +315,35 @@ shim! {
     }
 }
 
+shim! {
+    /// [`leek_value_binop`] with no charging at all — not the dynamic
+    /// string-concat / comparison surcharge either. For a compiler-synthesized
+    /// operation whose upstream equivalent is never evaluated: a `switch` that
+    /// dispatches in one operation never calls `eq()`, so its comparisons must
+    /// not meter one.
+    ///
+    /// # Safety
+    /// `a` and `b` must satisfy the
+    /// [handle contract](super#handle-safety-contract); they may alias, since
+    /// both borrows are shared and nothing here writes through a handle.
+    pub unsafe extern "C" fn leek_value_binop_raw(
+        code: i64,
+        a: *mut Value,
+        b: *mut Value,
+        version: i64,
+    ) -> *mut Value {
+        let Some(op) = binop_from_code(code) else {
+            return handle(Value::Null);
+        };
+        // SAFETY: handle contract on `a`.
+        let l = unsafe { val(&a) };
+        // SAFETY: handle contract on `b`; may alias `a`, but both are shared
+        // borrows and nothing below writes through a handle.
+        let r = unsafe { val(&b) };
+        handle(apply_binop(op, l, r, version as u8))
+    }
+}
+
 /// [`apply_binop`] plus the dynamic string-concat charge — the shim-side
 /// entry so every boxed `Add` meters upstream's concat cost (number→string
 /// conversion + per-char surcharge) exactly once. The pure [`apply_binop`]
@@ -322,8 +351,14 @@ shim! {
 fn apply_binop_charged(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
     match op {
         BinOp::Add => super::state::charge_concat(l, r),
-        BinOp::Eq | BinOp::Ne => super::state::charge_eq(l, r),
+        BinOp::Eq | BinOp::Ne | BinOp::LooseEq => super::state::charge_eq(l, r),
         _ => {}
+    }
+    // A `big_integer` operation whose result would be too large is refused
+    // here rather than attempted: the allocation this guards against is the
+    // one the operation itself would make.
+    if !super::state::charge_bigint(op, l, r) {
+        return Value::Null;
     }
     apply_binop(op, l, r, v)
 }
@@ -436,6 +471,7 @@ pub fn apply_binop(op: BinOp, l: &Value, r: &Value, v: u8) -> Value {
         Pow => rt::pow(l, r),
         Eq => rt::eq(l, r, v),
         Ne => rt::ne(l, r, v),
+        BinOp::LooseEq => rt::loose_eq_any(l, r),
         IdentityEq => rt::identity_eq(l, r),
         IdentityNe => rt::identity_ne(l, r),
         Lt => rt::lt(l, r),
@@ -479,6 +515,7 @@ pub(super) fn binop_from_code(c: i64) -> Option<BinOp> {
         x if x == Pow as i64 => Pow,
         x if x == Eq as i64 => Eq,
         x if x == Ne as i64 => Ne,
+        x if x == BinOp::LooseEq as i64 => BinOp::LooseEq,
         x if x == IdentityEq as i64 => IdentityEq,
         x if x == IdentityNe as i64 => IdentityNe,
         x if x == Lt as i64 => Lt,

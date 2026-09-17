@@ -87,8 +87,8 @@ pub trait EnvironmentCatalog: std::fmt::Debug + Send + Sync {
 pub struct LeekWarsCatalog;
 
 /// One fight constant: `(name, type-kind, value)`. `value` is the
-/// resolved literal (`"37"`, `"0.05"`) — empty when not foldable (e.g.
-/// an enum `.ordinal()`).
+/// resolved literal (`"37"`, `"0.05"`) — empty when the extractor cannot
+/// resolve it, which no constant in the current snapshot hits.
 type ConstRow = (String, String, String);
 
 static LEEKWARS_CONSTS: OnceLock<Vec<ConstRow>> = OnceLock::new();

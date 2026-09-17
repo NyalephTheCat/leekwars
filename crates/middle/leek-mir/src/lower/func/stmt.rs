@@ -1,9 +1,11 @@
 //! Per-function CFG lowering.
 
+use std::collections::HashSet;
+
 use leek_diagnostics::convert;
 use leek_hir::{
     Callee as HirCallee, DoWhileStmt, Expr, ExprKind, ForStmt, ForeachBind, ForeachStmt, IfStmt,
-    NameRef, Stmt, SwitchStmt, VarDecl, WhileStmt,
+    Literal, NameRef, Stmt, SwitchStmt, VarDecl, WhileStmt,
 };
 use leek_types::Type;
 
@@ -114,6 +116,20 @@ impl FnLowerer<'_> {
         }
     }
 
+    /// The value a declaration with no initialiser stores, or `None` for one
+    /// that stays null.
+    ///
+    /// v1 is the whole exception: there a declaration is a box that starts
+    /// null whatever its type, which is why `Map m m['a'] = 7` indexes into
+    /// null and faults there and nowhere else. From v2 a typed slot is never
+    /// null and takes its type's own value.
+    fn declared_default(&self, ty: Option<&Type>) -> Option<Rvalue> {
+        if self.hir.version <= 1 {
+            return None;
+        }
+        ty.and_then(default_rvalue_for_type)
+    }
+
     pub(crate) fn lower_var_decl(&mut self, v: &VarDecl) {
         if v.is_global {
             // A top-level `global x = init` declaration: the
@@ -137,7 +153,7 @@ impl FnLowerer<'_> {
                 // (`ops(default, 1)` upstream) — the 1-op store applies
                 // with or without an explicit initializer.
                 self.push_stmt(Statement::Charge(1));
-                if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
+                if let Some(rv) = self.declared_default(v.ty.as_ref()) {
                     self.push_stmt(Statement::Assign(Place::Global(v.def, v.name.clone()), rv));
                 }
             }
@@ -214,7 +230,7 @@ impl FnLowerer<'_> {
             // (`ops(default, 1)` upstream) — the 1-op store applies with
             // or without an explicit initializer.
             self.push_stmt(Statement::Charge(1));
-            if let Some(rv) = v.ty.as_ref().and_then(default_rvalue_for_type) {
+            if let Some(rv) = self.declared_default(v.ty.as_ref()) {
                 // Typed local with no initializer defaults to its type's
                 // value (container → empty, scalar → zero), matching the
                 // upstream "typed slots are never null" rule.
@@ -229,6 +245,28 @@ impl FnLowerer<'_> {
     }
 
     pub(crate) fn lower_if(&mut self, i: &IfStmt) {
+        // `leek_hir::transform::mark_constant_conditions` decided this `if`
+        // at compile time: emit the taken side alone, with no test, so it
+        // costs *no* operation — not even the one a real test charges — and
+        // the dead arm charges nothing for its body either. The condition is
+        // never lowered, which is what makes `if (DEBUG && expensive())` free
+        // rather than merely cheap.
+        //
+        // Reading the mark rather than re-deciding here is what keeps
+        // `if (constant_call())` a real branch: the mark predates the call
+        // substitution that made its condition a literal, as upstream's own
+        // pass order does.
+        if let Some(taken) = i.const_taken {
+            let branch = if taken {
+                Some(&i.then_branch)
+            } else {
+                i.else_branch.as_ref()
+            };
+            if let Some(branch) = branch {
+                self.lower_stmt(branch);
+            }
+            return;
+        }
         let cond = self.lower_expr_to_operand(&i.cond);
         let then_bb = self.new_block();
         let else_bb = self.new_block();
@@ -528,6 +566,55 @@ impl FnLowerer<'_> {
         self.push_stmt(Statement::Assign(place, read));
     }
 
+    /// A fresh temp holding `rv`, in the block being built.
+    fn materialize_here(&mut self, rv: Rvalue, span: leek_span::Span) -> LocalId {
+        let t = self.fresh_temp(Type::Any, span);
+        self.push_stmt(Statement::Assign(Place::Local(t), rv));
+        t
+    }
+
+    /// The chain that decides which arm a `switch` takes: one loose
+    /// comparison per label, branching to that label's body on a hit and to
+    /// the next test on a miss. Leaves the builder on the block after the
+    /// last test, for the caller to send at the default.
+    ///
+    /// `dispatched` says the selection is upstream's O(1) one, already
+    /// charged in full: the comparisons then compute the same answer for
+    /// nothing, rather than charging an operation each — and, for strings,
+    /// a character-by-character comparison each.
+    fn lower_switch_tests(
+        &mut self,
+        sw: &SwitchStmt,
+        disc_local: LocalId,
+        bodies: &[BlockId],
+        dispatched: bool,
+    ) {
+        for (arm, &body_bb) in sw.arms.iter().zip(bodies) {
+            let Some(case_expr) = &arm.case else { continue };
+            let case = self.lower_expr_to_operand(case_expr);
+            let cmp = self.fresh_temp(Type::Boolean, sw.span);
+            // `eq()`, not `==`: a switch's loose comparison is the same in
+            // every version, so `switch ('1') { case 1: … }` matches at v4 as
+            // it does at v1.
+            let test = Rvalue::Binary(BinOp::LooseEq, Operand::Local(disc_local), case);
+            self.push_stmt(Statement::Assign(
+                Place::Local(cmp),
+                if dispatched {
+                    Rvalue::Synthetic(Box::new(test))
+                } else {
+                    test
+                },
+            ));
+            let next_bb = self.new_block();
+            self.set_terminator(Terminator::Branch {
+                cond: Operand::Local(cmp),
+                then_block: body_bb,
+                else_block: next_bb,
+            });
+            self.resume(next_bb);
+        }
+    }
+
     pub(crate) fn lower_switch(&mut self, sw: &SwitchStmt) {
         // Switch with fall-through. Each case has two blocks:
         //   test_bb: compare discriminant; on hit → body_bb; on
@@ -549,69 +636,79 @@ impl FnLowerer<'_> {
             }
         };
 
-        // Pre-allocate one body block per case + a body block for
-        // the default arm (used both for direct default match and
-        // for fall-through after the last case).
-        let mut case_bodies: Vec<BlockId> = Vec::new();
-        let mut default_body: Option<BlockId> = None;
-        for arm in &sw.arms {
-            if arm.case.is_some() {
-                case_bodies.push(self.new_block());
-            } else {
-                default_body = Some(self.new_block());
-            }
-        }
+        // One body block per arm, in source order — which is also
+        // fall-through order. `default` is an arm like any other: it can sit
+        // in the middle, and a body that falls off its end continues into
+        // whatever is written next, not into the default.
+        let bodies: Vec<BlockId> = sw.arms.iter().map(|_| self.new_block()).collect();
+        let default_body = sw
+            .arms
+            .iter()
+            .position(|a| a.case.is_none())
+            .map(|i| bodies[i]);
         let exit = self.new_block();
 
         self.loop_stack.push(LoopCtx {
-            continue_target: exit,
+            // `break` leaves the switch; `continue` belongs to the enclosing
+            // loop and passes straight through — a switch is not a loop.
+            // With no loop around it, `continue` has nowhere to go but out.
+            continue_target: self
+                .loop_stack
+                .last()
+                .map_or(exit, |outer| outer.continue_target),
             break_target: exit,
         });
 
-        // First pass: emit the test chain.
+        // Upstream emits a real Java `switch` — one O(1) dispatch, charged a
+        // single operation however many cases there are — when every label is
+        // a constant of one kind and the subject is that kind too, because
+        // `eq()` then reduces to strict equality. The comparisons below are
+        // that same selection, so only the charging changes.
         let default_target = default_body.unwrap_or(exit);
-        let mut case_iter = case_bodies.iter().copied();
-        for arm in &sw.arms {
-            let Some(case_expr) = &arm.case else { continue };
-            let body_bb = case_iter.next().unwrap();
-            let case = self.lower_expr_to_operand(case_expr);
-            let cmp = self.fresh_temp(Type::Boolean, sw.span);
-            // The comparison is `Synthetic`: upstream charges one op per
-            // case test (reference.tsv: `var x = 2 switch (x) { case 1: ...
-            // case 2: ... }` = 4 ops), which is the flow-control charge
-            // below — the equality itself must not add another (#78).
-            self.push_stmt(Statement::Assign(
-                Place::Local(cmp),
-                Rvalue::Synthetic(Box::new(Rvalue::Binary(
-                    BinOp::Eq,
-                    Operand::Local(disc_local),
-                    case,
-                ))),
-            ));
-            let next_bb = self.new_block();
-            // Each case test costs 1 op (flow-control charge; the
-            // native backend's branches themselves are free).
-            self.push_stmt(Statement::Charge(1));
-            self.set_terminator(Terminator::Branch {
-                cond: Operand::Local(cmp),
-                then_block: body_bb,
-                else_block: next_bb,
-            });
-            self.resume(next_bb);
+        match constant_dispatch(sw, &self.locals[disc_local.0 as usize].ty) {
+            Dispatch::Chain => {
+                self.lower_switch_tests(sw, disc_local, &bodies, false);
+                self.goto(default_target);
+            }
+            Dispatch::Direct => {
+                self.push_stmt(Statement::Charge(1));
+                self.lower_switch_tests(sw, disc_local, &bodies, true);
+                self.goto(default_target);
+            }
+            // A subject only known at run time gets upstream's *guarded*
+            // form: when the value turns out to be of the labels' kind the
+            // dispatch is the same O(1) one, and when it is not the loose
+            // `eq()` chain is the only thing that can compare across kinds.
+            // Both select the same arm; what differs is what they cost.
+            Dispatch::Guarded(class) => {
+                let cls = self.materialize_here(Rvalue::BuiltinRef(class.to_string()), sw.span);
+                let ok = self.materialize_here(
+                    Rvalue::Synthetic(Box::new(Rvalue::Binary(
+                        BinOp::Instanceof,
+                        Operand::Local(disc_local),
+                        Operand::Local(cls),
+                    ))),
+                    sw.span,
+                );
+                let fast = self.new_block();
+                let slow = self.new_block();
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(ok),
+                    then_block: fast,
+                    else_block: slow,
+                });
+                self.resume(fast);
+                self.push_stmt(Statement::Charge(1));
+                self.lower_switch_tests(sw, disc_local, &bodies, true);
+                self.goto(default_target);
+                self.resume(slow);
+                self.lower_switch_tests(sw, disc_local, &bodies, false);
+                self.goto(default_target);
+            }
         }
-        self.goto(default_target);
 
-        // Second pass: emit each case body. Tail fall-through
-        // goto chains to the next body in source order; the
-        // default body (if any) is the chain's final stop before
-        // `exit`.
-        let body_after =
-            |i: usize, case_bodies: &[BlockId], default: Option<BlockId>, exit: BlockId| {
-                if let Some(next) = case_bodies.get(i + 1).copied() {
-                    return next;
-                }
-                default.unwrap_or(exit)
-            };
+        // Second pass: emit each body, each falling through to the next arm
+        // in source order and the last one to `exit`.
         //
         // Every body entered — by a match or by falling through from
         // the previous body — costs 1 op: upstream opens each Java
@@ -620,25 +717,91 @@ impl FnLowerer<'_> {
         // return 99 } case 2: ... }` = 7 ops, #78). Upstream merges
         // stacked labels (`case 1: case 2:`) into one test charged per
         // label; charging each empty body here yields the same total.
-        let mut case_index = 0usize;
-        for arm in &sw.arms {
-            if arm.case.is_some() {
-                let body_bb = case_bodies[case_index];
-                self.resume(body_bb);
-                self.push_stmt(Statement::Charge(1));
-                self.lower_block_stmts(&arm.body);
-                let next = body_after(case_index, &case_bodies, default_body, exit);
-                self.goto(next);
-                case_index += 1;
-            } else if let Some(default_bb) = default_body {
-                self.resume(default_bb);
-                self.push_stmt(Statement::Charge(1));
-                self.lower_block_stmts(&arm.body);
-                self.goto(exit);
-            }
+        for (i, arm) in sw.arms.iter().enumerate() {
+            self.resume(bodies[i]);
+            self.push_stmt(Statement::Charge(1));
+            self.lower_block_stmts(&arm.body);
+            self.goto(bodies.get(i + 1).copied().unwrap_or(exit));
         }
 
         self.loop_stack.pop();
         self.resume(exit);
+    }
+}
+
+/// How a `switch` selects its arm — which is a question about what it costs,
+/// not about what it answers: every form below compares the same way.
+enum Dispatch {
+    /// One loose comparison per label, charged an operation each.
+    Chain,
+    /// Upstream's O(1) Java `switch`, charged one operation however many
+    /// cases there are: every label is a constant of one kind and the subject
+    /// is declared that kind, so `eq()` reduces to strict equality.
+    Direct,
+    /// The same dispatch behind a run-time kind test, for a subject whose
+    /// type is only known then — the named builtin class is the labels' kind.
+    /// A value of another kind falls back to the chain, which is the only
+    /// thing that can compare across kinds.
+    Guarded(&'static str),
+}
+
+/// Which form a `switch` takes.
+///
+/// Upstream's conditions, and its reasons: every label must be a constant of
+/// one kind — all `integer`s in Java's `int` range, or all strings — with no
+/// duplicate (a Java `switch` would not compile with one, so upstream keeps
+/// the chain, where the first case wins), at most one `default`, and at least
+/// one label. A subject declared that kind dispatches directly; one of
+/// *another* scalar kind cannot match a label strictly at all, so it keeps
+/// the chain; anything else — a `var` — gets the guarded form.
+fn constant_dispatch(sw: &SwitchStmt, subject: &Type) -> Dispatch {
+    let labels: Vec<&Expr> = sw.arms.iter().filter_map(|a| a.case.as_ref()).collect();
+    if labels.is_empty() || sw.arms.iter().filter(|a| a.case.is_none()).count() > 1 {
+        return Dispatch::Chain;
+    }
+    let strings = matches!(labels[0].kind, ExprKind::Literal(Literal::String(_)));
+    let mut seen: HashSet<String> = HashSet::new();
+    for label in labels {
+        let key = match (strings, constant_label(label)) {
+            (true, Some(Label::Str(s))) => s,
+            (false, Some(Label::Int(n))) => n.to_string(),
+            _ => return Dispatch::Chain,
+        };
+        if !seen.insert(key) {
+            return Dispatch::Chain;
+        }
+    }
+    let want = if strings { Type::String } else { Type::Integer };
+    if *subject == want {
+        return Dispatch::Direct;
+    }
+    // A subject of another scalar kind can never match a constant label
+    // strictly, so the guard would be dead and the chain is all there is.
+    if matches!(
+        subject,
+        Type::Integer | Type::String | Type::Real | Type::Boolean | Type::Null
+    ) {
+        return Dispatch::Chain;
+    }
+    Dispatch::Guarded(if strings { "String" } else { "Integer" })
+}
+
+enum Label {
+    Int(i32),
+    Str(String),
+}
+
+/// A case label as the constant it is, when it is one. `case -1:` is a unary
+/// minus on a literal rather than a literal, and an integer outside Java's
+/// `int` range cannot be a Java `switch` label at all.
+fn constant_label(e: &Expr) -> Option<Label> {
+    match &e.kind {
+        ExprKind::Literal(Literal::String(s)) => Some(Label::Str(s.clone())),
+        ExprKind::Literal(Literal::Int(n)) => i32::try_from(*n).ok().map(Label::Int),
+        ExprKind::Unary(leek_hir::UnaryOp::Neg, x) => match &x.kind {
+            ExprKind::Literal(Literal::Int(n)) => i32::try_from(-*n).ok().map(Label::Int),
+            _ => None,
+        },
+        _ => None,
     }
 }

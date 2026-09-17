@@ -244,7 +244,10 @@ impl Lowerer {
         // First sweep: collect field and method names so method
         // bodies can resolve bare references back to `this.field`
         // or static calls on `class`.
-        let mut ctx = ClassCtx::default();
+        let mut ctx = ClassCtx {
+            class_def: Some(id),
+            ..ClassCtx::default()
+        };
         // Seed with inherited members from the parent chain so a
         // bare `m()` inside a subclass method resolves through the
         // chain (e.g. `class B extends A { r() { return m() } }`
@@ -259,6 +262,7 @@ impl Lowerer {
                 let Some(NameKind::Class(pid)) = self.file_decls.get(&pname).copied() else {
                     break;
                 };
+                ctx.parent_def.get_or_insert(pid);
                 let Some(Def::Class(pclass)) = self.out.defs.get(pid.0 as usize) else {
                     break;
                 };
@@ -496,9 +500,30 @@ impl Lowerer {
             let param_ty = if is_by_ref {
                 None
             } else {
-                p.children()
+                let declared = p
+                    .children()
                     .find(|n| n.kind() == SyntaxKind::TypeRef)
-                    .map(|n| leek_types::type_from_node(&n))
+                    .map(|n| leek_types::type_from_node(&n));
+                // A primitive parameter cannot hold its own `null` default:
+                // upstream emitted `long u_to = null`, which javac rejects,
+                // and now treats such a parameter as untyped instead (prod
+                // error #11872155). So `f(integer to = null)` really does
+                // answer `null` for `f()`, and keeps `2.5` for `f(2.5)`.
+                // A reference type already holds null and is unchanged, and
+                // so is a primitive with a non-null default.
+                match (&declared, &default) {
+                    (Some(ty), Some(d))
+                        if matches!(
+                            ty,
+                            leek_types::Type::Integer
+                                | leek_types::Type::Real
+                                | leek_types::Type::Boolean
+                        ) && matches!(d.kind, ExprKind::Literal(Literal::Null)) =>
+                    {
+                        None
+                    }
+                    _ => declared,
+                }
             };
             out.push(Param {
                 def: id,

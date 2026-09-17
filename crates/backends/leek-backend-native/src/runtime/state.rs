@@ -5,8 +5,10 @@
 
 use super::{
     CLASS_CTOR_THUNK, CLASS_PARENT, CLASS_REFLECT, CLASS_STRING_METHOD, DISPATCH, GLOBALS,
-    NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELDS, STATIC_INIT, STRICT,
+    NATIVE_RNG, OP_COUNT, OP_LIMIT, RUNTIME_ERROR, STATIC_FIELD_OWNER, STATIC_FIELDS, STATIC_INIT,
+    STRICT,
 };
+use leek_mir::BinOp;
 use leek_runtime::{Rng, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -163,6 +165,91 @@ pub(super) fn charge_concat(l: &Value, r: &Value) {
 /// first mismatch. An equal 1-entry map pair is therefore 10 ops upstream
 /// (`return [5: 5] == [5: 5]`, reference.tsv) where this charges 8. As
 /// elsewhere in this function, only the top-level operand pair is priced.
+/// Upstream's `BigIntegerValue.MAX_BITLENGTH` — the size past which a
+/// `big_integer` result is refused outright rather than allocated.
+const MAX_BITLENGTH: u64 = 1 << 20;
+
+/// Upstream's `BigIntegerValue.mulCost`: the cost of multiplying (or
+/// dividing) two numbers of these bit lengths, as the product of their sizes
+/// in 64-bit words. An upper bound on the real cost — Java goes sub-quadratic
+/// past a few thousand bits — so it never under-charges, and it is what stops
+/// successive squaring where a linear cost let it run.
+fn mul_cost(bits_a: u64, bits_b: u64) -> i64 {
+    let wa = (bits_a / 64).max(1);
+    let wb = (bits_b / 64).max(1);
+    i64::try_from(1 + wa.saturating_mul(wb) / 8).unwrap_or(i64::MAX)
+}
+
+/// Whether a `big_integer` result of `bits` bits may be produced. Refusing it
+/// *before* the operation is the point: the allocation upstream is guarding
+/// against is the one the operation itself would make.
+fn result_fits(bits: u64) -> bool {
+    if bits > MAX_BITLENGTH {
+        raise_runtime_error("OUT_OF_MEMORY");
+        return false;
+    }
+    true
+}
+
+/// Charge a `big_integer` operation, and answer whether it may run at all.
+///
+/// Two things a plain per-operation charge cannot do: a multiplication's cost
+/// grows with the *product* of its operands' sizes, so successive squaring
+/// pays for what it actually costs; and an operation whose result would
+/// exceed [`MAX_BITLENGTH`] is refused before it allocates, because by the
+/// time a size check on the result could run, the hundreds of megabytes are
+/// already there.
+pub(super) fn charge_bigint(op: BinOp, l: &Value, r: &Value) -> bool {
+    if !matches!(l, Value::BigInt(_)) && !matches!(r, Value::BigInt(_)) {
+        return true;
+    }
+    let bits = |v: &Value| match v {
+        Value::BigInt(b) => b.bits(),
+        _ => 64,
+    };
+    let (a, b) = (bits(l), bits(r));
+    // A shift's *effective* amount: only a left shift grows the number, and a
+    // right shift by a negative amount is a left shift.
+    let shift = |sign: i64| r.to_long().saturating_mul(sign);
+    match op {
+        BinOp::Mul => {
+            if !result_fits(a.saturating_add(b)) {
+                return false;
+            }
+            leek_charge_ops(mul_cost(a, b));
+        }
+        BinOp::Div | BinOp::IntDiv | BinOp::Mod => leek_charge_ops(mul_cost(a, b)),
+        BinOp::Pow => {
+            let exponent = r.to_long();
+            if a > 1 && exponent > 0 {
+                let result_bits = u64::try_from(exponent)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(a);
+                if !result_fits(result_bits) {
+                    return false;
+                }
+                leek_charge_ops(mul_cost(result_bits / 2, result_bits / 2));
+            }
+        }
+        BinOp::ShiftL | BinOp::ShiftR | BinOp::UShiftR => {
+            let amount = shift(if matches!(op, BinOp::ShiftL) { 1 } else { -1 });
+            if amount > 0 {
+                let amount = u64::try_from(amount).unwrap_or(u64::MAX);
+                if !result_fits(a.saturating_add(amount)) {
+                    return false;
+                }
+                leek_charge_ops(if amount < 4000 {
+                    1
+                } else {
+                    i64::try_from(amount / 2000).unwrap_or(i64::MAX)
+                });
+            }
+        }
+        _ => {}
+    }
+    true
+}
+
 pub(super) fn charge_eq(l: &Value, r: &Value) {
     let utf16 = |s: &str| leek_runtime::len_as_int(leek_runtime::jstr::len16(s));
     // `ops(1)` unconditionally, then the per-element part only when the
@@ -307,6 +394,16 @@ pub fn set_static_init(map: HashMap<(u32, String), usize>) {
     STATIC_INIT.with(|c| *c.borrow_mut() = map);
 }
 
+/// Install the static-method-resolution table for this run.
+pub fn set_static_method_resolve(map: HashMap<u32, HashMap<String, usize>>) {
+    DISPATCH.with(|c| c.borrow_mut().static_method_resolve = map);
+}
+
+/// Install the static-field ownership table for this run.
+pub fn set_static_field_owner(map: HashMap<u32, HashMap<String, u32>>) {
+    STATIC_FIELD_OWNER.with(|c| *c.borrow_mut() = map);
+}
+
 /// Reset the global + static-field stores. Called before every JIT run so a
 /// run can't observe a previous run's mutable class state.
 pub fn clear_globals() {
@@ -325,4 +422,100 @@ pub fn set_lambda_fns(map: HashMap<usize, (*const u8, usize)>) {
 /// Install the per-lambda user-param `@`-by-ref masks for this run.
 pub fn set_lambda_byref(map: HashMap<usize, Vec<bool>>) {
     DISPATCH.with(|c| c.borrow_mut().lambda_byref = map);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-entrant runs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Everything a JIT run arms for itself, saved so a *nested* run can arm its
+/// own and hand it back.
+///
+/// A run is normally the outermost thing on the thread, so it clears the
+/// globals, reseeds the PRNG, publishes its module's dispatch tables and
+/// resets the op counter — all thread-locals. One fight breaks that: a plant
+/// waking runs its AI from inside another entity's turn, i.e. from inside a
+/// builtin call made by a run that is still going. Without this save/restore
+/// the interrupted run would come back to cleared globals, another module's
+/// dispatch tables and a spent op budget.
+///
+/// Opaque on purpose: the fields are the runtime's own per-run thread-locals,
+/// and the only supported use is [`save_run_state`] followed by
+/// [`restore_run_state`].
+pub struct RunState {
+    globals: HashMap<String, *mut Value>,
+    static_fields: HashMap<(u32, String), *mut Value>,
+    static_init: HashMap<(u32, String), usize>,
+    static_field_owner: HashMap<u32, HashMap<String, u32>>,
+    class_parent: HashMap<u32, Option<(u32, String)>>,
+    class_ctor_thunk: HashMap<u32, usize>,
+    class_string_method: HashMap<u32, usize>,
+    class_reflect: HashMap<u32, HashMap<String, Vec<String>>>,
+    dispatch: super::DispatchTables,
+    rng: Rng,
+    runtime_error: Option<String>,
+    abort: bool,
+    call_depth: u32,
+    max_call_depth: u32,
+    stack_floor: usize,
+    strict: bool,
+    op_count: u64,
+    op_limit: u64,
+    display_version: u8,
+}
+
+/// Take the per-run thread-local state, leaving each slot at its default so
+/// the nested run starts clean. See [`RunState`].
+#[must_use]
+pub fn save_run_state() -> RunState {
+    RunState {
+        globals: GLOBALS.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        static_fields: STATIC_FIELDS.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        static_init: STATIC_INIT.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        static_field_owner: STATIC_FIELD_OWNER.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_parent: CLASS_PARENT.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_ctor_thunk: CLASS_CTOR_THUNK.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_string_method: CLASS_STRING_METHOD.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        class_reflect: CLASS_REFLECT.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        dispatch: DISPATCH.with(|g| std::mem::take(&mut *g.borrow_mut())),
+        rng: NATIVE_RNG.with(|r| std::mem::replace(&mut *r.borrow_mut(), Rng::new())),
+        runtime_error: RUNTIME_ERROR.with(|e| e.borrow_mut().take()),
+        abort: super::ABORT.with(std::cell::Cell::get),
+        call_depth: super::CALL_DEPTH.with(std::cell::Cell::get),
+        max_call_depth: super::MAX_CALL_DEPTH.with(std::cell::Cell::get),
+        stack_floor: super::STACK_FLOOR.with(std::cell::Cell::get),
+        strict: STRICT.with(std::cell::Cell::get),
+        op_count: OP_COUNT.with(std::cell::Cell::get),
+        op_limit: OP_LIMIT.with(std::cell::Cell::get),
+        display_version: leek_runtime::DISPLAY_VERSION.with(std::cell::Cell::get),
+    }
+}
+
+/// Put back what [`save_run_state`] took.
+///
+/// The operations the nested run charged are added to the interrupted run's
+/// counter rather than discarded: upstream does the same
+/// (`previousOperations + ai.operations()`), so an AI still pays for what the
+/// closure it handed to `summon()` spends.
+pub fn restore_run_state(saved: RunState) {
+    let nested_ops = OP_COUNT.with(std::cell::Cell::get);
+    GLOBALS.with(|g| *g.borrow_mut() = saved.globals);
+    STATIC_FIELDS.with(|g| *g.borrow_mut() = saved.static_fields);
+    STATIC_INIT.with(|g| *g.borrow_mut() = saved.static_init);
+    STATIC_FIELD_OWNER.with(|g| *g.borrow_mut() = saved.static_field_owner);
+    CLASS_PARENT.with(|g| *g.borrow_mut() = saved.class_parent);
+    CLASS_CTOR_THUNK.with(|g| *g.borrow_mut() = saved.class_ctor_thunk);
+    CLASS_STRING_METHOD.with(|g| *g.borrow_mut() = saved.class_string_method);
+    CLASS_REFLECT.with(|g| *g.borrow_mut() = saved.class_reflect);
+    DISPATCH.with(|g| *g.borrow_mut() = saved.dispatch);
+    NATIVE_RNG.with(|r| *r.borrow_mut() = saved.rng);
+    RUNTIME_ERROR.with(|e| *e.borrow_mut() = saved.runtime_error);
+    super::ABORT.with(|a| a.set(saved.abort));
+    super::CALL_DEPTH.with(|c| c.set(saved.call_depth));
+    super::MAX_CALL_DEPTH.with(|c| c.set(saved.max_call_depth));
+    super::STACK_FLOOR.with(|c| c.set(saved.stack_floor));
+    STRICT.with(|s| s.set(saved.strict));
+    OP_COUNT.with(|c| c.set(saved.op_count.saturating_add(nested_ops)));
+    OP_LIMIT.with(|c| c.set(saved.op_limit));
+    leek_runtime::DISPLAY_VERSION.with(|c| c.set(saved.display_version));
 }

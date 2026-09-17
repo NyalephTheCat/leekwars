@@ -237,18 +237,49 @@ function hypot(real x, real y) -> real;
  * @return 1 if number is positive, 0 if it is 0 and -1 if it is negative.
  */
 function signum(real number) -> integer;
+function signum(big_integer number) -> integer;
 
 /**
  * @param x
  * @return
  */
 function bitCount(integer x) -> integer;
+function bitCount(big_integer x) -> integer;
 
 /**
  * @param x
  * @return
  */
 function trailingZeros(integer x) -> integer;
+function trailingZeros(big_integer x) -> integer;
+
+/**
+ * @param x
+ * @return
+ */
+function bitLength(integer x) -> integer;
+function bitLength(big_integer x) -> integer;
+
+/**
+ * @param x
+ * @param pos
+ * @param val
+ * @return
+ */
+function setBit(integer x, integer pos) -> integer;
+function setBit(integer x, integer pos, integer val) -> integer;
+function setBit(integer x, integer pos, boolean val) -> integer;
+function setBit(big_integer x, integer pos) -> big_integer;
+function setBit(big_integer x, integer pos, integer val) -> big_integer;
+function setBit(big_integer x, integer pos, boolean val) -> big_integer;
+
+/**
+ * @param x
+ * @param pos
+ * @return
+ */
+function testBit(integer x, integer pos) -> boolean;
+function testBit(big_integer x, integer pos) -> boolean;
 
 /**
  * @param x

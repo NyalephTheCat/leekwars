@@ -75,12 +75,16 @@ pub const DIR_WEST: u8 = 3;
 pub fn obstacle_size(id: i32) -> Option<i32> {
     match id {
         // size 1
-        5 | 20 | 21 | 22 | 32 | 38 | 40 | 41 | 42 | 48 | 50 | 53 | 55 | 57 | 59 | 62 | 63 | 66
-        | 31 => Some(1),
-        // size 2
-        11 | 17 | 18 | 34 | 43 | 44 | 45 | 46 | 47 | 49 | 52 | 54 | 56 | 58 | 61 | 64 | 65 => {
-            Some(2)
+        5 | 20 | 21 | 22 | 32 | 38 | 40 | 41 | 42 | 48 | 50 | 53 | 55 | 57 | 59 | 62 | 63 | 66 => {
+            Some(1)
         }
+        // size 2. The generator's 3.00 data pass lined this list up with the
+        // client's own rendering table (`ground.ts`): twelve ids it had been
+        // treating as size 1 — 31 among them — are drawn as 2×2 walls, and
+        // three of their four cells stayed walkable on the fixed maps and the
+        // boss arenas.
+        2 | 4 | 10 | 11 | 12 | 14 | 15 | 17 | 18 | 19 | 23 | 25 | 31 | 33 | 34 | 37 | 43 | 44
+        | 45 | 46 | 47 | 49 | 52 | 54 | 56 | 58 | 61 | 64 | 65 => Some(2),
         // size 3
         51 => Some(3),
         // size 4
@@ -127,7 +131,6 @@ pub struct Cell {
     astar_visited_run: i32,
     astar_closed_run: i32,
     pub(crate) cost: i32,
-    weight: f32,
     parent: Option<usize>,
 }
 
@@ -192,7 +195,6 @@ impl Cell {
             astar_visited_run: 0,
             astar_closed_run: 0,
             cost: 0,
-            weight: 0.0,
             parent: None,
         }
     }
@@ -418,71 +420,61 @@ impl Map {
 
     // ── Connected components (composantes connexes) ──────────────────────────
 
-    /// `Map.computeComposantes()` — label walkable/obstacle regions.
+    /// `Map.COMPOSANTE_NEIGHBORS` — the four steps the flood fill takes.
+    const COMPOSANTE_NEIGHBORS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+    /// `Map.computeComposantes()` — number the connected components: two
+    /// cells carry the same number if and only if you can walk from one to
+    /// the other crossing only cells of the same nature (all walkable, or all
+    /// obstacle).
     ///
-    /// Port is a verbatim translation of the Java nested-loop union-find.
-    /// The resulting `cell.composante` values are used to check whether two
-    /// entities can reach each other.
+    /// Call it again after any change to walkability (obstacles cleared
+    /// around a turret, say): the numbers are what map generation asks
+    /// whether the two sides can reach each other, and a stale one accepts or
+    /// rejects a map on the wrong answer.
+    ///
+    /// A flood fill, as upstream's is since the 3.00 rewrite. The scanline
+    /// pass it replaced merged an equivalence only across the rows it had
+    /// already seen, so one component could keep two numbers — on seed 5,
+    /// cell 263 came out unreachable from cell 1 with a clear path between
+    /// them.
     // Same extents and offsets as `Map::new`: `max - min + 1` is positive
     // and `c.x - min_x` is non-negative because `min_x` is the minimum.
     #[allow(clippy::cast_sign_loss)]
     pub fn compute_composantes(&mut self) {
         let sx = (self.max_x - self.min_x + 1) as usize;
         let sy = (self.max_y - self.min_y + 1) as usize;
+        // 0 = not yet visited.
+        let mut connexe: Vec<Vec<i32>> = vec![vec![0_i32; sy]; sx];
 
-        // connexe[x][y] = component label, or -1 for empty (no cell here)
-        let mut connexe: Vec<Vec<i32>> = vec![vec![-1_i32; sy]; sx];
-        let mut ni: i32 = 1;
+        let at = |c: usize, cells: &[Cell], min_x: i32, min_y: i32| {
+            ((cells[c].x - min_x) as usize, (cells[c].y - min_y) as usize)
+        };
 
-        for x in 0..sx {
-            for y in 0..sy {
-                // Is there a cell here?
-                let c_id = match self.coord[x][y] {
-                    Some(id) => id,
-                    None => continue,
-                };
-                let c_walkable = self.cells[c_id].walkable;
-
-                let mut cur_number: i32 = 0;
-
-                // Check left neighbour
-                if x > 0 {
-                    if let Some(left_id) = self.coord[x - 1][y] {
-                        if self.cells[left_id].walkable == c_walkable {
-                            cur_number = connexe[x - 1][y];
-                        }
+        let mut ni = 0;
+        let mut stack: Vec<usize> = Vec::new();
+        for start in 0..self.cells.len() {
+            let (x, y) = at(start, &self.cells, self.min_x, self.min_y);
+            if connexe[x][y] != 0 {
+                continue;
+            }
+            ni += 1;
+            connexe[x][y] = ni;
+            stack.push(start);
+            while let Some(cell) = stack.pop() {
+                for (dx, dy) in Self::COMPOSANTE_NEIGHBORS {
+                    let Some(next) = self.get_next_cell(cell, dx, dy) else {
+                        continue;
+                    };
+                    if self.cells[next].walkable != self.cells[start].walkable {
+                        continue;
                     }
-                }
-
-                // Check above neighbour
-                if y > 0 {
-                    if let Some(above_id) = self.coord[x][y - 1] {
-                        if self.cells[above_id].walkable == c_walkable {
-                            let above_num = connexe[x][y - 1];
-                            if cur_number == 0 {
-                                cur_number = above_num;
-                            } else if cur_number != above_num {
-                                // Merge: replace all occurrences of above_num with cur_number
-                                let target_number = above_num;
-                                // Java: for (x2 = 0; x2 < connexe.length; x2++)
-                                //           for (y2 = 0; y2 <= y; y2++)
-                                for x2 in 0..sx {
-                                    for y2 in 0..=y {
-                                        if connexe[x2][y2] == target_number {
-                                            connexe[x2][y2] = cur_number;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    let (nx, ny) = at(next, &self.cells, self.min_x, self.min_y);
+                    if connexe[nx][ny] != 0 {
+                        continue;
                     }
-                }
-
-                if cur_number == 0 {
-                    connexe[x][y] = ni;
-                    ni += 1;
-                } else {
-                    connexe[x][y] = cur_number;
+                    connexe[nx][ny] = ni;
+                    stack.push(next);
                 }
             }
         }
@@ -625,11 +617,16 @@ impl Map {
                 // else: null (id == nb_cells or out of range) → no draws
             }
 
-            map.compute_composantes();
-
             // Place two entities (team 0 left side, team 1 right side)
             team0_cell = map.get_random_cell_in_part(rng, 1);
             team1_cell = map.get_random_cell_in_part(rng, 4);
+
+            // Only once the map is final: a turret clears the obstacles around
+            // it as it is placed, and numbering before that would answer the
+            // reachability check below from a map that no longer exists.
+            // (Nothing placed here clears obstacles yet — this is one leek a
+            // side — but the order is upstream's.)
+            map.compute_composantes();
 
             // Check connectivity
             valid = match (team0_cell, team1_cell) {
@@ -732,6 +729,32 @@ impl Map {
             return entity; // no change
         }
         self.slide_walk(entity, target, dx, dy)
+    }
+
+    /// `Map.getRepelLastAvailableCell(entity, caster, distance)` — push the
+    /// entity a *fixed* number of cells straight away from the caster,
+    /// stopping at the first cell that is off-map or unavailable. Unlike the
+    /// push and attract walks there is no target to reach and no direction
+    /// check: the direction is the caster→entity axis, and an entity on the
+    /// caster's own cell has none, so it does not move.
+    #[must_use]
+    pub fn repel_last_available_cell(&self, entity: usize, caster: usize, distance: i32) -> usize {
+        let dx = (self.cells[entity].x - self.cells[caster].x).signum();
+        let dy = (self.cells[entity].y - self.cells[caster].y).signum();
+        if dx == 0 && dy == 0 {
+            return entity; // same cell: no direction
+        }
+        let mut current = entity;
+        for _ in 0..distance {
+            let Some(next) = self.get_next_cell(current, dx, dy) else {
+                break;
+            };
+            if !self.cell_available(next) {
+                break;
+            }
+            current = next;
+        }
+        current
     }
 
     /// The shared `while (current != target)` walk of the push/attract cell
@@ -935,16 +958,21 @@ impl Map {
     ///
     /// ## Java heap quirk
     ///
-    /// The Java code uses `PriorityQueue<Cell>(ASTAR_WEIGHT)` where
-    /// `ASTAR_WEIGHT = (a, b) -> Float.compare(a.weight, b.weight)`.
-    /// When two cells have **equal weight**, Java's heap picks the one at the
+    /// The Java code uses `PriorityQueue<AStarNode>(ASTAR_WEIGHT)` where
+    /// `ASTAR_WEIGHT = (a, b) -> Float.compare(a.weight, b.weight)` and
+    /// `AStarNode` is an immutable `(cell, weight)` pair.
+    /// When two nodes have **equal weight**, Java's heap picks the one at the
     /// lower array index (the one that was added earlier / displaced earlier by
     /// `siftDown`), because `siftDown` picks the left child on ties.  This is
     /// NOT FIFO — it's determined by the internal heap structure.  We replicate
     /// it with `JavaMinHeap` (see below).
     ///
-    /// The lazy-deletion "stale entry" pattern is used (same weight re-pushes
-    /// instead of decrease-key), matching the Java `Map.java` implementation.
+    /// The lazy-deletion "stale entry" pattern is used: `PriorityQueue` has no
+    /// decrease-key and does not re-sort an element whose key changed, so every
+    /// improvement pushes a *new* node and the cell is closed the first time it
+    /// is polled un-closed.  Reading the key off the mutable `Cell` instead —
+    /// which is what this did before the generator's `moveTowardCell` fix —
+    /// breaks the heap invariant and yields non-minimal paths.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     #[must_use]
     // `cost` is an A* path length in cells, so `0 ..= 613`; the cast only
@@ -973,21 +1001,19 @@ impl Map {
 
         // Initialise start
         self.cells[start].cost = 0;
-        self.cells[start].weight = 0.0;
         self.cells[start].astar_visited_run = run;
         self.cells[start].parent = None;
 
-        // Java-compatible min-heap (see JavaMinHeap below).
-        // Weights are read from self.cells at comparison time to replicate
-        // Java's in-place mutation behaviour (see JavaMinHeap docs).
+        // Java-compatible min-heap (see JavaMinHeap below). Each entry owns
+        // the weight it was pushed with.
         let mut open = JavaMinHeap::new();
-        open.push(start, &self.cells);
+        open.push(start, 0.0);
 
-        while let Some(u) = open.pop(&self.cells) {
-            // Skip cells that were already closed (re-pushed entries, if any).
-            // In Java Map.java, cells are only ever added to the open list once,
-            // so this check is essentially a no-op in the Java version. We keep
-            // it for safety.
+        while let Some(u) = open.pop() {
+            // Lazy deletion: the first time a cell leaves the heap its cost is
+            // optimal (consistent heuristic, frozen weights), so it closes
+            // here. A stale entry for a cell that improved — and was pushed
+            // again — surfaces later and is skipped.
             if self.cells[u].astar_closed_run == run {
                 continue;
             }
@@ -1045,22 +1071,14 @@ impl Map {
                 let new_cost = u_cost + 1;
                 if !visited || new_cost < self.cells[c].cost {
                     self.cells[c].cost = new_cost;
-                    let h = self.get_cell_distance_to_set(c, end_cells) as f32;
-                    let w = new_cost as f32 + h;
-                    self.cells[c].weight = w;
                     self.cells[c].parent = Some(u);
-                    if !visited {
-                        // Java: open.add(c) — cell added to queue exactly once.
-                        // The heap looks up cell.weight at comparison time, so
-                        // in-place weight updates are automatically reflected in
-                        // future siftDown/siftUp operations (matching Java).
-                        self.cells[c].astar_visited_run = run;
-                        open.push(c, &self.cells);
-                    }
-                    // else: visited and improved — weight/parent updated in cell.
-                    // The heap looks up the updated weight via self.cells[id].weight,
-                    // so the next siftDown that encounters this cell will see its
-                    // new lower weight and potentially promote it — exactly as Java.
+                    self.cells[c].astar_visited_run = run;
+                    // A new entry on every improvement, its weight frozen:
+                    // that is what keeps the heap consistent without a
+                    // decrease-key. Any stale entry for this cell is skipped
+                    // by the closed check at the top of the loop.
+                    let h = self.get_cell_distance_to_set(c, end_cells) as f32;
+                    open.push(c, new_cost as f32 + h);
                 }
             }
         }
@@ -1387,28 +1405,26 @@ impl Map {
 
 /// A min-heap that replicates Java's `PriorityQueue` semantics exactly.
 ///
-/// ## Critical Java quirk: mutable weights
+/// ## The sort key is frozen at insertion
 ///
-/// Java's `PriorityQueue<Cell>` stores Cell **references**.  The comparator
-/// is `(a, b) -> Float.compare(a.weight, b.weight)`.  When a cell's weight is
-/// updated in place (the "visited but improved" branch of A\*), the heap's
-/// comparator reads the NEW weight.  The heap does NOT explicitly rebalance,
-/// but future `poll()` / `add()` operations call `siftDown` / `siftUp`, which
-/// DO compare using the current weight.  This means a cell can be "promoted"
-/// toward the root organically as siftDown encounters it with its new (lower)
-/// weight.
-///
-/// To replicate this, we store only cell IDs and look up the current weight
-/// from the `cells` slice at every comparison.  The cells slice is passed as
-/// a parameter to all operations.
+/// Java's `PriorityQueue` has no decrease-key and never re-sorts an element
+/// already in the heap, so a key mutated in place breaks the heap invariant:
+/// a cell could be closed with a sub-optimal `g` and never looked at again,
+/// which is how `moveTowardCell` came to take detours. Upstream's A* now
+/// carries the weight on an immutable entry (`AStarNode`) and pushes a *new*
+/// entry whenever a cell improves, letting the stale one be skipped on the
+/// way out. Each entry here therefore owns its weight rather than reading a
+/// cell field that may since have changed.
 ///
 /// ## Other Java invariants
 ///
 /// * `siftUp`: swap only when child weight is **strictly less** than parent.
 /// * `siftDown`: pick the smaller child; on tie (equal weight), pick the
-///   **left** child (2k+1).  Swap only when smaller child is **strictly less**.
+///   **left** child (2k+1). Swap only when smaller child is **strictly less**.
 struct JavaMinHeap {
-    data: Vec<usize>, // cell_ids only; weight is read from the cells slice
+    /// `(cell, weight)` — upstream's `AStarNode`, whose weight never changes
+    /// while the entry is in the heap.
+    data: Vec<(usize, f32)>,
 }
 
 impl JavaMinHeap {
@@ -1416,31 +1432,32 @@ impl JavaMinHeap {
         Self { data: Vec::new() }
     }
 
-    fn push(&mut self, id: usize, cells: &[Cell]) {
-        self.data.push(id);
+    fn push(&mut self, id: usize, weight: f32) {
+        self.data.push((id, weight));
         let last = self.data.len() - 1;
-        self.sift_up(last, cells);
+        self.sift_up(last);
     }
 
-    fn pop(&mut self, cells: &[Cell]) -> Option<usize> {
+    fn pop(&mut self) -> Option<usize> {
         if self.data.is_empty() {
             return None;
         }
-        let result = self.data[0];
+        let (result, _) = self.data[0];
         let last = self.data.pop().unwrap();
         if !self.data.is_empty() {
             self.data[0] = last;
-            self.sift_down(0, cells);
+            self.sift_down(0);
         }
         Some(result)
     }
 
-    /// `siftUp(k)` — swap up while cell weight < parent weight (strictly less).
-    fn sift_up(&mut self, mut k: usize, cells: &[Cell]) {
+    /// `siftUp(k)` — swap up while the entry's weight < its parent's
+    /// (strictly less).
+    fn sift_up(&mut self, mut k: usize) {
         while k > 0 {
             let parent = (k - 1) / 2;
             // Java: swap only if child < parent (Float.compare < 0)
-            if float_cmp(cells[self.data[k]].weight, cells[self.data[parent]].weight) < 0 {
+            if float_cmp(self.data[k].1, self.data[parent].1) < 0 {
                 self.data.swap(k, parent);
                 k = parent;
             } else {
@@ -1450,7 +1467,7 @@ impl JavaMinHeap {
     }
 
     /// `siftDown(k)` — swap down with the smaller child (Java: left on tie).
-    fn sift_down(&mut self, mut k: usize, cells: &[Cell]) {
+    fn sift_down(&mut self, mut k: usize) {
         let len = self.data.len();
         loop {
             let left = 2 * k + 1;
@@ -1459,18 +1476,13 @@ impl JavaMinHeap {
                 break;
             }
             // Pick the smaller child; on tie, Java always picks the left child.
-            let smaller = if right < len
-                && float_cmp(
-                    cells[self.data[right]].weight,
-                    cells[self.data[left]].weight,
-                ) < 0
-            {
+            let smaller = if right < len && float_cmp(self.data[right].1, self.data[left].1) < 0 {
                 right
             } else {
                 left
             };
             // Swap only if smaller child < current element (strictly).
-            if float_cmp(cells[self.data[smaller]].weight, cells[self.data[k]].weight) < 0 {
+            if float_cmp(self.data[smaller].1, self.data[k].1) < 0 {
                 self.data.swap(k, smaller);
                 k = smaller;
             } else {
@@ -2061,7 +2073,7 @@ mod tests {
             Some(
                 [
                     18, 36, 54, 72, 90, 108, 126, 144, 162, 180, 163, 181, 199, 182, 165, 148, 131,
-                    114, 97, 115, 133, 151, 134, 117, 100, 83, 66, 84, 67, 50
+                    114, 97, 80, 98, 116, 99, 82, 100, 83, 101, 84, 67, 50
                 ]
                 .as_ref()
             ),
@@ -2074,7 +2086,7 @@ mod tests {
             p.as_deref(),
             Some(
                 [
-                    67, 84, 66, 83, 100, 117, 134, 151, 133, 150, 132, 149, 166, 183, 165, 182,
+                    67, 84, 66, 83, 100, 117, 134, 151, 133, 150, 132, 149, 166, 148, 165, 182,
                     199, 181, 163, 180, 162, 144, 126, 108, 90, 72, 54, 36, 18, 0
                 ]
                 .as_ref()
@@ -2120,7 +2132,7 @@ mod tests {
             Some(
                 [
                     18, 36, 54, 72, 90, 108, 126, 144, 162, 180, 163, 181, 199, 182, 165, 148, 131,
-                    114, 97, 80, 98, 116, 134, 117, 100
+                    114, 97, 80, 98, 116, 99, 82, 100
                 ]
                 .as_ref()
             ),
@@ -2172,8 +2184,8 @@ mod tests {
             p.as_deref(),
             Some(
                 [
-                    18, 36, 54, 72, 90, 108, 126, 144, 162, 180, 163, 181, 199, 217, 235, 253, 271,
-                    254, 237, 220, 203, 186, 169, 152, 135, 118, 101, 119, 102, 85, 67, 50
+                    18, 36, 54, 72, 90, 108, 126, 144, 162, 180, 163, 181, 199, 217, 235, 253, 236,
+                    219, 202, 185, 203, 186, 169, 152, 135, 118, 101, 119, 102, 85, 67, 50
                 ]
                 .as_ref()
             ),
@@ -2190,7 +2202,7 @@ mod tests {
             Some(
                 [
                     117, 134, 152, 169, 186, 203, 220, 237, 255, 273, 291, 308, 325, 342, 359, 377,
-                    394, 411, 429, 446, 464, 482, 500
+                    394, 411, 428, 446, 464, 482, 500
                 ]
                 .as_ref()
             ),
@@ -2225,8 +2237,8 @@ mod tests {
             p.as_deref(),
             Some(
                 [
-                    168, 185, 202, 219, 237, 255, 273, 291, 309, 326, 343, 360, 378, 395, 413, 431,
-                    449, 432, 450
+                    168, 185, 202, 219, 237, 255, 273, 291, 309, 327, 345, 363, 381, 399, 417, 434,
+                    451, 468, 450
                 ]
                 .as_ref()
             ),
@@ -2254,7 +2266,7 @@ mod tests {
             p.as_deref(),
             Some(
                 [
-                    67, 84, 66, 48, 65, 82, 99, 81, 63, 45, 62, 79, 61, 43, 25, 42, 59, 76, 58, 75,
+                    67, 84, 66, 48, 65, 82, 99, 81, 63, 45, 62, 79, 61, 43, 60, 77, 94, 76, 58, 75,
                     92, 109, 91, 73, 55, 37, 19, 36, 18, 0
                 ]
                 .as_ref()
@@ -2269,8 +2281,8 @@ mod tests {
             Some(
                 [
                     18, 36, 54, 72, 90, 108, 126, 144, 162, 180, 198, 215, 233, 251, 269, 287, 305,
-                    323, 341, 358, 376, 394, 412, 430, 448, 431, 414, 432, 450, 468, 451, 469, 487,
-                    504, 522, 540, 558, 576, 594, 612
+                    323, 341, 324, 342, 325, 343, 361, 379, 397, 415, 433, 451, 469, 487, 504, 522,
+                    540, 558, 576, 594, 612
                 ]
                 .as_ref()
             ),

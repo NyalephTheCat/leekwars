@@ -163,9 +163,30 @@ pub(crate) fn dispatch_unary_math(name: &str, args: &[Value]) -> Option<Value> {
         "isFinite" => Value::Bool(a.as_real().is_none_or(f64::is_finite)),
         "isInfinite" => Value::Bool(a.as_real().is_some_and(f64::is_infinite)),
         "isNaN" => Value::Bool(a.as_real().is_some_and(f64::is_nan)),
-        "bitCount" => Value::Int(i64::from(a.as_int()?.count_ones())),
+        // The bit trio is overloaded on `long` and on `big_integer`, and the
+        // two overloads do NOT agree once a value needs more than 64 bits —
+        // upstream's `long` forms read a fixed-width word, its
+        // `BigIntegerValue` forms read the minimal two's-complement one.
+        // `as_int` alone would silently answer the long question about a
+        // big_integer, so each of these branches on the value first.
+        "bitCount" => match a {
+            Value::BigInt(b) => int_from_u64(crate::value::java_bit_count(b)),
+            _ => Value::Int(i64::from(a.as_int()?.count_ones())),
+        },
+        // `64 - Long.numberOfLeadingZeros(x)` — a negative long is 64 (its
+        // sign bit is set) and 0 is 0; the big_integer form is Java's
+        // "minimal two's-complement excluding the sign bit" instead.
+        "bitLength" => match a {
+            Value::BigInt(b) => int_from_u64(crate::value::java_bit_length(b)),
+            _ => Value::Int(i64::from(64 - a.as_int()?.leading_zeros())),
+        },
         "leadingZeros" => Value::Int(i64::from(a.as_int()?.leading_zeros())),
-        "trailingZeros" => Value::Int(i64::from(a.as_int()?.trailing_zeros())),
+        // `Long.numberOfTrailingZeros` answers 64 for zero; the big_integer
+        // form is `getLowestSetBit`, which answers -1 there.
+        "trailingZeros" => match a {
+            Value::BigInt(b) => Value::Int(crate::value::java_lowest_set_bit(b)),
+            _ => Value::Int(i64::from(a.as_int()?.trailing_zeros())),
+        },
         "bitReverse" => Value::Int(a.as_int()?.reverse_bits()),
         "byteReverse" => Value::Int(a.as_int()?.swap_bytes()),
         // big_integer keeps full precision via `BigInteger.toString(radix)`
@@ -187,6 +208,12 @@ pub(crate) fn dispatch_unary_math(name: &str, args: &[Value]) -> Option<Value> {
         "bitsToReal" => Value::Real(f64::from_bits(a.as_int()? as u64)),
         _ => return None,
     })
+}
+
+/// A bit count that cannot exceed a `big_integer`'s addressable bits, as a
+/// LeekScript integer.
+fn int_from_u64(n: u64) -> Value {
+    Value::Int(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
 /// `typeOf` tag — matches `LeekValueType` constants in upstream.

@@ -71,22 +71,23 @@ public class Harness {
     }
 
     /** Stock leek stats, mirroring the generator's FightTestBase.defaultLeek.
-     *  (ram bumped 30 → 50: `Entity.addChip` silently drops chips beyond
+     *  (ram bumped 30 → 52: `Entity.addChip` silently drops chips beyond
      *  getRAM(), and the corpus now equips more than 30 — ram isn't part of
      *  the outcome JSON, so goldens are unaffected.) */
     static Leek defaultLeek(int id, String name) {
-        return new Leek(id, name, 0, 10, 500, 6, 7, 100, 100, 10, 50, 10, 0, 0, 8, 50, 0, false, 0, 0, "", 0, "", "", "", 0);
+        return new Leek(id, name, 0, 10, 500, 6, 7, 100, 100, 10, 50, 10, 0, 0, 8, 52, 0, false, 0, 0, "", 0, "", "", "", 0);
     }
 
     /** Pistol = WEAPON_PISTOL (item id 37): range 1–7, ~15 damage, 3 TP. */
     static final int PISTOL_WEAPON_ID = 37;
 
-    /** Register a damaging pistol. The generator's bundled
-     *  `data/weapons.json` fails to load (missing `max_uses`), so its
-     *  registry is empty; we register an equivalent synthetic pistol —
-     *  keyed by id 37 so `addWeapon(getWeapon(37))` + `setWeapon(37)` work
-     *  — carrying a damage effect (type 1, value1=15) so fights deal real
-     *  damage and reach a KO. Done in our harness, not the generator. */
+    /** Register a damaging pistol — but only if the generator's bundled
+     *  `data/weapons.json` did not already give us weapon 37. It does now
+     *  (the entries are keyed by `item`, and item 37 is the pistol), so the
+     *  early return below is the live path and the real pistol is what the
+     *  corpus fires; the synthetic one is the fallback for a data snapshot
+     *  that fails to load. It carries a damage effect (type 1, value1=15) so
+     *  fights deal real damage and reach a KO. */
     static void registerPistol() {
         if (Weapons.getWeapon(PISTOL_WEAPON_ID) != null) {
             return;
@@ -223,9 +224,16 @@ public class Harness {
     /** TYPE_MULTIPLY_STATS ×2 for 3 turns, self-cast — EffectMultiplyStats
      *  (first-apply vs replacement max-life delta, silent ratio heal). */
     static final int COLOSSUS_CHIP_ID = 1049;
+    /** TYPE_SUMMON chip → plant template 1002 — the 2.50 rooted summons:
+     *  the plant never plays a turn of its own, it wakes when an entity
+     *  enters its zone. */
+    static final int PLANT_CHIP_ID = 1050;
     /** Synthetic bulb template id — its own namespace, distinct from chips
-     *  (real templates occupy 1–12 in data/summons.json). */
+     *  (real templates occupy 1–13 in data/summons.json). */
     static final int HARNESS_BULB_ID = 1001;
+    /** Synthetic PLANT template id: ROOTED (state 9) with an awakening zone
+     *  of 3, like corn and the chilli pepper. */
+    static final int HARNESS_PLANT_ID = 1002;
 
     /** Register the synthetic chips of the conformance corpus. Like the
      *  pistol, the generator's bundled chip data isn't loaded, so we register
@@ -1336,6 +1344,27 @@ public class Harness {
             /*level*/ 1, /*template*/ COLOSSUS_CHIP_ID, "colossus", ChipType.BOOST,
             /*maxUses*/ -1));
 
+        // 1050 "plant": TYPE_SUMMON → plant template 1002 — the 2.50 rooted
+        // summons. Same ladder as "spawn", but what comes out is ROOTED with
+        // an awakening zone: it leaves the turn order, and walking into its
+        // zone wakes it where the passer-by stands (PLANT_AWAKE / PLANT_ASLEEP,
+        // full TP back, cooldowns ticking one notch per awakening).
+        var plantEffects = Json.createArray();
+        var plantSummon = Json.createObject();
+        plantSummon.put("id", 14); // EFFECT_SUMMON
+        plantSummon.put("value1", HARNESS_PLANT_ID);
+        plantSummon.put("value2", 0);
+        plantSummon.put("turns", 0);
+        plantSummon.put("targets", 31);
+        plantSummon.put("modifiers", 0);
+        plantEffects.add(plantSummon);
+        Chips.addChip(new Chip(
+            PLANT_CHIP_ID, /*cost*/ 2, /*minRange*/ 1, /*maxRange*/ 8, plantEffects,
+            /*launchType*/ (byte) 7, /*area*/ (byte) 1, /*los*/ true,
+            /*cooldown*/ 3, /*teamCooldown*/ false, /*initialCooldown*/ 0,
+            /*level*/ 1, /*template*/ PLANT_CHIP_ID, "plant", ChipType.BULB,
+            /*maxUses*/ -1));
+
         // Bulb template 1001 "harness_bulb" — stat ranges scaled by the
         // OWNER's level (10 → coeff 1/30, bulb_base truncating), ×1.2 on a
         // critical summon. Chips laser (damage) + cure (heal): the bulb
@@ -1356,6 +1385,26 @@ public class Harness {
         bulbStats.putArray("mp").add(3).add(6);
         Bulbs.addInvocationTemplate(
             new BulbTemplate(HARNESS_BULB_ID, "harness_bulb", bulbChips, bulbStats));
+
+        // Plant template 1002 "harness_plant" — ROOTED (EntityState ordinal 9)
+        // with an awakening zone of 3, the shape corn and the chilli pepper
+        // have in data/summons.json. Zero MP: a rooted summon never walks.
+        var plantChips = Json.createArray();
+        plantChips.add(LASER_CHIP_ID);
+        var plantStats = Json.createObject();
+        plantStats.putArray("life").add(100).add(400);
+        plantStats.putArray("strength").add(50).add(200);
+        plantStats.putArray("wisdom").add(0).add(100);
+        plantStats.putArray("agility").add(0).add(0);
+        plantStats.putArray("resistance").add(0).add(0);
+        plantStats.putArray("science").add(0).add(100);
+        plantStats.putArray("magic").add(0).add(0);
+        plantStats.putArray("tp").add(4).add(8);
+        plantStats.putArray("mp").add(0).add(0);
+        var plantStates = Json.createArray();
+        plantStates.add(9); // EntityState.ROOTED
+        Bulbs.addInvocationTemplate(new BulbTemplate(
+            HARNESS_PLANT_ID, "harness_plant", plantChips, plantStats, plantStates, /*zone*/ 3));
     }
 
     static void attach(Fight fight, FarmerLog farmerLog, Leek leek, Class<?> aiClass) {
@@ -1418,6 +1467,8 @@ public class Harness {
             // 49th and 50th chips — exactly fills the leek's 50 RAM.
             leek.addChip(Chips.getChip(REVIVE_CHIP_ID));
             leek.addChip(Chips.getChip(COLOSSUS_CHIP_ID));
+            // 51st chip — the ram above was raised to 52 to fit it.
+            leek.addChip(Chips.getChip(PLANT_CHIP_ID));
         }
     }
 

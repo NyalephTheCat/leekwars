@@ -255,6 +255,7 @@ mod tests {
                     then_branch: body(),
                     else_branch: Some(body()),
                     soft: false,
+                    const_taken: None,
                     span: span(),
                 }),
                 1 + 3,
