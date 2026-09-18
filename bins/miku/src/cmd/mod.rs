@@ -24,6 +24,7 @@ pub mod migrate;
 pub mod new;
 pub mod profile;
 pub mod run;
+pub mod scope;
 pub mod test;
 
 pub fn dispatch(cli: Cli) -> Result<ExitCode> {

@@ -41,7 +41,7 @@ Create and run a project with `miku`, the workspace tool:
 cargo run -p miku -- new hello
 cd hello
 miku run                 # JIT-compile and run src/main.leek
-miku check               # diagnostics across the project
+miku check               # diagnostics for src/main.leek and its includes
 miku test                # run everything under tests/
 ```
 
@@ -55,7 +55,7 @@ and format rules.
 miku new|init        create / initialize a project
 miku build           compile via the manifest's backend (Java by default)
 miku run             JIT-compile and execute
-miku check           diagnostics only
+miku check           diagnostics only (--all: every file under src/ + tests/)
 miku test            run tests under tests/
 miku fmt | lint      format / lint .leek sources
 miku fix             apply machine-applicable diagnostic suggestions

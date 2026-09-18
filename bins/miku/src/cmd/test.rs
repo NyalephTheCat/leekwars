@@ -61,9 +61,9 @@ pub fn run(
         params: CompileParams::default(),
         color: color.into(),
         format: format.into(),
-        // `scope` and `timing` stay at their defaults: every `miku`
-        // subcommand compiles the whole program, and only `build --verbose`
-        // wants timings.
+        // `scope` and `timing` stay at their defaults: a compiled file
+        // covers its whole include closure, not the one file, and only
+        // `build --verbose` wants timings.
         ..DriverConfig::default()
     };
     // One session for the whole run: the reporter is built once, and every

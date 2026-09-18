@@ -74,7 +74,12 @@ pub enum Command {
     /// Run a leek-wars fight from a scenario file, or test an AI against many
     /// settings (matrix sweep, tournament, randomized builds).
     Fight(Fight),
-    /// Run diagnostics across the project without producing output.
+    /// Report diagnostics for the entry and its includes, without
+    /// producing output.
+    ///
+    /// The scope is the program: `[project] entry` plus every file it
+    /// reaches through `include(...)`. `--all` widens it to every `.leek`
+    /// file under `[paths].src` and `[paths].tests`.
     Check(Check),
     /// Run every `.leek` file under `tests/` via the native JIT.
     ///
@@ -95,7 +100,9 @@ pub enum Command {
     Test(Test),
     /// Format all `.leek` sources.
     Fmt(Fmt),
-    /// Run the linter.
+    /// Run the linter over the entry and its includes.
+    ///
+    /// Same scope as `miku check`, `--all` included.
     Lint(Lint),
     /// Print the extended explanation for a diagnostic code.
     Explain(Explain),
@@ -315,6 +322,17 @@ pub struct Run {
 
 #[derive(Debug, clap::Args)]
 pub struct Check {
+    /// Widen the scope to every `.leek` file under `[paths].src` and
+    /// `[paths].tests`, not only the entry and what it includes.
+    ///
+    /// Off by default: the entry plus its include closure is the program,
+    /// and an include-only fragment compiled on its own would report
+    /// errors for the symbols its includer declares. A file reached both
+    /// ways is compiled and reported once, and the exit status is the OR
+    /// over every file.
+    #[arg(long)]
+    pub all: bool,
+
     /// Also report constructs the native backend cannot compile.
     ///
     /// On by default when the manifest's default backend is `native`. The
@@ -364,6 +382,17 @@ pub struct Fmt {
 
 #[derive(Debug, clap::Args)]
 pub struct Lint {
+    /// Widen the scope to every `.leek` file under `[paths].src` and
+    /// `[paths].tests`, not only the entry and what it includes.
+    ///
+    /// Off by default: the entry plus its include closure is the program,
+    /// and an include-only fragment compiled on its own would report
+    /// errors for the symbols its includer declares. A file reached both
+    /// ways is compiled and reported once, and the exit status is the OR
+    /// over every file.
+    #[arg(long)]
+    pub all: bool,
+
     /// Also run the pedantic lints (strictness; verbose-but-fine code).
     #[arg(long)]
     pub pedantic: bool,
