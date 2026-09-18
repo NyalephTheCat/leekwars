@@ -163,6 +163,16 @@ also what the MIR lowerer reads to build the program-wide `globals` table. Only
 `declare_local` writes into a scope. A name that misses both resolves as a
 builtin.
 
+The **type checker** keeps its own scope stack, for types rather than `DefId`s,
+and answers the same question the same way (`leek_types::checker::ScopeKind`,
+`scope_ops::lookup`): `Block` and `Lambda` are transparent, `Function` — a
+function, method or constructor body — is opaque, and `File` is the outermost
+one. It diverges from the lowerer in only one respect, and only because it has
+nowhere else to put them: a `global`'s recorded type lives in the file scope's
+`locals`, with the name also listed in that scope's `globals` set. That set is
+what a `Function` lookup falls back to, so a `global` crosses the boundary and a
+main-block `var` declared next to it does not (#192).
+
 ## 5. The type lattice
 
 `leek_types::Type` is the checker's type language. It is a *checking* artifact:

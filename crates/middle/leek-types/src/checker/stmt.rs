@@ -133,14 +133,23 @@ impl Checker {
             .children()
             .find(|n| n.kind() == SyntaxKind::TypeRef);
         let declared = type_ref.as_ref().map(|t| self.resolve_type_node(t));
+        // `global x` reuses `VarDeclStmt`, with the keyword as its first
+        // token. Globals are program-wide whatever block or function body
+        // they sit in, and they are the only file-scope names a function
+        // body may read (#192), so they are recorded separately.
+        let is_global = v
+            .syntax()
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|t| t.kind() == SyntaxKind::KwGlobal);
         for ((name, _), init_ty) in decls.iter().zip(&init_tys) {
             if let Some(declared) = &declared {
-                self.declare(name.text(), declared.clone());
+                self.bind(is_global, name.text(), declared.clone());
             } else if matches!(init_ty, Some(Type::Null)) {
                 // Plain `var x = null` — null-binding tracked regardless
                 // of strict, since indexing and compound-assign checks
                 // already gate themselves on strict mode.
-                self.declare(name.text(), Type::Null);
+                self.bind(is_global, name.text(), Type::Null);
             } else if (self.opts.strict || self.opts.seed_library)
                 && let Some(ty) = init_ty
                 && !matches!(ty, Type::Any)
@@ -152,7 +161,11 @@ impl Checker {
                 // with real operands resolves `u` to `real`); the
                 // reassignment-incompatibility diagnostic stays strict-gated,
                 // so this only enriches inference, it doesn't add errors.
-                self.declare(name.text(), ty.clone());
+                self.bind(is_global, name.text(), ty.clone());
+            } else if is_global {
+                // No type committed, but the name still has to be
+                // reachable from a function body as a global.
+                self.note_global(name.text());
             }
         }
         // A scalar declaration initialised with a container is an
