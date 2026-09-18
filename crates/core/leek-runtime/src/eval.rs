@@ -136,14 +136,14 @@ const FOREACH_KEYS: usize = 1;
 
 /// Snapshot `v` into foreach-iteration state. Arrays iterate by index, maps
 /// by entry, intervals by unit step, sets by element (synthetic integer
-/// keys), objects/instances by field order. Non-iterables — a *string*
+/// keys). Non-iterables — a *string*, an *object* and a class *instance*
 /// among them — yield an empty snapshot (0 iterations).
 ///
 /// The state holds the iterated values *flat* — one `Value` per element, no
-/// per-element `[key, value]` pair — plus, for keyed sources (map / object /
-/// instance), a parallel array of keys built in the same traversal. A
-/// positional source (array / set / interval) stores no keys: its key is
-/// the position, produced on demand by [`foreach_key_at`].
+/// per-element `[key, value]` pair — plus, for the one keyed source (a map),
+/// a parallel array of keys built in the same traversal. A positional source
+/// (array / set / interval) stores no keys: its key is the position,
+/// produced on demand by [`foreach_key_at`].
 ///
 /// Both halves are packed into one `Value` so the compiler can hold the
 /// iteration state in a single slot. The packing is private to this module;
@@ -166,35 +166,26 @@ pub fn make_foreach_iter(v: &Value) -> Value {
             }
         }
         Value::Set(s) => values.extend(s.borrow().iter().cloned()),
-        Value::Object(o) => {
-            keyed = true;
-            let o = o.borrow();
-            reserve(&mut values, &mut keys, o.len());
-            for (name, val) in o.iter() {
-                keys.push(Value::String(Rc::new(name.clone())));
-                values.push(val.clone());
-            }
-        }
-        Value::Instance(inst) => {
-            keyed = true;
-            let inst = inst.borrow();
-            reserve(&mut values, &mut keys, inst.fields.len());
-            for (name, val) in &inst.fields {
-                keys.push(Value::String(Rc::new(name.clone())));
-                values.push(val.clone());
-            }
-        }
-        // A string is not iterable, so it snapshots to nothing (#268).
-        // Upstream's `AI.isIterable` (`AI.java:1801-1807`) admits only
+        // Not iterable, so each snapshots to nothing: a string (#268), an
+        // object literal and a class instance (#494). Upstream's
+        // `AI.isIterable` (`AI.java:1801-1807`) admits only
         // `LegacyArrayLeekValue` / `ArrayLeekValue` / `MapLeekValue` /
-        // `SetLeekValue` / `IntervalLeekValue`, and both loop forms wrap
-        // the whole walk in `if (isIterable(ar)) { … }`
-        // (`ForeachBlock.java:148`, `ForeachKeyBlock.java:191`), so the
-        // body of a `foreach` over a string never runs. The static side
-        // agrees: `Type.STRING` is a plain `Type` (`Type.java:29`), whose
+        // `SetLeekValue` / `IntervalLeekValue` — no `String`, and no
+        // `ObjectLeekValue`, which is what an object literal lowers to
+        // (`LeekObject.java:68`) and what a `class` instance is built on
+        // (`ClassDeclarationInstruction.java:535` roots every class at
+        // `NativeObjectLeekValue`). `AI.iterator` (`AI.java:1809-1821`)
+        // lists the same five and returns `null` for everything else, and
+        // both loop forms wrap the whole walk in `if (isIterable(ar)) { … }`
+        // (`ForeachBlock.java:148`, `ForeachKeyBlock.java:191`) — so the
+        // body runs zero times. The static side agrees for the string:
+        // `Type.STRING` is a plain `Type` (`Type.java:29`), whose
         // `isIterable` and `canBeIterable` (`Type.java:355`, `Type.java:359`)
         // both answer false.
-        Value::String(_) => {}
+        //
+        // Fields are still reachable — a program walks `.class.fields`,
+        // which is an *array* — just not by iterating the object itself.
+        Value::String(_) | Value::Object(_) | Value::Instance(_) => {}
         Value::Interval(iv) => {
             if let (Some(start), Some(end)) = (iv.start, iv.end) {
                 let lo = if iv.start_inclusive {
