@@ -403,16 +403,38 @@ fn foreach_over_every_source_kind() {
         jit("var r = '' for (var k : var v in <7, 8>) { r = r + k + ':' + v + ' ' } return r"),
         "\"0:7 1:8 \""
     );
-    // An object yields its fields, keyed by name.
+    // An object is NOT iterable, so the body never runs and `r` stays
+    // empty — this is not a missing feature, do not "fix" it back to
+    // "x1y2". Upstream's `AI.isIterable` (`AI.java:1801-1807`) admits only
+    // `LegacyArrayLeekValue` / `ArrayLeekValue` / `MapLeekValue` /
+    // `SetLeekValue` / `IntervalLeekValue`, and `AI.iterator`
+    // (`AI.java:1809-1821`) returns `null` for anything else.
+    // `ObjectLeekValue`, which `{x: 1, y: 2}` lowers to
+    // (`LeekObject.java:68`), is in neither list, and both loop forms wrap
+    // the walk in `if (isIterable(ar)) { … }` (`ForeachBlock.java:148`,
+    // `ForeachKeyBlock.java:191`) (#494).
     assert_eq!(
         jit("var r = '' for (var k : var v in {x: 1, y: 2}) { r = r + k + v } return r"),
-        "\"x1y2\""
+        "\"\""
     );
-    // So does a class instance.
+    assert_eq!(
+        jit("var n = 0 for (var v in {x: 1, y: 2}) { n = n + 1 } return n"),
+        "0"
+    );
+    // Nor is a class instance: every generated class is rooted at
+    // `NativeObjectLeekValue` (`ClassDeclarationInstruction.java:535`),
+    // which `AI.isIterable` no more lists than `ObjectLeekValue`. Fields
+    // are reached through `.class.fields` — an array — not by iterating
+    // the instance (#494).
     assert_eq!(
         jit("class A { x = 1 y = 2 } var r = '' \
              for (var k : var v in new A()) { r = r + k + v } return r"),
-        "\"x1y2\""
+        "\"\""
+    );
+    assert_eq!(
+        jit("class A { x = 1 y = 2 } var n = 0 \
+             for (var v in new A()) { n = n + 1 } return n"),
+        "0"
     );
     // A string is not iterable, so the body never runs and `r` stays
     // empty — upstream's `AI.isIterable` (`AI.java:1801-1807`) does not

@@ -2,15 +2,16 @@
 //! *flat* — one `Value` per element, no `[key, value]` pair — so its accessors
 //! are the whole contract its shape has. These tests pin what each source
 //! kind yields, that keys stay aligned with values, and that a positional
-//! source keys by position. A string is not one of the source kinds: it is
-//! not iterable at all (#268).
+//! source keys by position. A string (#268), an object and a class instance
+//! (#494) are not source kinds at all: upstream does not treat any of them
+//! as iterable, so each runs its loop body zero times.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use leek_runtime::{
-    IntervalValue, MapData, ObjectData, SetData, Value, foreach_key_at, foreach_len,
-    foreach_value_at, make_foreach_iter,
+    ClassId, Instance, IntervalValue, MapData, ObjectData, SetData, Value, foreach_key_at,
+    foreach_len, foreach_value_at, make_foreach_iter,
 };
 
 /// Every (key, value) pair a snapshot of `v` yields, rendered for comparison.
@@ -68,24 +69,49 @@ fn a_set_iterates_elements_keyed_by_position() {
     );
 }
 
-#[test]
-fn an_object_iterates_fields_keyed_by_name() {
+/// Two non-empty field bags: an object literal's, and a class instance's.
+fn fields() -> ObjectData {
     let mut o = ObjectData::new();
     o.set("x", Value::Int(1));
     o.set("y", Value::Int(2));
-    let o = Value::Object(Rc::new(RefCell::new(o)));
-    assert_eq!(
-        walk(&o),
-        [("\"x\"".into(), "1".into()), ("\"y\"".into(), "2".into())]
-    );
+    o
 }
 
-/// Upstream's `AI.isIterable` (`AI.java:1801-1807`) lists only the array /
-/// map / set / interval shapes, and `ForeachBlock.java:148` skips the whole
-/// walk when it says no — so a `foreach` over a string runs its body zero
-/// times (#268). The non-ASCII case guards the regression specifically: the
-/// old arm walked `as_bytes()`, so `"a😀b"` used to yield six mojibake
-/// one-char strings.
+/// Upstream's `AI.isIterable` (`AI.java:1801-1807`) lists only
+/// `LegacyArrayLeekValue` / `ArrayLeekValue` / `MapLeekValue` /
+/// `SetLeekValue` / `IntervalLeekValue`, and `AI.iterator`
+/// (`AI.java:1809-1821`) returns `null` for anything else. `ObjectLeekValue`
+/// — what an object literal lowers to (`LeekObject.java:68`) — is in neither
+/// list, and both loop forms skip the whole walk when `isIterable` says no
+/// (`ForeachBlock.java:148`, `ForeachKeyBlock.java:191`). So `{x: 1, y: 2}`
+/// runs its body zero times (#494); it does *not* yield `1, 2` keyed by
+/// field name, which is what this arm used to do.
+#[test]
+fn an_object_is_not_iterable() {
+    let o = Value::Object(Rc::new(RefCell::new(fields())));
+    assert_eq!(foreach_len(&make_foreach_iter(&o)), 0);
+    assert!(walk(&o).is_empty());
+}
+
+/// Same verdict for a class instance (#494): every generated class is rooted
+/// at `NativeObjectLeekValue` (`ClassDeclarationInstruction.java:535`), which
+/// no more appears in `AI.isIterable` than `ObjectLeekValue` does. A program
+/// reaches the fields through `.class.fields`, which is an *array* — not by
+/// iterating the instance.
+#[test]
+fn a_class_instance_is_not_iterable() {
+    let inst = Value::Instance(Rc::new(RefCell::new(Instance {
+        class: ClassId(0),
+        class_name: "A".into(),
+        fields: fields(),
+    })));
+    assert_eq!(foreach_len(&make_foreach_iter(&inst)), 0);
+    assert!(walk(&inst).is_empty());
+}
+
+/// A string is not iterable either (#268), by the same `AI.isIterable` read.
+/// The non-ASCII case guards that regression specifically: the old arm walked
+/// `as_bytes()`, so `"a😀b"` used to yield six mojibake one-char strings.
 #[test]
 fn a_string_is_not_iterable() {
     for src in ["abc", "a\u{1F600}b"] {
