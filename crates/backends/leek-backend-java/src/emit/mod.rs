@@ -1194,12 +1194,17 @@ pub(crate) fn stmt_definitely_returns(s: &Stmt, emit_ops: bool) -> bool {
         // `do … while (true)` likewise never falls through.
         Stmt::DoWhile(d) => {
             stmt_definitely_returns(&d.body, emit_ops)
-                || is_infinite_loop(&d.cond, &d.body, emit_ops)
+                || is_infinite_loop(Some(&d.cond), &d.body, emit_ops)
         }
         // `while (true) { … }` with no `break` escaping the loop never
         // completes normally — code after it is unreachable, so suppress
         // the trailing `return null;`.
-        Stmt::While(w) => is_infinite_loop(&w.cond, &w.body, emit_ops),
+        Stmt::While(w) => is_infinite_loop(Some(&w.cond), &w.body, emit_ops),
+        // Same rule for the C-style `for`: JLS treats a `for` whose condition
+        // is the constant `true` — or absent, which `emit_for` renders as
+        // exactly that literal — as unable to complete normally, so javac
+        // rejects a trailing `return null;` after it as unreachable (#485).
+        Stmt::For(f) => is_infinite_loop(f.cond.as_ref(), &f.body, emit_ops),
         // A `switch` never completes normally when it has a `default` arm, no
         // arm `break`s out, and the last arm definitely returns: every other
         // arm either returns or falls through into the next one (an empty
@@ -1217,18 +1222,21 @@ pub(crate) fn stmt_definitely_returns(s: &Stmt, emit_ops: bool) -> bool {
     }
 }
 
-/// True for a `while`/`do-while` whose condition is the literal `true` and whose
-/// body has no `break` targeting it — an infinite loop that never falls through.
+/// True for a `while`/`do-while`/`for` whose condition is the literal `true` —
+/// or, for a `for`, absent, which `emit_for` renders as that same literal — and
+/// whose body has no `break` targeting it: an infinite loop that never falls
+/// through.
 ///
 /// Only in *clean* mode (`!emit_ops`), where the condition emits as the bare
 /// constant `true` that javac folds to a provably-infinite loop (so a trailing
 /// `return null;` would be unreachable). In exact mode the condition is wrapped
-/// in `ops(bool(true), …)` (see `loop_cond_string`) — opaque to javac — so the
-/// trailing return is reachable and *required*; reporting the loop as infinite
-/// there is what produced the `missing return statement` javac failures.
-fn is_infinite_loop(cond: &Expr, body: &Stmt, emit_ops: bool) -> bool {
+/// in `ops(bool(true), …)` (see `loop_cond_string`, and `emit_for`'s absent-cond
+/// arm) — opaque to javac — so the trailing return is reachable and *required*;
+/// reporting the loop as infinite there is what produced the `missing return
+/// statement` javac failures.
+fn is_infinite_loop(cond: Option<&Expr>, body: &Stmt, emit_ops: bool) -> bool {
     !emit_ops
-        && matches!(&cond.kind, ExprKind::Literal(Literal::Bool(true)))
+        && cond.is_none_or(|c| matches!(&c.kind, ExprKind::Literal(Literal::Bool(true))))
         && !stmt_has_own_break(body)
 }
 

@@ -490,6 +490,18 @@ impl Emitter<'_> {
             // `LeekExpressionInstruction.writeJavaCode`'s for-header
             // emit path.
             Some(c) => self.for_cond_string(c),
+            // `for (;;)` has no upstream spelling (the reference parser
+            // requires all three clauses), so nothing to match here — only
+            // javac to satisfy. An absent condition *is* the constant `true`,
+            // and both modes treat it exactly as they treat a written one:
+            // clean mode emits the bare literal so javac's constant-condition
+            // rule fires and `stmt_definitely_returns` drops the then-
+            // unreachable trailing `return null;` (#485), while exact mode
+            // wraps it in `bool(...)` — same reason as `loop_cond_string` — to
+            // keep the loop opaque to javac so that trailing return stays
+            // reachable and required. The `ops(…, 0)` wrapper charges nothing,
+            // so op accounting is unchanged either way.
+            None if self.opts.emit_ops => "ops(bool(true), 0)".into(),
             None => "true".into(),
         };
         let step = match &f.step {
@@ -728,6 +740,19 @@ impl Emitter<'_> {
                 self.writer.add_code("ops(1);");
             }
         }
+        // Exact mode has already written this loop's per-iteration ticks just
+        // above — foreach's are shape- and version-dependent, unlike the flat
+        // `ops(1);` the other three loops take from
+        // `emit_body_with_entry_tick`, so they stay inline and untouched.
+        // Clean mode has no such ticks, and the charge pass emits nothing for
+        // a body that costs nothing, so an *empty* foreach body charged zero
+        // per iteration (#486). Close that one hole with the same flat tick
+        // the other three loops use, keeping the invariant that no clean-mode
+        // loop body is free. Clean mode's charge model is coarse by design —
+        // it drifts from the exact per-iteration total by the loop's own tick
+        // either way — so this does not try to reproduce the exact-mode counts
+        // above.
+        self.emit_clean_empty_body_tick(&fe.body);
         self.emit_stmt_or_block(&fe.body);
         self.writer.add_line("}");
         self.writer.add_line("}");
@@ -809,27 +834,36 @@ impl Emitter<'_> {
     /// is concatenated onto whatever the first statement emits next.
     /// Used for while/for/do-while bodies but NOT for if/else bodies or
     /// the main runIA block (`emit_foreach` and the function emitters
-    /// write their own ticks inline).
+    /// write their own ticks inline; foreach still shares the clean-mode
+    /// half through [`Self::emit_clean_empty_body_tick`]).
+    pub(crate) fn emit_body_with_entry_tick(&mut self, s: &Stmt) {
+        if self.opts.emit_ops {
+            self.writer.add_code("ops(1);");
+        } else {
+            self.emit_clean_empty_body_tick(s);
+        }
+        self.emit_stmt_or_block(s);
+    }
+
+    /// Charge the clean-mode body-entry tick for an *empty* loop body.
     ///
     /// Clean mode emits no per-statement ticks — a block's whole static
     /// cost arrives as the single `Stmt::Charge` the charge pass prepends,
     /// and that pass emits nothing for a block that costs nothing. An
     /// *empty* loop body therefore charged zero ops per iteration, so
     /// `while (true) {}` spun forever at 100% CPU instead of tripping the
-    /// per-turn op budget (#388). Emit the body-entry tick by hand for that
-    /// one shape, in the same spelling the charge pass would have used. A
-    /// body with any statement in it already charges at least 1 (even
-    /// `{ { } }` or a bare `null`), so this is the only hole.
-    pub(crate) fn emit_body_with_entry_tick(&mut self, s: &Stmt) {
-        if self.opts.emit_ops {
-            self.writer.add_code("ops(1);");
-        } else if matches!(s, Stmt::Block(b) if b.stmts.is_empty()) {
+    /// per-turn op budget (#388), and `for (var x in […]) {}` under-counted
+    /// against exact mode and the native backend (#486). Emit the body-entry
+    /// tick by hand for that one shape, in the same spelling the charge pass
+    /// would have used. A body with any statement in it already charges at
+    /// least 1 (even `{ { } }` or a bare `null`), so this is the only hole.
+    ///
+    /// A no-op in exact mode, where every loop emitter writes its own
+    /// per-iteration ticks — flat for while/for/do-while, shape- and
+    /// version-dependent for foreach.
+    pub(crate) fn emit_clean_empty_body_tick(&mut self, s: &Stmt) {
+        if !self.opts.emit_ops && matches!(s, Stmt::Block(b) if b.stmts.is_empty()) {
             self.writer.add_line("ops(1);");
-        }
-        if let Stmt::Block(b) = s {
-            self.emit_stmts(&b.stmts);
-        } else {
-            self.emit_stmt(s);
         }
     }
 }
