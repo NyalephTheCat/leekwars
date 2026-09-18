@@ -17,7 +17,7 @@
 //! session per process (a debug adapter drives exactly one).
 
 use std::rc::Rc;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LockResult, PoisonError, RwLock};
 
 use leek_runtime::Value;
 use leek_span::SourceId;
@@ -81,14 +81,25 @@ pub struct VarDesc {
 
 static HOOK: RwLock<Option<Arc<dyn DebugHook>>> = RwLock::new(None);
 
+/// Recover the guard from a poisoned lock instead of panicking — the
+/// workspace policy (#176), the same one `leek-prelude` and `leek-dap`
+/// spell as `lock_unpoisoned`.
+///
+/// It matters more here than in either of those. `fire_safepoint`,
+/// `fire_enter` and `fire_leave` are called from JIT-compiled code before
+/// every statement, so an `expect` on a poisoned lock would start an unwind
+/// through Cranelift frames. The data behind the lock is a single
+/// `Option<Arc<_>>` that a panicking holder cannot leave torn, so reading it
+/// after a poisoning is sound.
+fn unpoisoned<T>(result: LockResult<T>) -> T {
+    result.unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Install (or clear, with `None`) the global debug hook. The adapter sets
 /// this before running an instrumented program; to take one back out again,
 /// reach for [`clear_debug_hook`], which removes only the hook it is handed.
-///
-/// # Panics
-/// Panics only if the lock is poisoned (a prior holder panicked).
 pub fn set_debug_hook(hook: Option<Arc<dyn DebugHook>>) {
-    *HOOK.write().expect("debug-hook lock poisoned") = hook;
+    *unpoisoned(HOOK.write()) = hook;
 }
 
 /// Remove `hook` from the global slot, and only `hook`: if something else is
@@ -101,11 +112,8 @@ pub fn set_debug_hook(hook: Option<Arc<dyn DebugHook>>) {
 /// would tear that live session down: its parked debuggee would resume with
 /// no hook at all and run past every breakpoint to the end. Whoever installs
 /// a hook removes that hook, and a run that installed none removes nothing.
-///
-/// # Panics
-/// Panics only if the lock is poisoned (a prior holder panicked).
 pub fn clear_debug_hook(hook: &Arc<dyn DebugHook>) -> bool {
-    let mut slot = HOOK.write().expect("debug-hook lock poisoned");
+    let mut slot = unpoisoned(HOOK.write());
     // Compared as thin addresses: two `Arc<dyn DebugHook>` for one allocation
     // may carry different vtable pointers, and the allocation is the identity.
     let installed = slot
@@ -251,7 +259,7 @@ fn read_boxed(value: &Value) -> DebugValue {
 /// calling `safepoint`, so a hook that blocks (to pause) doesn't hold the
 /// lock.
 pub(crate) fn fire_safepoint(packed: i64, desc: usize, values: usize) {
-    let hook = HOOK.read().expect("debug-hook lock poisoned").clone();
+    let hook = unpoisoned(HOOK.read()).clone();
     if let Some(hook) = hook {
         let (source, offset) = unpack_position(packed);
         hook.safepoint(source, offset, desc, values);
@@ -260,7 +268,7 @@ pub(crate) fn fire_safepoint(packed: i64, desc: usize, values: usize) {
 
 /// Forward a function entry to the installed hook (pushes a call frame).
 pub(crate) fn fire_enter(desc: usize) {
-    let hook = HOOK.read().expect("debug-hook lock poisoned").clone();
+    let hook = unpoisoned(HOOK.read()).clone();
     if let Some(hook) = hook {
         hook.enter_frame(desc);
     }
@@ -268,7 +276,7 @@ pub(crate) fn fire_enter(desc: usize) {
 
 /// Forward a function return to the installed hook (pops a call frame).
 pub(crate) fn fire_leave() {
-    let hook = HOOK.read().expect("debug-hook lock poisoned").clone();
+    let hook = unpoisoned(HOOK.read()).clone();
     if let Some(hook) = hook {
         hook.leave_frame();
     }
@@ -278,7 +286,7 @@ pub(crate) fn fire_leave() {
 mod tests {
     use super::{
         DebugHook, DebugValue, HOOK, VarDesc, VarTable, clear_debug_hook, read_frame_vars,
-        render_frame_vars, set_debug_hook,
+        render_frame_vars, set_debug_hook, unpoisoned,
     };
     use leek_runtime::Value;
     use std::cell::RefCell;
@@ -360,8 +368,7 @@ mod tests {
     }
 
     fn installed() -> Option<*const ()> {
-        HOOK.read()
-            .expect("debug-hook lock poisoned")
+        unpoisoned(HOOK.read())
             .as_ref()
             .map(|hook| Arc::as_ptr(hook).cast::<()>())
     }
