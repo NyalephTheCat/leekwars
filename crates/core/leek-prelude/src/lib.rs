@@ -110,9 +110,15 @@ static MERGED_HEADER: Mutex<[Option<(u64, Option<Arc<str>>)>; 2]> = Mutex::new([
 /// *without* bumping [`generation`], so a driver that re-requests the same
 /// `--library` does not discard a merged header (nor, downstream, the parse
 /// of it) that is still correct.
+///
+/// "The same header" is [`same_header`]'s question, not pointer equality:
+/// [`LEEKWARS_SRC`] and friends are `const`, so each crate naming one
+/// materializes its own copy of the bytes and a pointer test would let two
+/// crates activate the same header twice (#490). Merging it twice makes
+/// every function it declares a duplicate definition.
 pub fn activate_library(src: &'static str) {
     let mut libs = lock_unpoisoned(&ACTIVE_LIBRARIES);
-    if !libs.iter().any(|s| std::ptr::eq(*s, src)) {
+    if !libs.iter().any(|s| same_header(s, src)) {
         libs.push(src);
         // Bumped while the lock is still held, so a reader that samples the
         // counter under that same lock can never pair the new library set
