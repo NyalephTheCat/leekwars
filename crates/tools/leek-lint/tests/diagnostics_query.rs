@@ -128,7 +128,7 @@ fn the_query_agrees_with_the_pipeline_step() {
     let root = leek_syntax::SyntaxNode::new_root(
         leek_db::queries::parse_query(&db, file, leek_db::ProgramClasses::none(&db)).green,
     );
-    let direct = leek_lint::lint_file(&hir.hir, Some(&root), &opts);
+    let direct = leek_lint::lint_file(&hir.hir, Some(&root), file.source(&db), &opts);
 
     assert_eq!(
         lint_query(&db, file, LintGroups::default()).as_slice(),

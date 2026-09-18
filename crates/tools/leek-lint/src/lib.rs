@@ -44,6 +44,7 @@ pub use query::{program_diagnostics_with_lints, program_lint_query};
 
 use leek_diagnostics::Diagnostic;
 use leek_hir::HirFile;
+use leek_span::SourceId;
 use leek_syntax::SyntaxNode;
 
 /// Run the default lint groups against `file` and return all
@@ -61,15 +62,22 @@ pub fn lint_with(file: &HirFile, opts: &LintOptions) -> Vec<Diagnostic> {
         .collect();
     let mut out = Vec::new();
     pass::run_passes(file, &mut passes, opts, &mut out);
-    // Stable order for consumers and tests: code, then position.
-    out.sort_by(|a, b| {
-        (a.code.0, a.span.start, a.span.end).cmp(&(b.code.0, b.span.start, b.span.end))
-    });
+    sort_findings(&mut out);
     out
 }
 
-/// Run the lints `opts` enables over `file` and drop the findings
-/// `@allow(...)` annotations suppress.
+/// The stable order consumers and tests read findings in: code, then
+/// position.
+fn sort_findings(out: &mut [Diagnostic]) {
+    out.sort_by(|a, b| {
+        (a.code.0, a.span.start, a.span.end).cmp(&(b.code.0, b.span.start, b.span.end))
+    });
+}
+
+/// Run the lints `opts` enables over `file`, drop the findings
+/// `@allow(...)` annotations suppress, and add the annotations' own
+/// findings — a name that resolves to no lint suppresses nothing, so it
+/// is reported rather than ignored.
 ///
 /// The pure entry point behind
 /// [`lint_query`](crate::query::lint_query) and
@@ -77,11 +85,25 @@ pub fn lint_with(file: &HirFile, opts: &LintOptions) -> Vec<Diagnostic> {
 ///
 /// `root` is the file's CST, which the annotations need — they live in
 /// comment trivia the HIR doesn't carry. Pass `None` when the caller has
-/// no tree, and nothing is suppressed.
-pub fn lint_file(file: &HirFile, root: Option<&SyntaxNode>, opts: &LintOptions) -> Vec<Diagnostic> {
+/// no tree, and nothing is suppressed. `source` is the file the tree
+/// was parsed from, which the annotations' own diagnostics point into
+/// (a green tree carries no [`SourceId`]); it is unused when `root` is
+/// `None`.
+pub fn lint_file(
+    file: &HirFile,
+    root: Option<&SyntaxNode>,
+    source: SourceId,
+    opts: &LintOptions,
+) -> Vec<Diagnostic> {
     let findings = lint_with(file, opts);
     match root {
-        Some(root) => collect_allows(root).suppress(findings),
+        Some(root) => {
+            let allows = collect_allows(root, source);
+            let mut out = allows.suppress(findings);
+            out.extend(allows.diagnostics);
+            sort_findings(&mut out);
+            out
+        }
         None => findings,
     }
 }

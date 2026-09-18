@@ -39,7 +39,12 @@ pub fn lint_query(
     let green = leek_parser::query::parse_query(db, file, ProgramClasses::none(db)).green;
     let root = SyntaxNode::new_root(green);
     let opts = crate::LintOptions::from_groups(groups, file.version_byte(db));
-    std::sync::Arc::new(crate::lint_file(&hir.hir, Some(&root), &opts))
+    std::sync::Arc::new(crate::lint_file(
+        &hir.hir,
+        Some(&root),
+        file.source(db),
+        &opts,
+    ))
 }
 
 /// One file's complete diagnostic stream: everything the compiler
@@ -85,6 +90,10 @@ pub fn diagnostics_with_lints(
 /// would honour an `@allow` inside an include; both are behaviour
 /// changes wearing a refactor's clothes.
 ///
+/// The regions carry the entry's `SourceId`, so a finding raised
+/// against an included file is not suppressed by an annotation that
+/// merely covers the same byte offsets in the entry.
+///
 /// The version comes off the entry's own input rather than out of
 /// `entry_version`: a driver settles the language version onto the input
 /// before anything reads it, so the two agree today, and following the
@@ -105,7 +114,12 @@ pub fn program_lint_query(
     let green = leek_db::queries::parse_query(db, entry, classes).green;
     let root = SyntaxNode::new_root(green);
     let opts = crate::LintOptions::from_groups(groups, entry.version_byte(db));
-    std::sync::Arc::new(crate::lint_file(&hir.hir, Some(&root), &opts))
+    std::sync::Arc::new(crate::lint_file(
+        &hir.hir,
+        Some(&root),
+        entry.source(db),
+        &opts,
+    ))
 }
 
 /// One program's complete diagnostic stream: everything the compiler
