@@ -30,9 +30,9 @@ pub fn run(
         params: CompileParams::default().with_opt(OptLevel::O1),
         color: color.into(),
         format: format.into(),
-        // `scope` and `timing` stay at their defaults: every `miku`
-        // subcommand compiles the whole program, and only `build --verbose`
-        // wants timings.
+        // `scope` and `timing` stay at their defaults: a compiled file
+        // covers its whole include closure, not the one file, and only
+        // `build --verbose` wants timings.
         ..DriverConfig::default()
     };
     let session = Session::new(&project, config)?;

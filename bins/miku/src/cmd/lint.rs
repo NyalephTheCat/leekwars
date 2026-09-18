@@ -1,4 +1,7 @@
-//! `miku lint` — run the linter across the project's entry.
+//! `miku lint` — run the linter over the project.
+//!
+//! Scope is [`crate::cmd::scope`]'s: the entry and its include closure by
+//! default, every file under `src/` and `tests/` with `--all`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -9,6 +12,7 @@ use leek_query::LintGroups;
 use leek_session::{CompileParams, DriverConfig, Session, Target};
 
 use crate::cli::{ColorWhen, Lint, MessageFormat};
+use crate::cmd::scope;
 
 pub fn run(
     args: &Lint,
@@ -32,15 +36,18 @@ pub fn run(
         }),
         color: color.into(),
         format: format.into(),
-        // `scope` and `timing` stay at their defaults: every `miku`
-        // subcommand compiles the whole program, and only `build --verbose`
-        // wants timings.
+        // `scope` and `timing` stay at their defaults: a compiled file
+        // covers its whole include closure, not the one file, and only
+        // `build --verbose` wants timings.
         ..DriverConfig::default()
     };
     let session = Session::new(&project, config)?;
-    Ok(if session.compile_entry()?.report() {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    })
+    let files = scope::targets(&project, args.all);
+    Ok(
+        if scope::compile_and_report(&session, &files, |_, _| Ok(()))? {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        },
+    )
 }

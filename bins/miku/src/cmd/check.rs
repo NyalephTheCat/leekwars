@@ -1,4 +1,7 @@
 //! `miku check` — diagnostics only.
+//!
+//! Scope is [`crate::cmd::scope`]'s: the entry and its include closure by
+//! default, every file under `src/` and `tests/` with `--all`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -10,6 +13,7 @@ use leek_project::Project;
 use leek_session::{Compilation, CompileParams, DriverConfig, Session, Target};
 
 use crate::cli::{Check, ColorWhen, MessageFormat};
+use crate::cmd::scope;
 
 pub fn run(
     args: &Check,
@@ -28,17 +32,22 @@ pub fn run(
         params: CompileParams::default(),
         color: color.into(),
         format: format.into(),
-        // `scope` and `timing` stay at their defaults: every `miku`
-        // subcommand compiles the whole program, and only `build --verbose`
-        // wants timings.
+        // `scope` and `timing` stay at their defaults: a compiled file
+        // covers its whole include closure, not the one file, and only
+        // `build --verbose` wants timings.
         ..DriverConfig::default()
     };
     let session = Session::new(&project, config)?;
-    let compiled = session.compile_entry()?;
-    let had_error = compiled.report();
-    if !had_error && native_compat_wanted(args, &project) {
-        report_native_compat(&project, &compiled);
-    }
+    let files = scope::targets(&project, args.all);
+    let native_compat = native_compat_wanted(args, &project);
+    // Per file, not per run: a file that compiles cleanly still gets the
+    // compat pass when another file of the same `--all` run did not.
+    let had_error = scope::compile_and_report(&session, &files, |compiled, file_error| {
+        if !file_error && native_compat {
+            report_native_compat(&project, compiled);
+        }
+        Ok(())
+    })?;
     Ok(if had_error {
         ExitCode::from(1)
     } else {

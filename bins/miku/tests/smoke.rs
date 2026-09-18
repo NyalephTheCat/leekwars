@@ -2520,3 +2520,161 @@ fn an_include_reaching_outside_the_project_resolves() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+// ---------------------------------------------------------------------------
+// `check` / `lint` scope (leekwars#274)
+//
+// The default is the entry plus its include closure — the cargo-like model a
+// leek-wars AI is written against — and `--all` is the opt-in that widens it
+// to every file under `src/` and `tests/`.
+// ---------------------------------------------------------------------------
+
+/// A project with three kinds of file: the entry, a helper it includes, and
+/// two files it never reaches (one under `src/`, one under `tests/`). Each
+/// non-entry file carries a differently-named unused variable, so stderr says
+/// exactly which files were looked at.
+fn wide_project(label: &str) -> PathBuf {
+    let dir = scratch_dir(label);
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "wide"
+version = "0.1.0"
+"#,
+    );
+    write(
+        &dir,
+        "src/main.leek",
+        "// @version:4\ninclude(\"helper\");\nreturn twice(21);\n",
+    );
+    write(
+        &dir,
+        "src/helper.leek",
+        "// @version:4\nfunction twice(x) { var unused_h = 1; return x * 2; }\n",
+    );
+    write(
+        &dir,
+        "src/orphan.leek",
+        "// @version:4\nvar unused_orphan = 1;\nreturn 0;\n",
+    );
+    write(
+        &dir,
+        "tests/stray.leek",
+        "// @version:4\nvar unused_stray = 2;\nreturn 0;\n",
+    );
+    dir
+}
+
+#[test]
+fn check_and_lint_default_to_the_entry_and_its_includes() {
+    let dir = wide_project("scope_default");
+    for args in [&["check"][..], &["lint"][..]] {
+        let out = miku(args, &dir);
+        // Unused variables are warnings by default, so the run still passes.
+        assert_eq!(out.status, 0, "miku {args:?} stderr: {}", out.stderr);
+        assert!(
+            out.stderr.contains("unused_h"),
+            "the include closure is part of the default scope: {}",
+            out.stderr
+        );
+        assert!(
+            !out.stderr.contains("unused_orphan") && !out.stderr.contains("unused_stray"),
+            "a file the entry never includes must stay out of the default \
+             scope: {}",
+            out.stderr
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn check_and_lint_all_reach_files_the_entry_does_not_include() {
+    let dir = wide_project("scope_all");
+    for args in [&["check", "--all"][..], &["lint", "--all"][..]] {
+        let out = miku(args, &dir);
+        assert_eq!(out.status, 0, "miku {args:?} stderr: {}", out.stderr);
+        assert!(
+            out.stderr.contains("unused_orphan"),
+            "`--all` walks [paths].src: {}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("unused_stray"),
+            "`--all` walks [paths].tests too: {}",
+            out.stderr
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn check_all_reports_an_included_file_once() {
+    // `src/helper.leek` is reachable both ways under `--all`: the entry
+    // includes it, and the walk finds it in its own right. Its diagnostics
+    // must be printed once.
+    let dir = wide_project("scope_dedup");
+    let out = miku(&["check", "--all"], &dir);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    // The header line of a rendered diagnostic; the caret label repeats the
+    // message, so match the part only the header has.
+    assert_eq!(
+        out.stderr.matches("]: variable `unused_h`").count(),
+        1,
+        "the helper is diagnosed once, not once per file that reaches it:\n{}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A project whose entry is clean and whose broken file sits at `rel`, which
+/// the entry never includes.
+fn broken_outside_the_entry(label: &str, rel: &str) -> PathBuf {
+    let dir = scratch_dir(label);
+    write(
+        &dir,
+        "Miku.toml",
+        r#"[project]
+name    = "broken"
+version = "0.1.0"
+"#,
+    );
+    write(&dir, "src/main.leek", "// @version:4\nreturn 1;\n");
+    // A parse error: the lexer rejects `$` and the `var` chain is malformed.
+    write(&dir, rel, "var var var = $@%\n");
+    dir
+}
+
+#[test]
+fn check_all_aggregates_a_failure_from_a_file_outside_the_entry_closure() {
+    let dir = broken_outside_the_entry("scope_exit_src", "src/broken.leek");
+    let default = miku(&["check"], &dir);
+    assert_eq!(
+        default.status, 0,
+        "the entry compiles, and the broken file is out of scope: {}",
+        default.stderr
+    );
+
+    let all = miku(&["check", "--all"], &dir);
+    assert_ne!(
+        all.status, 0,
+        "one broken file fails the whole run: {}",
+        all.stderr
+    );
+
+    let lint = miku(&["lint", "--all"], &dir);
+    assert_ne!(lint.status, 0, "stderr: {}", lint.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn check_all_covers_the_tests_tree() {
+    // Nothing under `tests/` was ever checked before #274 — `miku test` runs
+    // those files, but a project with no runnable expectations never heard
+    // about a broken one.
+    let dir = broken_outside_the_entry("scope_exit_tests", "tests/broken.leek");
+    assert_eq!(miku(&["check"], &dir).status, 0);
+    let all = miku(&["check", "--all"], &dir);
+    assert_ne!(all.status, 0, "stderr: {}", all.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
