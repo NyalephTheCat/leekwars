@@ -517,24 +517,47 @@ impl<'a> Emitter<'a> {
             _ => (main, None),
         };
         self.emit_stmts(head);
-        if let Some(e) = trailing_expr {
-            let code = self.expr_to_string(&e);
-            // Wrap in `ops(...)` only if the expression has runtime
-            // cost — same rule the Java reference applies for
-            // `LeekExpressionInstruction` returns.
-            let rendered = if self.opts.emit_ops {
-                let cost = expr_op_cost(&e);
-                if cost > 0 {
-                    format!("ops({code}, {cost})")
+        // One reachability answer for *both* arms below. The trailing
+        // expression is split off above, so `emit_stmts`' dead-code cutoff
+        // never sees it; without this the `return <expr>;` arm emitted
+        // unconditionally while only the `return null;` arm asked whether
+        // anything could reach it (#541). In clean mode a main block whose
+        // last statement is `while (true) {}` / `do {} while (true)` /
+        // `for (;;) {}` cannot complete normally — javac folds the constant
+        // condition and rejects *whichever* return follows as unreachable.
+        // Exact mode is untouched: there the condition is wrapped in
+        // `ops(bool(true), …)`, so `is_infinite_loop` reports false and the
+        // trailing return stays reachable and required, exactly as the
+        // reference emits it.
+        let head_returns = ends_with_return(head, self.opts.emit_ops);
+        match trailing_expr {
+            Some(e) if !head_returns => {
+                let code = self.expr_to_string(&e);
+                // Wrap in `ops(...)` only if the expression has runtime
+                // cost — same rule the Java reference applies for
+                // `LeekExpressionInstruction` returns.
+                let rendered = if self.opts.emit_ops {
+                    let cost = expr_op_cost(&e);
+                    if cost > 0 {
+                        format!("ops({code}, {cost})")
+                    } else {
+                        code
+                    }
                 } else {
                     code
-                }
-            } else {
-                code
-            };
-            self.writer.add_line(&format!("return {rendered};"));
-        } else if !ends_with_return(head, self.opts.emit_ops) {
-            self.writer.add_line("return null;");
+                };
+                self.writer.add_line(&format!("return {rendered};"));
+            }
+            None if !head_returns => self.writer.add_line("return null;"),
+            // Nothing can reach here, so the expression is dropped along with
+            // its `return` rather than hoisted above the loop: its side
+            // effects never run in the source program either, and every other
+            // unreachable statement in the block is already dropped outright
+            // by `emit_stmts`' cutoff. The reference has no say — it emits the
+            // opaque `ops(bool(true), …)` condition unconditionally, so
+            // javac's constant-condition rule never fires on its output and
+            // this shape has no upstream spelling to match.
+            _ => {}
         }
         if self.opts.is_clean() {
             self.writer.pop_indent();
