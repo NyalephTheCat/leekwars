@@ -15,6 +15,12 @@ use leek_lint::{all_metas, all_passes};
 
 /// Catalog entries in the lint range. The `L` prefix is the range's
 /// definition (see `AllowMap::suppress`, which treats it the same way).
+///
+/// The catalog's `lint:` section also holds `W0600`, which the
+/// `@allow(…)` scanner raises about an annotation's own text rather
+/// than about the code. It is not a lint and has no pass to pair with,
+/// which is exactly why it is not an `L` code — the prefix filter here
+/// is what keeps the pairing below honest.
 fn catalog_lint_ids() -> Vec<&'static str> {
     codes::CATALOG
         .iter()

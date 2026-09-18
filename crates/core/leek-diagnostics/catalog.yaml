@@ -139,6 +139,12 @@ lint:
   - { id: L0039, name: ManualRangeCheck, severity: hint }
   - { id: L0040, name: ArrayLiteralMembership, severity: hint }
   - { id: L0041, name: MapAsSet, severity: hint }
+  # Raised about a lint *annotation* rather than by a lint: the
+  # `@allow(…)` scanner in leek-lint reports a name that resolves to no
+  # lint, the way W0010 reports an unknown pragma. Deliberately not an
+  # `L` code — `leek-lint/tests/registry.rs` pairs every `L` code with a
+  # registered pass, and an annotation check has none to pair with.
+  - { id: W0600, name: UnknownLintInAllow, severity: warning }
 
 backend:
   # The native backend's own failures. `NativeError::Runtime` deliberately has
