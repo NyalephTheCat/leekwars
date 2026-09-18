@@ -19,8 +19,8 @@
 /// every later request into an empty result. Those recover the guard with
 /// `PoisonError::into_inner` now (#176, fixed in #487), the way
 /// leek-resolver's interner and builtin registry, leek-parser's header cache
-/// and leek-types' checker caches already did. The one still spelled `expect`
-/// is `leek_hir::fold`'s parsed fold map, which every lowering goes through.
+/// and leek-types' checker caches already did. `leek_hir::fold`'s parsed fold
+/// map, named here as the last `expect`, no longer holds a lock at all.
 pub fn guard<T: Default>(label: &str, f: impl FnOnce() -> T) -> T {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(value) => value,
