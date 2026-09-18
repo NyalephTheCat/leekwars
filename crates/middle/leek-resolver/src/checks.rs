@@ -391,7 +391,7 @@ impl Resolver {
                     if matches!(
                         self.lookup(&name),
                         Some(SymbolKind::Function | SymbolKind::Builtin)
-                    ) && !self.reassigned_names.contains(&name)
+                    ) && !self.name_reassigned(&name)
                     {
                         self.err(
                             codes::CANNOT_REDEFINE_FUNCTION,

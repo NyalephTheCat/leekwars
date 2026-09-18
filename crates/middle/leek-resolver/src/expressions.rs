@@ -201,7 +201,7 @@ impl Resolver {
             // (the redefined function lives in its own `rfunction_<name>`
             // box, and the mutation operators reach it).
             let compound = b.op().is_some_and(|o| o.kind() != SyntaxKind::Eq);
-            let redefined = self.reassigned_names.contains(&name);
+            let redefined = self.name_reassigned(&name);
             match kind {
                 SymbolKind::Function | SymbolKind::Builtin
                     if self.version >= Version::V4 || (compound && !redefined) =>
@@ -222,15 +222,19 @@ impl Resolver {
                 _ => {}
             }
         }
-        // Whatever the disposition, a reassignment makes future
-        // arity assumptions invalid — drop the metadata so
-        // subsequent calls don't false-fire.
-        self.fn_meta.remove(&name);
-        // Record the reassignment so `resolve_name_call` skips the
+        // Whatever the disposition, a reassignment makes future arity
+        // assumptions about *this binding* invalid — record it so
+        // `resolve_name_call` drops the recorded arity and skips the
         // BUILTIN_FN_META fallback. Upstream allows
-        // `cos = function(x, y, z) {…}; cos(1, 2, 3)` (the
-        // user-bound value overrides the builtin's arity).
-        self.reassigned_names.insert(name);
+        // `cos = function(x, y, z) {…}; cos(1, 2, 3)` (the user-bound
+        // value overrides the builtin's arity).
+        //
+        // It lands on the symbol the name resolves to here, so assigning
+        // to an unrelated local that happens to share a builtin's name no
+        // longer turns that builtin's arity checks off program-wide
+        // (#190). Only a name with no declaration at all — a bare
+        // redefinition of a builtin — still records program-wide.
+        self.mark_reassigned(name);
     }
 
     fn resolve_new(&mut self, n: &leek_parser::ast::NewExpr) {
@@ -426,37 +430,52 @@ impl Resolver {
                 format!("`{name}` was removed in v{removed_at}"),
             );
         }
-        // User-defined functions (declared during pass 1) take
-        // precedence; otherwise consult the static builtin metadata
-        // — UNLESS the user has reassigned this name (`cos = f`)
-        // OR we're inside a class method that has a same-named
-        // overload accepting the current arity. In both cases the
-        // builtin's arity no longer applies.
-        let user_meta = self.fn_meta.get(&name).copied();
+        // What the name resolves to *here* decides which signature the
+        // call is checked against (#190). A user declaration answers for
+        // itself — its recorded arity, or no check at all when we don't
+        // know its callable shape — and the builtin tables only get a say
+        // when the name genuinely reaches a builtin. That is what keeps a
+        // lambda local to one function, or a local that happens to share
+        // a builtin's name, from deciding how calls elsewhere are checked.
+        let symbol_meta = self.name_meta(&name);
         let class_method_matches_arity = self
             .current_class
             .as_ref()
             .and_then(|c| self.class_method_arities.get(c))
             .and_then(|m| m.get(&name))
             .is_some_and(|&(min, max)| arg_count >= min && arg_count <= max);
-        let meta = user_meta.or_else(|| {
-            if self.reassigned_names.contains(&name) || class_method_matches_arity {
-                None
-            } else {
-                crate::scope::BUILTIN_FN_META
-                    .get(name.as_str())
-                    .copied()
-                    .or_else(|| {
-                        builtins::builtin_fn_meta_in(self.builtins(), &name).map(
-                            |(min_args, max_args, min_version)| FnMeta {
-                                min_args,
-                                max_args,
-                                min_version,
-                            },
-                        )
-                    })
+        let meta = match symbol_meta {
+            // The binding was assigned to, so it holds a value of unknown
+            // arity: no check, and no builtin fallback either.
+            Some(m) if m.reassigned => None,
+            // An ordinary user binding — function, or lambda-valued var.
+            Some(m) if !m.class_method => m.fn_meta,
+            // A class method in scope, or a name with no declaration:
+            // consult the builtin metadata — UNLESS the user redefined
+            // the builtin outright (`cos = f`) or we're inside a class
+            // that has a same-named method accepting the current arity.
+            // In both cases the builtin's arity no longer applies.
+            _ => {
+                if (symbol_meta.is_none() && self.reassigned_names.contains(&name))
+                    || class_method_matches_arity
+                {
+                    None
+                } else {
+                    crate::scope::BUILTIN_FN_META
+                        .get(name.as_str())
+                        .copied()
+                        .or_else(|| {
+                            builtins::builtin_fn_meta_in(self.builtins(), &name).map(
+                                |(min_args, max_args, min_version)| FnMeta {
+                                    min_args,
+                                    max_args,
+                                    min_version,
+                                },
+                            )
+                        })
+                }
             }
-        });
+        };
         if let Some(meta) = meta {
             let is_builtin = matches!(self.lookup(&name), Some(SymbolKind::Builtin));
             self.check_call_meta(&ident, &name, meta, arg_count, is_builtin);

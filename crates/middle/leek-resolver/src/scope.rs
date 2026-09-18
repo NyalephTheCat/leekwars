@@ -67,6 +67,35 @@ pub(crate) struct FnMeta {
     pub(crate) min_version: u8,
 }
 
+/// Everything the call checks need to know about **one declared
+/// symbol**, parallel to [`Resolver::symbols`] and indexed by
+/// [`SymbolId.0`](SymbolId).
+///
+/// Attaching this to the symbol rather than to the bare name is what
+/// scopes it (#190): a lambda bound to `var f = (a, b) -> a` inside one
+/// function describes *that* binding, not every later `f` in the
+/// program. A name that resolves to no symbol has no `SymbolMeta` at
+/// all, which is precisely when the builtin tables get a say.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SymbolMeta {
+    /// Arity + version metadata, when we know the symbol is callable
+    /// with a known signature (a `function` declaration, or a lambda
+    /// bound straight to the variable). `None` means "callable shape
+    /// unknown" — no arity check fires, rather than one against
+    /// somebody else's signature.
+    pub(crate) fn_meta: Option<FnMeta>,
+    /// The symbol has appeared on the left of an assignment
+    /// (`f = function(…) {…}`, `f = g`), so whatever arity we recorded
+    /// for it no longer describes what the name holds.
+    pub(crate) reassigned: bool,
+    /// The symbol is a class method declared in a class-body scope.
+    /// Bare calls to those names keep the older resolution order — a
+    /// same-named builtin still wins over the method, and overloads are
+    /// answered from `class_method_arities` — so they are marked rather
+    /// than treated as ordinary user bindings.
+    pub(crate) class_method: bool,
+}
+
 impl Resolver {
     pub(crate) fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
@@ -142,6 +171,8 @@ impl Resolver {
         full_span: Span,
     ) -> (SymbolId, bool) {
         let id = SymbolId(u32::try_from(self.symbols.len()).expect("more than u32::MAX symbols"));
+        // Kept in lockstep with `symbols` so `SymbolId` indexes both.
+        self.symbol_meta.push(SymbolMeta::default());
         self.symbols.push(Symbol {
             id,
             kind,
@@ -213,6 +244,63 @@ impl Resolver {
             }
         }
         None
+    }
+
+    /// The call metadata recorded for `id`. Every [`SymbolId`] has an
+    /// entry — [`declare_with_span`](Self::declare_with_span) pushes one
+    /// with every symbol — so a miss can only be a corrupted id.
+    pub(crate) fn symbol_meta(&self, id: SymbolId) -> SymbolMeta {
+        self.symbol_meta
+            .get(id.0 as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Mutable access to [`symbol_meta`](Self::symbol_meta), for the
+    /// declaration sites that fill it in.
+    pub(crate) fn symbol_meta_mut(&mut self, id: SymbolId) -> &mut SymbolMeta {
+        debug_assert!(
+            (id.0 as usize) < self.symbol_meta.len(),
+            "symbol metadata is allocated with the symbol"
+        );
+        let idx = id.0 as usize;
+        if idx >= self.symbol_meta.len() {
+            self.symbol_meta.resize(idx + 1, SymbolMeta::default());
+        }
+        &mut self.symbol_meta[idx]
+    }
+
+    /// The call metadata for whatever `name` resolves to *here*, or
+    /// `None` when it resolves to no declared symbol (an undeclared name
+    /// or a builtin). The scoped replacement for the old program-wide
+    /// `fn_meta` / `reassigned_names` reads.
+    pub(crate) fn name_meta(&self, name: &str) -> Option<SymbolMeta> {
+        self.lookup_id(name).map(|id| self.symbol_meta(id))
+    }
+
+    /// True when `name` holds a value some assignment rebound — either a
+    /// declared symbol that was assigned to, or a builtin name that was
+    /// redefined without ever being declared (`cos = f` at top level,
+    /// which upstream turns into a program-wide redefinition).
+    pub(crate) fn name_reassigned(&self, name: &str) -> bool {
+        match self.lookup_id(name) {
+            Some(id) => self.symbol_meta(id).reassigned,
+            None => self.reassigned_names.contains(name),
+        }
+    }
+
+    /// Record that `name` was assigned to: on the symbol it resolves to,
+    /// or — for a builtin with no declaration to hang it on — in the
+    /// program-wide set.
+    pub(crate) fn mark_reassigned(&mut self, name: String) {
+        if let Some(id) = self.lookup_id(&name) {
+            let meta = self.symbol_meta_mut(id);
+            meta.reassigned = true;
+            // Whatever arity we recorded no longer describes the value.
+            meta.fn_meta = None;
+        } else {
+            self.reassigned_names.insert(name);
+        }
     }
 
     /// Record that the reference token at `ident` (offset / length

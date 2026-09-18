@@ -159,7 +159,10 @@ impl Resolver {
             return;
         };
         let nm = name.text().to_string();
-        let (_, redecl) = self.declare(&name, SymbolKind::Function);
+        // The entry this declaration replaces *in this same scope*, read
+        // before `declare` overwrites it — an overload widens its arity.
+        let prior = self.scopes.last().and_then(|s| s.get(&nm).copied());
+        let (id, redecl) = self.declare(&name, SymbolKind::Function);
         let overloads = self.opts.experimental_overloads;
         if redecl && !overloads {
             self.err(
@@ -169,27 +172,21 @@ impl Resolver {
             );
         }
         self.check_param_defaults(decl.syntax());
-        let (min_args, max_args) = fn_arity(decl.syntax());
-        if redecl && overloads {
-            // Overload: widen the recorded arity to cover this
+        let (mut min_args, mut max_args) = fn_arity(decl.syntax());
+        if redecl
+            && overloads
+            && let Some(prev) = prior.and_then(|p| self.symbol_meta(p).fn_meta)
+        {
+            // Overload: widen the recorded arity to cover the earlier
             // declaration too, so a call matching any signature passes.
-            let entry = self.fn_meta.entry(nm).or_insert(FnMeta {
-                min_args,
-                max_args,
-                min_version: 1,
-            });
-            entry.min_args = entry.min_args.min(min_args);
-            entry.max_args = entry.max_args.max(max_args);
-        } else {
-            self.fn_meta.insert(
-                nm,
-                FnMeta {
-                    min_args,
-                    max_args,
-                    min_version: 1,
-                },
-            );
+            min_args = min_args.min(prev.min_args);
+            max_args = max_args.max(prev.max_args);
         }
+        self.symbol_meta_mut(id).fn_meta = Some(FnMeta {
+            min_args,
+            max_args,
+            min_version: 1,
+        });
     }
 
     pub(crate) fn declare_var_names(&mut self, decl: &VarDeclStmt, kind: SymbolKind) {
@@ -279,12 +276,17 @@ impl Resolver {
                         if let Some(ident) =
                             ClassMethod::cast(member.clone()).and_then(|m| method_name(&m))
                         {
-                            let name_text = ident.text().to_string();
-                            let _ = self.declare(&ident, SymbolKind::Function);
-                            // Drop any builtin arity entry — the
-                            // method may be overloaded with different
-                            // arities than the global builtin.
-                            self.fn_meta.remove(name_text.as_str());
+                            let (id, _) = self.declare(&ident, SymbolKind::Function);
+                            // Mark it a class method rather than dropping
+                            // any same-named entry: the method may be
+                            // overloaded with arities the global builtin
+                            // doesn't accept, so bare calls to it inside
+                            // this class are answered from
+                            // `class_method_arities`. Mutating a
+                            // program-wide table here used to disable the
+                            // arity checks of a same-named *top-level*
+                            // function everywhere after the class (#190).
+                            self.symbol_meta_mut(id).class_method = true;
                         }
                     }
                     _ => {}
@@ -664,15 +666,24 @@ impl Resolver {
             self.declare_var_names(v, declaration_kind);
         }
         if let Some(name) = idents_after_keyword(v.syntax()).first() {
-            if let Some((min_args, max_args)) = lambda_arity {
-                self.fn_meta.insert(
-                    name.text().to_string(),
-                    FnMeta {
-                        min_args,
-                        max_args,
-                        min_version: 1,
-                    },
-                );
+            // Record the lambda's arity on the symbol this declaration
+            // just bound. Read straight out of the innermost scope, not
+            // via `lookup_id`: an outward walk could land on an outer
+            // binding of the same name, which is the leak being fixed.
+            // Recording it under the bare name let the arity escape this
+            // scope and decide how every later call of a same-named
+            // function was checked (#190).
+            if let Some((min_args, max_args)) = lambda_arity
+                && let Some(id) = self
+                    .scopes
+                    .last()
+                    .and_then(|scope| scope.get(name.text()).copied())
+            {
+                self.symbol_meta_mut(id).fn_meta = Some(FnMeta {
+                    min_args,
+                    max_args,
+                    min_version: 1,
+                });
             }
             if let Some(cls) = new_class {
                 self.set_var_class(name.text().to_string(), cls, has_explicit_type);
