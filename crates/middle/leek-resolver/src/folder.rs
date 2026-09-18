@@ -113,6 +113,11 @@ impl leek_diagnostics::IntoDiagnostic for IncludeError<'_> {
 /// `SourceFile` for. A fourth copy used to live in the LSP's
 /// program-scope handler; it calls the query now.
 ///
+/// This list is exhaustive, not a shared prefix: no resolver may try a
+/// candidate of its own after these. `MemFolder` did until #521, and
+/// the LSP shadows disk with it, so the editor accepted includes that
+/// `miku` and `leekc` rejected.
+///
 /// The results are paths to *open*, not yet map keys — run one through
 /// [`canonical_or_normalized`] before keying anything by it.
 #[must_use]
@@ -166,9 +171,13 @@ impl Folder for DiskFolder {
 }
 
 /// In-memory `Folder` for tests and the LSP's open-document layer.
-/// Keys are virtual paths (e.g. `"file:///proj/main.leek"`) and
-/// names are looked up by direct lookup or via a sibling-resolved
-/// path (`<dirname-of-includer>/<name>` and `<…>/<name>.leek`).
+///
+/// Keys are virtual paths (e.g. `"file:///proj/main.leek"`), normalized
+/// on insert. Names resolve through [`include_candidates`] and only
+/// through it — `<dirname-of-includer>/<name>.leek` first, then
+/// `<dirname-of-includer>/<name>` — so a name this folder answers is a
+/// name [`DiskFolder`] would answer given the same tree, and a name it
+/// refuses is one the CLI refuses too.
 pub struct MemFolder {
     files: BTreeMap<PathBuf, Arc<str>>,
 }
@@ -204,22 +213,24 @@ impl Default for MemFolder {
 
 impl Folder for MemFolder {
     fn load(&self, includer: &Path, name: &str) -> Result<LoadedFile, LoadError> {
-        let [with_ext, bare] = include_candidates(includer, name);
-        // The two shared candidates, plus one only this folder has: the
-        // raw name, keyed as written. Virtual fixtures are inserted
-        // under whatever path the test spelled, so `include("/proj/util")`
-        // from a file in another directory still finds them. Neither the
-        // disk folder nor the workspace-map query has that third lookup,
-        // which is why it stays here rather than in `include_candidates`.
-        let candidates = [
-            normalize_lexical(&with_ext),
-            normalize_lexical(&bare),
-            normalize_lexical(Path::new(name)),
-        ];
-        for c in &candidates {
-            if let Some(text) = self.files.get(c) {
+        // [`include_candidates`] and nothing else, in its order. The
+        // only thing this folder adds is the normalization the map's
+        // keys already went through in [`MemFolder::insert`]; the
+        // candidates themselves are the disk folder's.
+        //
+        // There used to be a third, folder-local candidate here — the
+        // raw include name keyed as written, which let
+        // `include("shared/util")` reach a fixture inserted as
+        // `shared/util.leek` from an includer in another directory.
+        // It is gone (#521): this folder backs the LSP's shadowing
+        // layer, so a name only it could resolve was a program that
+        // compiled in the editor and failed under `miku` and `leekc` —
+        // the worst way for the two to disagree.
+        for candidate in include_candidates(includer, name) {
+            let key = normalize_lexical(&candidate);
+            if let Some(text) = self.files.get(&key) {
                 return Ok(LoadedFile {
-                    path: c.clone(),
+                    path: key,
                     text: text.clone(),
                 });
             }
@@ -256,6 +267,70 @@ mod tests {
         f.insert("/proj/lib/util.leek", "function k() {}");
         let got = f.load(Path::new("/proj/main.leek"), "lib/util").unwrap();
         assert_eq!(got.path, PathBuf::from("/proj/lib/util.leek"));
+    }
+
+    #[test]
+    fn mem_folder_prefers_the_dot_leek_candidate() {
+        let mut f = MemFolder::new();
+        f.insert("/proj/main.leek", "");
+        f.insert("/proj/util.leek", "var from_dot_leek = 1;");
+        f.insert("/proj/util", "var from_bare = 1;");
+        let got = f.load(Path::new("/proj/main.leek"), "util").unwrap();
+        assert_eq!(got.path, PathBuf::from("/proj/util.leek"));
+    }
+
+    #[test]
+    fn mem_folder_falls_back_to_the_bare_candidate() {
+        let mut f = MemFolder::new();
+        f.insert("/proj/main.leek", "");
+        f.insert("/proj/util", "var from_bare = 1;");
+        let got = f.load(Path::new("/proj/main.leek"), "util").unwrap();
+        assert_eq!(got.path, PathBuf::from("/proj/util"));
+    }
+
+    /// #521. This folder used to try the raw include name, normalized,
+    /// as a third candidate, so a file keyed relatively answered an
+    /// includer sitting somewhere else entirely. [`DiskFolder`] never
+    /// had that lookup and neither does `resolve_include`, and the LSP
+    /// shadows disk with this folder — so the editor resolved includes
+    /// `miku` and `leekc` reported as not found.
+    #[test]
+    fn mem_folder_does_not_resolve_the_raw_include_name() {
+        // Keyed exactly as the name is written — the spelling the third
+        // candidate matched.
+        let mut f = MemFolder::new();
+        f.insert("/proj/main.leek", "");
+        f.insert("shared/util.leek", "function helper() {}");
+        assert_eq!(
+            f.load(Path::new("/proj/main.leek"), "shared/util.leek")
+                .unwrap_err(),
+            LoadError::NotFound,
+        );
+
+        // And the extensionless spelling of the same thing.
+        let mut f = MemFolder::new();
+        f.insert("/proj/main.leek", "");
+        f.insert("shared/util", "function helper() {}");
+        assert_eq!(
+            f.load(Path::new("/proj/main.leek"), "shared/util")
+                .unwrap_err(),
+            LoadError::NotFound,
+        );
+    }
+
+    /// The other half of the pin: the same file, keyed where the
+    /// includer's directory actually puts it, still resolves. Dropping
+    /// the third candidate narrowed this folder to the shared two, it
+    /// did not break sibling lookup.
+    #[test]
+    fn mem_folder_still_resolves_that_file_from_the_includers_directory() {
+        let mut f = MemFolder::new();
+        f.insert("/proj/main.leek", "");
+        f.insert("/proj/shared/util.leek", "function helper() {}");
+        for name in ["shared/util", "shared/util.leek"] {
+            let got = f.load(Path::new("/proj/main.leek"), name).unwrap();
+            assert_eq!(got.path, PathBuf::from("/proj/shared/util.leek"));
+        }
     }
 
     #[test]
