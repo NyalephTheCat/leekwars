@@ -165,10 +165,9 @@ fn clean_finite_for_keeps_the_trailing_return() {
 /// mode's dead-code elimination has to drop them — the same `emit_stmts`
 /// cutoff that already covers `while (true)`.
 ///
-/// A *trailing bare expression* is the one shape this does not reach: the main
+/// A *trailing bare expression* does not go through that cutoff — the main
 /// block splits it off before `emit_stmts` runs and re-emits it as runIA's
-/// `return`. That hole is not specific to `for` — `while (true) {}` followed by
-/// an expression has it too — so it is left alone here.
+/// `return` — so it is covered separately below (#541).
 #[test]
 fn clean_for_ever_drops_following_statements() {
     let java = java_for(
@@ -286,4 +285,90 @@ fn exact_foreach_keeps_its_own_per_iteration_ticks() {
         !foreach_body(&keyed_v4).contains("ops("),
         "keyed v4 foreach must charge nothing per iteration:\n{keyed_v4}"
     );
+}
+
+/// The main block's three infinite-loop spellings, each followed by a bare
+/// trailing expression.
+const INFINITE_LOOP_THEN_EXPR: [&str; 3] = [
+    "// @version:4\nfor (;;) {}\ndebug(\"x\")\n",
+    "// @version:4\nwhile (true) {}\ndebug(\"x\")\n",
+    "// @version:4\ndo {} while (true)\ndebug(\"x\")\n",
+];
+
+/// #541: `emit_ai_class` splits the main block's trailing bare expression off
+/// *before* `emit_stmts` runs, so the dead-code cutoff never sees it and the
+/// `return <expr>;` went out unconditionally — while the sibling `return
+/// null;` arm did consult `ends_with_return`. In clean mode the loop condition
+/// emits as the bare constant javac folds, so that return is unreachable and
+/// javac rejects the class. Both arms now read the same answer, and the
+/// expression is dropped along with its `return`.
+#[test]
+fn clean_infinite_loop_drops_the_unreachable_trailing_expression() {
+    for src in INFINITE_LOOP_THEN_EXPR {
+        let java = java_for(src, &Options::clean(Version::V4, 1));
+        assert!(
+            !java.contains("return"),
+            "a return after a provably-infinite loop is unreachable for {src:?}:\n{java}"
+        );
+        // Dropped outright rather than hoisted above the loop: its side
+        // effects never run in the source program either.
+        assert!(
+            !java.contains("debug"),
+            "the unreachable trailing expression must not be emitted for {src:?}:\n{java}"
+        );
+    }
+}
+
+/// The other half of the same answer: a loop that *can* complete normally
+/// leaves the trailing expression reachable, so clean mode must still return
+/// it. Guards against the fix over-suppressing.
+#[test]
+fn clean_finite_loop_keeps_the_trailing_expression_return() {
+    for src in [
+        "// @version:4\nfor (var i = 0; i < 3; i++) {}\ndebug(\"x\")\n",
+        "// @version:4\nwhile (true) { break; }\ndebug(\"x\")\n",
+    ] {
+        let java = java_for(src, &Options::clean(Version::V4, 1));
+        assert!(
+            java.contains("return SystemClass.debug(this, \"x\");"),
+            "a reachable trailing expression must still be returned for {src:?}:\n{java}"
+        );
+    }
+}
+
+/// Sharing the `return null;` arm's answer also covers the non-loop half of
+/// it: a head ending in an actual `return` leaves nothing able to reach the
+/// trailing expression either, in *both* modes. That one is deliberate — the
+/// old output (`return 1l; return ops(SystemClass.debug(…), 100);`) is not
+/// valid Java in either mode, so no reference capture can hold it.
+#[test]
+fn trailing_expression_after_a_return_is_dropped_in_both_modes() {
+    let src = "// @version:4\nreturn 1\ndebug(\"x\")\n";
+    for opts in [
+        Options::clean(Version::V4, 1),
+        Options::exact(Version::V4, 1),
+    ] {
+        let java = java_for(src, &opts);
+        assert!(
+            !java.contains("debug"),
+            "a statement after an unconditional return is unreachable:\n{java}"
+        );
+    }
+}
+
+/// Exact mode is untouched for the loop shapes. The condition is wrapped in
+/// `ops(bool(true), …)`,
+/// which is not a Java constant expression, so javac's constant-condition
+/// reachability rule never fires and the trailing `return` is both reachable
+/// and required — exactly what the reference `AbstractLeekBlock.writeJavaCode`
+/// emits for this shape.
+#[test]
+fn exact_infinite_loop_keeps_the_trailing_expression_return() {
+    for src in INFINITE_LOOP_THEN_EXPR {
+        let java = java_for(src, &Options::exact(Version::V4, 1));
+        assert!(
+            java.contains("return ops(SystemClass.debug(this, \"x\"), 100);"),
+            "exact mode must keep the reachable trailing return for {src:?}:\n{java}"
+        );
+    }
 }
