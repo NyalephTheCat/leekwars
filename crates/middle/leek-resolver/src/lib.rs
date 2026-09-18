@@ -50,7 +50,6 @@ mod scope;
 mod statements;
 mod util;
 
-use scope::FnMeta;
 pub use scope::SymbolKind;
 
 pub mod index;
@@ -290,18 +289,30 @@ pub(crate) struct Resolver {
     /// Top-level declarations see an empty stack.
     pub(crate) containers: Vec<SymbolId>,
 
-    /// Arity + version metadata for functions/lambdas we've seen.
-    /// Keyed by name. Lambdas bound to `var name = (…) -> …` get an
-    /// entry too. Names not in the map are treated as variadic and
-    /// version-agnostic — that's the default for runtime helpers we
-    /// haven't classified yet.
-    pub(crate) fn_meta: HashMap<String, FnMeta>,
-    /// Names that have appeared on the left of an assignment (`cos
-    /// = function(…) {…}`, `cos = f`). For these we skip the
-    /// `BUILTIN_FN_META` fallback at call sites — the user has
-    /// shadowed the builtin with a value of unknown arity, and
-    /// upstream Leekscript dispatches to the user's binding rather
-    /// than the original builtin.
+    /// Call metadata for every declared symbol — arity, reassignment,
+    /// class-method-ness — parallel to [`symbols`](Self::symbols) and
+    /// indexed by [`SymbolId.0`](SymbolId). Grown by
+    /// [`declare_with_span`](Resolver::declare_with_span) in lockstep
+    /// with `symbols`, so the two are always the same length.
+    ///
+    /// Keyed by symbol rather than by name (#190): a lambda bound to
+    /// `var f = (a, b) -> a` inside one function used to overwrite the
+    /// program-wide entry for a top-level `function f(x)`, so a later
+    /// `f(1)` got a bogus `INVALID_PARAMETER_COUNT`. A symbol dies with
+    /// its scope, so nothing leaks out of the block that declared it.
+    /// Symbols with no `fn_meta` are treated as variadic and
+    /// version-agnostic — that's the default for anything whose callable
+    /// shape we haven't classified.
+    pub(crate) symbol_meta: Vec<crate::scope::SymbolMeta>,
+    /// **Builtin** names that have appeared on the left of an assignment
+    /// without ever being declared (`cos = function(…) {…}`, `cos = f`
+    /// at top level). For these we skip the `BUILTIN_FN_META` fallback
+    /// at call sites — the user has shadowed the builtin with a value of
+    /// unknown arity, and upstream Leekscript dispatches to the user's
+    /// binding rather than the original builtin. There is no symbol to
+    /// hang the flag on, so this one set stays program-wide; an
+    /// assignment to a name that *does* resolve to a declared symbol
+    /// sets [`SymbolMeta::reassigned`](crate::scope::SymbolMeta) instead.
     pub(crate) reassigned_names: std::collections::HashSet<String>,
     /// Symbols exposed via `import <builtin-library>` statements.
     pub(crate) imported_library_symbols: std::collections::HashSet<String>,
@@ -413,7 +424,7 @@ impl Resolver {
             symbols: Vec::new(),
             references: Vec::new(),
             containers: Vec::new(),
-            fn_meta: HashMap::new(),
+            symbol_meta: Vec::new(),
             reassigned_names: std::collections::HashSet::new(),
             imported_library_symbols: std::collections::HashSet::new(),
             class_final_fields: HashMap::new(),
@@ -855,6 +866,154 @@ mod index_tests {
             "class type leaked across scopes → false final-field error: {:?}",
             r.diagnostics
         );
+    }
+
+    // ---- #190: arity / reassignment metadata is per symbol, not per name ----
+
+    #[test]
+    fn lambda_arity_does_not_leak_across_scopes() {
+        // Mirrors `var_class_type_does_not_leak_across_scopes`: a lambda bound
+        // to a local in one function must not decide how a same-named binding
+        // elsewhere is checked. `h`'s two-argument `f` used to overwrite the
+        // program-wide entry for `function f(x)`, so the later `f(1)` — resolved
+        // after `h`'s body, in source order — got a bogus INVALID_PARAMETER_COUNT.
+        //
+        // The inner `var f` also shadows the outer function, which is its own
+        // (pre-existing) VARIABLE_NAME_UNAVAILABLE diagnostic — unrelated to
+        // the arity leak this asserts about.
+        let r = run("function f(x) { return x }\n\
+             function h() { var f = (a, b) -> a + b return f(1, 2) }\n\
+             f(1)\n");
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "lambda arity leaked out of `h` → false arity error on `f(1)`: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn lambda_arity_does_not_leak_onto_a_builtin_name() {
+        // The same leak seen from the builtin side, and with no shadowing
+        // noise: a local lambda named like a builtin used to install its arity
+        // program-wide, so the top-level `abs(1)` — a perfectly good call —
+        // was checked against the lambda's two parameters.
+        let r = run(
+            "function h() { var abs = (a, b) -> a + b return abs(1, 2) }\n\
+             abs(1)\n",
+        );
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "a local lambda decided how a builtin call is checked: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn class_method_does_not_disable_toplevel_fn_arity() {
+        // Declaring `A.f()` used to `fn_meta.remove("f")`, silently turning
+        // off arity checks for the same-named top-level function everywhere
+        // after the class. The genuine error on `f(1, 2)` must still fire.
+        let r = run("function f(x) { return x }\n\
+             class A { f() { return 1 } }\n\
+             f(1, 2)\n");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "a class method disabled the top-level function's arity check: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn class_method_overload_still_silences_its_own_calls() {
+        // Control for the above: inside the class, a bare call to a method
+        // that accepts the arity is still fine even when a same-named builtin
+        // would reject it.
+        let r = run("class A { m() { return sqrt(1, 2) } sqrt(a, b) { return a + b } }\n");
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "a same-class overload accepting this arity should not error: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn local_assignment_does_not_disable_a_builtin_name() {
+        // Assigning to an unrelated local that happens to share a builtin's
+        // name used to add that name to the program-wide `reassigned_names`,
+        // skipping the builtin metadata for the rest of the program. The
+        // top-level `abs(1, 2)` is a real error and must still be reported.
+        let r = run("function h() { var abs = 1 abs = 2 return abs }\n\
+             abs(1, 2)\n");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "a local sharing a builtin's name disabled its arity check: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn redefining_a_builtin_outright_still_silences_its_arity() {
+        // Control for the above: a bare `cos = …` with no declaration really
+        // does rebind the builtin program-wide upstream, so calls after it
+        // keep dispatching to the user's value of unknown arity.
+        let r = run("cos = function(x, y, z) { return x }\n\
+             cos(1, 2, 3)\n");
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "a redefined builtin should not be checked against its old arity: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn reassigned_local_lambda_stops_being_arity_checked() {
+        // Per-symbol reassignment still does its job inside the scope that
+        // owns the binding: once `f` has been assigned something else, its
+        // recorded lambda arity no longer describes it.
+        let r = run("function h() { var f = (a, b) -> a + b f = 12 return f(1, 2, 3) }\n");
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+            "a reassigned binding should not keep its old arity: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn arity_checks_still_fire_in_scope() {
+        // Positive controls, so none of the above can be "fixed" by turning
+        // the arity check off: a top-level function, a lambda-valued var and
+        // a builtin each still reject a call with the wrong argument count.
+        for (src, what) in [
+            (
+                "function f(x) { return x }\nf(1, 2)\n",
+                "top-level function",
+            ),
+            ("var f = (a, b) -> a + b\nf(1)\n", "lambda-valued var"),
+            ("abs(1, 2)\n", "builtin"),
+        ] {
+            let r = run(src);
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.code == codes::INVALID_PARAMETER_COUNT),
+                "{what}: a wrong argument count should still error: {:?}",
+                r.diagnostics
+            );
+        }
     }
 
     #[test]
