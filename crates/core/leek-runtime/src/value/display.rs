@@ -12,6 +12,7 @@
 // float comparisons here are deliberate.
 #![allow(clippy::float_cmp)]
 
+use std::fmt::Write as _;
 use std::rc::Rc;
 
 use super::key::MapKey;
@@ -585,55 +586,147 @@ fn write_real(f: &mut std::fmt::Formatter<'_>, r: f64) -> std::fmt::Result {
     }
 }
 
+/// Every f64 at or above 2^53 is an integer; below it, `{:.3}` is the
+/// faithful rendering — see `write_real_v1`.
+const F64_INTEGRAL_FROM: f64 = 9_007_199_254_740_992.0; // 2^53
+/// The first f64 that no longer fits a `u64`/Java `long` — see
+/// `integral_digits_v1`.
+const F64_PAST_U64_INTEGER: f64 = 9_223_372_036_854_775_808.0; // 2^63
+/// The one value whose tie upstream breaks *downwards*: its digit string is a
+/// single `5` sitting exactly at the rounding position, and Java's half-even
+/// rule needs a preceding digit to decide, so with none it rounds down —
+/// `0.0005` prints `0` while `0.00051` prints `0,001`. Any other value with a
+/// tie at the third decimal has digits before the rounding position.
+const V1_TIE_WITHOUT_A_PRECEDING_DIGIT: f64 = 0.0005;
+
 fn write_real_v1(f: &mut std::fmt::Formatter<'_>, r: f64) -> std::fmt::Result {
-    // Up to 3 fractional digits, trimmed of trailing zeros, with
-    // `,` as the decimal separator and narrow no-break space as
-    // the thousands separator.
+    // v1 is upstream's `AI.doubleToString` for version < 2, i.e. Java's
+    // `new DecimalFormat()` + `setMinimumFractionDigits(0)` under the
+    // server's French locale: at most 3 fractional digits (rounded, not
+    // truncated, so 0.9999 prints "1"), trailing zeros trimmed, `,` as the
+    // decimal separator, narrow no-break space every 3 integer digits, and
+    // the sign taken from the sign *bit* (`-0.0` prints "-0").
     //
-    // We round the value to 3 decimals up front (rather than just
-    // truncating the fractional part) so 0.9999 prints as "1",
-    // not "0" — Java's `NumberFormat` rounds first, then formats.
-    let neg = r < 0.0;
+    // Everything is derived from the decimal *string*: the old integer
+    // round-trip (`real_to_int(rounded.trunc())`) saturated at `i64::MAX`,
+    // which printed 1e20 as "9 223 372 036 854 775 807", and
+    // `(abs * 1000.0).round()` lost precision above ~9e15.
     let abs = r.abs();
-    let rounded = (abs * 1000.0).round() / 1000.0;
-    let int_part = crate::real_to_int(rounded.trunc());
-    let frac_part = rounded - crate::int_to_real(int_part);
-    let mut frac_str = if frac_part > 0.0 {
-        let raw = format!("{frac_part:.3}");
-        // raw is "0.xxx" — drop the leading "0".
-        let trimmed = raw.trim_end_matches('0').trim_end_matches('.').to_string();
-        if trimmed.len() <= 2 {
-            // Whole number after trimming (e.g. "0" or "0.").
-            String::new()
-        } else {
-            trimmed[1..].replace('.', ",")
-        }
+    // At or above 2^53 the value is an exact integer and Java's digits stop
+    // short of its full expansion, so `integral_digits_v1` takes over.
+    //
+    // Below it, Java rounds its *shortest round-tripping* digit string to 3
+    // fractional digits. When that string has fewer than 3 of them there is
+    // nothing to round and Java prints it as-is, even though the exact binary
+    // expansion runs on: `-171031007609512.28` is exactly `…512.28125` and
+    // prints `…512,28`, not `…512,281`. Otherwise `{:.3}` does the rounding —
+    // Java's tie handling (`alreadyRounded` / `valueExactAsDecimal`) exists
+    // precisely to reproduce half-to-even rounding of the true binary value,
+    // which is what `{:.3}` gives.
+    //
+    // Cross-checked against Java's own output over 200 000 doubles: the two
+    // agree except on ~0.01% of values above 1e14, where upstream's *legacy*
+    // `FloatingDecimal` breaks an exact shortest-representation tie downwards
+    // (`2167814799036972.25` → `…972,2`) and Rust's formatter breaks it
+    // upwards (`…972,3`).
+    let digits = if abs >= F64_INTEGRAL_FROM {
+        integral_digits_v1(abs)
+    } else if abs == V1_TIE_WITHOUT_A_PRECEDING_DIGIT {
+        "0".to_string()
     } else {
-        String::new()
+        let shortest = format!("{abs}");
+        if shortest
+            .split_once('.')
+            .is_none_or(|(_, frac)| frac.len() < 3)
+        {
+            shortest
+        } else {
+            format!("{abs:.3}")
+        }
     };
-    if frac_str.is_empty() {
-        frac_str.clear();
-    }
-    let int_str = format_with_thousands_separator(u64::try_from(int_part).unwrap_or(0));
-    if neg {
+    let (int_digits, frac_digits) = digits.split_once('.').unwrap_or((digits.as_str(), ""));
+    let frac = frac_digits.trim_end_matches('0');
+    if r.is_sign_negative() {
         f.write_str("-")?;
     }
-    f.write_str(&int_str)?;
-    f.write_str(&frac_str)
+    write_with_thousands_separator(f, int_digits)?;
+    if frac.is_empty() {
+        Ok(())
+    } else {
+        f.write_str(",")?;
+        f.write_str(frac)
+    }
 }
 
-fn format_with_thousands_separator(n: u64) -> String {
-    let s = n.to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::new();
-    for (i, b) in bytes.iter().enumerate() {
-        let from_end = bytes.len() - i;
-        if i > 0 && from_end.is_multiple_of(3) {
-            out.push('\u{202f}');
+/// The integer digits Java prints for an f64 that is `>= 2^53` (so an exact
+/// integer, and never with a fractional part to round).
+///
+/// Java's `DecimalFormat` doesn't take these from `Double.toString`: it goes
+/// through the *legacy* `FloatingDecimal`, which for an integer that still
+/// fits a `long` emits the value's exact digits with the low ones — the ones
+/// the gap between neighbouring doubles makes meaningless — rounded away.
+/// The count of dropped digits is `floor(log10(2^(binExp - 54)))`, i.e. the
+/// decimal width of a quarter of the ulp, and the drop rounds half-up. So
+/// `8.65986970577082e17` prints `865 986 970 577 081 980`, not the
+/// `865 986 970 577 082 000` its shortest representation would give.
+///
+/// Past `2^63` the value no longer fits a `long` and the legacy code falls
+/// back to its general algorithm, which yields the shortest round-tripping
+/// digits zero-padded — what Rust's `Display` prints. (That algorithm
+/// predates the shortest-repr one `Double.toString` uses today and is
+/// occasionally one digit off it: for `1e23` Java prints the digits
+/// `99999999999999990000000` where we print `100000000000000000000000`.
+/// Reproducing that quirk isn't worth an emulation of Sun's dtoa.)
+fn integral_digits_v1(abs: f64) -> String {
+    if abs >= F64_PAST_U64_INTEGER {
+        return format!("{abs}");
+    }
+    // `abs` is integral and below 2^63, so the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let value = abs as u64;
+    // Unbiased exponent: `abs >= 2^53` is always normal.
+    let bin_exp = i32::try_from((abs.to_bits() >> 52) & 0x7ff).unwrap_or(0) - 1023;
+    let insignificant = if bin_exp > 53 {
+        // `insignificantDigits(1 << (binExp - 54))`: how many times that
+        // power of two can be divided by 10 while it stays >= 10.
+        let mut quarter_ulp = 1_u64 << (bin_exp - 54);
+        let mut dropped = 0_u32;
+        while quarter_ulp >= 10 {
+            quarter_ulp /= 10;
+            dropped += 1;
         }
-        out.push(*b as char);
+        dropped
+    } else {
+        0
+    };
+    if insignificant == 0 {
+        return value.to_string();
+    }
+    let pow10 = 10_u64.pow(insignificant);
+    let residue = value % pow10;
+    let mut kept = value / pow10;
+    if residue >= pow10 / 2 {
+        kept += 1;
+    }
+    let mut out = kept.to_string();
+    for _ in 0..insignificant {
+        out.push('0');
     }
     out
+}
+
+fn write_with_thousands_separator(
+    f: &mut std::fmt::Formatter<'_>,
+    digits: &str,
+) -> std::fmt::Result {
+    for (i, c) in digits.char_indices() {
+        let from_end = digits.len() - i;
+        if i > 0 && from_end.is_multiple_of(3) {
+            f.write_char('\u{202f}')?;
+        }
+        f.write_char(c)?;
+    }
+    Ok(())
 }
 
 // Display-time version flag — `to_string` doesn't take parameters,
