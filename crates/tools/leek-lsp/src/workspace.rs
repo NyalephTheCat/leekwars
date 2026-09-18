@@ -75,15 +75,38 @@ pub struct Workspace {
     roots: Vec<ProjectIndex>,
     /// On-disk `.leek` files from the project index (not open).
     pub indexed: HashMap<PathBuf, IndexedFile>,
-    /// Files an `include("…")` reaches that are neither open nor
-    /// indexed — an include that escapes the project root, or one
-    /// followed before its project was indexed.
+    /// Every path-bearing file the workspace holds an input for that is
+    /// neither open nor indexed right now: what an `include("…")`
+    /// reached — an include that escapes the project root, or one
+    /// followed before its project was indexed — and what a closed
+    /// buffer left behind.
     ///
     /// Kept across revisions rather than rebuilt per [`Workspace::resync`]
     /// because the value here is the `SourceFile` *identity*: minting a
     /// fresh input for the same path every keystroke would give salsa a
-    /// new key each time and throw away every memo hanging off it.
-    walked: HashMap<PathBuf, IndexedFile>,
+    /// new key each time and throw away every memo hanging off it. The
+    /// same reasoning covers a buffer closed and reopened, which used to
+    /// mint one input per cycle — none of them ever freed (#313).
+    ///
+    /// Holding an entry here does *not* make a file analyzable:
+    /// [`Workspace::resync`] builds the target list from `docs` +
+    /// `indexed` alone, so a closed buffer stays closed and this map can
+    /// only be reached again by reopening it or by an include that leads
+    /// back to it.
+    retained: HashMap<PathBuf, IndexedFile>,
+    /// The input minted for each `untitled:` buffer, keyed by URI
+    /// because a pathless buffer has nothing for `retained` to key on.
+    /// Without it every reopen reserved a fresh [`leek_span::SourceId`]
+    /// *and* a fresh input (#313).
+    ///
+    /// Deliberately never evicted. An entry is a `Url` plus a `Copy`
+    /// handle, added only on the open that mints the input behind it, so
+    /// the map is bounded by the number of distinct scratch buffers the
+    /// client has opened — and by that same count of salsa inputs, which
+    /// the database never frees. Dropping an entry on `close` would
+    /// therefore free nothing and hand the next open a *second* input,
+    /// which is the leak this map exists to stop.
+    untitled: HashMap<Url, SourceFile>,
     /// The salsa input naming every file this workspace holds, keyed by
     /// the canonical path each [`SourceFile`] carries. Rewritten by
     /// [`Workspace::resync`] from `docs` + `indexed`, so a tracked query
@@ -145,7 +168,8 @@ impl Default for Workspace {
             docs: HashMap::new(),
             roots: Vec::new(),
             indexed: HashMap::new(),
-            walked: HashMap::new(),
+            retained: HashMap::new(),
+            untitled: HashMap::new(),
             files,
             targets: Vec::new(),
             folder: crate::folder::include_folder(&[]),
@@ -160,58 +184,48 @@ impl Default for Workspace {
 }
 
 impl Workspace {
-    // Takes `uri` by value: it's stored (cloned) into `self.docs` and used
-    // across both branches, and all call sites hand over an owned `Url`.
-    #[allow(clippy::needless_pass_by_value)]
+    // Takes `uri` by value: it ends up in `self.docs`, and every call
+    // site hands over an owned `Url`.
     pub fn open(&mut self, uri: Url, text: String) {
         // The buffer's text becomes the shared handle first, and every
         // read below goes through it: the salsa input, the doc handle and
         // the analysis target all hold this one allocation.
         let arc_text: Arc<str> = Arc::from(text);
         let path = uri_to_path(&uri);
-        // An indexed file keeps its entry (and salsa input) while open:
-        // `resync` already skips indexed files with an open buffer, and
-        // keeping the entry lets `close` hand the file back to the project
-        // index instead of losing it.
-        if let Some(path) = path.as_deref()
-            && let Some(source_file) = self.indexed.get(path).map(|indexed| indexed.source_file)
-        {
-            let lang = self.settle(Some(path), &arc_text);
-            self.apply_language(source_file, lang);
-            let line_table = Arc::new(LineTable::new(&arc_text));
-            source_file.set_text(&mut self.db).to(Arc::clone(&arc_text));
+        let line_table = Arc::new(LineTable::new(&arc_text));
+        let lang = self.settle(path.as_deref(), &arc_text);
+        // Whatever input the workspace already holds for this file is the
+        // input the buffer gets: the project index's, one a closed buffer
+        // left behind, one the include walk minted, or — for a pathless
+        // buffer — the one this `untitled:` URI had last time. Salsa never
+        // frees an input, so minting a second one for a file we already
+        // hold leaks an input per open/close cycle and leaves two inputs
+        // claiming one canonical path (#313).
+        let source_file = match self.held_input(path.as_deref(), &uri) {
+            Some(source_file) => {
+                self.apply_language(source_file, lang);
+                source_file.set_text(&mut self.db).to(Arc::clone(&arc_text));
+                source_file
+            }
+            None => self.mint_input(&uri, path.as_deref(), &arc_text, &line_table, lang),
+        };
+        // The off-buffer entry that owns this input keeps its place while
+        // the file is open, tracking the buffer's text: `resync` already
+        // skips an indexed file with an open buffer, and keeping the entry
+        // lets `close` hand the file back to the project index — or, for a
+        // retained one, lets the next open find the input again.
+        if let Some(path) = path.as_deref() {
             if let Some(indexed) = self.indexed.get_mut(path) {
                 indexed.line_table = Arc::clone(&line_table);
                 indexed.text = Arc::clone(&arc_text);
             }
-            self.docs.insert(
-                uri.clone(),
-                DocHandle {
-                    source_file,
-                    line_table,
-                    text: arc_text,
-                    version: 0,
-                },
-            );
-            self.resync();
-            return;
+            if let Some(retained) = self.retained.get_mut(path) {
+                retained.line_table = Arc::clone(&line_table);
+                retained.text = Arc::clone(&arc_text);
+            }
         }
-
-        let source_id = self.source_id_for(path.as_deref());
-        let line_table = Arc::new(LineTable::new(&arc_text));
-        let lang = self.settle(path.as_deref(), &arc_text);
-        let source_file = SourceFile::new(
-            &self.db,
-            canonical_path_of(path.as_deref()),
-            source_id,
-            Arc::clone(&arc_text),
-            lang.version,
-            lang.strict,
-            leek_types::seed_library_enabled(),
-            leek_span::FeatureFlags::from_env().to_bits(),
-        );
         self.docs.insert(
-            uri.clone(),
+            uri,
             DocHandle {
                 source_file,
                 line_table,
@@ -220,6 +234,62 @@ impl Workspace {
             },
         );
         self.resync();
+    }
+
+    /// The input this workspace already holds for a file, if any: the
+    /// project index's, the one retained from an earlier buffer or an
+    /// include walk, or — for a buffer with no path — the one minted for
+    /// this `untitled:` URI.
+    fn held_input(&self, path: Option<&Path>, uri: &Url) -> Option<SourceFile> {
+        match path {
+            Some(path) => self
+                .indexed
+                .get(path)
+                .or_else(|| self.retained.get(path))
+                .map(|file| file.source_file),
+            None => self.untitled.get(uri).copied(),
+        }
+    }
+
+    /// Mint the salsa input for a file the workspace has never held, and
+    /// remember it — under its path, or under its URI for a pathless
+    /// buffer — so the next open reuses it instead of minting another.
+    fn mint_input(
+        &mut self,
+        uri: &Url,
+        path: Option<&Path>,
+        text: &Arc<str>,
+        line_table: &Arc<LineTable>,
+        lang: LanguageSettings,
+    ) -> SourceFile {
+        let source_file = SourceFile::new(
+            &self.db,
+            canonical_path_of(path),
+            self.source_id_for(path),
+            Arc::clone(text),
+            lang.version,
+            lang.strict,
+            leek_types::seed_library_enabled(),
+            leek_span::FeatureFlags::from_env().to_bits(),
+        );
+        match path {
+            Some(path) => {
+                self.retained.insert(
+                    path.to_path_buf(),
+                    IndexedFile {
+                        uri: uri.clone(),
+                        path: path.to_path_buf(),
+                        source_file,
+                        line_table: Arc::clone(line_table),
+                        text: Arc::clone(text),
+                    },
+                );
+            }
+            None => {
+                self.untitled.insert(uri.clone(), source_file);
+            }
+        }
+        source_file
     }
 
     /// Record the client's version number for an open document. Echoed
@@ -382,18 +452,28 @@ impl Workspace {
     /// rebuild them once at the end.
     fn register_indexed(&mut self, uri: Url, loaded: leek_project::LoadedProjectFile) {
         let arc_text: Arc<str> = Arc::from(loaded.text);
-        let flags_bits = leek_span::FeatureFlags::from_env().to_bits();
-        let source_id = self.source_id_for(Some(&loaded.path));
-        let source_file = SourceFile::new(
-            &self.db,
-            loaded.path.display().to_string(),
-            source_id,
-            arc_text.clone(),
-            loaded.version_byte,
-            loaded.strict,
-            leek_types::seed_library_enabled(),
-            flags_bits,
-        );
+        // A file the workspace already minted an input for — reached by
+        // an include walk, or left behind by a closed buffer — hands that
+        // input to the index rather than getting a second one beside it,
+        // which `files` would then have to pick between (#313).
+        let source_file = match self.retained.remove(&loaded.path) {
+            Some(retained) => {
+                let source_file = retained.source_file;
+                self.apply_settings(source_file, loaded.version_byte, loaded.strict);
+                source_file.set_text(&mut self.db).to(Arc::clone(&arc_text));
+                source_file
+            }
+            None => SourceFile::new(
+                &self.db,
+                loaded.path.display().to_string(),
+                self.source_id_for(Some(&loaded.path)),
+                arc_text.clone(),
+                loaded.version_byte,
+                loaded.strict,
+                leek_types::seed_library_enabled(),
+                leek_span::FeatureFlags::from_env().to_bits(),
+            ),
+        };
         self.indexed.insert(
             loaded.path.clone(),
             IndexedFile {
@@ -562,7 +642,7 @@ impl Workspace {
     /// memos are invalidated by the same mechanism.
     fn walk_to(&mut self, candidate: &Path, key: &str) -> Option<SourceFile> {
         let text = std::fs::read_to_string(candidate).ok()?;
-        if let Some(known) = self.walked.get_mut(&PathBuf::from(key)) {
+        if let Some(known) = self.retained.get_mut(&PathBuf::from(key)) {
             if known.text.as_ref() != text {
                 let text: Arc<str> = Arc::from(text);
                 known
@@ -588,7 +668,7 @@ impl Workspace {
             leek_types::seed_library_enabled(),
             leek_span::FeatureFlags::from_env().to_bits(),
         );
-        self.walked.insert(
+        self.retained.insert(
             path.clone(),
             IndexedFile {
                 uri: path_to_uri(&path),
@@ -639,11 +719,19 @@ impl Workspace {
     /// only the fields that changed so an ordinary edit doesn't needlessly
     /// invalidate on them.
     fn apply_language(&mut self, source_file: SourceFile, lang: LanguageSettings) {
-        if source_file.version_byte(&self.db) != lang.version {
-            source_file.set_version_byte(&mut self.db).to(lang.version);
+        self.apply_settings(source_file, lang.version, lang.strict);
+    }
+
+    /// [`Workspace::apply_language`] for a caller that has the two
+    /// settled values without a [`LanguageSettings`] around them — a
+    /// project file, whose version and strictness the index settled when
+    /// it loaded the file.
+    fn apply_settings(&mut self, source_file: SourceFile, version: u8, strict: bool) {
+        if source_file.version_byte(&self.db) != version {
+            source_file.set_version_byte(&mut self.db).to(version);
         }
-        if source_file.strict(&self.db) != lang.strict {
-            source_file.set_strict(&mut self.db).to(lang.strict);
+        if source_file.strict(&self.db) != strict {
+            source_file.set_strict(&mut self.db).to(strict);
         }
     }
 
@@ -708,6 +796,15 @@ impl Workspace {
                 indexed.uri = new.clone();
                 indexed.path.clone_from(&new_path);
                 self.indexed.insert(new_path.clone(), indexed);
+            }
+            // Same for a file whose input is retained rather than
+            // indexed: leaving it under the old key would hide it from
+            // the reopen at the new path, which would then mint a second
+            // input for the file that just moved.
+            if let Some(mut retained) = self.retained.remove(&old_path) {
+                retained.uri = new.clone();
+                retained.path.clone_from(&new_path);
+                self.retained.insert(new_path.clone(), retained);
             }
             // At most one input can sit at a path, so this moves the
             // file's input whether it was open, indexed or both. Leaving
@@ -1345,5 +1442,124 @@ mod tests {
         );
         assert_eq!(indexed_len, 1, "no second entry for the same file");
         assert_eq!(targets, 1, "the file must not be analysed twice");
+    }
+
+    /// #313: a path-bearing buffer the project index does not own used to
+    /// get a brand-new `SourceFile` on every open. `source_id_for` interns
+    /// by path, so the *id* was stable while the input behind it was not:
+    /// one salsa input leaked per open/close cycle, and for a stretch two
+    /// live inputs claimed the same canonical path.
+    ///
+    /// Salsa gives every input a distinct id, so one handle comparing
+    /// equal to the other is exactly "no second input was allocated".
+    #[test]
+    fn reopening_a_loose_file_reuses_its_source_file() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create scratch dir");
+        let file = root.join("loose.leek");
+        fs::write(&file, "var x = 1\n").expect("write file");
+        let path = file.canonicalize().expect("canonical file");
+        let uri = path_to_uri(&path);
+
+        let mut ws = Workspace::default();
+        ws.open(uri.clone(), "var x = 1\n".into());
+        let first = ws.doc(&uri).expect("open doc").source_file;
+
+        for text in ["var x = 2\n", "var x = 3\n"] {
+            ws.close(&uri);
+            assert!(
+                ws.analysis_targets().is_empty(),
+                "the retained input must not resurrect a closed document",
+            );
+            ws.open(uri.clone(), text.into());
+        }
+        let last = ws.doc(&uri).expect("open doc").source_file;
+        let retained = ws.retained.len();
+        let text = last.text(&ws.db).to_string();
+        let targets = ws.analysis_targets().len();
+        fs::remove_dir_all(&root).expect("remove scratch dir");
+
+        // `SourceFile` has no `Debug`, so this is `assert!` rather than
+        // `assert_eq!`.
+        assert!(first == last, "reopening must reuse the file's input");
+        assert_eq!(retained, 1, "one retained input for the one file");
+        assert_eq!(text, "var x = 3\n", "the reused input carries the new text");
+        assert_eq!(targets, 1, "the reopened buffer is analysed once");
+    }
+
+    /// #313, the pathless half: an `untitled:` buffer has no path to
+    /// intern, so `source_id_for` reserved a fresh id — and `open` a fresh
+    /// input — every single time the scratch buffer was reopened.
+    #[test]
+    fn reopening_an_untitled_buffer_reuses_its_source_file() {
+        let mut ws = Workspace::default();
+        let uri = Url::parse("untitled:scratch.leek").expect("uri");
+
+        ws.open(uri.clone(), "var x = 1\n".into());
+        let first = ws.doc(&uri).expect("open doc").source_file;
+        let first_id = first.source(&ws.db);
+
+        ws.close(&uri);
+        assert!(
+            ws.analysis_targets().is_empty(),
+            "the retained input must not resurrect a closed scratch buffer",
+        );
+
+        ws.open(uri.clone(), "var x = 2\n".into());
+        let second = ws.doc(&uri).expect("open doc").source_file;
+
+        assert!(first == second, "reopening must reuse the buffer's input");
+        assert_eq!(first_id, second.source(&ws.db), "and with it the SourceId");
+        assert_eq!(second.text(&ws.db).as_ref(), "var x = 2\n");
+        assert_eq!(ws.untitled.len(), 1, "one entry for the one scratch URI");
+
+        // A second scratch buffer is still a second file.
+        let other = Url::parse("untitled:other.leek").expect("uri");
+        ws.open(other, "var y = 1\n".into());
+        assert_eq!(ws.untitled.len(), 2);
+        let ids = source_ids(&ws);
+        assert_eq!(ids.len(), 2);
+        assert_unique(&ids);
+    }
+
+    /// The manifest half of #313, which landed first and is guarded here
+    /// so it cannot regress: a file inside a project but outside its
+    /// indexed source tree settles on the owning `Miku.toml`, not on the
+    /// hard-coded version 4 / non-strict pair `open` used to pass.
+    #[test]
+    fn a_file_outside_the_source_tree_settles_on_the_owning_manifest() {
+        let root = temp_root();
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create project");
+        fs::write(
+            root.join("Miku.toml"),
+            "[project]\nname = \"outside\"\nversion = \"0.1.0\"\nlanguage = 2\nstrict = true\n\n\
+             [paths]\nsrc = \"src\"\n",
+        )
+        .expect("write manifest");
+        fs::write(src.join("main.leek"), "return 1\n").expect("write entry");
+        // Inside the project directory, outside the indexed `src` tree.
+        let loose = root.join("scratch.leek");
+        fs::write(&loose, "return 2\n").expect("write loose file");
+
+        let mut ws = Workspace::default();
+        ws.index_project_at(&root);
+        let path = loose.canonicalize().expect("canonical loose file");
+        let uri = path_to_uri(&path);
+        let indexed_the_loose_file = ws.indexed.contains_key(&path);
+
+        ws.open(uri.clone(), "return 2\n".into());
+        let lang = lang_of(&ws, &uri);
+        // The buffer's own pragma still wins over the manifest default.
+        ws.update(&uri, "// @version:1\nreturn 2\n".into());
+        let overridden = lang_of(&ws, &uri);
+        fs::remove_dir_all(&root).expect("remove project");
+
+        assert!(
+            !indexed_the_loose_file,
+            "the file must be outside the indexed source tree for this test to mean anything",
+        );
+        assert_eq!(lang, (2, true), "the manifest above the file settles it");
+        assert_eq!(overridden, (1, true), "a pragma still beats the manifest");
     }
 }
