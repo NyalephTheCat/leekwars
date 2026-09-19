@@ -957,6 +957,25 @@ fn pull_diagnostics_maps_catalog_code_description() {
 }
 
 #[test]
+fn pull_diagnostics_reports_duplicate_class_field() {
+    let text = "class Example { integer value; integer value; }\n";
+    let ws = open(text);
+    let report = pull_diagnostics::handle_textdoc(&ws, &url());
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        report
+    else {
+        panic!("expected full report");
+    };
+    let duplicate = full
+        .full_document_diagnostic_report
+        .items
+        .iter()
+        .find(|d| d.code == Some(lsp::NumberOrString::String("E0202".into())))
+        .expect("expected duplicate-field diagnostic");
+    assert_eq!(duplicate.message, "field `value` is already declared");
+}
+
+#[test]
 fn pull_diagnostics_resolves_parent_directory_include_symbols() {
     let mut ws = Workspace::default();
     let main = test_file("relative-include-project/src/entry.leek");

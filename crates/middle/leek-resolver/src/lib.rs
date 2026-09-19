@@ -1033,6 +1033,18 @@ mod index_tests {
     }
 
     #[test]
+    fn duplicate_class_fields_are_reported() {
+        let r = run("class A { integer value; integer value; }\n");
+        let duplicates: Vec<_> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == codes::REDECLARED_SYMBOL)
+            .collect();
+        assert_eq!(duplicates.len(), 1, "diagnostics: {:?}", r.diagnostics);
+        assert_eq!(duplicates[0].message, "field `value` is already declared");
+    }
+
+    #[test]
     fn typed_foreach_binding_declares_in_class_method() {
         // `for (Entity e in …)` declares `e` just like `for (var e in …)`.
         // The bug only surfaced inside class methods because that's the

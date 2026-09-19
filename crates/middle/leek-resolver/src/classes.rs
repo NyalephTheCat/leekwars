@@ -99,6 +99,13 @@ impl Resolver {
                         && let Some(ident) = field_name(&field)
                     {
                         let n = ident.text().to_string();
+                        if !c.field_names.insert(n.clone()) {
+                            self.err(
+                                codes::REDECLARED_SYMBOL,
+                                self.span_of(&ident),
+                                format!("field `{n}` is already declared"),
+                            );
+                        }
                         c.all_fields.insert(n.clone());
                         if is_static {
                             c.static_members.insert(n.clone());
@@ -397,6 +404,7 @@ impl Resolver {
 struct CollectedMembers {
     finals: HashSet<String>,
     static_finals: HashSet<String>,
+    field_names: HashSet<String>,
     all_fields: HashSet<String>,
     static_members: HashSet<String>,
     all_methods: HashSet<String>,
