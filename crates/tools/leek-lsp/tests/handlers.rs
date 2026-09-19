@@ -1063,7 +1063,7 @@ fn pull_diagnostics_type_checks_globals_from_includes() {
     let mut ws = Workspace::default();
     let main = test_file("type-include-project/src/entry.leek");
     let included = test_file("type-include-project/lib/constants.leek");
-    ws.open(included, "var INCLUDED_STRING = \"text\"\n".to_string());
+    ws.open(included, "global INCLUDED_STRING = \"text\"\n".to_string());
     ws.open(
         main.clone(),
         "include(\"../lib/constants.leek\")\nclass Consumer { read() { var value = INCLUDED_STRING\nvalue = 1\nreturn value } }\n"
@@ -1082,6 +1082,38 @@ fn pull_diagnostics_type_checks_globals_from_includes() {
             .iter()
             .any(|d| d.code == Some(lsp::NumberOrString::String("E0250".into()))),
         "included global type should flow into the entry file, got: {items:#?}"
+    );
+}
+
+#[test]
+fn pull_diagnostics_does_not_type_check_included_main_block_vars_in_a_method() {
+    // The mirror of the test above, and the half of #192 that tightens:
+    // a top-level `var` of an included file is a *main-block local*, not
+    // a global, and a class method cannot see it (docs/semantics.md §4).
+    // The fixture is otherwise identical, so only the declaration keyword
+    // decides whether `value` is known to be a string.
+    let mut ws = Workspace::default();
+    let main = test_file("type-include-project/src/entry.leek");
+    let included = test_file("type-include-project/lib/constants.leek");
+    ws.open(included, "var INCLUDED_STRING = \"text\"\n".to_string());
+    ws.open(
+        main.clone(),
+        "include(\"../lib/constants.leek\")\nclass Consumer { read() { var value = INCLUDED_STRING\nvalue = 1\nreturn value } }\n"
+            .to_string(),
+    );
+
+    let report = pull_diagnostics::handle_textdoc(&ws, &main);
+    let lsp::DocumentDiagnosticReportResult::Report(lsp::DocumentDiagnosticReport::Full(full)) =
+        report
+    else {
+        panic!("expected full report");
+    };
+    let items = &full.full_document_diagnostic_report.items;
+    assert!(
+        items
+            .iter()
+            .all(|d| d.code != Some(lsp::NumberOrString::String("E0250".into()))),
+        "a main-block var must not reach across a method boundary, got: {items:#?}"
     );
 }
 

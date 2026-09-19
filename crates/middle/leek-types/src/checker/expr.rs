@@ -350,7 +350,10 @@ impl Checker {
     }
 
     pub(crate) fn infer_lambda(&mut self, l: &leek_parser::ast::LambdaExpr) -> Type {
-        self.push_function();
+        // A lambda body is *not* a lookup boundary: it captures the
+        // enclosing function's locals, as HIR lowering and the runtime
+        // both do (#192). `push_function` would hide them.
+        self.push_lambda();
         self.declare_params_as_any(l.syntax());
         // Parameter types (typed params keep their type; untyped → Any).
         let mut params = Vec::new();

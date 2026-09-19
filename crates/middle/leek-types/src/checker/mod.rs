@@ -26,7 +26,7 @@ mod scope;
 mod scope_ops;
 mod stmt;
 
-pub(crate) use scope::Scope;
+pub(crate) use scope::{Scope, ScopeKind};
 
 pub(crate) struct Checker {
     pub(crate) source: SourceId,
@@ -151,7 +151,7 @@ impl Checker {
     pub(crate) fn new(source: SourceId, version: Version, opts: Options) -> Self {
         Self {
             source,
-            scopes: vec![Scope::empty()],
+            scopes: vec![Scope::new(ScopeKind::File)],
             diagnostics: Vec::new(),
             typed_exprs: Vec::new(),
             opts,
